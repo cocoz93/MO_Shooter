@@ -1,0 +1,6 @@
+add_executable(EdgeProbe main.cpp)
+target_link_libraries(EdgeProbe PRIVATE MoShared)
+if(MSVC)
+    target_compile_options(EdgeProbe PRIVATE /W4 /utf-8)
+    target_compile_definitions(EdgeProbe PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
+endif()

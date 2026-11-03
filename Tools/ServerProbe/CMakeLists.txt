@@ -1,0 +1,7 @@
+add_executable(ServerProbe main.cpp)
+target_link_libraries(ServerProbe PRIVATE MoShared)
+target_include_directories(ServerProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../BotClient)
+if(MSVC)
+    target_compile_options(ServerProbe PRIVATE /W4 /utf-8)
+    target_compile_definitions(ServerProbe PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
+endif()

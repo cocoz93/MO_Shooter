@@ -1,0 +1,6 @@
+add_executable(MoveCheck main.cpp)
+target_link_libraries(MoveCheck PRIVATE MoShared)
+if(MSVC)
+    target_compile_options(MoveCheck PRIVATE /W4 /utf-8)
+    target_compile_definitions(MoveCheck PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+endif()

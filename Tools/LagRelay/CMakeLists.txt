@@ -1,0 +1,5 @@
+add_executable(LagRelay main.cpp)
+if(MSVC)
+    target_compile_options(LagRelay PRIVATE /W4 /utf-8)
+    target_compile_definitions(LagRelay PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
+endif()

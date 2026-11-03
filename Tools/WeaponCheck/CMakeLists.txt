@@ -1,0 +1,6 @@
+add_executable(WeaponCheck main.cpp)
+target_link_libraries(WeaponCheck PRIVATE MoShared)
+if(MSVC)
+    target_compile_options(WeaponCheck PRIVATE /W4 /utf-8)
+    target_compile_definitions(WeaponCheck PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+endif()
