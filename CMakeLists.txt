@@ -1,0 +1,23 @@
+﻿cmake_minimum_required(VERSION 3.20)
+project(MO_Shooter LANGUAGES CXX)
+
+# cmake -S . -B build && cmake --build build --config Release
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# 서브모듈 ServerCore 는 고치지 않고 가져다만 쓴다(CLAUDE.md)
+# 아직 push 안 한 코어로 시험할 때만 -DMO_SERVERCORE_DIR=<ServerCore 리포 경로>
+set(LOCKFREE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/LockFree/LockFree_Test" CACHE PATH "")
+set(MO_SERVERCORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ServerCore" CACHE PATH "")
+add_subdirectory("${MO_SERVERCORE_DIR}" ServerCore)
+add_subdirectory(Shared)
+add_subdirectory(Server)
+add_subdirectory(BotClient)
+add_subdirectory(Tools/MapCheck)
+add_subdirectory(Tools/MoveCheck)
+add_subdirectory(Tools/WeaponCheck)
+add_subdirectory(Tools/ServerProbe)
+add_subdirectory(Tools/EdgeProbe)
+add_subdirectory(Tools/LagRelay)
