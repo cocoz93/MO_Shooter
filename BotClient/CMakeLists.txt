@@ -1,0 +1,6 @@
+add_executable(BotClient main.cpp NetClient.h)
+target_link_libraries(BotClient PRIVATE MoShared)
+if(MSVC)
+    target_compile_options(BotClient PRIVATE /W4 /utf-8)
+    target_compile_definitions(BotClient PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
+endif()
