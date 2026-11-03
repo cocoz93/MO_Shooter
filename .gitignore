@@ -1,0 +1,38 @@
+# 빌드 산출물
+build/
+build-*/
+out/
+cmake-build-*/
+CMakeUserPresets.json
+*.obj
+*.o
+*.pdb
+*.exe
+*.lib
+*.dll
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.sln.docstates
+
+# 언리얼 (나중에 들어온다)
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+*.sln
+
+# 내려받은 에셋 — 재배포 금지 조건이 붙어 있어 저장소에 넣지 않는다
+Assets/
+
+# 작업 부스러기
+_*.png
+_*.html
+shots/
+*.log
+
+# AI 작업 지침 — 이 리포용 규칙 파일. 공개 리포라 올리지 않는다
+CLAUDE.md
+**/CLAUDE.md
