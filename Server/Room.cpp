@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 
 namespace mo
@@ -33,6 +34,20 @@ namespace mo
 		{
 			return std::isfinite(input.moveX) && std::isfinite(input.moveY) && std::isfinite(input.yaw) && std::isfinite(input.pitch)
 				&& std::isfinite(input.aimX) && std::isfinite(input.aimY) && std::isfinite(input.aimZ);
+		}
+
+		// 0~1 밖이면 보간이 몸을 아무 데나 둘 수 있다 — 시점을 안 믿는 대신 입력째 버린다. NaN 도 이 비교에서 걸린다
+		bool IsViewAlphaInRange(const wire::Input& input)
+		{
+			return input.viewAlpha >= 0.f && input.viewAlpha <= 1.f;
+		}
+
+		float NormalizeAxis(float degrees)
+		{
+			float d = std::fmod(degrees, 360.f);
+			if (d > 180.f) d -= 360.f;
+			else if (d < -180.f) d += 360.f;
+			return d;
 		}
 
 		// 남에게 그대로 전해지는 값이라 범위 밖이면 입력째 버린다
@@ -65,8 +80,16 @@ namespace mo
 		}
 	}
 
-	CRoom::CRoom(const CMapCollision& map, const MoveParams& params, const MatchRules& rules, uint32_t seed, bool allowDebug, IRoomSender& sender, uint32_t roomId)
-		: _map(map), _params(params), _rules(rules), _allowDebug(allowDebug), _sender(sender), _roomId(roomId), _moveSim(map, _params), _rng(seed), _spawnRng(seed + 1)
+	ERewindKind ClassifyRewind(uint32_t nowTick, uint32_t viewTick, float viewAlpha, uint32_t limitTicks)
+	{
+		if (viewTick == 0) return ERewindKind::NoView;
+		if (viewTick > nowTick || (viewTick == nowTick && viewAlpha > 0.f)) return ERewindKind::Future;
+		if (nowTick - viewTick > limitTicks) return ERewindKind::Clamped;
+		return ERewindKind::Ok;
+	}
+
+	CRoom::CRoom(const CMapCollision& map, const MoveParams& params, const MatchRules& rules, uint32_t seed, bool allowDebug, IRoomSender& sender, uint32_t roomId, const RewindOptions& rewind)
+		: _map(map), _params(params), _rules(rules), _allowDebug(allowDebug), _sender(sender), _roomId(roomId), _rewind(rewind), _moveSim(map, _params), _rng(seed), _spawnRng(seed + 1)
 	{
 		size_t count = 0;
 		const SpawnPoint* starts = GetExpanseStarts(count);
@@ -187,7 +210,7 @@ namespace mo
 		Player* player = Find(session);
 		if (!player) return;
 		++_stats.inputsReceived;
-		if (!IsFiniteInput(input) || !IsViewInRange(input))
+		if (!IsFiniteInput(input) || !IsViewInRange(input) || !IsViewAlphaInRange(input))
 		{
 			++_stats.inputsRejectedBadValue;
 			return;
@@ -559,6 +582,9 @@ namespace mo
 			shot.aimDir = AimDirection(input.yaw, input.pitch);
 			shot.spreadAngle = events.spreadAngle;
 			shot.spreadMultiplier = events.spreadMultiplier;
+			shot.viewTick = input.viewTick;
+			shot.viewAlpha = input.viewAlpha;
+			shot.seq = input.seq;
 			_pendingShots.push_back(shot);
 		}
 	}
@@ -675,11 +701,63 @@ namespace mo
 		}
 	}
 
+	// 틱마다 입력을 모두 적용한 뒤, 사격 판정 앞에서 적는다 — 상태 패킷으로 나가는 자리와 같은 틱 값이어야 화면 자리와 맞는다
+	void CRoom::RecordRewindSamples()
+	{
+		for (const std::unique_ptr<Player>& player : _players)
+		{
+			RewindSample& sample = player->rewindHistory[_tick % player->rewindHistory.size()];
+			sample.tick = _tick;
+			sample.location = player->move.location;
+			sample.yaw = player->yaw;
+			sample.alive = !player->dead;
+		}
+	}
+
+	// Lyra 가 남의 캐릭터를 그리는 식과 같다(MOBridgeSubsystem::TickRemotes). false = 그 시점에 몸이 없었다(죽었거나 아직 안 들어옴)
+	bool CRoom::GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out) const
+	{
+		const size_t size = player.rewindHistory.size();
+		const RewindSample& from = player.rewindHistory[viewTick % size];
+		if (from.tick != viewTick || !from.alive) return false;
+		out.center = from.location;
+		out.yawDegrees = from.yaw;
+		out.id = player.id;
+		if (viewAlpha <= 0.f) return true;
+		const RewindSample& to = player.rewindHistory[(viewTick + 1) % size];
+		if (to.tick != viewTick + 1 || Length(to.location - from.location) > wire::kRemoteTeleportDistance) return true;
+		out.center = from.location + (to.location - from.location) * (double)viewAlpha;
+		out.yawDegrees = from.yaw + viewAlpha * NormalizeAxis(to.yaw - from.yaw);
+		return true;
+	}
+
 	void CRoom::ResolveShot(const PendingShot& shot)
 	{
+		// 그 시점 = 정상이면 보던 시점, 한도 초과면 한도 시점. 시점 없음·미래는 현재 자리
+		const ERewindKind rewindKind = ClassifyRewind(_tick, shot.viewTick, shot.viewAlpha, _rewind.limitTicks);
+		bool useHistory = false;
+		uint32_t bodyTick = 0;
+		float bodyAlpha = 0.f;
+		switch (rewindKind)
+		{
+		case ERewindKind::NoView:
+		case ERewindKind::Future:
+			break;
+		case ERewindKind::Clamped:
+			useHistory = true;
+			bodyTick = _tick - _rewind.limitTicks;
+			break;
+		case ERewindKind::Ok:
+			useHistory = true;
+			bodyTick = shot.viewTick;
+			bodyAlpha = shot.viewAlpha;
+			break;
+		}
+
 		Player* shooter = nullptr;
 		_bodies.clear();
 		_bodyOwners.clear();
+		_bodiesNow.clear();
 		for (const std::unique_ptr<Player>& player : _players)
 		{
 			if (player->id == shot.shooter)
@@ -687,15 +765,31 @@ namespace mo
 				shooter = player.get();
 				continue;
 			}
-			if (player->dead) continue;
-			BodyPlacement body;
-			body.center = player->move.location;
-			body.yawDegrees = player->yaw;
-			body.id = player->id;
+			if (player->dead) continue;		// 지금 죽어 있으면 그때 살아 있었어도 안 맞는다
+			BodyPlacement now;
+			now.center = player->move.location;
+			now.yawDegrees = player->yaw;
+			now.id = player->id;
+			if (_rewind.shadow) _bodiesNow.push_back(now);
+			BodyPlacement body = now;
+			if (useHistory && !GetRewoundBody(*player, bodyTick, bodyAlpha, body)) continue;
+			if (_rewind.log)
+			{
+				std::printf("REWIND seq=%u shooter=%u target=%u now=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f\n", shot.seq, shot.shooter, player->id, _tick, bodyTick, bodyAlpha, body.center.x, body.center.y, body.center.z, body.yawDegrees);
+			}
 			_bodies.push_back(body);
 			_bodyOwners.push_back(player.get());
 		}
 		if (!shooter) return;	// 쏜 틱에 나감
+
+		switch (rewindKind)
+		{
+		case ERewindKind::NoView: ++_stats.rewindNoView; break;
+		case ERewindKind::Future: ++_stats.rewindFuture; break;
+		case ERewindKind::Clamped: ++_stats.rewindClamped; break;
+		case ERewindKind::Ok: ++_stats.rewindOk; break;
+		}
+		if (useHistory) _stats.rewindTicksSum += _tick - bodyTick;
 
 		const WeaponDef& def = GetWeaponDef((EWeapon)shot.weapon);
 		wire::Shot packet = wire::Shot();
@@ -715,6 +809,22 @@ namespace mo
 			ResolveBullet(_map, _bodies.data(), _bodies.size(), shot.start, end, def.sweepRadius, result);
 
 			++_stats.bullets;
+			if (_rewind.shadow)
+			{
+				BulletResult now;
+				ResolveBullet(_map, _bodiesNow.data(), _bodiesNow.size(), shot.start, end, def.sweepRadius, now);
+				const bool hitAtView = result.kind == EBulletHit::Body;
+				const bool hitNow = now.kind == EBulletHit::Body;
+				if (hitAtView && hitNow) ++_stats.hitsBoth;
+				else if (hitAtView) ++_stats.hitsRewindOnly;
+				else if (hitNow) ++_stats.hitsNowOnly;
+				else ++_stats.hitsNeither;
+				if (hitAtView && !hitNow)
+				{
+					RayHit wall;
+					if (_map.Raycast(shot.start, _bodyOwners[result.bodyIndex]->move.location, MAP_BLOCK_WEAPON, wall)) ++_stats.rewindOnlyBehindWall;
+				}
+			}
 			wire::ShotBullet& bullet = packet.bullets[i];
 			bullet.hit = (uint8_t)ToWireHit(result.kind);
 			const Vec3 point = result.kind == EBulletHit::None ? end : result.point;
@@ -843,6 +953,7 @@ namespace mo
 		{
 			TickPlayerInputs(*player);
 		}
+		RecordRewindSamples();
 		const Clock::time_point inputsEnd = Clock::now();
 		ResolveShots();
 		const Clock::time_point shotsEnd = Clock::now();

@@ -33,6 +33,7 @@ namespace mo
 		uint32_t seed = 0;
 		bool debug = false;
 		std::string recordPath;		// 비어 있으면 안 적는다
+		RewindOptions rewind;
 	};
 
 	struct RoomSummary

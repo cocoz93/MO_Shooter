@@ -63,6 +63,7 @@ namespace
 		int maxSessions = 64;
 		double measureFromSeconds = 0;
 		double measureSeconds = 0;
+		mo::RewindOptions rewind;
 	};
 
 	bool ParseArgs(int argc, char** argv, Args& out)
@@ -93,6 +94,9 @@ namespace
 			else if (value("--measureSeconds=", v)) out.measureSeconds = std::atof(v.c_str());
 			else if (s == "--exitWhenEmpty") out.exitWhenEmpty = true;
 			else if (s == "--debug") out.debug = true;
+			else if (s == "--rewindShadow") out.rewind.shadow = true;
+			else if (s == "--rewindLog") out.rewind.log = true;
+			else if (value("--rewindLimitTicks=", v)) out.rewind.limitTicks = (uint32_t)std::min(std::atoi(v.c_str()), (int)mo::kRewindLimitTicks);	// 시험 전용. 기록 칸이 상수만큼뿐이라 더 키우지는 못한다
 			else
 			{
 				std::printf("[오류] 모르는 인자: %s\n", s.c_str());
@@ -305,6 +309,7 @@ namespace
 			settings.rules = _args.rules;
 			settings.seed = _args.seed + (id - 1);		// 방 1 은 --seed 그대로 — 재생 시험이 같은 난수를 따라간다
 			settings.debug = _args.debug;
+			settings.rewind = _args.rewind;
 			if (!_args.recordPath.empty()) settings.recordPath = mo::RoomRecordPath(_args.recordPath, id);
 			_threads[thread]->PostCreateRoom(id, settings);
 			return id;
@@ -611,6 +616,9 @@ int main(int argc, char** argv)
 		(unsigned long long)room.inputsRejectedBadValue, (unsigned long long)room.movesOverLength, (unsigned long long)room.weaponIdRejected, (unsigned long long)room.debugPlacesRejected, (unsigned long long)room.shotsAimReplaced,
 		(unsigned long long)room.firesRejectedSwap, (unsigned long long)room.shotsAimPulledBack, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq, (unsigned long long)badPackets,
 		(unsigned long long)room.shotsAimStaleAfterSpawn, (unsigned long long)room.firesTooSoon, (unsigned long long)room.firesEmpty);
+	std::printf("SERVER rewind noView=%llu future=%llu clamped=%llu ok=%llu ticksSum=%llu hitsBoth=%llu hitsRewindOnly=%llu hitsNowOnly=%llu hitsNeither=%llu behindWall=%llu\n",
+		(unsigned long long)room.rewindNoView, (unsigned long long)room.rewindFuture, (unsigned long long)room.rewindClamped, (unsigned long long)room.rewindOk, (unsigned long long)room.rewindTicksSum,
+		(unsigned long long)room.hitsBoth, (unsigned long long)room.hitsRewindOnly, (unsigned long long)room.hitsNowOnly, (unsigned long long)room.hitsNeither, (unsigned long long)room.rewindOnlyBehindWall);
 	std::printf("SERVER kills=%llu falls=%llu spawns=%llu spawnsFromFallback=%llu phaseChanges=%llu finished=%d\n",
 		(unsigned long long)room.kills, (unsigned long long)room.falls, (unsigned long long)room.spawns, (unsigned long long)room.spawnsFromFallback, (unsigned long long)room.phaseChanges, firstFinished ? 1 : 0);
 	if (firstFinished)
