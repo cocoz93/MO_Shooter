@@ -96,6 +96,7 @@ namespace
 			else if (s == "--debug") out.debug = true;
 			else if (s == "--rewindShadow") out.rewind.shadow = true;
 			else if (s == "--rewindLog") out.rewind.log = true;
+			else if (s == "--rewindNoSpread") out.rewind.noSpread = true;
 			else if (value("--rewindLimitTicks=", v)) out.rewind.limitTicks = (uint32_t)std::min(std::atoi(v.c_str()), (int)mo::kRewindLimitTicks);	// 시험 전용. 기록 칸이 상수만큼뿐이라 더 키우지는 못한다
 			else
 			{

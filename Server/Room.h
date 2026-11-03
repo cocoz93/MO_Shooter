@@ -36,6 +36,7 @@ namespace mo
 		uint32_t limitTicks = kRewindLimitTicks;	// 시험 전용 --rewindLimitTicks. 0 = 되감기 끔
 		bool shadow = false;						// 측정 전용 — 같은 탄을 현재 자리로도 계산해 비교한다
 		bool log = false;							// 대조 전용 — 쏠 때마다 되감은 자리를 찍는다
+		bool noSpread = false;		// 측정 전용 — 무기 퍼짐을 빼고 조준점 그대로 쏜다. 퍼짐(3~14도)이 21m 교전 거리의 몸 크기(약 2도)보다 커서 되감기 효과를 가리는지 가르려고
 	};
 
 	// 시점 입력의 네 갈래. 값을 돌려주는 함수로 두어 시험이 갈래를 전수로 볼 수 있게 한다

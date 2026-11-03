@@ -792,6 +792,10 @@ namespace mo
 		if (useHistory) _stats.rewindTicksSum += _tick - bodyTick;
 
 		const WeaponDef& def = GetWeaponDef((EWeapon)shot.weapon);
+		if (_rewind.log)
+		{
+			std::printf("AIM seq=%u shooter=%u weapon=%u start=%.2f,%.2f,%.2f dir=%.5f,%.5f,%.5f spread=%.3f mult=%.3f\n", shot.seq, shot.shooter, (unsigned)shot.weapon, shot.start.x, shot.start.y, shot.start.z, shot.aimDir.x, shot.aimDir.y, shot.aimDir.z, shot.spreadAngle, shot.spreadMultiplier);
+		}
 		wire::Shot packet = wire::Shot();
 		packet.tick = _tick;
 		packet.shooter = shot.shooter;
@@ -803,7 +807,8 @@ namespace mo
 
 		for (int i = 0; i < packet.count; ++i)
 		{
-			const Vec3 dir = SpreadDirection(shot.aimDir, shot.spreadAngle, shot.spreadMultiplier, def.spreadExponent, _rng);
+			Vec3 dir = SpreadDirection(shot.aimDir, shot.spreadAngle, shot.spreadMultiplier, def.spreadExponent, _rng);
+			if (_rewind.noSpread) dir = shot.aimDir;
 			const Vec3 end = shot.start + dir * (double)def.maxDamageRange;
 			BulletResult result;
 			ResolveBullet(_map, _bodies.data(), _bodies.size(), shot.start, end, def.sweepRadius, result);

@@ -3,6 +3,7 @@
 //   BotClient --map=<파일.mocl> [--port=7791] [--bots=10] [--seed=20261102] [--record=파일] [--lead=3] [--breakRecord] [--breakMirror]
 //   BotClient --map=<파일.mocl> --seconds=초 [--measureFrom=초 --measureSeconds=초] ... = 부하 시험. 경기 끝을 기다리지 않고 시간이 되면 끊고 LOADBOT 줄을 낸다.
 //   봇이 많으면 서버가 방을 나눠 앉힌다 — 기록은 같은 방 봇끼리만 맞춰 본다. 방 2부터는 기록 이름 뒤에 .room<번호>
+//   --measureView = 되감기 측정. Lyra 처럼 상태를 쌓아 0.1초 뒤 보간한 자리를 오차 없이 조준하고, 그 시점을 입력에 실어 보낸다. 기본 꺼짐
 //
 // 판정은 하지 않는다 — 입력을 보내고 받은 것을 적어 맞춰 볼 뿐이다.
 // 1. 봇마다 같은 공용 코드(Shared)로 자기 입력을 여기서도 돌려, 돌아온 상태와 위치·속도·탄창까지 비교한다.
@@ -80,6 +81,7 @@ namespace
 		double seconds = 0;				// 0 이 아니면 부하 시험
 		double measureFromSeconds = 0;
 		double measureSeconds = 0;
+		bool measureView = false;		// 되감기 측정 모드 — 꺼져 있으면 기존 시험과 같은 입력을 보낸다
 	};
 
 	// 대조군 — 서버 숫자가 멀쩡한데 이 값이 나쁘면 송신 쪽 문제다. 측정 구간에만 가리킨다
@@ -148,6 +150,11 @@ namespace
 		}
 
 		void Close() { _net.Close(); }
+
+		void SetMeasureView(bool on) { _measureView = on; }
+		uint64_t GetAckLagSum() const { return _ackLagSum; }
+		uint64_t GetAckLagSamples() const { return _ackLagSamples; }
+		uint32_t GetAckLagMax() const { return _ackLagMax; }
 
 		uint32_t GetId() const { return _welcome.playerId; }
 		uint32_t GetRoomId() const { return _welcome.roomId; }
@@ -296,6 +303,9 @@ namespace
 			if (g_stateGapsMs && _hasStateTime) g_stateGapsMs->push_back(std::chrono::duration<float, std::milli>(now - _stateTime).count());
 			_stateTime = now;
 			_hasStateTime = true;
+			uint32_t stateTick = 0;
+			std::memcpy(&stateTick, data + offsetof(wire::State, tick), sizeof(stateTick));
+			if (_measureView) UpdateViewClock(stateTick);
 			uint8_t count = 0;
 			std::memcpy(&count, data + offsetof(wire::State, count), 1);
 			for (int i = 0; i < count; ++i)
@@ -303,7 +313,15 @@ namespace
 				wire::PlayerState p;
 				std::memcpy(&p, data + offsetof(wire::State, players) + sizeof(wire::PlayerState) * i, sizeof(p));
 				_players[p.id] = p;
-				if (p.id == _welcome.playerId) CompareSelf(p);
+				if (_measureView) _viewHistory[p.id].Add(p, stateTick);
+				if (p.id == _welcome.playerId)
+				{
+					CompareSelf(p);
+					const uint32_t ackLag = _self.GetSeq() - p.lastSeq;
+					_ackLagSum += ackLag;
+					++_ackLagSamples;
+					_ackLagMax = std::max(_ackLagMax, ackLag);
+				}
 			}
 		}
 
@@ -334,15 +352,79 @@ namespace
 			if (bad && _firstBadSeq == 0) _firstBadSeq = p.lastSeq;
 		}
 
+		// Lyra 다리의 틱 시계와 같은 식(MOBridgeSubsystem.cpp HandlePacket) — 받은 상태로 맞추고 30틱 넘게 벌어지면 다시 잡는다
+		void UpdateViewClock(uint32_t stateTick)
+		{
+			const double sample = (double)stateTick - std::chrono::duration<double>(Clock::now().time_since_epoch()).count() * wire::kTickRate;
+			if (!_hasViewClock || std::abs(sample - _viewClockOffset) > 30.0)
+			{
+				_viewClockOffset = sample;
+				_hasViewClock = true;
+			}
+			else
+			{
+				_viewClockOffset += 0.02 * (sample - _viewClockOffset);
+			}
+		}
+
+		// Lyra 다리의 상대 보간과 같은 식(MOBridgeSubsystem.cpp TickRemotes) — 측정 봇의 화면에 해당한다
+		void BuildShownPlayers(double renderTick)
+		{
+			_shownPlayers = _players;
+			for (const auto& entry : _viewHistory)
+			{
+				const ViewHistory& history = entry.second;
+				const ViewHistory::Snap* from = nullptr;
+				const ViewHistory::Snap* to = nullptr;
+				const uint32_t available = std::min<uint32_t>(history.count, ViewHistory::kSnaps);
+				for (uint32_t back = 0; back < available; ++back)
+				{
+					const ViewHistory::Snap& s = history.snaps[(history.count - 1 - back) % ViewHistory::kSnaps];
+					if ((double)s.tick <= renderTick)
+					{
+						from = &s;
+						break;
+					}
+					to = &s;
+				}
+				const ViewHistory::Snap* base = from ? from : to;
+				if (!base) continue;
+				wire::PlayerState& shown = _shownPlayers[entry.first];
+				shown.x = (float)base->at.x;
+				shown.y = (float)base->at.y;
+				shown.z = (float)base->at.z;
+				shown.flags = base->flags;
+				if (from && to && Length(to->at - from->at) <= wire::kRemoteTeleportDistance)
+				{
+					const double span = std::max((double)to->tick - (double)from->tick, 1.0);
+					const double alpha = std::min(std::max((renderTick - (double)from->tick) / span, 0.0), 1.0);
+					const Vec3 at = from->at + (to->at - from->at) * alpha;
+					shown.x = (float)at.x;
+					shown.y = (float)at.y;
+					shown.z = (float)at.z;
+				}
+			}
+		}
+
 		// 두뇌 — 가장 가까운 산 적을 보고 쏘며 다가간다. 길찾기가 없어 막히면 무작위로 돌아간다
 		void Think(wire::Input& input)
 		{
 			const Vec3 at = _self.GetMove().location;
 			const Vec3 eye = at + Vec3(0, 0, kEyeHeight);
 
+			if (_measureView && _hasViewClock)
+			{
+				const double renderTick = std::chrono::duration<double>(Clock::now().time_since_epoch()).count() * wire::kTickRate + _viewClockOffset - kViewDelayTicks;
+				BuildShownPlayers(renderTick);
+				const double whole = std::floor(renderTick);
+				input.viewTick = renderTick >= 1.0 ? (uint32_t)whole : 0;
+				input.viewAlpha = renderTick >= 1.0 ? (float)(renderTick - whole) : 0.f;
+			}
+			const std::map<uint32_t, wire::PlayerState>& seen = _measureView ? _shownPlayers : _players;
+
 			const wire::PlayerState* enemy = nullptr;
 			double nearest = 0;
-			for (const auto& entry : _players)
+			for (const auto& entry : seen)
 			{
 				const wire::PlayerState& p = entry.second;
 				if (p.team == _welcome.team || (p.flags & wire::STATE_DEAD)) continue;
@@ -361,7 +443,7 @@ namespace
 			{
 				const Vec3 target(enemy->x, enemy->y, enemy->z);
 				const Vec3 d = target - eye;
-				const double error = 2.0;	// 도 — 사람 흉내가 아니라 전부 머리에 맞지 않게
+				const double error = _measureView ? 0.0 : 2.0;	// 도 — 사람 흉내가 아니라 전부 머리에 맞지 않게. 측정은 본 자리를 그대로 조준해 빗나감을 무기 퍼짐으로만 남긴다
 				yaw = (float)(std::atan2(d.y, d.x) * 180.0 / kPi + (_rng.NextFloat() - 0.5f) * error);
 				pitch = (float)(std::atan2(d.z, std::sqrt(d.x * d.x + d.y * d.y)) * 180.0 / kPi + (_rng.NextFloat() - 0.5f) * error);
 				const double horizontal = std::sqrt(d.x * d.x + d.y * d.y);
@@ -469,6 +551,36 @@ namespace
 		int _strafeSign = 1;
 		uint64_t _detours = 0;
 
+		// 측정 모드 — 화면에 해당하는 상태 기록. 6틱 지연 + 왕복 300ms(18틱) + 여유로 32칸
+		struct ViewHistory
+		{
+			static constexpr uint32_t kSnaps = 32;
+			struct Snap
+			{
+				uint32_t tick = 0;
+				Vec3 at;
+				uint8_t flags = 0;
+			};
+			std::array<Snap, kSnaps> snaps;
+			uint32_t count = 0;
+			void Add(const wire::PlayerState& p, uint32_t tick)
+			{
+				Snap& s = snaps[count % kSnaps];
+				s.tick = tick;
+				s.at = Vec3(p.x, p.y, p.z);
+				s.flags = p.flags;
+				++count;
+			}
+		};
+		static constexpr double kViewDelayTicks = 6.0;	// Lyra 다리 kRemoteDelayTicks 와 같은 값(0.1초)
+		bool _measureView = false;
+		bool _hasViewClock = false;
+		double _viewClockOffset = 0;
+		std::map<uint32_t, ViewHistory> _viewHistory;
+		std::map<uint32_t, wire::PlayerState> _shownPlayers;
+		uint64_t _ackLagSum = 0, _ackLagSamples = 0;
+		uint32_t _ackLagMax = 0;
+
 		uint64_t _states = 0;
 		Clock::time_point _stateTime;
 		bool _hasStateTime = false;
@@ -499,6 +611,7 @@ namespace
 			else if (value("--seconds=", v)) out.seconds = std::atof(v.c_str());
 			else if (value("--measureFrom=", v)) out.measureFromSeconds = std::atof(v.c_str());
 			else if (value("--measureSeconds=", v)) out.measureSeconds = std::atof(v.c_str());
+			else if (s == "--measureView") out.measureView = true;
 			else if (s == "--breakRecord") out.breakRecord = true;
 			else if (s == "--breakMirror") out.breakMirror = true;
 			else
@@ -534,6 +647,7 @@ int main(int argc, char** argv)
 	for (int i = 0; i < args.bots; ++i)
 	{
 		bots.emplace_back(new CBot(map, sim, rules, args.seed + 100 + (uint32_t)i));
+		bots.back()->SetMeasureView(args.measureView);
 		if (!bots.back()->Connect(args.port))
 		{
 			std::printf("BOT %d 접속 실패\n", i);
@@ -620,6 +734,15 @@ int main(int argc, char** argv)
 			flagDiff += bot->GetFlagDiff();
 			states += bot->GetStates();
 		}
+		uint64_t ackLagSum = 0, ackLagSamples = 0;
+		uint32_t ackLagMax = 0;
+		for (const std::unique_ptr<CBot>& bot : bots)
+		{
+			ackLagSum += bot->GetAckLagSum();
+			ackLagSamples += bot->GetAckLagSamples();
+			ackLagMax = std::max(ackLagMax, bot->GetAckLagMax());
+		}
+		std::printf("BOTLAG ackLagAvg=%.2f maxAckLag=%u samples=%llu\n", ackLagSamples ? (double)ackLagSum / (double)ackLagSamples : 0.0, ackLagMax, (unsigned long long)ackLagSamples);
 		std::sort(stateGapsMs.begin(), stateGapsMs.end());
 		std::sort(loopGapsMs.begin(), loopGapsMs.end());
 		const auto percentile = [](const std::vector<float>& sorted, double p) { return sorted.empty() ? 0.f : sorted[(size_t)((sorted.size() - 1) * p)]; };
