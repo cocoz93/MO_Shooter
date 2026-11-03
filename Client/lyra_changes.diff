@@ -1,0 +1,302 @@
+diff --git a/Source/LyraGame/AbilitySystem/Abilities/LyraGameplayAbility_Reset.cpp b/Source/LyraGame/AbilitySystem/Abilities/LyraGameplayAbility_Reset.cpp
+index bdf4730..33681c0 100644
+--- a/Source/LyraGame/AbilitySystem/Abilities/LyraGameplayAbility_Reset.cpp	
++++ b/Source/LyraGame/AbilitySystem/Abilities/LyraGameplayAbility_Reset.cpp	
+@@ -9,6 +9,11 @@
+ 
+ #include UE_INLINE_GENERATED_CPP_BY_NAME(LyraGameplayAbility_Reset)
+ 
++// [MOBridge] When an external server owns the match, Lyra's own warmup reset must not rebuild the pawns.
++static TAutoConsoleVariable<int32> CVarBridgeBlockLyraReset(
++	TEXT("Lyra.Bridge.BlockLyraReset"), 0,
++	TEXT("1 = the reset ability ends at once (an external server decides spawn and reset)."));
++
+ ULyraGameplayAbility_Reset::ULyraGameplayAbility_Reset(const FObjectInitializer& ObjectInitializer)
+ 	: Super(ObjectInitializer)
+ {
+@@ -29,6 +34,13 @@ void ULyraGameplayAbility_Reset::ActivateAbility(const FGameplayAbilitySpecHandl
+ {
+ 	check(ActorInfo);
+ 
++	if (CVarBridgeBlockLyraReset.GetValueOnGameThread() != 0)
++	{
++		UE_LOG(LogTemp, Log, TEXT("MOB_LYRA_RESET_BLOCKED avatar=%s"), *GetNameSafe(ActorInfo->AvatarActor.Get()));
++		EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
++		return;
++	}
++
+ 	ULyraAbilitySystemComponent* LyraASC = CastChecked<ULyraAbilitySystemComponent>(ActorInfo->AbilitySystemComponent.Get());
+ 
+ 	FGameplayTagContainer AbilityTypesToIgnore;
+diff --git a/Source/LyraGame/AbilitySystem/Executions/LyraDamageExecution.cpp b/Source/LyraGame/AbilitySystem/Executions/LyraDamageExecution.cpp
+index 41f11e3..31a43b9 100644
+--- a/Source/LyraGame/AbilitySystem/Executions/LyraDamageExecution.cpp	
++++ b/Source/LyraGame/AbilitySystem/Executions/LyraDamageExecution.cpp	
+@@ -27,6 +27,12 @@ static FDamageStatics& DamageStatics()
+ 	return Statics;
+ }
+ 
++// [MOBridge pilot] When an external server owns damage, Lyra's own damage calculation is skipped.
++// The server's result is applied separately through a SetByCaller effect (Plugins/MOBridge).
++static TAutoConsoleVariable<int32> CVarBridgeBlockLyraDamage(
++	TEXT("Lyra.Bridge.BlockLyraDamage"), 0,
++	TEXT("1 = skip ULyraDamageExecution (an external server decides damage)."));
++
+ 
+ ULyraDamageExecution::ULyraDamageExecution()
+ {
+@@ -36,6 +42,13 @@ ULyraDamageExecution::ULyraDamageExecution()
+ void ULyraDamageExecution::Execute_Implementation(const FGameplayEffectCustomExecutionParameters& ExecutionParams, FGameplayEffectCustomExecutionOutput& OutExecutionOutput) const
+ {
+ #if WITH_SERVER_CODE
++	if (CVarBridgeBlockLyraDamage.GetValueOnGameThread() != 0)
++	{
++		UE_LOG(LogLyraAbilitySystem, Log, TEXT("Bridge: Lyra damage execution blocked (effect=%s, target=%s)"),
++			*GetNameSafe(ExecutionParams.GetOwningSpec().Def), *GetNameSafe(ExecutionParams.GetTargetAbilitySystemComponent() ? ExecutionParams.GetTargetAbilitySystemComponent()->GetAvatarActor() : nullptr));
++		return;
++	}
++
+ 	const FGameplayEffectSpec& Spec = ExecutionParams.GetOwningSpec();
+ 	FLyraGameplayEffectContext* TypedContext = FLyraGameplayEffectContext::ExtractEffectContext(Spec.GetContext());
+ 	check(TypedContext);
+diff --git a/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h b/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h
+index fd082c0..ec3447d 100644
+--- a/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h	
++++ b/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h	
+@@ -31,7 +31,7 @@ struct FLyraGameplayEffectContext : public FGameplayEffectContext
+ 	static LYRAGAME_API FLyraGameplayEffectContext* ExtractEffectContext(struct FGameplayEffectContextHandle Handle);
+ 
+ 	/** Sets the object used as the ability source */
+-	void SetAbilitySource(const ILyraAbilitySourceInterface* InObject, float InSourceLevel);
++	LYRAGAME_API void SetAbilitySource(const ILyraAbilitySourceInterface* InObject, float InSourceLevel);
+ 
+ 	/** Returns the ability source interface associated with the source object. Only valid on the authority. */
+ 	const ILyraAbilitySourceInterface* GetAbilitySource() const;
+diff --git a/Source/LyraGame/AbilitySystem/Phases/LyraGamePhaseSubsystem.h b/Source/LyraGame/AbilitySystem/Phases/LyraGamePhaseSubsystem.h
+index 6d03558..f46bf66 100644
+--- a/Source/LyraGame/AbilitySystem/Phases/LyraGamePhaseSubsystem.h	
++++ b/Source/LyraGame/AbilitySystem/Phases/LyraGamePhaseSubsystem.h	
+@@ -43,7 +43,7 @@ enum class EPhaseTagMatchType : uint8
+  *     Game.Playing will remain active, while Game.Playing.CaptureTheFlag will end.
+  */
+ UCLASS()
+-class ULyraGamePhaseSubsystem : public UWorldSubsystem
++class LYRAGAME_API ULyraGamePhaseSubsystem : public UWorldSubsystem
+ {
+ 	GENERATED_BODY()
+ 
+diff --git a/Source/LyraGame/Character/LyraCharacterMovementComponent.cpp b/Source/LyraGame/Character/LyraCharacterMovementComponent.cpp
+index 4be612b..96850a2 100644
+--- a/Source/LyraGame/Character/LyraCharacterMovementComponent.cpp	
++++ b/Source/LyraGame/Character/LyraCharacterMovementComponent.cpp	
+@@ -51,6 +51,56 @@ void ULyraCharacterMovementComponent::InitializeComponent()
+ 	Super::InitializeComponent();
+ }
+ 
++void (*ULyraCharacterMovementComponent::MOBMoveHook)(ULyraCharacterMovementComponent* Self, float DeltaTime) = nullptr;
++void (*ULyraCharacterMovementComponent::MOBPreMoveHook)(ULyraCharacterMovementComponent* Self, FVector& InputVector, float DeltaTime) = nullptr;
++void (*ULyraCharacterMovementComponent::MOBPostMoveHook)(ULyraCharacterMovementComponent* Self, float DeltaTime) = nullptr;
++
++void ULyraCharacterMovementComponent::ControlledCharacterMove(const FVector& InputVector, float DeltaSeconds)
++{
++	if (MOBPreMoveHook)
++	{
++		FVector Input = InputVector;
++		MOBPreMoveHook(this, Input, DeltaSeconds);
++		Super::ControlledCharacterMove(Input, DeltaSeconds);
++		if (MOBPostMoveHook)
++		{
++			MOBPostMoveHook(this, DeltaSeconds);
++		}
++		return;
++	}
++	Super::ControlledCharacterMove(InputVector, DeltaSeconds);
++}
++
++void ULyraCharacterMovementComponent::PhysWalking(float deltaTime, int32 Iterations)
++{
++	if (MOBMoveHook)
++	{
++		MOBMoveHook(this, deltaTime);
++		return;
++	}
++	Super::PhysWalking(deltaTime, Iterations);
++}
++
++void ULyraCharacterMovementComponent::PhysCustom(float deltaTime, int32 Iterations)
++{
++	if (MOBMoveHook)
++	{
++		MOBMoveHook(this, deltaTime);
++		return;
++	}
++	Super::PhysCustom(deltaTime, Iterations);
++}
++
++void ULyraCharacterMovementComponent::PhysFalling(float deltaTime, int32 Iterations)
++{
++	if (MOBMoveHook)
++	{
++		MOBMoveHook(this, deltaTime);
++		return;
++	}
++	Super::PhysFalling(deltaTime, Iterations);
++}
++
+ const FLyraCharacterGroundInfo& ULyraCharacterMovementComponent::GetGroundInfo()
+ {
+ 	if (!CharacterOwner || (GFrameCounter == CachedGroundInfo.LastUpdateFrame))
+diff --git a/Source/LyraGame/Character/LyraCharacterMovementComponent.h b/Source/LyraGame/Character/LyraCharacterMovementComponent.h
+index 0632a3e..b27aa08 100644
+--- a/Source/LyraGame/Character/LyraCharacterMovementComponent.h	
++++ b/Source/LyraGame/Character/LyraCharacterMovementComponent.h	
+@@ -63,6 +63,13 @@ public:
+ 
+ 	UE_API void SetReplicatedAcceleration(const FVector& InAcceleration);
+ 
++	// MOBridge: when set, walking and custom physics run this instead of the engine code. Null = original behavior.
++	UE_API static void (*MOBMoveHook)(ULyraCharacterMovementComponent* Self, float DeltaTime);
++
++	// MOBridge: called right around ControlledCharacterMove to replay and record input. Null = original behavior.
++	UE_API static void (*MOBPreMoveHook)(ULyraCharacterMovementComponent* Self, FVector& InputVector, float DeltaTime);
++	UE_API static void (*MOBPostMoveHook)(ULyraCharacterMovementComponent* Self, float DeltaTime);
++
+ 	//~UMovementComponent interface
+ 	UE_API virtual FRotator GetDeltaRotation(float DeltaTime) const override;
+ 	UE_API virtual float GetMaxSpeed() const override;
+@@ -72,6 +79,11 @@ protected:
+ 
+ 	UE_API virtual void InitializeComponent() override;
+ 
++	UE_API virtual void PhysWalking(float deltaTime, int32 Iterations) override;
++	UE_API virtual void PhysCustom(float deltaTime, int32 Iterations) override;
++	UE_API virtual void PhysFalling(float deltaTime, int32 Iterations) override;
++	UE_API virtual void ControlledCharacterMove(const FVector& InputVector, float DeltaSeconds) override;
++
+ protected:
+ 
+ 	// Cached ground info for the character.  Do not access this directly!  It's only updated when accessed via GetGroundInfo().
+diff --git a/Source/LyraGame/Equipment/LyraQuickBarComponent.h b/Source/LyraGame/Equipment/LyraQuickBarComponent.h
+index 1c3d15b..ed4beab 100644
+--- a/Source/LyraGame/Equipment/LyraQuickBarComponent.h	
++++ b/Source/LyraGame/Equipment/LyraQuickBarComponent.h	
+@@ -14,7 +14,7 @@ class UObject;
+ struct FFrame;
+ 
+ UCLASS(Blueprintable, meta=(BlueprintSpawnableComponent))
+-class ULyraQuickBarComponent : public UControllerComponent
++class LYRAGAME_API ULyraQuickBarComponent : public UControllerComponent
+ {
+ 	GENERATED_BODY()
+ 
+diff --git a/Source/LyraGame/GameModes/LyraGameMode.cpp b/Source/LyraGame/GameModes/LyraGameMode.cpp
+index 50535a2..4d385a8 100644
+--- a/Source/LyraGame/GameModes/LyraGameMode.cpp	
++++ b/Source/LyraGame/GameModes/LyraGameMode.cpp	
+@@ -30,6 +30,11 @@
+ 
+ #include UE_INLINE_GENERATED_CPP_BY_NAME(LyraGameMode)
+ 
++// [MOBridge pilot] When an external server owns life and death, Lyra must not respawn bridged bots on its own.
++static TAutoConsoleVariable<int32> CVarBridgeBlockBotRespawn(
++	TEXT("Lyra.Bridge.BlockBotRespawn"), 0,
++	TEXT("1 = ignore restart requests for bot controllers (an external server decides respawn)."));
++
+ ALyraGameMode::ALyraGameMode(const FObjectInitializer& ObjectInitializer)
+ 	: Super(ObjectInitializer)
+ {
+@@ -468,6 +473,13 @@ void ALyraGameMode::GenericPlayerInitialization(AController* NewPlayer)
+ 
+ void ALyraGameMode::RequestPlayerRestartNextFrame(AController* Controller, bool bForceReset)
+ {
++	// [MOBridge] Checked before the reset: GA_AutoRespawn forces a reset here, which would unpossess a pawn the server already respawned.
++	if (CVarBridgeBlockBotRespawn.GetValueOnGameThread() != 0)
++	{
++		UE_LOG(LogLyra, Log, TEXT("MOB_LYRA_RESTART_BLOCKED controller=%s force=%d"), *GetNameSafe(Controller), bForceReset ? 1 : 0);
++		return;
++	}
++
+ 	if (bForceReset && (Controller != nullptr))
+ 	{
+ 		Controller->Reset();
+diff --git a/Source/LyraGame/Inventory/LyraInventoryItemInstance.h b/Source/LyraGame/Inventory/LyraInventoryItemInstance.h
+index 88365e2..c4c1de8 100644
+--- a/Source/LyraGame/Inventory/LyraInventoryItemInstance.h	
++++ b/Source/LyraGame/Inventory/LyraInventoryItemInstance.h	
+@@ -18,7 +18,7 @@ struct FGameplayTag;
+  * ULyraInventoryItemInstance
+  */
+ UCLASS(BlueprintType)
+-class ULyraInventoryItemInstance : public UObject
++class LYRAGAME_API ULyraInventoryItemInstance : public UObject
+ {
+ 	GENERATED_BODY()
+ 
+diff --git a/Source/LyraGame/Messages/LyraVerbMessage.h b/Source/LyraGame/Messages/LyraVerbMessage.h
+index be15f18..23f90dc 100644
+--- a/Source/LyraGame/Messages/LyraVerbMessage.h	
++++ b/Source/LyraGame/Messages/LyraVerbMessage.h	
+@@ -9,7 +9,7 @@
+ 
+ // Represents a generic message of the form Instigator Verb Target (in Context, with Magnitude)
+ USTRUCT(BlueprintType)
+-struct FLyraVerbMessage
++struct LYRAGAME_API FLyraVerbMessage
+ {
+ 	GENERATED_BODY()
+ 
+@@ -35,5 +35,5 @@ struct FLyraVerbMessage
+ 	double Magnitude = 1.0;
+ 
+ 	// Returns a debug string representation of this message
+-	LYRAGAME_API FString ToString() const;
++	FString ToString() const;
+ };
+diff --git a/Source/LyraGame/System/LyraDevelopmentStatics.cpp b/Source/LyraGame/System/LyraDevelopmentStatics.cpp
+index 47cf2ef..346deb1 100644
+--- a/Source/LyraGame/System/LyraDevelopmentStatics.cpp	
++++ b/Source/LyraGame/System/LyraDevelopmentStatics.cpp	
+@@ -13,8 +13,17 @@
+ 
+ #include UE_INLINE_GENERATED_CPP_BY_NAME(LyraDevelopmentStatics)
+ 
++// [MOBridge] When an external server owns the match, Lyra's own warmup wait and countdown must not run.
++static TAutoConsoleVariable<int32> CVarBridgeSkipWarmup(
++	TEXT("Lyra.Bridge.SkipWarmup"), 0,
++	TEXT("1 = Phase_Warmup goes straight to Phase_Playing (an external server decides the match phases)."));
++
+ bool ULyraDevelopmentStatics::ShouldSkipDirectlyToGameplay()
+ {
++	if (CVarBridgeSkipWarmup.GetValueOnGameThread() != 0)
++	{
++		return true;
++	}
+ #if WITH_EDITOR
+ 	if (GIsEditor)
+ 	{
+diff --git a/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h b/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h
+index a2fa9f9..c0ca42d 100644
+--- a/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h	
++++ b/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h	
+@@ -17,7 +17,7 @@ class UPhysicalMaterial;
+  * A piece of equipment representing a ranged weapon spawned and applied to a pawn
+  */
+ UCLASS()
+-class ULyraRangedWeaponInstance : public ULyraWeaponInstance, public ILyraAbilitySourceInterface
++class LYRAGAME_API ULyraRangedWeaponInstance : public ULyraWeaponInstance, public ILyraAbilitySourceInterface
+ {
+ 	GENERATED_BODY()
+ 
+diff --git a/Source/LyraGame/Weapons/LyraWeaponStateComponent.h b/Source/LyraGame/Weapons/LyraWeaponStateComponent.h
+index c3ddfb1..f6350d4 100644
+--- a/Source/LyraGame/Weapons/LyraWeaponStateComponent.h	
++++ b/Source/LyraGame/Weapons/LyraWeaponStateComponent.h	
+@@ -38,7 +38,7 @@ struct FLyraServerSideHitMarkerBatch
+ 
+ // Tracks weapon state and recent confirmed hit markers to display on screen
+ UCLASS()
+-class ULyraWeaponStateComponent : public UControllerComponent
++class LYRAGAME_API ULyraWeaponStateComponent : public UControllerComponent
+ {
+ 	GENERATED_BODY()
+ 
