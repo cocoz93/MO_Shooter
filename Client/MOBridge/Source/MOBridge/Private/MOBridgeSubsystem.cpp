@@ -205,6 +205,7 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bEventShots = FParse::Param(Cmd, TEXT("MOBEventShots"));
 	bKeepPickups = FParse::Param(Cmd, TEXT("MOBKeepPickups"));
 	bAnimLog = FParse::Param(Cmd, TEXT("MOBAnimLog"));
+	bViewLog = FParse::Param(Cmd, TEXT("MOBViewLog"));
 	FParse::Value(Cmd, TEXT("MOBBreakAt="), BreakAt);
 	// 대기 단계는 경험 로드 직후 시작한다 — 준비(캐릭터 생성)를 기다리면 늦는다
 	if (!ServerAddr.IsEmpty()) IConsoleManager::Get().FindConsoleVariable(TEXT("Lyra.Bridge.SkipWarmup"))->Set(1, ECVF_SetByCode);
@@ -736,6 +737,7 @@ void UMOBridgeSubsystem::TickRemotes(double Now)
 {
 	if (!Core || !bHasTickClock || ResultAt > 0) return;	// 경기가 끝나면 상태가 안 온다 — 그 자리에 둔다
 	const double RenderTick = Now * wire::kTickRate + TickClockOffset - kRemoteDelayTicks;
+	ShownRenderTick = RenderTick;
 	bool bSpawnedThisFrame = false;
 
 	for (TPair<uint32, FMOBRemote>& Pair : Remotes)
@@ -957,6 +959,17 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	if (Wanted != Weapon) ++InputsWeaponChange;
 	Weapon = Wanted;
 
+	// 되감기 시점 = 사람이 보고 쏜 화면. 이 함수는 TickRemotes 앞에 돌므로 ShownRenderTick 은 지난 프레임에 상대를 놓은 시점이다
+	// 시계가 아직 없으면 0 = 시점 없음(서버가 현재 자리로 판정)
+	uint32 ViewTick = 0;
+	float ViewAlpha = 0.f;
+	if (ShownRenderTick >= 1.0)
+	{
+		const double ViewWhole = FMath::FloorToDouble(ShownRenderTick);
+		ViewTick = (uint32)ViewWhole;
+		ViewAlpha = (float)(ShownRenderTick - ViewWhole);
+	}
+
 	for (int32 i = 0; i < Due; ++i)
 	{
 		wire::Input In = wire::Input();
@@ -970,6 +983,8 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		In.aimY = (float)Aim.Y;
 		In.aimZ = (float)Aim.Z;
 		In.weapon = Weapon;
+		In.viewTick = ViewTick;
+		In.viewAlpha = ViewAlpha;
 		if (bJump) In.buttons |= wire::BUTTON_JUMP;
 		if (bFire) In.buttons |= wire::BUTTON_FIRE;
 		if (bReloadDown && !bReloadWasDown) { In.buttons |= wire::BUTTON_RELOAD; ++InputsReload; }
@@ -978,6 +993,18 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		// 번호를 붙이고 여기서도 돌린다 — 서버 답을 기다리지 않고 바로 움직이려고
 		Core->Prediction.AddInput(In);
 		Seq = In.seq;
+		if (bViewLog && bFire)
+		{
+			// 서버 REWIND 줄과 (seq, 상대) 로 잇는다 — 서버가 되돌린 자리 = 그때 화면 자리인가
+			for (const TPair<uint32, FMOBRemote>& Pair : Remotes)
+			{
+				const FMOBRemote& R = Pair.Value;
+				const ACharacter* Shown = R.Pawn.Get();
+				if (!Shown || R.bKilled) continue;
+				const FVector At = Shown->GetActorLocation();
+				UE_LOG(LogMOB, Log, TEXT("MOB_VIEW seq=%u target=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f"), In.seq, R.Id, ViewTick, ViewAlpha, At.X, At.Y, At.Z, Shown->GetActorRotation().Yaw);
+			}
+		}
 		if (!Core->Prediction.IsWaitingSpawn())
 		{
 			SelfPrev = SelfCur;

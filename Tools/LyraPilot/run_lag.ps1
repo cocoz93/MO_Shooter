@@ -5,7 +5,9 @@ param(
     [int]$Port = 7830,
     [int]$Bots = 9,
     [int]$QuitAt = 60,
-    [int]$TimeoutSec = 200
+    [int]$TimeoutSec = 200,
+    [string]$ServerExtra = '',
+    [string]$LyraExtra = ''
 )
 # One Lyra (no rendering) + bots, everyone through Tools/LagRelay. Judges only whether the match breaks; the sent-ack gap proves the delay is real.
 $proj   = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
@@ -19,13 +21,13 @@ $relayOut = "$outDir\game_${Tag}_relay.txt"
 $log    = "$outDir\game_${Tag}_lyra.log"
 $relayPort = $Port + 1
 
-$srv = Start-Process -FilePath "$repo\build\Server\Release\Server.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", '--exitWhenEmpty', '--warmup=2', '--matchSeconds=45') -RedirectStandardOutput $srvOut -RedirectStandardError "$srvOut.err" -PassThru -WindowStyle Hidden
+$srv = Start-Process -FilePath "$repo\build\Server\Release\Server.exe" -ArgumentList (@("--map=`"$map`"", "--port=$Port", '--exitWhenEmpty', '--warmup=2', '--matchSeconds=45') + ($ServerExtra -split ' ' | Where-Object { $_ })) -RedirectStandardOutput $srvOut -RedirectStandardError "$srvOut.err" -PassThru -WindowStyle Hidden
 $null = $srv.Handle   # without this ExitCode stays empty after the process ends
 Start-Sleep -Milliseconds 800
 $relay = Start-Process -FilePath "$repo\build\Tools\LagRelay\Release\LagRelay.exe" -ArgumentList @("--listen=$relayPort", "--target=$Port", "--delayMs=$DelayMs", "--jitterMs=$JitterMs", "--seconds=$($TimeoutSec + 30)") -RedirectStandardOutput $relayOut -PassThru -WindowStyle Hidden
 Start-Sleep -Milliseconds 300
 
-$lyraArgs = @("`"$proj\Lyra.uproject`"", '/ShooterMaps/Maps/L_Expanse?NumBots=0', '-game', '-nullrhi', '-unattended', '-nosplash', '-nosound', '-log', "-abslog=`"$log`"", "-MOBServer=127.0.0.1:$relayPort", "-MOBTag=$Tag", '-MOBAutoInput', "-MOBQuitAt=$QuitAt")
+$lyraArgs = @("`"$proj\Lyra.uproject`"", '/ShooterMaps/Maps/L_Expanse?NumBots=0', '-game', '-nullrhi', '-unattended', '-nosplash', '-nosound', '-log', "-abslog=`"$log`"", "-MOBServer=127.0.0.1:$relayPort", "-MOBTag=$Tag", '-MOBAutoInput', "-MOBQuitAt=$QuitAt") + ($LyraExtra -split ' ' | Where-Object { $_ })
 $t0 = Get-Date
 $lyra = Start-Process -FilePath $ue -ArgumentList $lyraArgs -PassThru
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
