@@ -616,9 +616,9 @@ int main(int argc, char** argv)
 		(unsigned long long)room.inputsRejectedBadValue, (unsigned long long)room.movesOverLength, (unsigned long long)room.weaponIdRejected, (unsigned long long)room.debugPlacesRejected, (unsigned long long)room.shotsAimReplaced,
 		(unsigned long long)room.firesRejectedSwap, (unsigned long long)room.shotsAimPulledBack, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq, (unsigned long long)badPackets,
 		(unsigned long long)room.shotsAimStaleAfterSpawn, (unsigned long long)room.firesTooSoon, (unsigned long long)room.firesEmpty);
-	std::printf("SERVER rewind noView=%llu future=%llu clamped=%llu ok=%llu ticksSum=%llu hitsBoth=%llu hitsRewindOnly=%llu hitsNowOnly=%llu hitsNeither=%llu behindWall=%llu\n",
+	std::printf("SERVER rewind rewindNoView=%llu rewindFuture=%llu rewindClamped=%llu rewindOk=%llu rewindTicksSum=%llu hitsBoth=%llu hitsRewindOnly=%llu hitsNowOnly=%llu hitsNeither=%llu rewindOnlyBehindWall=%llu shots=%llu bullets=%llu\n",
 		(unsigned long long)room.rewindNoView, (unsigned long long)room.rewindFuture, (unsigned long long)room.rewindClamped, (unsigned long long)room.rewindOk, (unsigned long long)room.rewindTicksSum,
-		(unsigned long long)room.hitsBoth, (unsigned long long)room.hitsRewindOnly, (unsigned long long)room.hitsNowOnly, (unsigned long long)room.hitsNeither, (unsigned long long)room.rewindOnlyBehindWall);
+		(unsigned long long)room.hitsBoth, (unsigned long long)room.hitsRewindOnly, (unsigned long long)room.hitsNowOnly, (unsigned long long)room.hitsNeither, (unsigned long long)room.rewindOnlyBehindWall, (unsigned long long)room.shots, (unsigned long long)room.bullets);
 	std::printf("SERVER kills=%llu falls=%llu spawns=%llu spawnsFromFallback=%llu phaseChanges=%llu finished=%d\n",
 		(unsigned long long)room.kills, (unsigned long long)room.falls, (unsigned long long)room.spawns, (unsigned long long)room.spawnsFromFallback, (unsigned long long)room.phaseChanges, firstFinished ? 1 : 0);
 	if (firstFinished)

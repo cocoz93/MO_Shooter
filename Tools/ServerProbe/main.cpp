@@ -5,6 +5,7 @@
 //   ServerProbe <map.mocl> <move.csv> --rules [--port=7791]		서버는 --debug --warmup=3 --targetScore=2
 //   ServerProbe <map.mocl> <move.csv> --checkStarts=<weapons_match.txt>		서버 없이
 //   ServerProbe <map.mocl> <move.csv> --authority --serverLog=<서버 출력 파일>	서버는 --warmup=0 --exitWhenEmpty, --debug 없이
+//   ServerProbe <map.mocl> <move.csv> --rewind --serverLog=<서버 출력 파일>	서버는 --debug --rewindShadow --warmup=0 --exitWhenEmpty
 //
 // 1. 재생: Lyra 이동 기록의 입력에 무기 입력을 섞어 보내고, 돌아온 상태를 같은 공용 코드(Shared)를 여기서 돌린 결과와 비교한다.
 //    서버가 입력을 틱마다 하나씩 빠짐없이 같은 순서로 썼다면 float 까지 똑같다. Lyra 와의 차이도 같이 적는다.
@@ -501,6 +502,7 @@ namespace
 		std::vector<wire::Kill> kills;
 		std::vector<wire::Match> matches;
 		std::vector<wire::PlayerState> history;
+		std::vector<uint32_t> historyTicks;		// history 와 같은 칸 — 그 상태가 어느 틱 것인가
 		wire::Result result = wire::Result();
 		bool hasResult = false;
 		wire::PlayerState self = wire::PlayerState();
@@ -518,6 +520,9 @@ namespace
 					{
 						hasSelf = true;
 						history.push_back(self);
+						uint32_t stateTick = 0;
+						std::memcpy(&stateTick, data + offsetof(wire::State, tick), sizeof(stateTick));
+						historyTicks.push_back(stateTick);
 					}
 					break;
 				case wire::Msg::S2C_SHOT:
@@ -1500,6 +1505,382 @@ namespace
 	}
 }
 
+namespace
+{
+	// ─── 되감기 ────────────────────────────────────────────
+	struct RewindSpots
+	{
+		Vec3 shooter;
+		Vec3 view;		// 쏘는 쪽에서 트인 옛 자리
+		Vec3 away;		// 옛 자리에서 200 넘게 떨어진 트인 자리 — 보간 안 함
+		Vec3 nearby;		// 옛 자리에서 200 안쪽 — 보간함
+		Vec3 hidden;	// 쏘는 쪽에서 벽 뒤
+	};
+
+	// 캡슐 중심을 바닥 위로 맞춘다. 그 자리에 설 수 없으면 false
+	bool SnapToFloor(const CMapCollision& map, const Vec3& at, Vec3& out)
+	{
+		RayHit floor;
+		const Vec3 from = at + Vec3(0, 0, 40);
+		if (!map.Raycast(from, from + Vec3(0, 0, -300), MAP_BLOCK_MOVE, floor)) return false;
+		out = Vec3(at.x, at.y, from.z - floor.distance + 95.0);
+		if (std::fabs(out.z - at.z) > 15.0) return false;	// 낭떠러지·턱 — 같은 높이만 쓴다
+		return !map.OverlapCapsule(out + Vec3(0, 0, 5), 35, 90, MAP_BLOCK_MOVE);
+	}
+
+	bool FindRewindSpots(const CMapCollision& map, const std::vector<Row>& rows, RewindSpots& out)
+	{
+		const Vec3 kBody(0, 0, 15);
+		for (size_t i = 200; i < rows.size(); i += 97)
+		{
+			if (rows[i].modeBefore != kModeWalking) continue;
+			const Vec3 base = rows[i].after;
+			const Vec3 eye = base + Vec3(0, 0, 60);
+			const auto open = [&](const Vec3& at)
+			{
+				RayHit ray;
+				return !map.Raycast(eye, at + kBody, MAP_BLOCK_WEAPON, ray);
+			};
+			Vec3 hidden;
+			bool hasHidden = false;
+			for (double distance : { 400.0, 600.0, 800.0, 1000.0, 1200.0 })
+			{
+				for (int d = 0; d < 16 && !hasHidden; ++d)
+				{
+					const double angle = d * kPi / 8.0;
+					Vec3 at;
+					if (!SnapToFloor(map, base + Vec3(std::cos(angle), std::sin(angle), 0) * distance, at)) continue;
+					if (!open(at))
+					{
+						hidden = at;
+						hasHidden = true;
+					}
+				}
+			}
+			if (!hasHidden) continue;
+			for (int d = 0; d < 16; ++d)
+			{
+				const double angle = d * kPi / 8.0;
+				const Vec3 dir(std::cos(angle), std::sin(angle), 0);
+				const Vec3 perp(-dir.y, dir.x, 0);
+				Vec3 view, away, nearby;
+				if (!SnapToFloor(map, base + dir * 300.0, view) || !open(view)) continue;
+				if (!SnapToFloor(map, view + perp * 260.0, away) || !open(away)) continue;
+				if (!SnapToFloor(map, view + perp * 190.0, nearby) || !open(nearby)) continue;
+				if (!open(view + (nearby - view) * 0.5)) continue;
+				out.shooter = base;
+				out.view = view;
+				out.away = away;
+				out.nearby = nearby;
+				out.hidden = hidden;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// 서버 판정과 따로 적어 둔 갈래 규칙 — 서버 코드를 부르면 같이 틀려도 시험이 못 잡는다
+	enum class EExpectView { NoView, Future, Clamped, Ok };
+	EExpectView ExpectView(uint32_t shotTick, uint32_t viewTick, float alpha)
+	{
+		if (viewTick == 0) return EExpectView::NoView;
+		if (viewTick > shotTick || (viewTick == shotTick && alpha > 0.f)) return EExpectView::Future;
+		return shotTick - viewTick > 18 ? EExpectView::Clamped : EExpectView::Ok;
+	}
+
+	bool RunRewind(int port, const CMapCollision& map, const std::vector<Row>& rows, const std::string& serverLog)
+	{
+		int fails = 0;
+		const auto check = [&fails](bool ok, const char* text)
+		{
+			std::printf("REWIND %s %s\n", ok ? "통과" : "실패", text);
+			if (!ok) ++fails;
+		};
+		RewindSpots spots;
+		if (!FindRewindSpots(map, rows, spots))
+		{
+			std::printf("REWIND 설 자리를 못 찾음\n");
+			return false;
+		}
+		std::printf("REWIND 자리 쏘는쪽 %.0f,%.0f,%.0f 옛 %.0f,%.0f,%.0f 먼 %.0f,%.0f,%.0f 가까운 %.0f,%.0f,%.0f 벽뒤 %.0f,%.0f,%.0f\n",
+			spots.shooter.x, spots.shooter.y, spots.shooter.z, spots.view.x, spots.view.y, spots.view.z, spots.away.x, spots.away.y, spots.away.z, spots.nearby.x, spots.nearby.y, spots.nearby.z, spots.hidden.x, spots.hidden.y, spots.hidden.z);
+
+		ShotClient clients[2];
+		ShotClient& a = clients[0];
+		ShotClient& b = clients[1];
+		if (!ConnectAndHello(a.net, port, a.welcome) || !ConnectAndHello(b.net, port, b.welcome))
+		{
+			std::printf("REWIND 접속 실패\n");
+			return false;
+		}
+		timeBeginPeriod(1);
+		const uint32_t idB = b.welcome.playerId;
+		const uint8_t kRifle = (uint8_t)EWeapon::Rifle;
+		const Vec3 kBody(0, 0, 15);
+		const Vec3 eye = spots.shooter + Vec3(0, 0, 60);
+
+		const auto sendShooter = [&](const Vec3& aim, uint8_t buttons, uint32_t viewTick, float viewAlpha)
+		{
+			wire::Input input = wire::Input();
+			input.seq = ++a.seq;
+			AimAt(eye, aim, input.yaw, input.pitch);
+			input.aimX = (float)eye.x; input.aimY = (float)eye.y; input.aimZ = (float)eye.z;
+			input.buttons = buttons;
+			input.weapon = kRifle;
+			input.viewTick = viewTick;
+			input.viewAlpha = viewAlpha;
+			a.net.SendPacket(input, wire::Msg::C2S_INPUT);
+		};
+		const auto settle = [&](int ticks)
+		{
+			RunTicks(clients, 2, ticks, [&](int) { sendShooter(spots.view, 0, 0, 0.f); }, [] { return false; });
+		};
+		// 대상을 옮기고 그 자리가 상태로 돌아올 때까지 기다린다. 반환 = 그 자리가 처음 보인 틱
+		const auto moveTarget = [&](const Vec3& at, float hp) -> uint32_t
+		{
+			const size_t mark = b.history.size();
+			b.Place(at, hp);
+			for (int i = 0; i < 600; ++i)
+			{
+				sendShooter(spots.view, 0, 0, 0.f);
+				for (ShotClient& c : clients) c.Pump();
+				for (size_t h = mark; h < b.history.size(); ++h)
+				{
+					const wire::PlayerState& s = b.history[h];
+					const double dx = s.x - at.x, dy = s.y - at.y, dz = s.z - at.z;
+					if (dx * dx + dy * dy < 1.0 && std::fabs(dz) < 10.0 && (s.flags & wire::STATE_DEAD) == 0) return b.historyTicks[h];
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(16));
+			}
+			return 0;
+		};
+		const auto waitDead = [&]() -> uint32_t
+		{
+			const size_t mark = b.history.size() > 4 ? b.history.size() - 4 : 0;
+			for (int i = 0; i < 300; ++i)
+			{
+				sendShooter(spots.view, 0, 0, 0.f);
+				for (ShotClient& c : clients) c.Pump();
+				for (size_t h = mark; h < b.history.size(); ++h)
+				{
+					if ((b.history[h].flags & wire::STATE_DEAD) != 0) return b.historyTicks[h];
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(16));
+			}
+			return 0;
+		};
+
+		uint64_t tallyNoView = 0, tallyFuture = 0, tallyClamped = 0, tallyOk = 0;
+		int firedExtra = 0;
+		// 한 발 쏜다. 받은 탄의 틱으로 갈래를 따로 세어 서버 계수와 맞춰 본다
+		const auto fire = [&](const Vec3& aim, uint32_t viewTick, float viewAlpha, EExpectView& outView, bool& outHitTarget) -> bool
+		{
+			const size_t before = a.shots.size();
+			for (int i = 0; i < 40 && a.shots.size() == before; ++i)
+			{
+				sendShooter(aim, wire::BUTTON_FIRE, viewTick, viewAlpha);
+				std::this_thread::sleep_for(std::chrono::milliseconds(16));
+				for (ShotClient& c : clients) c.Pump();
+			}
+			if (a.shots.size() == before) return false;
+			sendShooter(aim, 0, 0, 0.f);
+			PumpFor(clients, 2, 0.05);
+			firedExtra += (int)(a.shots.size() - before) - 1;
+			for (size_t s = before; s < a.shots.size(); ++s)
+			{
+				switch (ExpectView(a.shots[s].tick, viewTick, viewAlpha))
+				{
+				case EExpectView::NoView: ++tallyNoView; break;
+				case EExpectView::Future: ++tallyFuture; break;
+				case EExpectView::Clamped: ++tallyClamped; break;
+				case EExpectView::Ok: ++tallyOk; break;
+				}
+			}
+			const wire::Shot& shot = a.shots[before];
+			outView = ExpectView(shot.tick, viewTick, viewAlpha);
+			outHitTarget = shot.bullets[0].hit == (uint8_t)wire::EShotHit::Body && shot.bullets[0].target == idB;
+			return true;
+		};
+		// 되감기 정상 갈래가 필요한 경우 — 바쁜 PC 에서 한도를 넘겼으면 처음부터 다시 만든다(판정 실패가 아니다)
+		const auto caseOk = [&](const char* text, bool expectHit, auto&& prepare)
+		{
+			for (int attempt = 0; attempt < 4; ++attempt)
+			{
+				settle(30);
+				Vec3 aim;
+				uint32_t viewTick = 0;
+				float alpha = 0.f;
+				if (!prepare(aim, viewTick, alpha))
+				{
+					check(false, text);
+					return;
+				}
+				EExpectView view = EExpectView::NoView;
+				bool hit = false;
+				if (!fire(aim + kBody, viewTick, alpha, view, hit))
+				{
+					check(false, text);
+					return;
+				}
+				if (view != EExpectView::Ok) continue;
+				check(hit == expectHit, text);
+				return;
+			}
+			check(false, text);
+		};
+		const auto caseOther = [&](const char* text, EExpectView expectView, bool expectHit, const Vec3& aim, uint32_t viewTick)
+		{
+			settle(30);
+			EExpectView view = EExpectView::NoView;
+			bool hit = false;
+			const bool fired = fire(aim + kBody, viewTick, 0.f, view, hit);
+			check(fired && view == expectView && hit == expectHit, text);
+		};
+
+		a.Place(spots.shooter, 100.f);
+		b.Place(spots.view, 100.f);
+		PumpFor(clients, 2, 0.2);
+		settle(90);		// 소총을 든다
+
+		uint32_t oldTick = 0;
+		// ① 옮기기 전 틱을 보고 쏘면 맞는다
+		caseOk("옮기기 전 틱으로 쏘면 맞음", true, [&](Vec3& aim, uint32_t& view, float&)
+		{
+			if (!moveTarget(spots.view, 100.f)) return false;
+			settle(6);
+			const uint32_t first = moveTarget(spots.away, 100.f);
+			if (!first) return false;
+			oldTick = first - 1;
+			aim = spots.view;
+			view = oldTick;
+			return true;
+		});
+		// ② 같은 조준 + 시점 없음 = 현재 자리라 빗나간다
+		caseOther("같은 조준에 시점 없으면 빗나감", EExpectView::NoView, false, spots.view, 0);
+		// ③ 한도보다 과거 — 한도 시점에는 이미 옮겨 간 뒤다
+		settle(30);
+		caseOther("한도보다 과거면 옛 자리를 쏴도 빗나감", EExpectView::Clamped, false, spots.view, oldTick);
+		caseOther("한도보다 과거면 한도 시점 자리는 맞음", EExpectView::Clamped, true, spots.away, oldTick);
+		// ④ 미래 틱 = 현재 자리
+		const uint32_t farFuture = (b.historyTicks.empty() ? 0 : b.historyTicks.back()) + 100000;
+		caseOther("미래 틱이면 현재 자리는 맞음", EExpectView::Future, true, spots.away, farFuture);
+		caseOther("미래 틱이면 옛 자리는 빗나감", EExpectView::Future, false, spots.view, farFuture);
+		// ⑤ 그 시점에 죽어 있었음
+		caseOk("그 시점에 죽어 있었으면 안 맞음", false, [&](Vec3& aim, uint32_t& view, float&)
+		{
+			if (!moveTarget(spots.view, 1.f)) return false;
+			settle(30);
+			EExpectView killView = EExpectView::NoView;
+			bool killed = false;
+			if (!fire(spots.view + kBody, 0, 0.f, killView, killed) || !killed) return false;
+			const uint32_t deadTick = waitDead();
+			if (!deadTick) return false;
+			settle(3);		// 부활시키기 전에 죽은 칸이 기록에 남게
+			if (!moveTarget(spots.view, 100.f)) return false;
+			settle(4);
+			aim = spots.view;
+			view = deadTick + 1;	// 쓰러진 틱의 기록은 판정 앞에 적혀 아직 살아 있다 — 그다음 틱부터 죽은 칸
+			return true;
+		});
+		// ⑥ 지금 죽어 있음 — 그때 살아 있었어도 안 맞는다
+		caseOk("지금 죽어 있으면 안 맞음", false, [&](Vec3& aim, uint32_t& view, float&)
+		{
+			if (!moveTarget(spots.view, 1.f)) return false;
+			settle(30);
+			const uint32_t aliveTick = b.historyTicks.back();
+			EExpectView killView = EExpectView::NoView;
+			bool killed = false;
+			if (!fire(spots.view + kBody, 0, 0.f, killView, killed) || !killed) return false;
+			if (!waitDead()) return false;
+			aim = spots.view;
+			view = aliveTick;
+			return true;
+		});
+		moveTarget(spots.view, 100.f);
+		// ⑦ 옛 자리는 트였고 지금 자리는 벽 뒤
+		caseOk("옛 자리 트임·지금 벽 뒤면 맞음", true, [&](Vec3& aim, uint32_t& view, float&)
+		{
+			if (!moveTarget(spots.view, 100.f)) return false;
+			settle(6);
+			const uint32_t first = moveTarget(spots.hidden, 100.f);
+			if (!first) return false;
+			aim = spots.view;
+			view = first - 1;
+			return true;
+		});
+		// ⑧ 두 틱 거리 200 초과 — 비율이 커도 앞 틱 자리
+		caseOk("200 넘게 뛴 사이는 보간 안 함", true, [&](Vec3& aim, uint32_t& view, float& alpha)
+		{
+			if (!moveTarget(spots.view, 100.f)) return false;
+			settle(6);
+			const uint32_t first = moveTarget(spots.away, 100.f);
+			if (!first) return false;
+			aim = spots.view;
+			view = first - 1;
+			alpha = 0.9f;
+			return true;
+		});
+		// ⑨ 200 안쪽 — 가운데 자리로 보간. 앞 틱·뒤 틱 자리면 95cm 어긋나 빗나간다
+		caseOk("200 안쪽 사이는 비율대로 보간", true, [&](Vec3& aim, uint32_t& view, float& alpha)
+		{
+			if (!moveTarget(spots.view, 100.f)) return false;
+			settle(6);
+			const uint32_t first = moveTarget(spots.nearby, 100.f);
+			if (!first) return false;
+			aim = spots.view + (spots.nearby - spots.view) * 0.5;
+			view = first - 1;
+			alpha = 0.5f;
+			return true;
+		});
+		// ⑩ 비율이 NaN·범위 밖이면 입력째 버린다
+		const size_t shotsBeforeBad = a.shots.size();
+		const float badAlpha[] = { std::numeric_limits<float>::quiet_NaN(), -0.1f, 1.5f };
+		for (float alpha : badAlpha)
+		{
+			settle(15);
+			sendShooter(spots.away, wire::BUTTON_FIRE, 1, alpha);
+		}
+		sendShooter(spots.away, 0, 0, 0.f);
+		PumpFor(clients, 2, 0.2);
+		check(a.shots.size() == shotsBeforeBad, "비율이 나쁜 입력은 안 쏨");
+		check(firedExtra == 0, "한 번에 한 발만 나감");
+		timeEndPeriod(1);
+
+		a.net.Close();
+		b.net.Close();
+		std::string log;
+		for (int i = 0; i < 100 && log.empty(); ++i)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			std::ifstream file(serverLog, std::ios::binary);
+			log.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+			if (log.find("SERVER kills=") == std::string::npos) log.clear();
+		}
+		const auto exact = [&](const char* key, uint64_t expected)
+		{
+			const uint64_t value = ReadCount(log, key);
+			std::printf("REWIND %s 개수 %s=%llu 기대 %llu\n", value == expected ? "통과" : "실패", key, (unsigned long long)value, (unsigned long long)expected);
+			if (value != expected) ++fails;
+		};
+		exact("rewindNoView", tallyNoView);
+		exact("rewindFuture", tallyFuture);
+		exact("rewindClamped", tallyClamped);
+		exact("rewindOk", tallyOk);
+		exact("badValue", 3);
+		exact("rewindOnlyBehindWall", 1);
+		const uint64_t bullets = ReadCount(log, "bullets");
+		const uint64_t sum = ReadCount(log, "hitsBoth") + ReadCount(log, "hitsRewindOnly") + ReadCount(log, "hitsNowOnly") + ReadCount(log, "hitsNeither");
+		std::printf("REWIND %s 네 경우 합 %llu = 탄 %llu\n", sum == bullets && bullets > 0 ? "통과" : "실패", (unsigned long long)sum, (unsigned long long)bullets);
+		if (sum != bullets || bullets == 0) ++fails;
+		// 옛 자리로만 맞은 경우 ①⑦⑧⑨ 넷. 다시 만든 판이 있으면 더 늘 수 있어 하한만 본다
+		const uint64_t rewindOnly = ReadCount(log, "hitsRewindOnly");
+		std::printf("REWIND %s hitsRewindOnly=%llu (4 이상)\n", rewindOnly >= 4 && rewindOnly != (uint64_t)-1 ? "통과" : "실패", (unsigned long long)rewindOnly);
+		if (rewindOnly < 4 || rewindOnly == (uint64_t)-1) ++fails;
+		std::printf("REWIND 실패 %d건\n", fails);
+		return fails == 0;
+	}
+}
+
 int main(int argc, char** argv)
 {
 	std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -1512,7 +1893,7 @@ int main(int argc, char** argv)
 	size_t rowLimit = (size_t)-1;
 	uint32_t seed = 20261102;
 	bool breakMirror = false, breakSpread = false, breakDamage = false, rulesOnly = false;
-	bool authorityOnly = false;
+	bool authorityOnly = false, rewindOnly = false;
 	std::string serverLog;
 	std::string startsDump;
 	for (int i = 3; i < argc; ++i)
@@ -1526,6 +1907,7 @@ int main(int argc, char** argv)
 		else if (s == "--breakDamage") breakDamage = true;
 		else if (s == "--rules") rulesOnly = true;
 		else if (s == "--authority") authorityOnly = true;
+		else if (s == "--rewind") rewindOnly = true;
 		else if (s.rfind("--serverLog=", 0) == 0) serverLog = s.substr(12);
 		else if (s.rfind("--checkStarts=", 0) == 0) startsDump = s.substr(14);
 		else
@@ -1561,6 +1943,12 @@ int main(int argc, char** argv)
 		const bool authorityOk = RunAuthority(port, map, serverLog);
 		std::printf("RESULT %s (권위 확인)\n", authorityOk ? "PASS" : "FAIL");
 		return authorityOk ? 0 : 1;
+	}
+	if (rewindOnly)
+	{
+		const bool rewindOk = RunRewind(port, map, rows, serverLog);
+		std::printf("RESULT %s (되감기)\n", rewindOk ? "PASS" : "FAIL");
+		return rewindOk ? 0 : 1;
 	}
 	if (rulesOnly)
 	{

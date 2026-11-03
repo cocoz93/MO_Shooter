@@ -76,6 +76,15 @@ run_bots() {
 	cmp -s "$OUT/bots_srv.csv" "$OUT/bots_bot.csv" || ok=0
 	grep -q '^RESULT PASS' "$OUT/bots_bot.log" || ok=0
 	verdict 봇한판 $ok "봇 rc=$brc 서버 rc=$src $(grep -E 'BOT 서버' "$OUT/bots_bot.log" | tail -1 | cut -c1-110)"
+
+	# 시점을 안 보내는 봇은 전부 시점 없음 갈래여야 한다 — 다른 갈래가 늘면 기존 판정이 바뀐 것
+	local rew shots noview
+	rew="$(grep -a 'SERVER rewind' "$OUT/bots_srv.log")"
+	shots="$(echo "$rew" | sed -E 's/.* shots=([0-9]+).*/\1/')"
+	noview="$(echo "$rew" | sed -E 's/.*rewindNoView=([0-9]+).*/\1/')"
+	ok=1
+	[ -n "$shots" ] && [ "$shots" -gt 0 ] && [ "$shots" = "$noview" ] || ok=0
+	verdict 시점없음갈래 $ok "shots=$shots noView=$noview"
 }
 
 run_rules() {
@@ -100,6 +109,18 @@ run_replay() {
 	[ $prc = 0 ] && [ $src = 0 ] || ok=0
 	grep -q '^RESULT PASS' "$OUT/replay_probe.log" || ok=0
 	verdict 재생 $ok "프로브 rc=$prc 서버 rc=$src"
+}
+
+run_rewind() {
+	"$SRV" "--map=$MAP" --port=7957 --debug --rewindShadow --exitWhenEmpty --warmup=0 --matchSeconds=100000 --targetScore=1000 > "$OUT/rewind_srv.log" 2>&1 &
+	local spid=$!
+	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --port=7957 --rewind "--serverLog=$OUT_W/rewind_srv.log" > "$OUT/rewind_probe.log" 2>&1
+	local prc=$?
+	wait $spid
+	local src=$? ok=1
+	[ $prc = 0 ] && [ $src = 0 ] || ok=0
+	grep -q '^RESULT PASS' "$OUT/rewind_probe.log" || ok=0
+	verdict 되감기 $ok "프로브 rc=$prc 서버 rc=$src $(grep -E 'REWIND 실패 [0-9]+건' "$OUT/rewind_probe.log" | cut -c1-40)"
 }
 
 run_authority() {
@@ -174,6 +195,7 @@ else
 		run_rules
 		run_replay
 		run_authority
+		run_rewind
 		run_multi
 	fi
 fi
