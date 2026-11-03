@@ -1,0 +1,8 @@
+# 기존 라이브러리의 volatile 읽기 + Interlocked 조합 — 11-02 첫 판 95건이 전부 이 자리였다(게임 코드·이번 추가분 0건)
+# 이것을 걸러야 새로 생긴 경합이 보인다. 숫자는 report.sh 가 따로 알려 주지 않으니 첫 판 기록과 함께 볼 것
+race:CLockFreeQueue
+race:CLockFreeStack
+race:CInternalFreeList
+race:CExternalTlsFreeList
+race:LockFreeCompat.h
+race:CIOCPServer::AcquireSession

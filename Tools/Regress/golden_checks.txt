@@ -1,0 +1,91 @@
+move_gym_fixed ONE frames=11153 (walk=6912 fall=4241) posMax=0.2500 p50=0.00000 p99=0.0000 over0.01=6 over0.1=2 over1=0 | velMax=7.985 velOver1=2 | modeMismatch=0
+move_gym_fixed RUN frames=11153 (walk=6912 fall=4241) posMax=4.2589 p50=0.00002 p99=2.8229 over0.01=1203 over0.1=370 over1=150 | velMax=21.417 velOver1=79 | modeMismatch=0
+move_gym_fixed RUN segments=20 over1cm=1 over10cm=0 worst=4.259 (seg 18) resync=0 firstOver1 median=7.52s
+move_gym_fixed COUNT ticks=11153 walkIter=6913 fallIter=4388 | floorSweep=6531 second=4 line=51 lineWalk=51 supplied=552 adjust=684 popOut=0
+move_gym_fixed COUNT perchTry=4 perchOk=1 perchOverride=0 perchFail=3
+move_gym_fixed COUNT ramp2=0 stepTry=777 stepOk=542 stepReject=132 slide=841 twoWall=187 ledgeFall=1 | landed=82 landedEdge=0 fallWall2=52 fallStuck=0 apex=66 | jump=66 launch=0 | startPen=0 resolveTeleport=0 resolveSweep=0
+move_expanse_fixed ONE frames=23584 (walk=11879 fall=11705) posMax=1.7894 p50=0.00000 p99=0.0002 over0.01=10 over0.1=3 over1=1 | velMax=42.751 velOver1=3 | modeMismatch=0
+move_expanse_fixed RUN frames=23584 (walk=11879 fall=11705) posMax=67.5603 p50=0.00014 p99=4.4805 over0.01=674 over0.1=592 over1=408 | velMax=165.073 velOver1=107 | modeMismatch=0
+move_expanse_fixed RUN segments=40 over1cm=3 over10cm=1 worst=67.560 (seg 12) resync=0 firstOver1 median=8.93s
+move_expanse_fixed COUNT ticks=23584 walkIter=11891 fallIter=11948 | floorSweep=11639 second=0 line=107 lineWalk=102 supplied=565 adjust=827 popOut=0
+move_expanse_fixed COUNT perchTry=13 perchOk=5 perchOverride=0 perchFail=8
+move_expanse_fixed COUNT ramp2=0 stepTry=766 stepOk=543 stepReject=208 slide=820 twoWall=263 ledgeFall=14 | landed=146 landedEdge=0 fallWall2=144 fallStuck=0 apex=110 | jump=115 launch=0 | startPen=0 resolveTeleport=0 resolveSweep=0
+move_expanse_free ONE frames=26462 (walk=12834 fall=13628) posMax=3.5684 p50=0.00000 p99=0.0002 over0.01=32 over0.1=4 over1=1 | velMax=13.122 velOver1=3 | modeMismatch=1
+move_expanse_free RUN frames=26462 (walk=12834 fall=13628) posMax=22.3422 p50=0.00011 p99=22.3422 over0.01=3337 over0.1=1370 over1=1209 | velMax=453.444 velOver1=756 | modeMismatch=2
+move_expanse_free RUN segments=20 over1cm=2 over10cm=1 worst=22.342 (seg 13) resync=0 firstOver1 median=7.59s
+move_expanse_free COUNT ticks=26462 walkIter=12844 fallIter=13747 | floorSweep=12742 second=0 line=363 lineWalk=324 supplied=663 adjust=880 popOut=0
+move_expanse_free COUNT perchTry=369 perchOk=322 perchOverride=0 perchFail=47
+move_expanse_free COUNT ramp2=0 stepTry=1311 stepOk=653 stepReject=642 slide=1758 twoWall=1112 ledgeFall=12 | landed=77 landedEdge=0 fallWall2=201 fallStuck=1 apex=54 | jump=58 launch=0 | startPen=0 resolveTeleport=0 resolveSweep=0
+move_expanse_stress ONE frames=4264 (walk=1863 fall=2401) posMax=0.2697 p50=0.00000 p99=0.0000 over0.01=11 over0.1=1 over1=0 | velMax=0.108 velOver1=0 | modeMismatch=0
+move_expanse_stress RUN frames=4264 (walk=1863 fall=2401) posMax=0.3269 p50=0.00010 p99=0.2642 over0.01=302 over0.1=78 over1=0 | velMax=5.287 velOver1=11 | modeMismatch=0
+move_expanse_stress RUN segments=12 over1cm=0 over10cm=0 worst=0.327 (seg 10) resync=0 firstOver1 median=0.00s
+move_expanse_stress COUNT ticks=4264 walkIter=1867 fallIter=2457 | floorSweep=1883 second=0 line=2 lineWalk=0 supplied=47 adjust=114 popOut=0
+move_expanse_stress COUNT perchTry=1 perchOk=0 perchOverride=0 perchFail=1
+move_expanse_stress COUNT ramp2=0 stepTry=47 stepOk=47 stepReject=0 slide=47 twoWall=10 ledgeFall=4 | landed=31 landedEdge=0 fallWall2=11 fallStuck=0 apex=29 | jump=19 launch=23 | startPen=6 resolveTeleport=6 resolveSweep=0
+weapon TABLE   pistol   items=59 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001
+weapon TABLE   rifle    items=68 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001
+weapon TABLE   shotgun  items=65 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001
+weapon DAMAGE  pistol   samples=116 nonZero=87 allySamples=29 allyNonZero=0 maxDiff=0.0000 over0.01=0
+weapon DAMAGE  rifle    samples=116 nonZero=87 allySamples=29 allyNonZero=0 maxDiff=0.0000 over0.01=0
+weapon DAMAGE  shotgun  samples=116 nonZero=87 allySamples=29 allyNonZero=0 maxDiff=0.0008 over0.01=0
+weapon MONTAGE pistol   fire 0.666667 / 1.00 = 0.666667 (표 0.666667) | reload 1.631531 / 1.50 = 1.087687 (표 1.087687)
+weapon MONTAGE rifle    fire 0.533000 / 1.00 = 0.533000 (표 0.533000) | reload 1.746580 / 1.00 = 1.746580 (표 1.746580)
+weapon MONTAGE shotgun  fire 0.666667 / 2.20 = 0.303030 (표 0.303030) | reload 2.243124 / 1.00 = 2.243124 (표 2.243124)
+weapon CYCLE   pistol   frames=7196 shots lyra=199 sim=199 | magDiff=0 spareDiff=0 firstBad=seg-1:f-1 | reloads lyra=13 sim=13 | heatMax=0.0000 spreadMax=0.0000 multMax=0.0002 firstShotDiff=0
+weapon         gaps lyra: 9:176 71:1 79:2 87:1 92:1 107:1 109:2 111:2 112:1 116:1 121:1 152:1 164:1 171:1 175:1 220:1 248:1 | sim: 9:176 71:1 79:2 87:1 92:1 107:1 109:2 111:2 112:1 116:1 121:1 152:1 164:1 171:1 175:1 220:1 248:1 | reload frames lyra: 57:1 65:1 132:1 149:1 174:1 188:1
+weapon CYCLE   rifle    frames=7137 shots lyra=288 sim=288 | magDiff=0 spareDiff=0 firstBad=seg-1:f-1 | reloads lyra=7 sim=7 | heatMax=0.0000 spreadMax=0.0000 multMax=0.0000 firstShotDiff=0
+weapon         gaps lyra: 9:257 24:1 30:1 46:1 56:1 63:1 69:1 73:1 74:2 76:2 89:1 93:1 105:1 111:1 136:2 147:1 151:1 154:2 157:1 158:1 163:1 185:1 228:1 279:1 | sim: 9:257 24:1 30:1 46:1 56:1 63:1 69:1 73:1 74:2 76:2 89:1 93:1 105:1 111:1 136:2 147:1 151:1 154:2 157:1 158:1 163:1 185:1 228:1 279:1 | reload frames lyra: 192:1 220:1 350:1
+weapon CYCLE   shotgun  frames=7177 shots lyra=114 sim=114 | magDiff=0 spareDiff=0 firstBad=seg-1:f-1 | reloads lyra=12 sim=12 | heatMax=0.0000 spreadMax=0.0000 multMax=0.0009 firstShotDiff=0
+weapon         gaps lyra: 19:85 27:1 61:1 63:1 64:1 71:1 83:1 106:1 119:1 129:1 145:1 176:1 179:1 181:2 182:1 184:1 185:1 186:1 189:1 198:1 231:1 233:1 262:1 301:1 311:1 | sim: 19:85 27:1 61:1 63:1 64:1 71:1 83:1 106:1 119:1 129:1 145:1 176:1 179:1 181:2 182:1 184:1 185:1 186:1 189:1 198:1 231:1 233:1 262:1 301:1 311:1 | reload frames lyra: 93:1 218:1 235:1 247:1 253:1 339:1 436:1 466:1
+weapon HITS    pistol   hits=16 weak=7 hpChanges=16 sum lyra=414.00 mine=414.00 maxDiff=0.0000 over0.01=0 | startFromMe max=92.5 horiz=60.6
+weapon HITS    rifle    hits=16 weak=8 hpChanges=16 sum lyra=240.00 mine=240.00 maxDiff=0.0000 over0.01=0 | startFromMe max=92.5 horiz=60.6
+weapon HITS    shotgun  hits=95 weak=22 hpChanges=16 sum lyra=1160.70 mine=1160.70 maxDiff=0.0039 over0.01=0 | startFromMe max=92.5 horiz=60.6
+weapon RESOLVE line rows=4800 bad=0 | sweep rows=14400 bad=0 usedSweep=1132 lineBodyOverSweepMap=44
+weapon RAYMISS state=0 lyraOnly=74 mineOnly=106 | Lyra 만 맞음 중 내 몸까지 +1cm=27 +2cm=41 +3cm=49 +5cm=53 +10cm=65
+weapon         lyra bones: calf_l:8 calf_r:4 foot_l:1 foot_r:1 hand_l:9 hand_r:5 head:11 lowerarm_l:5 lowerarm_r:3 pelvis:3 spine_02:1 spine_05:1 thigh_l:7 thigh_r:9 upperarm_l:4 upperarm_r:2
+weapon         mine bones: calf_l:2 calf_r:7 clavicle_l:1 clavicle_r:3 foot_l:2 foot_r:3 hand_l:8 hand_r:3 head:23 lowerarm_l:3 neck_02:2 pelvis:5 spine_02:1 spine_03:2 spine_05:14 thigh_l:8 thigh_r:6 upperarm_l:8 upperarm_r:5
+weapon RAYMISS state=1 lyraOnly=319 mineOnly=363 | Lyra 만 맞음 중 내 몸까지 +1cm=54 +2cm=94 +3cm=116 +5cm=182 +10cm=266
+weapon         lyra bones: calf_l:43 calf_r:42 clavicle_l:1 clavicle_r:4 foot_l:18 foot_r:26 hand_l:20 hand_r:10 head:20 lowerarm_l:13 lowerarm_r:10 neck_01:1 pelvis:13 spine_02:2 spine_03:5 spine_04:1 spine_05:6 thigh_l:21 thigh_r:33 upperarm_l:14 upperarm_r:16
+weapon         mine bones: calf_l:50 calf_r:42 clavicle_l:10 clavicle_r:11 foot_l:18 foot_r:17 hand_l:15 hand_r:9 head:59 lowerarm_l:14 lowerarm_r:1 neck_02:3 pelvis:6 spine_02:4 spine_03:2 spine_04:1 spine_05:13 thigh_l:29 thigh_r:21 upperarm_l:23 upperarm_r:15
+weapon RAYMISS state=2 lyraOnly=349 mineOnly=540 | Lyra 만 맞음 중 내 몸까지 +1cm=54 +2cm=90 +3cm=112 +5cm=169 +10cm=246
+weapon         lyra bones: calf_l:53 calf_r:51 clavicle_l:2 clavicle_r:1 foot_l:14 foot_r:21 hand_l:11 hand_r:5 head:33 lowerarm_l:17 lowerarm_r:11 neck_02:1 pelvis:13 spine_03:1 spine_05:11 thigh_l:32 thigh_r:35 upperarm_l:23 upperarm_r:14
+weapon         mine bones: calf_l:59 calf_r:97 clavicle_l:6 clavicle_r:12 foot_l:32 foot_r:32 hand_l:26 hand_r:12 head:57 lowerarm_l:19 lowerarm_r:7 neck_01:3 neck_02:3 pelvis:14 spine_02:2 spine_04:2 spine_05:20 thigh_l:39 thigh_r:55 upperarm_l:13 upperarm_r:30
+weapon RAYMISS state=3 lyraOnly=205 mineOnly=207 | Lyra 만 맞음 중 내 몸까지 +1cm=52 +2cm=79 +3cm=107 +5cm=145 +10cm=184
+weapon         lyra bones: calf_l:25 calf_r:48 clavicle_r:2 foot_l:12 foot_r:11 hand_l:1 hand_r:1 head:11 lowerarm_l:9 pelvis:14 spine_02:1 spine_03:3 spine_04:3 spine_05:2 thigh_l:26 thigh_r:23 upperarm_l:6 upperarm_r:7
+weapon         mine bones: calf_l:41 calf_r:24 clavicle_l:4 clavicle_r:3 foot_l:12 foot_r:9 hand_l:8 hand_r:3 head:19 lowerarm_l:4 lowerarm_r:1 pelvis:11 spine_02:2 spine_03:4 spine_04:1 spine_05:11 thigh_l:18 thigh_r:16 upperarm_l:5 upperarm_r:11
+weapon RAYS    state=0 r=0.0 n=1200 lyra[none/map/body]=337/620/243 mine=330/619/251 agree=96.00% | body either=271 both=223(82.3%) weak same=219/223(lyraWeak=18) bone same=198 avgDist=2.91 maxDist=59.97 | map both=613 maxDist=0.055 | lyraMultiHit=0 noBot=0
+weapon RAYS    state=0 r=0.5 n=1200 lyra[none/map/body]=365/572/263 mine=354/574/272 agree=96.75% | body either=287 both=248(86.4%) weak same=247/248(lyraWeak=25) bone same=221 avgDist=3.33 maxDist=58.96 | map both=569 maxDist=0.017 | lyraMultiHit=1 noBot=0
+weapon RAYS    state=0 r=5.5 n=1200 lyra[none/map/body]=267/589/344 mine=256/591/353 agree=96.58% | body either=369 both=328(88.9%) weak same=318/328(lyraWeak=34) bone same=287 avgDist=4.16 maxDist=53.25 | map both=585 maxDist=0.038 | lyraMultiHit=1 noBot=0
+weapon RAYS    state=0 r=6.0 n=1200 lyra[none/map/body]=212/600/388 mine=203/603/394 agree=95.67% | body either=417 both=365(87.5%) weak same=361/365(lyraWeak=38) bone same=326 avgDist=3.48 maxDist=70.48 | map both=593 maxDist=0.012 | lyraMultiHit=9 noBot=0
+weapon RAYS    state=1 r=0.0 n=1200 lyra[none/map/body]=355/601/244 mine=370/594/236 agree=86.67% | body either=320 both=160(50.0%) weak same=154/160(lyraWeak=20) bone same=86 avgDist=15.49 maxDist=133.72 | map both=573 maxDist=0.009 | lyraMultiHit=0 noBot=0
+weapon RAYS    state=1 r=0.5 n=1200 lyra[none/map/body]=360/615/225 mine=350/617/233 agree=85.00% | body either=319 both=139(43.6%) weak same=130/139(lyraWeak=24) bone same=71 avgDist=13.46 maxDist=93.43 | map both=587 maxDist=0.701 | lyraMultiHit=3 noBot=0
+weapon RAYS    state=1 r=5.5 n=1200 lyra[none/map/body]=263/609/328 mine=248/612/340 agree=84.50% | body either=427 both=241(56.4%) weak same=225/241(lyraWeak=36) bone same=114 avgDist=13.67 maxDist=76.13 | map both=573 maxDist=0.426 | lyraMultiHit=8 noBot=0
+weapon RAYS    state=1 r=6.0 n=1200 lyra[none/map/body]=280/566/354 mine=248/566/386 agree=87.00% | body either=448 both=292(65.2%) weak same=275/292(lyraWeak=46) bone same=139 avgDist=14.73 maxDist=103.89 | map both=540 maxDist=0.006 | lyraMultiHit=11 noBot=0
+weapon RAYS    state=2 r=0.0 n=1200 lyra[none/map/body]=481/464/255 mine=459/463/278 agree=82.75% | body either=370 both=163(44.1%) weak same=146/163(lyraWeak=33) bone same=49 avgDist=16.76 maxDist=74.12 | map both=454 maxDist=0.014 | lyraMultiHit=0 noBot=0
+weapon RAYS    state=2 r=0.5 n=1200 lyra[none/map/body]=507/449/244 mine=454/450/296 agree=80.33% | body either=388 both=152(39.2%) weak same=143/152(lyraWeak=26) bone same=45 avgDist=14.29 maxDist=90.48 | map both=436 maxDist=0.008 | lyraMultiHit=1 noBot=0
+weapon RAYS    state=2 r=5.5 n=1200 lyra[none/map/body]=385/493/322 mine=337/487/376 agree=81.17% | body either=462 both=236(51.1%) weak same=223/236(lyraWeak=32) bone same=82 avgDist=15.74 maxDist=149.67 | map both=473 maxDist=0.007 | lyraMultiHit=11 noBot=0
+weapon RAYS    state=2 r=6.0 n=1200 lyra[none/map/body]=383/468/349 mine=323/466/411 agree=81.67% | body either=490 both=270(55.1%) weak same=248/270(lyraWeak=34) bone same=71 avgDist=16.76 maxDist=67.27 | map both=450 maxDist=0.022 | lyraMultiHit=10 noBot=0
+weapon RAYS    state=3 r=0.0 n=1200 lyra[none/map/body]=356/603/241 mine=360/606/234 agree=91.25% | body either=290 both=185(63.8%) weak same=184/185(lyraWeak=24) bone same=142 avgDist=7.52 maxDist=57.32 | map both=583 maxDist=0.006 | lyraMultiHit=0 noBot=0
+weapon RAYS    state=3 r=0.5 n=1200 lyra[none/map/body]=387/572/241 mine=378/572/250 agree=90.92% | body either=300 both=191(63.7%) weak same=188/191(lyraWeak=19) bone same=146 avgDist=7.39 maxDist=46.58 | map both=553 maxDist=0.480 | lyraMultiHit=2 noBot=0
+weapon RAYS    state=3 r=5.5 n=1200 lyra[none/map/body]=250/589/361 mine=247/590/363 agree=92.17% | body either=409 both=315(77.0%) weak same=309/315(lyraWeak=35) bone same=218 avgDist=7.52 maxDist=48.75 | map both=567 maxDist=0.007 | lyraMultiHit=10 noBot=0
+weapon RAYS    state=3 r=6.0 n=1200 lyra[none/map/body]=248/574/378 mine=241/583/376 agree=91.33% | body either=429 both=325(75.8%) weak same=319/325(lyraWeak=48) bone same=246 avgDist=7.89 maxDist=55.04 | map both=556 maxDist=0.014 | lyraMultiHit=9 noBot=0
+weapon CONE    samples=200000 meanDeg=2.498 (기대 2.5) overHalf=0.000000
+weapon RESULT PASS
+map_expanse CHECK kind=A total=15000 bothHit=9225 bothMiss=5775 onlyLyra=0 onlyMine=0 lyraPen=4351 penMismatch=0 maxDiff=0.0910 p99Diff=0.00074 over0.1=0 over1=0
+map_expanse NORMAL kind=A compared=4874 over0.01=91 over0.1=90 max=1.4142 | startPen compared=4351 over0.1=663
+map_expanse CHECK kind=C total=15000 bothHit=9213 bothMiss=5772 onlyLyra=15 onlyMine=0 lyraPen=6125 penMismatch=0 maxDiff=451.8685 p99Diff=0.00566 over0.1=38 over1=20
+map_expanse NORMAL kind=C compared=3088 over0.01=51 over0.1=51 max=1.4142 | startPen compared=6125 over0.1=1776
+map_expanse CHECK kind=D total=50000 bothHit=45583 bothMiss=4417 onlyLyra=0 onlyMine=0 lyraPen=0 penMismatch=0 maxDiff=0.3792 p99Diff=0.00021 over0.1=1 over1=0
+map_expanse CHECK kind=E total=50000 bothHit=30575 bothMiss=19425 onlyLyra=0 onlyMine=0 lyraPen=0 penMismatch=0 maxDiff=0.0097 p99Diff=0.00059 over0.1=0 over1=0
+map_expanse CHECK kind=F total=15000 bothHit=14871 bothMiss=129 onlyLyra=0 onlyMine=0 lyraPen=3303 penMismatch=0 maxDiff=0.3558 p99Diff=0.00063 over0.1=1 over1=0
+map_expanse NORMAL kind=F compared=11568 over0.01=31 over0.1=31 max=1.4142 | startPen compared=3303 over0.1=136
+map_expanse CHECK kind=R total=50000 bothHit=28769 bothMiss=21231 onlyLyra=0 onlyMine=0 lyraPen=0 penMismatch=0 maxDiff=0.0086 p99Diff=0.00049 over0.1=0 over1=0
+map_gym CHECK kind=A total=15000 bothHit=10198 bothMiss=4802 onlyLyra=0 onlyMine=0 lyraPen=6809 penMismatch=0 maxDiff=0.0120 p99Diff=0.00026 over0.1=0 over1=0
+map_gym NORMAL kind=A compared=3389 over0.01=5 over0.1=5 max=1.4142 | startPen compared=6809 over0.1=356
+map_gym CHECK kind=C total=15000 bothHit=3386 bothMiss=11614 onlyLyra=0 onlyMine=0 lyraPen=575 penMismatch=0 maxDiff=0.0712 p99Diff=0.00125 over0.1=0 over1=0
+map_gym NORMAL kind=C compared=2811 over0.01=30 over0.1=30 max=1.4142 | startPen compared=575 over0.1=29
+map_gym CHECK kind=D total=50000 bothHit=50000 bothMiss=0 onlyLyra=0 onlyMine=0 lyraPen=0 penMismatch=0 maxDiff=0.0004 p99Diff=0.00010 over0.1=0 over1=0
+map_gym CHECK kind=E total=50000 bothHit=21717 bothMiss=28283 onlyLyra=0 onlyMine=0 lyraPen=0 penMismatch=0 maxDiff=0.0029 p99Diff=0.00049 over0.1=0 over1=0
+map_gym CHECK kind=F total=15000 bothHit=14870 bothMiss=130 onlyLyra=0 onlyMine=0 lyraPen=111 penMismatch=0 maxDiff=0.0900 p99Diff=0.00015 over0.1=0 over1=0
+map_gym NORMAL kind=F compared=14759 over0.01=9 over0.1=9 max=1.4142 | startPen compared=111 over0.1=15
+map_gym CHECK kind=R total=50000 bothHit=23295 bothMiss=26705 onlyLyra=0 onlyMine=0 lyraPen=0 penMismatch=0 maxDiff=0.0072 p99Diff=0.00053 over0.1=0 over1=0
