@@ -219,6 +219,8 @@ private:
 	int64 RemoteFrames = 0, RemoteUnderrun = 0, RemoteTeleports = 0, RemoteDriftOver1cm = 0;
 	// -MOBAnimLog 진단 — 남의 캐릭터가 움직이는 프레임에 애니가 무슨 상태였나
 	bool bViewLog = false;		// -MOBViewLog 쏠 때마다 상대 화면 자리를 찍는다. 서버 REWIND 줄과 대조
+	double RemotePitchWantMax = 0;		// -MOBViewLog — 상대에게 넣은 위아래 시선의 최대
+	double RemotePitchSeenMax = 0;		// -MOBViewLog — 다음 프레임에 애니가 읽는 시선으로 남아 있던 값의 최대
 	double ShownRenderTick = -1.0;	// 지난 프레임에 상대를 놓은 시점(틱). 입력의 viewTick·viewAlpha 로 나간다
 	bool bAnimLog = false;
 	double NextAnimLogAt = 0;

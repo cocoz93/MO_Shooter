@@ -38,7 +38,7 @@ public:
 	virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Always; }
 
 private:
-	enum class EPhase : uint8 { WaitPawns, Equip, Table, ScriptStart, Script, HitStart, Hit, RayStart, Ray, Done };
+	enum class EPhase : uint8 { WaitPawns, Equip, Table, ScriptStart, Script, HitStart, Hit, RayStart, Ray, PoseEquip, Done };
 
 	bool IsMatchPlaying(double Real);
 	bool PrepareActors();
@@ -57,7 +57,10 @@ private:
 
 	void TickScript(float Dt);
 	void TickHit(float Dt);
-	void WriteShapes(const TCHAR* Prefix);
+	void WriteShapes(const TCHAR* Prefix, bool bLog = true);
+	void PreparePose();
+	void EquipFoe(int32 WeaponIndex);
+	int32 StateTag() const { return bPoseOnly ? PoseWeapon * 10 + RayState : RayState; }
 	void TickRays(float Dt);
 	void Finish();
 
@@ -111,6 +114,10 @@ private:
 	FVector HitDir = FVector::ForwardVector;
 	FVector MineHome = FVector::ZeroVector;
 
+	// -MOBPoseOnly — 상대 무기 × 동작마다 몸 자리·광선만 기록한다(동작별 자세 표를 넣을지 정하는 자료). 상태 번호 = 무기*10 + 동작
+	bool bPoseOnly = false;
+	int32 PoseWeapon = 0;
+	float PoseYaw = 0.f;
 	int32 RayState = 0;
 	FVector EnemyHome = FVector::ZeroVector;
 	double NextEnemyActionAt = 0;

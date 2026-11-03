@@ -13,8 +13,11 @@
 #include "Abilities/GameplayAbility.h"
 #include "Animation/AnimMontage.h"
 #include "Curves/CurveFloat.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Equipment/LyraEquipmentDefinition.h"
+#include "Equipment/LyraEquipmentInstance.h"
 #include "Equipment/LyraEquipmentManagerComponent.h"
 #include "Equipment/LyraQuickBarComponent.h"
 #include "GameFramework/Character.h"
@@ -72,6 +75,10 @@ namespace
 	constexpr double RAY_LENGTH_MIN = 100.0;
 	constexpr double RAY_LENGTH_MAX = 3000.0;
 	constexpr int32 RAYS_PER_FRAME = 4;
+	constexpr int32 POSE_LAST_STATE = 5;			// 0 서기 · 1 걷기 · 2 점프 · 3 제자리 회전 · 4 위아래 조준(실제 게임과 같은 설정) · 5 위아래 조준(AI 컨트롤러 멈춤 — 시선이 몸에 먹었을 때의 값). Lyra 에 달리기 입력 자산이 없어(IA_Sprint 없음, IA_AutoRun 은 자동 전진) 걷기가 곧 달리기다
+	constexpr int32 POSE_SAMPLE_FRAMES = 6;		// 60프레임 기준 초당 10번 — 걸음 한 주기에 여러 번 찍히면서 기록이 수 MB 로 끝나는 간격
+	constexpr double POSE_SETTLE_SECONDS = 1.0;	// 동작이 바뀐 직후 애니 섞임 구간은 빼고 잰다. 섞임이 1초 안쪽이라는 가정 — 더 길면 앞 동작이 섞여 들어온다
+	constexpr double POSE_PITCH_DEGREES = 60.0;	// 위아래 조준 폭. 평소 교전보다 넓게 — 몸이 가장 벌어질 때를 보려고
 
 	// 곡선 경계 앞뒤를 일부러 넣은 거리 표본
 	const double DISTANCES[] = { 0, 1, 50, 100, 500, 599, 600, 601, 620, 639, 640, 641, 1000, 1999, 2000, 2000.5, 2001, 2002, 2500, 2799, 2800, 2800.5, 2801, 2802, 5000, 10000, 24999, 25000, 30000 };
@@ -124,6 +131,7 @@ void UMOBWeaponRecordSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FParse::Value(Cmd, TEXT("MOBWeaponSegs="), SegsPerWeapon);
 	FParse::Value(Cmd, TEXT("MOBWeaponSegSec="), SegSeconds);
 	FParse::Value(Cmd, TEXT("MOBWeaponRaySec="), RaySeconds);
+	bPoseOnly = FParse::Param(Cmd, TEXT("MOBPoseOnly"));
 	Rng.Initialize(Seed);
 }
 
@@ -657,7 +665,46 @@ void UMOBWeaponRecordSubsystem::TickHit(float Dt)
 	++Frame;
 }
 
-void UMOBWeaponRecordSubsystem::WriteShapes(const TCHAR* Prefix)
+// 실제 게임의 상대와 같게 맞춘다 — 시선은 내가 정하고(MOBridgeSubsystem::SpawnRemote), 무기는 장비 칸을 바로 바꾼다(SyncRemoteWeapon)
+void UMOBWeaponRecordSubsystem::PreparePose()
+{
+	ACharacter* Foe = Enemy.Get();
+	if (!Foe) return;
+	PoseYaw = Foe->GetActorRotation().Yaw;
+	if (AAIController* AI = Cast<AAIController>(Foe->GetController())) AI->bSetControlRotationFromPawnOrientation = false;
+}
+
+void UMOBWeaponRecordSubsystem::EquipFoe(int32 WeaponIndex)
+{
+	ACharacter* Foe = Enemy.Get();
+	ULyraEquipmentManagerComponent* EM = Foe ? Foe->FindComponentByClass<ULyraEquipmentManagerComponent>() : nullptr;
+	if (!EM)
+	{
+		UE_LOG(LogMOBWeaponRec, Error, TEXT("MOB_WREC foe_no_equipment"));
+		return;
+	}
+	static const TCHAR* const Names[NUM_WEAPONS] = { TEXT("Pistol"), TEXT("Rifle"), TEXT("Shotgun") };
+	const FString Path = FString::Printf(TEXT("/ShooterCore/Weapons/%s/WID_%s.WID_%s_C"), Names[WeaponIndex], Names[WeaponIndex], Names[WeaponIndex]);
+	UClass* Def = LoadClass<ULyraEquipmentDefinition>(nullptr, *Path);
+	const TArray<ULyraEquipmentInstance*> Old = EM->GetEquipmentInstancesOfType(ULyraEquipmentInstance::StaticClass());
+	for (ULyraEquipmentInstance* I : Old) EM->UnequipItem(I);
+	ULyraEquipmentInstance* Now = Def ? EM->EquipItem(Def) : nullptr;
+	UE_LOG(LogMOBWeaponRec, Log, TEXT("MOB_WREC foe_weapon=%s removed=%d instance=%s"), WEAPON_NAMES[WeaponIndex], Old.Num(), *GetNameSafe(Now));
+	Csv += FString::Printf(TEXT("POSEWEAPON,%d,%s,%d\n"), WeaponIndex, WEAPON_NAMES[WeaponIndex], Now ? 1 : 0);
+
+	// 몸 종류 기록 — Lyra 는 캐릭터마다 몸을 무작위로 고른다(B_PickRandomCharacter). 몸이 다르면 뼈 길이가 달라
+	// 고정 자세와의 어긋남이 그만큼 커지므로, 어느 몸으로 잰 표인지 기록에 남긴다
+	USkeletalMeshComponent* FoeMesh = Foe->GetMesh();
+	Csv += FString::Printf(TEXT("POSEMESH,%d,pawn,%s\n"), WeaponIndex, FoeMesh ? *GetNameSafe(FoeMesh->GetSkeletalMeshAsset()) : TEXT("none"));
+	TArray<USkeletalMeshComponent*> MeshParts;
+	Foe->GetComponents<USkeletalMeshComponent>(MeshParts, true);
+	for (const USkeletalMeshComponent* Part : MeshParts)
+	{
+		if (Part && Part != FoeMesh) Csv += FString::Printf(TEXT("POSEMESH,%d,part,%s\n"), WeaponIndex, *GetNameSafe(Part->GetSkeletalMeshAsset()));
+	}
+}
+
+void UMOBWeaponRecordSubsystem::WriteShapes(const TCHAR* Prefix, bool bLog)
 {
 	ACharacter* Foe = Enemy.Get();
 	USkeletalMeshComponent* Sk = Foe ? Foe->GetMesh() : nullptr;
@@ -689,7 +736,7 @@ void UMOBWeaponRecordSubsystem::WriteShapes(const TCHAR* Prefix)
 		for (const FKSphylElem& E : B->AggGeom.SphylElems) Emit(TEXT("sphyl"), FTransform(E.Rotation, E.Center), E.Radius, E.Length, 0, 0);
 		for (const FKBoxElem& E : B->AggGeom.BoxElems) Emit(TEXT("box"), FTransform(E.Rotation, E.Center), E.X, E.Y, E.Z, 0);
 	}
-	UE_LOG(LogMOBWeaponRec, Log, TEXT("MOB_WREC shapes=%d"), Count);
+	if (bLog) UE_LOG(LogMOBWeaponRec, Log, TEXT("MOB_WREC shapes=%d"), Count);
 }
 
 void UMOBWeaponRecordSubsystem::TickRays(float Dt)
@@ -703,7 +750,9 @@ void UMOBWeaponRecordSubsystem::TickRays(float Dt)
 	const FVector Loc = Foe->GetActorLocation();
 	const FVector V = Foe->GetVelocity();
 	const int32 Falling = M && M->IsFalling() ? 1 : 0;
-	Csv += FString::Printf(TEXT("BOT,%d,%d,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%d\n"), RayState, Frame, Loc.X, Loc.Y, Loc.Z, Foe->GetActorRotation().Yaw, V.X, V.Y, V.Z, Falling);
+	const bool bSettling = bPoseOnly && Now - PhaseAt < POSE_SETTLE_SECONDS;
+	if (bPoseOnly && !bSettling && Frame % POSE_SAMPLE_FRAMES == 0) WriteShapes(*FString::Printf(TEXT("POSE,%d,%d"), StateTag(), Frame), false);
+	if (!bSettling) Csv += FString::Printf(TEXT("BOT,%d,%d,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%d\n"), StateTag(), Frame, Loc.X, Loc.Y, Loc.Z, Foe->GetActorRotation().Yaw, V.X, V.Y, V.Z, Falling);
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBWeaponRay), /*bTraceComplex=*/ true);
 	Params.bReturnPhysicalMaterial = true;
@@ -711,7 +760,7 @@ void UMOBWeaponRecordSubsystem::TickRays(float Dt)
 	if (Ally.IsValid()) Params.AddIgnoredActor(Ally.Get());
 	static const float Radii[] = { 0.f, 0.5f, 5.5f, 6.f };
 
-	for (int32 I = 0; I < RAYS_PER_FRAME; ++I)
+	for (int32 I = 0; I < (bSettling ? 0 : RAYS_PER_FRAME); ++I)
 	{
 		const float R = Radii[RayCount % 4];
 		++RayCount;
@@ -743,7 +792,7 @@ void UMOBWeaponRecordSubsystem::TickRays(float Dt)
 			Dist = (H.Location - A).Size();
 			Blocking = H.bBlockingHit ? 1 : 0;
 		}
-		Csv += FString::Printf(TEXT("RAY,%d,%d,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%s,%d,%.3f,%d\n"), RayState, Frame, R, A.X, A.Y, A.Z, B.X, B.Y, B.Z, Hits.Num(), Kind, *Bone, Weak, Dist, Blocking);
+		Csv += FString::Printf(TEXT("RAY,%d,%d,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%s,%d,%.3f,%d\n"), StateTag(), Frame, R, A.X, A.Y, A.Z, B.X, B.Y, B.Z, Hits.Num(), Kind, *Bone, Weak, Dist, Blocking);
 	}
 
 	// 움직임: 상태 0=서 있기, 1=걷기, 2=점프 섞어 걷기, 3=제자리 방향 바꾸기
@@ -752,10 +801,11 @@ void UMOBWeaponRecordSubsystem::TickRays(float Dt)
 		if (Now >= NextEnemyActionAt)
 		{
 			NextEnemyActionAt = Now + 1.0;
-			Foe->TeleportTo(EnemyHome, FRotator(0, Rng.FRandRange(-180.f, 180.f), 0), false, true);
+			PoseYaw = Rng.FRandRange(-180.f, 180.f);
+			Foe->TeleportTo(EnemyHome, FRotator(0, PoseYaw, 0), false, true);
 		}
 	}
-	else if (RayState >= 1)
+	else if (RayState == 1 || RayState == 2)
 	{
 		if (Now >= NextEnemyActionAt)
 		{
@@ -768,6 +818,19 @@ void UMOBWeaponRecordSubsystem::TickRays(float Dt)
 			EnemyMoveDir = (EnemyHome - Foe->GetActorLocation()).GetSafeNormal2D();
 		}
 		Foe->AddMovementInput(EnemyMoveDir, 1.f);
+		if (bPoseOnly && RayState == 2) Foe->Jump();	// 자세만 잴 때는 내려오자마자 다시 뛰어 공중 프레임을 늘린다
+	}
+	if (bPoseOnly)
+	{
+		const double Pitch = RayState >= 4 ? POSE_PITCH_DEGREES * FMath::Sin(2.0 * UE_DOUBLE_PI * (Now - PhaseAt) / 4.0) : 0.0;
+		AController* FoeCtrl = Foe->GetController();
+		if (FoeCtrl)
+		{
+			// 값이 몸에 닿는지 — 내가 지난 프레임에 넣은 값이 애니가 읽는 시선으로 남아 있나
+			if (RayState >= 4 && Frame % POSE_SAMPLE_FRAMES == 0) Csv += FString::Printf(TEXT("POSEAIM,%d,%d,%.3f,%.3f\n"), StateTag(), Frame, Pitch, FRotator::NormalizeAxis(Foe->GetBaseAimRotation().Pitch));
+			FoeCtrl->SetActorTickEnabled(RayState != 5);
+			FoeCtrl->SetControlRotation(FRotator(Pitch, PoseYaw, 0.0));
+		}
 	}
 	++Frame;
 }
@@ -795,6 +858,15 @@ void UMOBWeaponRecordSubsystem::Tick(float DeltaTime)
 		{
 			Csv += FString::Printf(TEXT("META,seed,%d\n"), Seed);
 			Csv += FString::Printf(TEXT("META,ally,%d\n"), Ally.IsValid() ? 1 : 0);
+			if (bPoseOnly)
+			{
+				PreparePose();
+				PoseWeapon = 0;
+				EquipFoe(PoseWeapon);
+				PhaseAt = Real;
+				Phase = EPhase::PoseEquip;
+				break;
+			}
 			Phase = EPhase::Equip;
 			WeaponIdx = 0;
 			Equip(WeaponIdx);
@@ -935,15 +1007,39 @@ void UMOBWeaponRecordSubsystem::Tick(float DeltaTime)
 		TickRays(DeltaTime);
 		if (World->GetTimeSeconds() - PhaseAt > RaySeconds)
 		{
-			WriteShapes(*FString::Printf(TEXT("SHAPE_END%d"), RayState));
+			WriteShapes(*FString::Printf(TEXT("SHAPE_END%d"), StateTag()));
 			PhaseAt = World->GetTimeSeconds();
 			NextEnemyActionAt = 0;
 			++RayState;
-			if (RayState > 3)
+			if (RayState > (bPoseOnly ? POSE_LAST_STATE : 3))
 			{
-				UE_LOG(LogMOBWeaponRec, Log, TEXT("MOB_WREC rays=%d"), RayCount);
-				Finish();
+				if (bPoseOnly && PoseWeapon + 1 < NUM_WEAPONS)
+				{
+					++PoseWeapon;
+					RayState = 0;
+					if (ACharacter* PoseFoe = Enemy.Get()) PoseFoe->TeleportTo(EnemyHome, FRotator(0, PoseYaw, 0), false, true);
+					EquipFoe(PoseWeapon);
+					PhaseAt = Real;
+					Phase = EPhase::PoseEquip;
+				}
+				else
+				{
+					UE_LOG(LogMOBWeaponRec, Log, TEXT("MOB_WREC rays=%d"), RayCount);
+					Finish();
+				}
 			}
+		}
+		break;
+
+	case EPhase::PoseEquip:
+		if (Real - PhaseAt > 2.0)
+		{
+			WriteShapes(*FString::Printf(TEXT("POSESHAPE%d"), PoseWeapon), false);
+			Frame = 0;
+			RayState = 0;
+			NextEnemyActionAt = 0;
+			PhaseAt = World->GetTimeSeconds();
+			Phase = EPhase::Ray;
 		}
 		break;
 

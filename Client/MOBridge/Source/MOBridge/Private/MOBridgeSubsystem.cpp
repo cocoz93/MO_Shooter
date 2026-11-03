@@ -832,6 +832,11 @@ void UMOBridgeSubsystem::TickRemotes(double Now)
 		R.LastSetYaw = Shown.Yaw;
 		R.bHasSet = true;
 		ApplyMoveToCharacter(Ch, Shown.Vel, Shown.bFalling);
+		if (bViewLog)
+		{
+			RemotePitchWantMax = FMath::Max(RemotePitchWantMax, (double)FMath::Abs(Shown.Pitch));
+			RemotePitchSeenMax = FMath::Max(RemotePitchSeenMax, (double)FMath::Abs(FRotator::NormalizeAxis(Ch->GetBaseAimRotation().Pitch)));
+		}
 		if (R.Ctrl.IsValid()) R.Ctrl->SetControlRotation(FRotator(Shown.Pitch, Shown.Yaw, 0.f));
 		// 위치는 위에서 정했고, 입력은 애니가 읽는 가속을 만들 뿐이다
 		if (Shown.MoveX != 0 || Shown.MoveY != 0) Ch->AddMovementInput(FVector(Shown.MoveX / 127.f, Shown.MoveY / 127.f, 0.f), 1.f);
@@ -1198,6 +1203,7 @@ void UMOBridgeSubsystem::DrainGrabber()
 
 void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 {
+	if (bViewLog) UE_LOG(LogMOB, Log, TEXT("MOB_VIEWPITCH want=%.3f seen=%.3f"), RemotePitchWantMax, RemotePitchSeenMax);
 	if (bQuitting) return;
 	bQuitting = true;
 

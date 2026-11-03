@@ -6,6 +6,7 @@ param(
     [double]$SegSec = 30,
     [double]$RaySec = 20,
     [switch]$FreeDt,
+    [switch]$PoseOnly,
     [int]$TimeoutSec = 590
 )
 # Records weapon table, damage samples, scripted firing, real hits and body rays to Saved/MOB/weaponrec_<Tag>.csv (answer sheet for Tools/WeaponCheck).
@@ -18,6 +19,7 @@ $log  = "$out\weaponrec_$Tag.log"
 $a = @("`"$proj\Lyra.uproject`"", "$MapPath`?NumBots=2", '-game', '-RenderOffScreen', '-ResX=640', '-ResY=360',
        '-unattended', '-nosplash', '-nosound', '-log', "-abslog=`"$log`"",
        "-MOBWeaponRecord=$Tag", "-MOBWeaponSeed=$Seed", "-MOBWeaponSegs=$Segs", "-MOBWeaponSegSec=$SegSec", "-MOBWeaponRaySec=$RaySec")
+if ($PoseOnly) { $a += '-MOBPoseOnly' }
 if (-not $FreeDt) { $a += @('-benchmark', '-fps=60', '-UseFixedTimeStep') }
 $t0 = Get-Date
 $p = Start-Process -FilePath $ue -ArgumentList $a -PassThru
