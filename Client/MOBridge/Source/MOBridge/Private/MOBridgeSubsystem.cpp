@@ -79,7 +79,6 @@ namespace
 	constexpr double kVisualSnapDistance = 300.0;	// 이보다 크게 틀어지면 서서히 줄이지 않고 바로 옮긴다
 	constexpr float kVisualErrorDecay = 12.f;		// 초당 — 보정 차이가 0.1초면 약 30% 남는다
 	constexpr double kRemoteDelayTicks = 6.0;		// 0.1초
-	constexpr double kRemoteTeleportDistance = 200.0;	// 한 틱에 이만큼 뛰면 부활 — 보간하지 않는다
 
 	constexpr double kAutoStart = 6.0;
 	constexpr double kAutoLeg = 1.2;
@@ -800,7 +799,7 @@ void UMOBridgeSubsystem::TickRemotes(double Now)
 			const double Span = FMath::Max<double>((double)To->Tick - (double)From->Tick, 1.0);
 			const double Alpha = FMath::Clamp((RenderTick - (double)From->Tick) / Span, 0.0, 1.0);
 			Shown = *From;
-			if (FVector::Dist(From->Pos, To->Pos) > kRemoteTeleportDistance)
+			if (FVector::Dist(From->Pos, To->Pos) > wire::kRemoteTeleportDistance)
 			{
 				++RemoteTeleports;
 			}

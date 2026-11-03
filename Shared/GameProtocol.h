@@ -9,10 +9,11 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 2;
+		constexpr uint32_t kProtocolVersion = 3;
 		constexpr int kTickRate = 60;
 		constexpr int kMaxPlayersInRoom = 10;
 		constexpr int kMaxBulletsInShot = 9;	// 샷건 한 발의 탄 수
+		constexpr double kRemoteTeleportDistance = 200.0;	// 한 틱에 이만큼 뛰면 부활·순간이동 — 화면도 되감기도 보간하지 않는다
 
 		enum class Msg : uint16_t
 		{
@@ -79,6 +80,8 @@ namespace mo
 			float aimX, aimY, aimZ;	// 사격 시작점 — Lyra 는 카메라 쪽에서 쏜다
 			uint8_t buttons;		// EButton
 			uint8_t weapon;			// EWeapon
+			uint32_t viewTick;		// 쏠 때 화면에 그리던 틱의 정수 부분. 0 = 시점 없음 → 서버는 현재 자리로 판정
+			float viewAlpha;		// viewTick 에서 다음 틱까지의 비율 0~1 — 틱 간격이 달리기로 약 8cm 라 정수 틱만으로는 모자란다
 		};
 
 		// 시험용 — 입력과 같은 순서로 처리한다
