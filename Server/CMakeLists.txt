@@ -1,0 +1,6 @@
+add_executable(Server main.cpp Room.cpp Room.h GameThread.cpp GameThread.h)
+target_link_libraries(Server PRIVATE MoShared ServerNetworkLib)
+if(MSVC)
+    target_compile_options(Server PRIVATE /W4 /utf-8)
+    target_compile_definitions(Server PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+endif()
