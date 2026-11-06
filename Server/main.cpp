@@ -467,7 +467,16 @@ namespace
 int main(int argc, char** argv)
 {
 	shared::LoggerGuard loggerGuard;
-	std::setvbuf(stdout, nullptr, _IONBF, 0);	// 러너가 파일로 받는다 — 줄마다 바로 보이게
+	// --rewindLog 는 발사마다 줄을 낸다. 버퍼 없이 쓰면 그 틱이 수십 ms 길어진다(실측: 켠 판 workUs p99 43~58ms, 끈 판 0.26ms).
+	// 그래서 이 옵션을 켠 판만 출력을 모았다가 끝에 쓴다. 8MB = 180초 판 기록(약 175KB)의 45배
+	static char rewindLogBuffer[8 * 1024 * 1024];
+	bool rewindLog = false;
+	for (int i = 1; i < argc; ++i)
+	{
+		if (std::strcmp(argv[i], "--rewindLog") == 0) rewindLog = true;
+	}
+	if (rewindLog) std::setvbuf(stdout, rewindLogBuffer, _IOFBF, sizeof(rewindLogBuffer));
+	else std::setvbuf(stdout, nullptr, _IONBF, 0);	// 러너가 파일로 받는다 — 줄마다 바로 보이게
 
 	Args args;
 	if (!ParseArgs(argc, argv, args))
