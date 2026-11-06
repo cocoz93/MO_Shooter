@@ -19,6 +19,7 @@ public class MOBridge : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"AnimationCore",	// two-bone IK for the simple anim hands (MOBSimpleAnimInstance)
 			"InputCore",
 			"Chaos",
 			"PhysicsCore",

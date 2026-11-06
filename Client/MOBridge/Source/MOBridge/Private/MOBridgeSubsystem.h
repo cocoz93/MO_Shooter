@@ -46,6 +46,8 @@ struct FMOBRemote
 	bool bRespawnPending = false;
 	uint32 RespawnTick = 0;
 
+	uint32 ShownNewestTick = 0;	// 지난 프레임에 이 상대를 놓을 때 받아 둔 가장 새 상태의 틱(-MOBViewLog 진단)
+
 	uint8 Weapon = 0;
 	uint8 ShownWeapon = 0xFF;
 	TWeakObjectPtr<ULyraEquipmentInstance> Equipped;
@@ -66,8 +68,10 @@ struct FMOBRemote
  *   -MOBShotAt=10,15            준비된 뒤 N초에 캡처(Saved/MOB/<tag>_<N>.png)
  *   -MOBRecord=start,dur,fps    프레임 연속 캡처(사람 확인 영상용)
  *   -MOBQuitAt=N                준비된 뒤 N초에 끝냄(서버 경기 결과가 먼저 오면 그쪽)
+ *   -MOBNoViewClamp             시험 옵션. 화면 시점 묶기를 끈다(고치기 전 동작과 견줄 때만). 평소에는 상태가 늦게 와 상대를 마지막 자리에 세워 둔 프레임에 그 상태의 틱을 화면 시점으로 보고한다(candidate1-pilot-plan.md 파일럿 2)
  *   -MOBTag=name                산출물 파일 이름 앞부분
  *   -MOBBreakPredictAt=N        일부러 틀리기 — 준비된 뒤 N초에 내 예측 위치를 1m 민다(보정이 잡는지 보려고)
+ *   -MOBSimpleAnim              화면 시험 — 상대를 Lyra 애니 대신 소총 클립 단순 재생으로 움직인다(MOBSimpleAnimInstance.h)
  * 판정에 쓰는 줄은 전부 「MOB_」 로 시작한다.
  */
 UCLASS()
@@ -132,6 +136,7 @@ private:
 	bool bAutoAim = false;
 	bool bEventShots = false;
 	bool bKeepPickups = false;
+	bool bSimpleAnim = false;
 	float BreakAt = -1;
 	float BreakPredictAt = -1;
 
@@ -222,6 +227,9 @@ private:
 	double RemotePitchWantMax = 0;		// -MOBViewLog — 상대에게 넣은 위아래 시선의 최대
 	double RemotePitchSeenMax = 0;		// -MOBViewLog — 다음 프레임에 애니가 읽는 시선으로 남아 있던 값의 최대
 	double ShownRenderTick = -1.0;	// 지난 프레임에 상대를 놓은 시점(틱). 입력의 viewTick·viewAlpha 로 나간다
+	double ShownWallTick = -1.0;	// 같은 프레임에 시계로 계산한 시점. 묶기가 걸리지 않은 프레임에는 ShownRenderTick 과 같다
+	bool bViewClamp = true;			// 기본 켜짐. -MOBNoViewClamp 로 끈다
+	int64 ViewClampFrames = 0;		// 받은 상태가 시계 시점보다 늦어 시점을 당긴 프레임 수
 	bool bAnimLog = false;
 	double NextAnimLogAt = 0;
 	int64 AnimMoving = 0, AnimMovingRendered = 0, AnimMovingNoInput = 0, AnimMovingNoAccel = 0;

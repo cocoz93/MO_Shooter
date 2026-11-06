@@ -3,7 +3,8 @@ param(
     [string]$ServerArgs = '--warmup=10 --matchSeconds=300',
     [int]$Bots = 9,
     [int]$Port = 7791,
-    [string]$Res = '1280x720'
+    [string]$Res = '1280x720',
+    [string]$LyraExtra = ''
 )
 # One human game: match server + windowed Lyra (keyboard and mouse) + bots. Bots join once Lyra is welcomed.
 # Results: Saved\MOB\game_<Tag>_*. Ends when the Lyra window is closed.
@@ -21,7 +22,7 @@ $srv = Start-Process -FilePath "$repo\build\Server\Release\Server.exe" -Argument
 Start-Sleep -Milliseconds 800
 
 $list = @("`"$proj\Lyra.uproject`"", '/ShooterMaps/Maps/L_Expanse?NumBots=0', '-game', '-windowed', "-ResX=$resX", "-ResY=$resY",
-          '-nosplash', '-log', "-abslog=`"$log`"", "-MOBServer=127.0.0.1:$Port", "-MOBTag=$Tag")
+          '-nosplash', '-log', "-abslog=`"$log`"", "-MOBServer=127.0.0.1:$Port", "-MOBTag=$Tag") + ($LyraExtra -split ' ' | Where-Object { $_ })
 $lyra = Start-Process -FilePath $ue -ArgumentList $list -PassThru
 "server=$($srv.Id) lyra=$($lyra.Id)"
 

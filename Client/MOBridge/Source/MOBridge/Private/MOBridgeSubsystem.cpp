@@ -38,6 +38,7 @@
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/GameplayMessageSubsystem.h"
 #include "MOBServerDamageEffect.h"
+#include "MOBSimpleAnimInstance.h"
 
 #include "AbilitySystem/Attributes/LyraHealthSet.h"
 #include "AbilitySystem/LyraAbilitySystemComponent.h"
@@ -204,8 +205,10 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bAutoAim = FParse::Param(Cmd, TEXT("MOBAutoAim"));
 	bEventShots = FParse::Param(Cmd, TEXT("MOBEventShots"));
 	bKeepPickups = FParse::Param(Cmd, TEXT("MOBKeepPickups"));
+	bSimpleAnim = FParse::Param(Cmd, TEXT("MOBSimpleAnim"));
 	bAnimLog = FParse::Param(Cmd, TEXT("MOBAnimLog"));
 	bViewLog = FParse::Param(Cmd, TEXT("MOBViewLog"));
+	bViewClamp = !FParse::Param(Cmd, TEXT("MOBNoViewClamp"));
 	FParse::Value(Cmd, TEXT("MOBBreakAt="), BreakAt);
 	// 대기 단계는 경험 로드 직후 시작한다 — 준비(캐릭터 생성)를 기다리면 늦는다
 	if (!ServerAddr.IsEmpty()) IConsoleManager::Get().FindConsoleVariable(TEXT("Lyra.Bridge.SkipWarmup"))->Set(1, ECVF_SetByCode);
@@ -687,6 +690,7 @@ void UMOBridgeSubsystem::SpawnRemote(FMOBRemote& R)
 		}
 		if (ULyraPawnExtensionComponent* Ext = ULyraPawnExtensionComponent::FindPawnExtensionComponent(Fresh)) Ext->CheckDefaultInitialization();
 		R.Pawn = Fresh;
+		if (bSimpleAnim) MOBApplySimpleAnim(Fresh);
 		R.ShownWeapon = 0xFF;
 		R.Equipped = nullptr;
 		++RemoteRespawns;
@@ -729,6 +733,7 @@ void UMOBridgeSubsystem::SpawnRemote(FMOBRemote& R)
 
 	R.Ctrl = C;
 	R.Pawn = Ch;
+	if (bSimpleAnim) MOBApplySimpleAnim(Ch);
 	++RemoteSpawned;
 	UE_LOG(LogMOB, Log, TEXT("MOB_REMOTE id=%u pawn=%s serverTeam=%u lyraTeam=%d localLyraTeam=%d"), R.Id, *GetNameSafe(Ch), R.ServerTeam, WantLyraTeam, LocalLyraTeam);
 }
@@ -736,8 +741,27 @@ void UMOBridgeSubsystem::SpawnRemote(FMOBRemote& R)
 void UMOBridgeSubsystem::TickRemotes(double Now)
 {
 	if (!Core || !bHasTickClock || ResultAt > 0) return;	// 경기가 끝나면 상태가 안 온다 — 그 자리에 둔다
-	const double RenderTick = Now * wire::kTickRate + TickClockOffset - kRemoteDelayTicks;
+	const double WallTick = Now * wire::kTickRate + TickClockOffset - kRemoteDelayTicks;
+	double RenderTick = WallTick;
+	if (bViewClamp)
+	{
+		// 상태가 늦게 오면 화면은 마지막 받은 자리에 상대를 세워 둔다. 그때 시계 시점을 그대로 보고하면 서버가 화면보다 앞선 자리로 되감는다.
+		// 그래서 보여 줄 시점을 「받은 상태 중 가장 새 것」까지로 묶고, 묶은 시점을 보고한다. 상대마다 받은 틱이 다르면 가장 늦은 쪽에 맞춘다
+		double NewestAll = TNumericLimits<double>::Max();
+		for (const TPair<uint32, FMOBRemote>& Pair : Remotes)
+		{
+			const FMOBRemote& R = Pair.Value;
+			if (R.bKilled || !R.Pawn.IsValid() || R.SnapCount == 0) continue;
+			NewestAll = FMath::Min(NewestAll, (double)R.Snaps[(R.SnapCount - 1) % FMOBRemote::kSnapshots].Tick);
+		}
+		if (NewestAll < RenderTick)
+		{
+			RenderTick = NewestAll;
+			++ViewClampFrames;
+		}
+	}
 	ShownRenderTick = RenderTick;
+	ShownWallTick = WallTick;
 	bool bSpawnedThisFrame = false;
 
 	for (TPair<uint32, FMOBRemote>& Pair : Remotes)
@@ -781,6 +805,7 @@ void UMOBridgeSubsystem::TickRemotes(double Now)
 
 		// 보여 줄 시점을 사이에 둔 두 상태를 찾는다(틱마다 오므로 뒤에서 몇 칸이면 닿는다)
 		const FMOBSnapshot& Newest = R.Snaps[(R.SnapCount - 1) % FMOBRemote::kSnapshots];
+		R.ShownNewestTick = Newest.Tick;
 		const FMOBSnapshot* From = nullptr;
 		const FMOBSnapshot* To = nullptr;
 		const uint32 Available = FMath::Min<uint32>(R.SnapCount, FMOBRemote::kSnapshots);
@@ -1007,7 +1032,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 				const ACharacter* Shown = R.Pawn.Get();
 				if (!Shown || R.bKilled) continue;
 				const FVector At = Shown->GetActorLocation();
-				UE_LOG(LogMOB, Log, TEXT("MOB_VIEW seq=%u target=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f"), In.seq, R.Id, ViewTick, ViewAlpha, At.X, At.Y, At.Z, Shown->GetActorRotation().Yaw);
+				UE_LOG(LogMOB, Log, TEXT("MOB_VIEW seq=%u target=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f newest=%u wall=%.3f"), In.seq, R.Id, ViewTick, ViewAlpha, At.X, At.Y, At.Z, Shown->GetActorRotation().Yaw, R.ShownNewestTick, ShownWallTick);
 			}
 		}
 		if (!Core->Prediction.IsWaitingSpawn())
@@ -1203,6 +1228,7 @@ void UMOBridgeSubsystem::DrainGrabber()
 
 void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 {
+	if (bViewLog) UE_LOG(LogMOB, Log, TEXT("MOB_VIEWCLAMP on=%d frames=%lld"), bViewClamp ? 1 : 0, ViewClampFrames);
 	if (bViewLog) UE_LOG(LogMOB, Log, TEXT("MOB_VIEWPITCH want=%.3f seen=%.3f"), RemotePitchWantMax, RemotePitchSeenMax);
 	if (bQuitting) return;
 	bQuitting = true;
