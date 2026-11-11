@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # 자세 대조 — 판정 모양 기록 둘을 (조각, 프레임, 부위)로 이어 부위 중심과 축 방향이 얼마나 다른지 낸다
-#   python check_pose.py <기준.csv> <비교.csv> [--refTag=POSE] [--cmpTag=POSE] [--rows=animcmp_<Tag>.csv] [--limitCm=0.1] [--limitDeg=0.3]
+#   python check_pose.py <기준.csv> <비교.csv> [--refTag=POSE] [--cmpTag=POSE] [--rows=animcmp_<Tag>.csv] [--limitCm=0.1] [--limitDeg=0.3] [--top=5]
 # 기준 = 언리얼이 남긴 모양(animcmp_<Tag>_shapes.csv). 비교 = 언리얼 밖에서 계산한 모양(같은 줄 형식)
 #   POSE  = 물리 몸체 자리로 남긴 줄,  POSEB = 뼈 자리로 남긴 줄(화면에 그려진 몸)
 # 줄 형식 = <태그>,조각,프레임,부위,종류,약점,중심 xyz,X축 xyz,Y축 xyz,Z축 xyz,크기 a,b,c  (MOBAnimCompareSubsystem::WriteShapes)
@@ -108,7 +108,7 @@ print(f'axisDiffMax={worst_a[0]:.4f} worst={worst_a[1]}')
 for seg in sorted(by_seg):
     n, c, a, total = by_seg[seg]
     print(f'  seg {seg:2d} {seg_names.get(seg, ""):7s} n={n:6d} centerMax={c:.4f} centerMean={total / n:.4f} axisMax={a:.4f}')
-top = sorted(by_bone.items(), key=lambda kv: -kv[1][1])[:5]
+top = sorted(by_bone.items(), key=lambda kv: -kv[1][1])[:int(opt.get('top', 5))]
 print('  부위별 큰 순: ' + ' · '.join(f'{k} {v[1]:.4f}cm/{v[2]:.3f}도' for k, v in top))
 ok = missing == 0 and size_mismatch == 0 and worst_c[0] <= limit_cm and worst_a[0] <= limit_deg
 print('POSE PASS' if ok else f'POSE FAIL (기준 {limit_cm:g}cm · {limit_deg:g}도)')

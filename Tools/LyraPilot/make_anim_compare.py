@@ -22,6 +22,15 @@ SEGMENT_LABELS = {
     "hold_down": "아래 60도 유지", "look_mid": "가운데로 (-60 → 0도)", "run_up": "앞으로 달리며 위로 (0 → 45도)",
     "run_down": "뒤로 달리며 아래로 (45 → -45도)", "stop_mid": "멈추며 가운데로", "jump": "제자리 점프",
     "run_pre": "앞으로 달리기", "run_jump": "달리며 점프", "stop_end": "멈춤",
+    # -Script startstop
+    "stop_fwd": "앞 달리기 멈춤", "stop_bwd": "뒤 달리기 멈춤", "stop_left": "왼쪽 달리기 멈춤", "stop_right": "오른쪽 달리기 멈춤",
+    "diag": "대각선 45도로", "stop_diag": "대각선 멈춤",
+    "piv_bf_a": "뒤로 달리기", "piv_bf_b": "뒤 → 앞 돌아서기", "stop_bf": "멈춤",
+    "piv_fb_a": "앞으로 달리기", "piv_fb_b": "앞 → 뒤 돌아서기", "stop_fb": "멈춤",
+    "piv_lr_a": "왼쪽으로 달리기", "piv_lr_b": "왼쪽 → 오른쪽 돌아서기", "stop_lr": "멈춤",
+    "piv_rl_a": "오른쪽으로 달리기", "piv_rl_b": "오른쪽 → 왼쪽 돌아서기", "stop_rl": "멈춤",
+    "ad1": "좌우 번갈아 (0.4초씩)", "ad2": "좌우 번갈아 (0.4초씩)", "ad3": "좌우 번갈아 (0.4초씩)",
+    "ad4": "좌우 번갈아 (0.4초씩)", "ad5": "좌우 번갈아 (0.4초씩)", "ad6": "좌우 번갈아 (0.4초씩)", "stop_ad": "멈춤",
 }
 RECORD_FPS = 60.0
 VIDEO_FPS = 30

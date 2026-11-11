@@ -6,6 +6,7 @@ param(
     [switch]$DumpClips,
     [string]$Script = '',
     [switch]$Probe,
+    [switch]$Transitions,
     [string]$MapPath = '/ShooterCore/Maps/L_ShooterGym',
     [string]$Res = '1280x720',
     [int]$TimeoutSec = 590
@@ -15,6 +16,8 @@ param(
 # -Shapes also writes animcmp_<Tag>_shapes.csv: every hit shape per frame, the input of the mis-hit calculation.
 # -DumpClips (with -Simple) also writes animcmp_<Tag>_clips60.csv and _clips120.csv: the clip data a pose calculation outside Unreal needs.
 # -Script aimjump records aiming up/down and jumping instead of the running script; with -Simple the plain blend also does aim and jump.
+# -Script startstop records starts, stops and direction reversals in four directions (third look, start-stop-pivot-test.md).
+# -Transitions (with -Simple) also puts the start, stop and reversal clips into the plain blend.
 # -Probe also writes animcmp_<Tag>_probe.csv: per frame anim blueprint variables, state machine states, curves and body-space bone positions.
 $proj = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
 $ue   = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
@@ -32,7 +35,8 @@ if ($Shapes)  { $a += '-MOBACShapes' }
 if ($DumpClips) { $a += '-MOBACDumpClips' }
 if ($Script)  { $a += "-MOBACScript=$Script" }
 if ($Probe)   { $a += '-MOBACProbe' }
-if ($Simple -and $Script -eq 'aimjump') { $a += '-MOBSimpleAimJump' }
+if ($Simple -and ($Transitions -or $Script -eq 'aimjump' -or $Script -eq 'startstop')) { $a += '-MOBSimpleAimJump' }  # -Transitions needs the aim/jump clip set too
+if ($Simple -and $Transitions) { $a += '-MOBSimpleTransitions' }
 $t0 = Get-Date
 $p = Start-Process -FilePath $ue -ArgumentList $a -PassThru
 if (-not $p.WaitForExit($TimeoutSec * 1000)) { "TIMEOUT after $TimeoutSec s - killing"; Stop-Process -Id $p.Id -Force }
