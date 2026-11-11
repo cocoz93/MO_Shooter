@@ -1,7 +1,7 @@
 ﻿// 서버 시험 클라 — 서버를 TCP 로 붙어서 본다. 서버 코드를 부르지 않는다.
 //
 // 서버는 --debug --warmup=0 으로 띄운다(경기 전 대기 중에는 피해가 없다).
-//   ServerProbe <map.mocl> <move.csv> [--port=7791] [--rows=N] [--seed=20261102] [--breakMirror] [--breakSpread] [--breakDamage]
+//   ServerProbe <map.mocl> <move.csv> [--port=7791] [--rows=N] [--breakMirror] [--breakSpread] [--breakDamage]
 //   ServerProbe <map.mocl> <move.csv> --rules [--port=7791]		서버는 --debug --warmup=3 --targetScore=2
 //   ServerProbe <map.mocl> <move.csv> --checkStarts=<weapons_match.txt>		서버 없이
 //   ServerProbe <map.mocl> <move.csv> --authority --serverLog=<서버 출력 파일>	서버는 --warmup=0 --exitWhenEmpty, --debug 없이
@@ -254,7 +254,7 @@ namespace
 		uint8_t hit;
 	};
 
-	bool RunReplay(int port, const CMapCollision& map, const MoveParams& baseParams, const std::vector<Row>& rows, uint32_t seed, bool breakMirror, bool breakSpread)
+	bool RunReplay(int port, const CMapCollision& map, const MoveParams& baseParams, const std::vector<Row>& rows, bool breakMirror, bool breakSpread)
 	{
 		MoveParams params = baseParams;
 		if (breakMirror) params.maxAcceleration += 1.f;
@@ -283,7 +283,6 @@ namespace
 		std::vector<Expected> expected(rows.size() + 128);
 		std::vector<bool> known(expected.size(), false);
 		CWeaponScript script(20261102);
-		CSpreadRng bulletRng(seed);
 		std::vector<ExpectedBullet> expectedBullets;
 		size_t bulletCursor = 0;
 		uint64_t bulletsCompared = 0, bulletsDiff = 0;
@@ -422,6 +421,7 @@ namespace
 					const float multiplier = breakSpread ? weapons[currentWeapon].GetSpread().GetCalculatedMultiplier() : events.spreadMultiplier;
 					for (int b = 0; b < def.bulletsPerCartridge; ++b)
 					{
+						CSpreadRng bulletRng(SpreadSeed(input.seq, (uint32_t)b));
 						const Vec3 dir = SpreadDirection(aimDir, angle, multiplier, def.spreadExponent, bulletRng);
 						const Vec3 end = aimStart + dir * (double)def.maxDamageRange;
 						BulletResult result;
@@ -1444,6 +1444,23 @@ namespace
 		PumpFor(clients, 1, 0.1);
 		check(a.self.weapon == weaponBefore, "없는 무기 번호면 든 무기 그대로");
 
+		// 10-1. 입력 번호를 건너뛴 입력의 사격은 버린다(D15). 다음 입력은 번호가 이어져 쏜다 — 대조군
+		const Vec3 gapAim = eye() + Vec3(100, 0, 0);
+		SendAim(a, eye(), gapAim, 0, 0, wire::BUTTON_RELOAD, kRifle);
+		RunTicks(clients, 1, 240, [&](int) { SendAim(a, eye(), gapAim, 0, 0, 0, kRifle); }, noStop);
+		PumpFor(clients, 1, 0.1);
+		check(a.self.magazine > 0, "번호 시험 전에 탄이 있음");
+		const size_t shotsBeforeGap = a.shots.size();
+		a.seq += 5;
+		SendAim(a, eye(), gapAim, 0, 0, wire::BUTTON_FIRE, kRifle);
+		RunTicks(clients, 1, 30, [&](int) { SendAim(a, eye(), gapAim, 0, 0, 0, kRifle); }, noStop);
+		PumpFor(clients, 1, 0.1);
+		check(a.shots.size() == shotsBeforeGap, "입력 번호를 건너뛴 사격은 안 나감");
+		SendAim(a, eye(), gapAim, 0, 0, wire::BUTTON_FIRE, kRifle);
+		RunTicks(clients, 1, 30, [&](int) { SendAim(a, eye(), gapAim, 0, 0, 0, kRifle); }, noStop);
+		PumpFor(clients, 1, 0.1);
+		check(a.shots.size() == shotsBeforeGap + 1, "번호가 이어지면 그 사격은 나감");
+
 		// 11. 깨진 패킷 — 크기 틀림 3 · 모르는 종류 2 · 두 번째 인사 1
 		struct ShortInput { wire::Header h; uint32_t seq; };
 		for (int i = 0; i < 3; ++i)
@@ -1494,6 +1511,7 @@ namespace
 		exact("aimWall", 1);
 		exact("aimFar", aimFarFired);
 		exact("oldSeq", 5);
+		exact("seqGapFire", 1);
 		exact("weaponId", 10);
 		exact("badPackets", 6);
 		some("swap");
@@ -1886,12 +1904,11 @@ int main(int argc, char** argv)
 	std::setvbuf(stdout, nullptr, _IONBF, 0);
 	if (argc < 3)
 	{
-		std::printf("쓰는 법: ServerProbe <map.mocl> <move.csv> [--port=7791] [--rows=N] [--seed=N] [--breakMirror] [--breakSpread] [--breakDamage]\n");
+		std::printf("쓰는 법: ServerProbe <map.mocl> <move.csv> [--port=7791] [--rows=N] [--breakMirror] [--breakSpread] [--breakDamage]\n");
 		return 2;
 	}
 	int port = 7791;
 	size_t rowLimit = (size_t)-1;
-	uint32_t seed = 20261102;
 	bool breakMirror = false, breakSpread = false, breakDamage = false, rulesOnly = false;
 	bool authorityOnly = false, rewindOnly = false;
 	std::string serverLog;
@@ -1901,7 +1918,6 @@ int main(int argc, char** argv)
 		const std::string s = argv[i];
 		if (s.rfind("--port=", 0) == 0) port = std::atoi(s.c_str() + 7);
 		else if (s.rfind("--rows=", 0) == 0) rowLimit = (size_t)std::strtoull(s.c_str() + 7, nullptr, 10);
-		else if (s.rfind("--seed=", 0) == 0) seed = (uint32_t)std::strtoul(s.c_str() + 7, nullptr, 10);
 		else if (s == "--breakMirror") breakMirror = true;
 		else if (s == "--breakSpread") breakSpread = true;
 		else if (s == "--breakDamage") breakDamage = true;
@@ -1957,7 +1973,7 @@ int main(int argc, char** argv)
 		return rulesOk ? 0 : 1;
 	}
 	bool ok = CheckParams(params, values);
-	const bool replayOk = RunReplay(port, map, params, rows, seed, breakMirror, breakSpread);
+	const bool replayOk = RunReplay(port, map, params, rows, breakMirror, breakSpread);
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 	const bool shotsOk = RunShots(port, map, rows, breakDamage);
 	ok = ok && replayOk && shotsOk;

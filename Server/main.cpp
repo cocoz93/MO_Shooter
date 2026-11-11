@@ -2,13 +2,14 @@
 //
 //   Server --map=<파일.mocl> [--port=7791] [--seed=20261102] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일]
 //          [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=1] [--maxSessions=64]
-//          [--measureFrom=초 --measureSeconds=초]
+//          [--measureFrom=초 --measureSeconds=초] [--clips=파일]
 //
 // --debug 는 시험 클라가 위치·체력을 정할 수 있게 한다. 사람이 하는 판에서는 켜지 않는다.
 // --warmup·--matchSeconds·--targetScore 는 시험에서 Lyra 값을 줄일 때만 쓴다.
 // --record 는 처치와 경기 결과를 적는다 — 봇이 받아 적은 기록과 바이트로 비교한다. 방 2부터는 뒤에 .room<번호> 를 붙인다.
 // --exitWhenEmpty 는 방을 한 번이라도 쓴 뒤 열린 방이 하나도 안 남으면 끝낸다.
 // --measureSeconds 를 주면 시작 뒤 --measureFrom 초부터 그만큼만 재서 LOAD 줄로 낸다(부하 시험용).
+// --clips 는 클립 파일(Tools/LyraPilot/make_clip_pack.py 가 Lyra 에서 뽑는다, 리포에 안 넣는다). 주면 몸 판정이 애니 자세를 쓰고 상태 패킷에 애니 상태가 붙는다.
 //
 // 이 파일이 라우터다: 접속·끊김·인사를 한 곳에서 받아 접속을 방에 앉힌다. 앉은 뒤 입력은 네트워크 워커가 그 방의 게임 스레드로 바로 넣는다.
 // 로그인·로비는 없다 — 접속하면 자리가 남은 가장 앞 방에 앉고, 없으면 새 방을 만든다.
@@ -64,6 +65,8 @@ namespace
 		double measureFromSeconds = 0;
 		double measureSeconds = 0;
 		mo::RewindOptions rewind;
+		std::string clipsPath;
+		mo::AnimOptions anim;
 	};
 
 	bool ParseArgs(int argc, char** argv, Args& out)
@@ -81,6 +84,7 @@ namespace
 			std::string v;
 			if (value("--map=", v)) out.mapPath = v;
 			else if (value("--port=", v)) out.port = std::atoi(v.c_str());
+			else if (value("--clips=", v)) out.clipsPath = v;
 			else if (value("--seed=", v)) out.seed = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
 			else if (value("--duration=", v)) out.durationSeconds = std::atof(v.c_str());
 			else if (value("--record=", v)) out.recordPath = v;
@@ -97,6 +101,7 @@ namespace
 			else if (s == "--rewindShadow") out.rewind.shadow = true;
 			else if (s == "--rewindLog") out.rewind.log = true;
 			else if (s == "--rewindNoSpread") out.rewind.noSpread = true;
+			else if (s == "--rewindBulletLog") out.rewind.bulletLog = true;
 			else if (value("--rewindLimitTicks=", v)) out.rewind.limitTicks = (uint32_t)std::min(std::atoi(v.c_str()), (int)mo::kRewindLimitTicks);	// 시험 전용. 기록 칸이 상수만큼뿐이라 더 키우지는 못한다
 			else
 			{
@@ -112,18 +117,36 @@ namespace
 		return !out.mapPath.empty();
 	}
 
-	bool LoadMap(const std::string& path, mo::CMapCollision& map)
+	bool ReadFile(const std::string& path, std::vector<char>& data)
 	{
 		FILE* file = nullptr;
 		if (fopen_s(&file, path.c_str(), "rb") != 0 || !file) return false;
 		std::fseek(file, 0, SEEK_END);
 		const long size = std::ftell(file);
 		std::fseek(file, 0, SEEK_SET);
-		std::vector<char> data((size_t)size);
+		data.resize((size_t)size);
 		const size_t read = std::fread(data.data(), 1, data.size(), file);
 		std::fclose(file);
-		if (read != data.size()) return false;
+		return read == data.size();
+	}
+
+	bool LoadMap(const std::string& path, mo::CMapCollision& map)
+	{
+		std::vector<char> data;
+		if (!ReadFile(path, data)) return false;
 		return map.LoadFromMemory(data.data(), data.size()) == mo::EMapLoad::Ok;
+	}
+
+	// 클립을 읽고, 방에서 쓸 초기화가 되는지 시작할 때 확인한다
+	bool LoadClips(const std::string& path, mo::CAnimClips& clips, double& outBoundRadius)
+	{
+		std::vector<char> data;
+		if (!ReadFile(path, data) || clips.LoadFromMemory(data.data(), data.size()) != mo::EClipLoad::Ok) return false;
+		mo::CAnimPoseEvaluator evaluator;
+		mo::CAnimState state;
+		if (!evaluator.Init(clips, mo::kAnimBundleName) || !state.Init(clips, mo::kAnimBundleName)) return false;
+		outBoundRadius = evaluator.ComputeBoundRadius();
+		return true;
 	}
 
 	double ProcessCpuSeconds()
@@ -308,9 +331,10 @@ namespace
 			settings.map = &_map;
 			settings.params = &_params;
 			settings.rules = _args.rules;
-			settings.seed = _args.seed + (id - 1);		// 방 1 은 --seed 그대로 — 재생 시험이 같은 난수를 따라간다
+			settings.seed = _args.seed + (id - 1);		// 방마다 시작 자리 난수를 다르게 둔다. 탄 방향은 입력 번호로 정해져 이 값을 안 쓴다
 			settings.debug = _args.debug;
 			settings.rewind = _args.rewind;
+			settings.anim = _args.anim;
 			if (!_args.recordPath.empty()) settings.recordPath = mo::RoomRecordPath(_args.recordPath, id);
 			_threads[thread]->PostCreateRoom(id, settings);
 			return id;
@@ -473,7 +497,7 @@ int main(int argc, char** argv)
 	bool rewindLog = false;
 	for (int i = 1; i < argc; ++i)
 	{
-		if (std::strcmp(argv[i], "--rewindLog") == 0) rewindLog = true;
+		if (std::strcmp(argv[i], "--rewindLog") == 0 || std::strcmp(argv[i], "--rewindBulletLog") == 0) rewindLog = true;
 	}
 	if (rewindLog) std::setvbuf(stdout, rewindLogBuffer, _IOFBF, sizeof(rewindLogBuffer));
 	else std::setvbuf(stdout, nullptr, _IONBF, 0);	// 러너가 파일로 받는다 — 줄마다 바로 보이게
@@ -490,6 +514,18 @@ int main(int argc, char** argv)
 	{
 		std::printf("[오류] 맵을 읽지 못함: %s\n", args.mapPath.c_str());
 		return 1;
+	}
+
+	mo::CAnimClips clips;		// 서버가 멈출 때까지 방들이 읽는다
+	if (!args.clipsPath.empty())
+	{
+		if (!LoadClips(args.clipsPath, clips, args.anim.boundRadius))
+		{
+			std::printf("[오류] 클립을 읽지 못함: %s\n", args.clipsPath.c_str());
+			return 1;
+		}
+		args.anim.clips = &clips;
+		std::printf("ANIMBOUND radius=%.3f meshZ=%.3f bones=%zu bodies=%zu\n", args.anim.boundRadius, clips.MeshPlacement().p[2], clips.Bones().size(), clips.Bodies().size());
 	}
 
 	const mo::MoveParams params = mo::MakeLyraMoveParams();
@@ -622,13 +658,18 @@ int main(int argc, char** argv)
 		(unsigned long long)room.starvedTicks, (unsigned long long)room.idleMoves, (unsigned long long)room.debugPlaces, (unsigned long long)room.statesSent);
 	std::printf("SERVER shots=%llu firesBlockedPostGame=%llu bullets=%llu hitMap=%llu hitBody=%llu hitImmune=%llu missed=%llu damageEvents=%llu\n",
 		(unsigned long long)room.shots, (unsigned long long)room.firesBlockedPostGame, (unsigned long long)room.bullets, (unsigned long long)room.bulletsHitMap, (unsigned long long)room.bulletsHitBody, (unsigned long long)room.bulletsHitImmune, (unsigned long long)room.bulletsMissed, (unsigned long long)room.damageEvents);
-	std::printf("REJECT badValue=%llu moveOver=%llu weaponId=%llu debugPlace=%llu aimFar=%llu swap=%llu aimWall=%llu droppedFull=%llu oldSeq=%llu badPackets=%llu | aimStale=%llu fireTooSoon=%llu fireEmpty=%llu\n",
+	std::printf("REJECT badValue=%llu moveOver=%llu weaponId=%llu debugPlace=%llu aimFar=%llu swap=%llu aimWall=%llu droppedFull=%llu oldSeq=%llu badPackets=%llu | aimStale=%llu fireTooSoon=%llu fireEmpty=%llu seqGapFire=%llu\n",
 		(unsigned long long)room.inputsRejectedBadValue, (unsigned long long)room.movesOverLength, (unsigned long long)room.weaponIdRejected, (unsigned long long)room.debugPlacesRejected, (unsigned long long)room.shotsAimReplaced,
 		(unsigned long long)room.firesRejectedSwap, (unsigned long long)room.shotsAimPulledBack, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq, (unsigned long long)badPackets,
-		(unsigned long long)room.shotsAimStaleAfterSpawn, (unsigned long long)room.firesTooSoon, (unsigned long long)room.firesEmpty);
+		(unsigned long long)room.shotsAimStaleAfterSpawn, (unsigned long long)room.firesTooSoon, (unsigned long long)room.firesEmpty, (unsigned long long)room.firesDroppedSeqGap);
 	std::printf("SERVER rewind rewindNoView=%llu rewindFuture=%llu rewindClamped=%llu rewindOk=%llu rewindTicksSum=%llu hitsBoth=%llu hitsRewindOnly=%llu hitsNowOnly=%llu hitsNeither=%llu rewindOnlyBehindWall=%llu shots=%llu bullets=%llu\n",
 		(unsigned long long)room.rewindNoView, (unsigned long long)room.rewindFuture, (unsigned long long)room.rewindClamped, (unsigned long long)room.rewindOk, (unsigned long long)room.rewindTicksSum,
 		(unsigned long long)room.hitsBoth, (unsigned long long)room.hitsRewindOnly, (unsigned long long)room.hitsNowOnly, (unsigned long long)room.hitsNeither, (unsigned long long)room.rewindOnlyBehindWall, (unsigned long long)room.shots, (unsigned long long)room.bullets);
+	if (args.anim.clips)
+	{
+		std::printf("SERVER anim updates=%llu poseTargets=%llu poseEvals=%llu poseReused=%llu poseSkipped=%llu stateBytesMax=%llu\n",
+			(unsigned long long)room.animUpdates, (unsigned long long)room.poseTargets, (unsigned long long)room.poseEvals, (unsigned long long)room.poseReused, (unsigned long long)room.poseSkipped, (unsigned long long)room.stateBytesMax);
+	}
 	std::printf("SERVER kills=%llu falls=%llu spawns=%llu spawnsFromFallback=%llu phaseChanges=%llu finished=%d\n",
 		(unsigned long long)room.kills, (unsigned long long)room.falls, (unsigned long long)room.spawns, (unsigned long long)room.spawnsFromFallback, (unsigned long long)room.phaseChanges, firstFinished ? 1 : 0);
 	if (firstFinished)

@@ -205,9 +205,9 @@ namespace
 				}
 				break;
 			case wire::Msg::S2C_STATE:
-				if (size <= (int)sizeof(state))
+				if (size <= (int)wire::kMaxStatePacketSize)		// 클립을 준 서버는 뒤에 애니 상태가 붙는다 — 앞부분만 본다
 				{
-					std::memcpy(&state, data, (size_t)size);
+					std::memcpy(&state, data, std::min((size_t)size, sizeof(state)));
 					if (states > 0) maxStateGap = std::max(maxStateGap, SecondsSince(_lastState));
 					_lastState = Clock::now();
 					++states;

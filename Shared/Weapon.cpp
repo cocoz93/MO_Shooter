@@ -1,5 +1,8 @@
 ﻿#include "Weapon.h"
 
+#include "AnimClips.h"
+#include "AnimPose.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -290,6 +293,60 @@ namespace mo
 			outNormal = normal;
 			return true;
 		}
+
+		// 구 스윕 ↔ 상자(반길이 ex, ey, ez, 구 반지름 r). 면만 밀어 둔 상자는 변 · 꼭짓점에서 실제보다 넓다.
+		// 민 상자의 들어간 점이 변 · 꼭짓점 구역이면 그 변의 캡슐로 다시 잰다 — 움직이는 구와 상자의 정석(Ericson, Real-Time Collision Detection 5.5.7)
+		bool SegmentRoundedBox(const Vec3& p, const Vec3& d, double ex, double ey, double ez, double r, double& outT, Vec3& outNormal)
+		{
+			double t = 0;
+			Vec3 n;
+			if (!SegmentBox(p, d, ex + r, ey + r, ez + r, t, n)) return false;
+
+			const double pos[3] = { p.x, p.y, p.z };
+			const double dir[3] = { d.x, d.y, d.z };
+			const double half[3] = { ex, ey, ez };
+			double sign[3];
+			bool beyond[3];
+			int beyondCount = 0;
+			for (int i = 0; i < 3; ++i)
+			{
+				const double at = pos[i] + dir[i] * t;
+				sign[i] = at >= 0 ? 1.0 : -1.0;
+				beyond[i] = std::fabs(at) > half[i];
+				if (beyond[i]) ++beyondCount;
+			}
+			if (beyondCount <= 1)
+			{
+				outT = t;
+				outNormal = n;
+				return true;
+			}
+
+			// 두 축이 밖이면 남은 축 방향의 변 하나, 세 축이 다 밖이면 꼭짓점에서 나가는 변 셋
+			double best = 2.0;
+			Vec3 bestNormal(0, 0, 1);
+			for (int axis = 0; axis < 3; ++axis)
+			{
+				if (beyondCount == 2 && beyond[axis]) continue;
+				const int u = (axis + 1) % 3;
+				const int v = (axis + 2) % 3;
+				const Vec3 edgeStart(pos[u] - sign[u] * half[u], pos[v] - sign[v] * half[v], pos[axis]);
+				const Vec3 edgeDir(dir[u], dir[v], dir[axis]);
+				double edgeT = 0;
+				Vec3 edgeNormal;
+				if (!SegmentCapsuleZ(edgeStart, edgeDir, half[axis], r, edgeT, edgeNormal) || edgeT >= best) continue;
+				best = edgeT;
+				double world[3];
+				world[u] = edgeNormal.x;
+				world[v] = edgeNormal.y;
+				world[axis] = edgeNormal.z;
+				bestNormal = Vec3(world[0], world[1], world[2]);
+			}
+			if (best > 1.0) return false;
+			outT = best;
+			outNormal = bestNormal;
+			return true;
+		}
 	}
 
 	float Curve::Eval(float time) const
@@ -542,6 +599,25 @@ namespace mo
 		return forward * std::cos(angleFromCenter) + right * (sinA * std::cos(angleAround)) + up * (sinA * std::sin(angleAround));
 	}
 
+	uint32_t SpreadSeed(uint32_t inputSeq, uint32_t bulletIndex)
+	{
+		// 입력 번호는 1씩 늘어난다. 그대로 넣으면 이웃 번호의 xorshift 첫 값이 거의 같아 이어 쏜 탄이 비슷한 거리로 벌어진다(이웃 번호 상관 0.9996, 실측 WeaponCheck). 그래서 MurmurHash3 마무리 식으로 섞는다
+		uint32_t h = inputSeq * 0x9E3779B1u + bulletIndex;
+		h ^= h >> 16;
+		h *= 0x85EBCA6Bu;
+		h ^= h >> 13;
+		h *= 0xC2B2AE35u;
+		h ^= h >> 16;
+		return h;
+	}
+
+	Vec3 AimDirection(float yawDegrees, float pitchDegrees)
+	{
+		const double yaw = yawDegrees * kPi / 180.0;
+		const double pitch = pitchDegrees * kPi / 180.0;
+		return Vec3(std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch));
+	}
+
 	// ─── 몸 판정 ───────────────────────────────────────────
 
 	const BodyShape* GetBodyShapes(size_t& outCount)
@@ -552,6 +628,8 @@ namespace mo
 
 	bool TraceBody(const BodyPlacement& body, const Vec3& start, const Vec3& end, double radius, BodyHit& out)
 	{
+		if (body.skip) return false;
+
 		const double yaw = body.yawDegrees * kPi / 180.0;
 		const double cosYaw = std::cos(yaw);
 		const double sinYaw = std::sin(yaw);
@@ -565,29 +643,28 @@ namespace mo
 
 		bool found = false;
 		double best = 2.0;
-		for (uint32_t i = 0; i < sizeof(kBodyShapes) / sizeof(kBodyShapes[0]); ++i)
+		// 부위 하나 — 좌표는 캐릭터 요 0 기준
+		const auto testShape = [&](uint32_t index, EBodyShape kind, bool weakSpot, const Vec3& center, const Vec3& axisX, const Vec3& axisY, const Vec3& axisZ, double a, double b, double c)
 		{
-			const BodyShape& s = kBodyShapes[i];
-			const Vec3 axisX(s.axisX[0], s.axisX[1], s.axisX[2]);
-			const Vec3 axisY(s.axisY[0], s.axisY[1], s.axisY[2]);
-			const Vec3 axisZ(s.axisZ[0], s.axisZ[1], s.axisZ[2]);
-			const Vec3 rel = localStart - Vec3(s.center[0], s.center[1], s.center[2]);
+			const Vec3 rel = localStart - center;
 			const Vec3 p(Dot(rel, axisX), Dot(rel, axisY), Dot(rel, axisZ));
 			const Vec3 d(Dot(localDir, axisX), Dot(localDir, axisY), Dot(localDir, axisZ));
 
 			double t = 0;
 			Vec3 n;
 			bool hit = false;
-			switch (s.kind)
+			switch (kind)
 			{
 			case EBodyShape::Sphere:
-				hit = SegmentCapsuleZ(p, d, 0.0, (double)s.a + radius, t, n);
+				hit = SegmentCapsuleZ(p, d, 0.0, a + radius, t, n);
 				break;
 			case EBodyShape::Sphyl:
-				hit = SegmentCapsuleZ(p, d, (double)s.b * 0.5, (double)s.a + radius, t, n);
+				hit = SegmentCapsuleZ(p, d, b * 0.5, a + radius, t, n);
 				break;
 			case EBodyShape::Box:
-				hit = SegmentBox(p, d, (double)s.a * 0.5 + radius, (double)s.b * 0.5 + radius, (double)s.c * 0.5 + radius, t, n);
+				// 자세 판정은 엔진과 같게 둥근 상자로 잰다. 고정 포즈 판정은 Tools/WeaponCheck 기준선이 이 근사로 잡혀 있어 그대로 둔다
+				hit = (body.pose && radius > 0) ? SegmentRoundedBox(p, d, a * 0.5, b * 0.5, c * 0.5, radius, t, n)
+					: SegmentBox(p, d, a * 0.5 + radius, b * 0.5 + radius, c * 0.5 + radius, t, n);
 				break;
 			}
 			if (hit && t < best)
@@ -595,12 +672,31 @@ namespace mo
 				best = t;
 				found = true;
 				out.time = t;
-				out.shape = i;
-				out.weakSpot = s.weakSpot;
+				out.shape = index;
+				out.weakSpot = weakSpot;
 				const Vec3 worldNormal = toWorld(axisX * n.x + axisY * n.y + axisZ * n.z);
 				const Vec3 at = start + (end - start) * t;
 				out.point = at - worldNormal * radius;
 			}
+		};
+
+		if (body.pose)
+		{
+			for (uint32_t i = 0; i < body.shapeCount; ++i)
+			{
+				const ClipBody& s = body.shapes[i];
+				const BodyPose& pose = body.pose[i];
+				testShape(i, (EBodyShape)s.kind, s.weakSpot, Vec3(pose.center[0], pose.center[1], pose.center[2]),
+					Vec3(pose.axisX[0], pose.axisX[1], pose.axisX[2]), Vec3(pose.axisY[0], pose.axisY[1], pose.axisY[2]), Vec3(pose.axisZ[0], pose.axisZ[1], pose.axisZ[2]), s.a, s.b, s.c);
+			}
+			return found;
+		}
+
+		for (uint32_t i = 0; i < sizeof(kBodyShapes) / sizeof(kBodyShapes[0]); ++i)
+		{
+			const BodyShape& s = kBodyShapes[i];
+			testShape(i, s.kind, s.weakSpot, Vec3(s.center[0], s.center[1], s.center[2]),
+				Vec3(s.axisX[0], s.axisX[1], s.axisX[2]), Vec3(s.axisY[0], s.axisY[1], s.axisY[2]), Vec3(s.axisZ[0], s.axisZ[1], s.axisZ[2]), s.a, s.b, s.c);
 		}
 		return found;
 	}

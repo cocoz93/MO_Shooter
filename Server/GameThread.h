@@ -8,6 +8,7 @@
 
 #include "NetIoModel.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -34,6 +35,7 @@ namespace mo
 		bool debug = false;
 		std::string recordPath;		// 비어 있으면 안 적는다
 		RewindOptions rewind;
+		AnimOptions anim;
 	};
 
 	struct RoomSummary
@@ -65,16 +67,20 @@ namespace mo
 	inline void AddRoomStats(RoomStats& total, const RoomStats& add)
 	{
 		static_assert(sizeof(RoomStats) % sizeof(uint64_t) == 0, "RoomStats 는 uint64_t 만");
+		const uint64_t stateBytesMax = std::max(total.stateBytesMax, add.stateBytesMax);		// 최대는 더하지 않는다
 		uint64_t* to = reinterpret_cast<uint64_t*>(&total);
 		const uint64_t* from = reinterpret_cast<const uint64_t*>(&add);
 		for (size_t i = 0; i < sizeof(RoomStats) / sizeof(uint64_t); ++i) to[i] += from[i];
+		total.stateBytesMax = stateBytesMax;
 	}
 
 	inline void SubtractRoomStats(RoomStats& total, const RoomStats& sub)
 	{
+		const uint64_t stateBytesMax = total.stateBytesMax;		// 최대는 빼지 않는다
 		uint64_t* to = reinterpret_cast<uint64_t*>(&total);
 		const uint64_t* from = reinterpret_cast<const uint64_t*>(&sub);
 		for (size_t i = 0; i < sizeof(RoomStats) / sizeof(uint64_t); ++i) to[i] -= from[i];
+		total.stateBytesMax = stateBytesMax;
 	}
 
 	// 측정 구간이 있으면 틱 숫자는 그 구간 것만 남는다

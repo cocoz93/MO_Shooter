@@ -70,6 +70,7 @@ weapon RAYS    state=3 r=0.5 n=1200 lyra[none/map/body]=387/572/241 mine=378/572
 weapon RAYS    state=3 r=5.5 n=1200 lyra[none/map/body]=250/589/361 mine=247/590/363 agree=92.17% | body either=409 both=315(77.0%) weak same=309/315(lyraWeak=35) bone same=218 avgDist=7.52 maxDist=48.75 | map both=567 maxDist=0.007 | lyraMultiHit=10 noBot=0
 weapon RAYS    state=3 r=6.0 n=1200 lyra[none/map/body]=248/574/378 mine=241/583/376 agree=91.33% | body either=429 both=325(75.8%) weak same=319/325(lyraWeak=48) bone same=246 avgDist=7.89 maxDist=55.04 | map both=556 maxDist=0.014 | lyraMultiHit=9 noBot=0
 weapon CONE    samples=200000 meanDeg=2.498 (기대 2.5) overHalf=0.000000
+weapon SEEDED  samples=200000 meanDeg=2.497 (기대 2.5) overHalf=0.000000 사분면 49890~50117 (기대 50000) 다음번호같음=0 다음탄같음=0 이웃상관 1칸=0.0007 9칸=-0.0034
 weapon RESULT PASS
 map_expanse CHECK kind=A total=15000 bothHit=9225 bothMiss=5775 onlyLyra=0 onlyMine=0 lyraPen=4351 penMismatch=0 maxDiff=0.0910 p99Diff=0.00074 over0.1=0 over1=0
 map_expanse NORMAL kind=A compared=4874 over0.01=91 over0.1=90 max=1.4142 | startPen compared=4351 over0.1=663

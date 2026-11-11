@@ -68,6 +68,8 @@ namespace mo
 		const CWeaponCycle& GetWeapon() const { return _weapons[_weapon]; }
 		uint8_t GetWeaponIndex() const { return _weapon; }
 		uint32_t GetSeq() const { return _seq; }
+		// 방금 돌린 입력의 무기 결과 — 쐈으면 이 입력 번호와 퍼짐으로 서버와 같은 탄 방향을 구한다(D15)
+		const WeaponEvents& GetLastWeaponEvents() const { return _lastWeaponEvents; }
 		bool IsWaitingSpawn() const { return _waitingSpawn; }
 		bool IsLocked() const { return _lockInputs > 0; }
 
@@ -85,6 +87,7 @@ namespace mo
 		MoveState _move;
 		std::array<CWeaponCycle, (size_t)EWeapon::Count> _weapons;
 		CWeaponFireGate _fireGate;
+		WeaponEvents _lastWeaponEvents;
 		uint8_t _weapon = 0;
 		bool _jumpHeld = false;
 		int _lockInputs = 0;

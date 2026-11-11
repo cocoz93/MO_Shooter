@@ -31,7 +31,7 @@ namespace mo
 		CRoomHost(CGameThread& owner, uint32_t id, const RoomSettings& settings)
 			: _owner(owner)
 			, _id(id)
-			, _room(*settings.map, *settings.params, settings.rules, settings.seed, settings.debug, *this, id, settings.rewind)
+			, _room(*settings.map, *settings.params, settings.rules, settings.seed, settings.debug, *this, id, settings.rewind, settings.anim)
 		{
 			if (!settings.recordPath.empty()) _record = std::fopen(settings.recordPath.c_str(), "wb");
 		}

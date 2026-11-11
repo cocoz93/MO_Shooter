@@ -61,11 +61,16 @@ namespace mo
 			return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 		}
 
-		Vec3 AimDirection(float yawDegrees, float pitchDegrees)
+		// 선분에서 점까지 거리의 제곱
+		double SegmentPointDistanceSquared(const Vec3& start, const Vec3& end, const Vec3& point)
 		{
-			const double yaw = yawDegrees * kPi / 180.0;
-			const double pitch = pitchDegrees * kPi / 180.0;
-			return Vec3(std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch));
+			const Vec3 segment = end - start;
+			const Vec3 toPoint = point - start;
+			const double lengthSquared = segment.x * segment.x + segment.y * segment.y + segment.z * segment.z;
+			const double along = toPoint.x * segment.x + toPoint.y * segment.y + toPoint.z * segment.z;
+			const double t = lengthSquared > 0.0 ? std::min(std::max(along / lengthSquared, 0.0), 1.0) : 0.0;
+			const Vec3 gap = toPoint - segment * t;
+			return gap.x * gap.x + gap.y * gap.y + gap.z * gap.z;
 		}
 
 		wire::EShotHit ToWireHit(EBulletHit hit)
@@ -88,9 +93,21 @@ namespace mo
 		return ERewindKind::Ok;
 	}
 
-	CRoom::CRoom(const CMapCollision& map, const MoveParams& params, const MatchRules& rules, uint32_t seed, bool allowDebug, IRoomSender& sender, uint32_t roomId, const RewindOptions& rewind)
-		: _map(map), _params(params), _rules(rules), _allowDebug(allowDebug), _sender(sender), _roomId(roomId), _rewind(rewind), _moveSim(map, _params), _rng(seed), _spawnRng(seed + 1)
+	CRoom::CRoom(const CMapCollision& map, const MoveParams& params, const MatchRules& rules, uint32_t seed, bool allowDebug, IRoomSender& sender, uint32_t roomId, const RewindOptions& rewind, const AnimOptions& anim)
+		: _map(map), _params(params), _rules(rules), _allowDebug(allowDebug), _sender(sender), _roomId(roomId), _rewind(rewind), _anim(anim), _moveSim(map, _params), _spawnRng(seed + 1)
 	{
+		if (_anim.clips)
+		{
+			// main 이 시작할 때 같은 초기화로 확인했으므로 여기서 실패하지 않는다
+			_animReady = _poseEvaluator.Init(*_anim.clips, kAnimBundleName) && _animCodec.Init(*_anim.clips, kAnimBundleName);
+			if (_animReady)
+			{
+				_localFrom.resize(_poseEvaluator.BoneCount());
+				_localTo.resize(_poseEvaluator.BoneCount());
+				_localBlend.resize(_poseEvaluator.BoneCount());
+			}
+		}
+
 		size_t count = 0;
 		const SpawnPoint* starts = GetExpanseStarts(count);
 		for (size_t i = 0; i < count; ++i)
@@ -163,6 +180,7 @@ namespace mo
 		const uint32_t id = player->id;
 		Player& added = *player;
 		_players.push_back(std::move(player));
+		if (_animReady) added.anim.Init(*_anim.clips, kAnimBundleName);
 		SpawnPlayer(added);
 
 		if (_phase == wire::EMatchPhase::Waiting)
@@ -210,6 +228,9 @@ namespace mo
 		Player* player = Find(session);
 		if (!player) return;
 		++_stats.inputsReceived;
+		// 탄 방향이 입력 번호로 정해지므로 번호를 건너뛰면 유리한 값을 고를 수 있다. 정상 클라는 1씩 늘리고 TCP 라 안 건너뛴다(D15)
+		const bool skippedSeq = input.seq != player->lastReceivedSeq + 1;
+		player->lastReceivedSeq = input.seq;
 		if (!IsFiniteInput(input) || !IsViewInRange(input) || !IsViewAlphaInRange(input))
 		{
 			++_stats.inputsRejectedBadValue;
@@ -217,6 +238,12 @@ namespace mo
 		}
 		QueuedInput item;
 		item.input = input;
+		if (skippedSeq && (item.input.buttons & wire::BUTTON_FIRE))
+		{
+			// 이동은 그대로 쓰고 그 사격만 버린다
+			item.input.buttons = (uint8_t)(item.input.buttons & ~wire::BUTTON_FIRE);
+			++_stats.firesDroppedSeqGap;
+		}
 		item.place = wire::DebugPlace();
 		item.isPlace = false;
 		PushQueue(*player, item, input.seq);
@@ -224,12 +251,13 @@ namespace mo
 
 	void CRoom::OnDebugPlace(int64_t session, const wire::DebugPlace& place)
 	{
+		Player* player = Find(session);
+		if (player) player->lastReceivedSeq = place.seq;		// 시험용 자리 옮기기도 입력과 같은 번호 줄을 쓴다(거절돼도 번호는 지나갔다)
 		if (!_allowDebug)
 		{
 			++_stats.debugPlacesRejected;
 			return;
 		}
-		Player* player = Find(session);
 		if (!player) return;
 		QueuedInput item;
 		item.input = wire::Input();
@@ -416,6 +444,7 @@ namespace mo
 		player.move.location = slot.point.location;
 		player.move.maxSpeed = _params.maxWalkSpeed;
 		_moveSim.RefreshFloor(player.move);
+		if (_animReady) player.anim.Reset();
 		player.jumpHeld = false;
 		player.yaw = slot.point.yawDegrees;
 		player.pitch = 0;
@@ -710,13 +739,65 @@ namespace mo
 			sample.tick = _tick;
 			sample.location = player->move.location;
 			sample.yaw = player->yaw;
+			sample.pitch = player->pitch;
 			sample.alive = !player->dead;
+			if (_animReady) player->anim.ToWire(sample.anim);
+		}
+	}
+
+	// 언리얼 쪽 입력과 같은 값을 만든다 — MOBSimpleAnimInstance.cpp 의 Pitch · bAccelerating · GroundDistance · PlantDrop
+	void CRoom::MakeMoveInput(const Player& player, AnimMoveInput& out) const
+	{
+		constexpr double kAccelerationNearlyZero = 1e-8;	// FMath::IsNearlyZero 기본 허용치
+		constexpr float kGroundTraceDistance = 100000.f;	// ULyraCharacterMovementComponent::GetGroundInfo
+
+		const MoveState& move = player.move;
+		const double yaw = player.yaw * kPi / 180.0;
+		const double cosYaw = std::cos(yaw);
+		const double sinYaw = std::sin(yaw);
+		out.deltaSeconds = kTickSeconds;
+		out.velocity[0] = cosYaw * move.velocity.x + sinYaw * move.velocity.y;
+		out.velocity[1] = -sinYaw * move.velocity.x + cosYaw * move.velocity.y;
+		out.velocity[2] = move.velocity.z;
+		out.acceleration[0] = cosYaw * move.acceleration.x + sinYaw * move.acceleration.y;
+		out.acceleration[1] = -sinYaw * move.acceleration.x + cosYaw * move.acceleration.y;
+		out.acceleration[2] = move.acceleration.z;
+		out.accelerating = move.acceleration.x * move.acceleration.x + move.acceleration.y * move.acceleration.y > kAccelerationNearlyZero;
+		out.falling = move.mode == EMoveMode::Falling;
+		out.pitch = std::min(std::max(NormalizeAxis(player.pitch), -90.f), 90.f);
+		if (out.falling)
+		{
+			out.groundDistance = kGroundTraceDistance;
+			Vec3 end = move.location;
+			end.z -= kGroundTraceDistance + _params.capsuleHalfHeight;
+			RayHit hit;
+			if (_map.Raycast(move.location, end, MAP_BLOCK_MOVE, hit)) out.groundDistance = std::max((float)hit.distance - _params.capsuleHalfHeight, 0.f);
+		}
+		else if (move.floor.blockingHit)
+		{
+			out.hasFloorGap = true;
+			out.plantGap = _anim.clips->MeshPlacement().p[2] + _params.capsuleHalfHeight + move.floor.GetDistanceToFloor();
+		}
+	}
+
+	// 입력을 다 적용한 뒤, 기록 앞에서 사람마다 한 번 — 입력이 몇 개 왔든 시간은 틱만큼 흐른다
+	void CRoom::UpdateAnimStates()
+	{
+		if (!_animReady) return;
+		for (const std::unique_ptr<Player>& player : _players)
+		{
+			if (player->dead) continue;
+			AnimMoveInput input;
+			MakeMoveInput(*player, input);
+			player->anim.Update(input);
+			++_stats.animUpdates;
 		}
 	}
 
 	// Lyra 가 남의 캐릭터를 그리는 식과 같다(MOBridgeSubsystem::TickRemotes). false = 그 시점에 몸이 없었다(죽었거나 아직 안 들어옴)
-	bool CRoom::GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out) const
+	bool CRoom::GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out, float& outAlpha) const
 	{
+		outAlpha = 0.f;
 		const size_t size = player.rewindHistory.size();
 		const RewindSample& from = player.rewindHistory[viewTick % size];
 		if (from.tick != viewTick || !from.alive) return false;
@@ -728,7 +809,73 @@ namespace mo
 		if (to.tick != viewTick + 1 || Length(to.location - from.location) > wire::kRemoteTeleportDistance) return true;
 		out.center = from.location + (to.location - from.location) * (double)viewAlpha;
 		out.yawDegrees = from.yaw + viewAlpha * NormalizeAxis(to.yaw - from.yaw);
+		outAlpha = viewAlpha;
 		return true;
+	}
+
+	// 탄이 닿을 수 있는 몸만 자세를 구한다. 안 닿는 몸은 skip 표시로 판정에서 뺀다
+	void CRoom::PrepareBodyPoses(std::vector<BodyPlacement>& bodies, const std::vector<BodyPoseRef>& refs, const Vec3& start, const Vec3& end, double sweepRadius)
+	{
+		// 구로 쏠 때 부위는 탄 반지름만큼 부푼다. 상자는 면을 세 축으로 밀어 모서리가 √3 배까지 나가므로 그 몫으로 잡는다
+		constexpr double kSqrt3 = 1.7320508075688772;
+		const double reach = _anim.boundRadius + sweepRadius * kSqrt3;
+		for (size_t i = 0; i < bodies.size(); ++i)
+		{
+			BodyPlacement& body = bodies[i];
+			if (SegmentPointDistanceSquared(start, end, body.center) > reach * reach)
+			{
+				body.skip = true;
+				++_stats.poseSkipped;
+				continue;
+			}
+			body.skip = false;
+			body.pose = GetPoseAt(*refs[i].owner, refs[i].tick, refs[i].alpha);
+			body.shapes = _anim.clips->Bodies().data();
+			body.shapeCount = (uint32_t)_anim.clips->Bodies().size();
+		}
+	}
+
+	// 판정 자세 = 그 틱의 상태로 만든 자세. alpha > 0 이면 다음 틱 자세와 뼈별로 섞는다 — 화면과 같은 식(D32)
+	const BodyPose* CRoom::GetPoseAt(const Player& owner, uint32_t tick, float alpha, bool countStats)
+	{
+		for (size_t i = 0; i < _poseCacheUsed; ++i)
+		{
+			const CachedPose& cached = _poseCache[i];
+			if (cached.owner == owner.id && cached.tick == tick && cached.alpha == alpha)
+			{
+				if (countStats) ++_stats.poseReused;
+				return cached.bodies.data();
+			}
+		}
+
+		if (_poseCacheUsed == _poseCache.size())
+		{
+			_poseCache.emplace_back();
+			_poseCache.back().bodies.resize(_poseEvaluator.BodyCount());
+		}
+		CachedPose& cached = _poseCache[_poseCacheUsed++];
+		cached.owner = owner.id;
+		cached.tick = tick;
+		cached.alpha = alpha;
+
+		const size_t size = owner.rewindHistory.size();
+		const RewindSample& from = owner.rewindHistory[tick % size];
+		AnimPoseInput input;
+		_animCodec.FromWire(from.anim, from.pitch, input);
+		_poseEvaluator.EvaluateLocal(input, _localFrom.data());
+		const BoneTransform* local = _localFrom.data();
+		if (alpha > 0.f)
+		{
+			const RewindSample& to = owner.rewindHistory[(tick + 1) % size];
+			AnimPoseInput nextInput;
+			_animCodec.FromWire(to.anim, to.pitch, nextInput);
+			_poseEvaluator.EvaluateLocal(nextInput, _localTo.data());
+			_poseEvaluator.BlendLocal(_localFrom.data(), _localTo.data(), alpha, _localBlend.data());
+			local = _localBlend.data();
+		}
+		_poseEvaluator.BodiesFromLocal(local, cached.bodies.data());
+		if (countStats) ++_stats.poseEvals;
+		return cached.bodies.data();
 	}
 
 	void CRoom::ResolveShot(const PendingShot& shot)
@@ -758,6 +905,8 @@ namespace mo
 		_bodies.clear();
 		_bodyOwners.clear();
 		_bodiesNow.clear();
+		_bodyPoseRefs.clear();
+		_bodyNowRefs.clear();
 		for (const std::unique_ptr<Player>& player : _players)
 		{
 			if (player->id == shot.shooter)
@@ -765,20 +914,44 @@ namespace mo
 				shooter = player.get();
 				continue;
 			}
-			if (player->dead) continue;		// 지금 죽어 있으면 그때 살아 있었어도 안 맞는다
+			if (player->dead)		// 지금 죽어 있으면 그때 살아 있었어도 안 맞는다
+			{
+				if (_rewind.bulletLog) std::printf("DEADSKIP seq=%u shooter=%u target=%u\n", shot.seq, shot.shooter, player->id);
+				continue;
+			}
 			BodyPlacement now;
 			now.center = player->move.location;
 			now.yawDegrees = player->yaw;
 			now.id = player->id;
-			if (_rewind.shadow) _bodiesNow.push_back(now);
+			if (_rewind.shadow)
+			{
+				_bodiesNow.push_back(now);
+				if (_animReady) _bodyNowRefs.push_back({ player.get(), _tick, 0.f });
+			}
 			BodyPlacement body = now;
-			if (useHistory && !GetRewoundBody(*player, bodyTick, bodyAlpha, body)) continue;
+			float poseAlpha = 0.f;
+			if (useHistory && !GetRewoundBody(*player, bodyTick, bodyAlpha, body, poseAlpha)) continue;
 			if (_rewind.log)
 			{
 				std::printf("REWIND seq=%u shooter=%u target=%u now=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f\n", shot.seq, shot.shooter, player->id, _tick, bodyTick, bodyAlpha, body.center.x, body.center.y, body.center.z, body.yawDegrees);
+				if (_animReady)
+				{
+					// 화면 MOB_VIEWP 줄과 (seq, 상대, 부위) 로 잇는다. 기록용이라 비용 집계에 넣지 않는다
+					const BodyPose* pose = GetPoseAt(*player, useHistory ? bodyTick : _tick, poseAlpha, false);
+					const std::vector<ClipBody>& shapes = _anim.clips->Bodies();
+					const std::vector<ClipBone>& bones = _anim.clips->Bones();
+					for (size_t part = 0; part < shapes.size(); ++part)
+					{
+						const ClipBody& shape = shapes[part];
+						const BodyPose& at = pose[part];
+						std::printf("REWINDP seq=%u shooter=%u target=%u bone=%s kind=%d weak=%d p=%.4f,%.4f,%.4f x=%.5f,%.5f,%.5f y=%.5f,%.5f,%.5f z=%.5f,%.5f,%.5f s=%.4f,%.4f,%.4f\n", shot.seq, shot.shooter, player->id, bones[(size_t)shape.bone].name.c_str(), (int)shape.kind, shape.weakSpot ? 1 : 0,
+							at.center[0], at.center[1], at.center[2], at.axisX[0], at.axisX[1], at.axisX[2], at.axisY[0], at.axisY[1], at.axisY[2], at.axisZ[0], at.axisZ[1], at.axisZ[2], shape.a, shape.b, shape.c);
+					}
+				}
 			}
 			_bodies.push_back(body);
 			_bodyOwners.push_back(player.get());
+			if (_animReady) _bodyPoseRefs.push_back({ player.get(), useHistory ? bodyTick : _tick, poseAlpha });
 		}
 		if (!shooter) return;	// 쏜 틱에 나감
 
@@ -804,19 +977,32 @@ namespace mo
 		packet.startZ = (float)shot.start.z;
 		packet.weapon = shot.weapon;
 		packet.count = (uint8_t)std::min(def.bulletsPerCartridge, (int32_t)wire::kMaxBulletsInShot);
+		if (_animReady) _stats.poseTargets += (uint64_t)packet.count * (_bodies.size() + _bodiesNow.size());
 
 		for (int i = 0; i < packet.count; ++i)
 		{
-			Vec3 dir = SpreadDirection(shot.aimDir, shot.spreadAngle, shot.spreadMultiplier, def.spreadExponent, _rng);
+			CSpreadRng bulletRng(SpreadSeed(shot.seq, (uint32_t)i));
+			Vec3 dir = SpreadDirection(shot.aimDir, shot.spreadAngle, shot.spreadMultiplier, def.spreadExponent, bulletRng);
 			if (_rewind.noSpread) dir = shot.aimDir;
+			if (_rewind.log)
+			{
+				std::printf("SPREAD seq=%u shooter=%u i=%d spread=%.6f mult=%.6f aim=%.7f,%.7f,%.7f dir=%.7f,%.7f,%.7f\n", shot.seq, shot.shooter, i, shot.spreadAngle, shot.spreadMultiplier, shot.aimDir.x, shot.aimDir.y, shot.aimDir.z, dir.x, dir.y, dir.z);
+			}
 			const Vec3 end = shot.start + dir * (double)def.maxDamageRange;
 			BulletResult result;
+			if (_animReady) PrepareBodyPoses(_bodies, _bodyPoseRefs, shot.start, end, def.sweepRadius);
 			ResolveBullet(_map, _bodies.data(), _bodies.size(), shot.start, end, def.sweepRadius, result);
+			if (_rewind.bulletLog)
+			{
+				const bool hitBody = result.kind == EBulletHit::Body;
+				std::printf("BULLET seq=%u shooter=%u i=%d kind=%d target=%u weak=%d rewind=%d\n", shot.seq, shot.shooter, i, (int)result.kind, hitBody ? _bodies[result.bodyIndex].id : 0u, hitBody && result.weakSpot ? 1 : 0, (int)rewindKind);
+			}
 
 			++_stats.bullets;
 			if (_rewind.shadow)
 			{
 				BulletResult now;
+				if (_animReady) PrepareBodyPoses(_bodiesNow, _bodyNowRefs, shot.start, end, def.sweepRadius);
 				ResolveBullet(_map, _bodiesNow.data(), _bodiesNow.size(), shot.start, end, def.sweepRadius, now);
 				const bool hitAtView = result.kind == EBulletHit::Body;
 				const bool hitNow = now.kind == EBulletHit::Body;
@@ -887,6 +1073,7 @@ namespace mo
 
 	void CRoom::ResolveShots()
 	{
+		_poseCacheUsed = 0;
 		for (const PendingShot& shot : _pendingShots)
 		{
 			ResolveShot(shot);
@@ -929,10 +1116,36 @@ namespace mo
 			out.moveX = player->dead ? (int8_t)0 : player->moveX;
 			out.moveY = player->dead ? (int8_t)0 : player->moveY;
 		}
-		const int size = (int)(offsetof(wire::State, players) + sizeof(wire::PlayerState) * packet.count);
+		const int headSize = (int)(offsetof(wire::State, players) + sizeof(wire::PlayerState) * packet.count);
+		int size = headSize;
+		const auto animOf = [this](const Player& player) -> const wire::AnimStateWire& { return player.rewindHistory[_tick % player.rewindHistory.size()].anim; };
+		const auto animSize = [](const wire::AnimStateWire& anim) { return wire::kAnimStateHeadSize + sizeof(wire::AnimLayerWire) * anim.layerCount; };
+		if (_animReady)
+		{
+			for (const std::unique_ptr<Player>& player : _players) size += (int)animSize(animOf(*player));
+		}
 		packet.h.size = (uint16_t)size;
 		packet.h.type = (uint16_t)wire::Msg::S2C_STATE;
-		SendToAll(&packet, size);
+		if (_animReady)
+		{
+			// 꼬리 = 사람마다 앞부분과 같은 차례로 — 앞부분만 읽는 클라는 count 까지만 보므로 깨지지 않는다
+			char bytes[wire::kMaxStatePacketSize];
+			std::memcpy(bytes, &packet, (size_t)headSize);
+			size_t at = (size_t)headSize;
+			for (const std::unique_ptr<Player>& player : _players)
+			{
+				const wire::AnimStateWire& anim = animOf(*player);
+				const size_t length = animSize(anim);
+				std::memcpy(bytes + at, &anim, length);
+				at += length;
+			}
+			SendToAll(bytes, size);
+			_stats.stateBytesMax = std::max(_stats.stateBytesMax, (uint64_t)size);
+		}
+		else
+		{
+			SendToAll(&packet, size);
+		}
 		_stats.statesSent += packet.count;
 	}
 
@@ -958,6 +1171,7 @@ namespace mo
 		{
 			TickPlayerInputs(*player);
 		}
+		UpdateAnimStates();
 		RecordRewindSamples();
 		const Clock::time_point inputsEnd = Clock::now();
 		ResolveShots();

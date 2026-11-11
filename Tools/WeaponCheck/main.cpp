@@ -690,6 +690,68 @@ int main(int argc, char** argv)
 		if (std::fabs(sum / n - 2.5) > 0.02 || maxOver > 1e-6) failed = true;
 	}
 
+	// ─── 7. 입력 번호로 정한 퍼짐 — 번호가 1씩 늘어도 분포가 치우치지 않는지, 번호 · 탄 번호마다 달라지는지 ──
+	{
+		const Vec3 aim(0.6, 0.64, 0.48);
+		const double aimLen = std::sqrt(aim.x * aim.x + aim.y * aim.y + aim.z * aim.z);
+		double sumDeg = 0, maxOver = 0;
+		int quadrant[4] = { 0, 0, 0, 0 };
+		int sameAsNext = 0, sameAsNextBullet = 0;
+		const int n = 200000;
+		std::vector<double> degs((size_t)n);
+		const auto direction = [&](uint32_t seq, uint32_t bullet)
+		{
+			CSpreadRng rng(SpreadSeed(seq, bullet));
+			return SpreadDirection(aim, 10.f, 1.f, 1.f, rng);
+		};
+		const Vec3 center = aim * (1.0 / aimLen);
+		const double flat = std::sqrt(center.x * center.x + center.y * center.y);
+		const Vec3 right(-center.y / flat, center.x / flat, 0);
+		const Vec3 up(center.y * right.z - center.z * right.y, center.z * right.x - center.x * right.z, center.x * right.y - center.y * right.x);
+		for (int i = 1; i <= n; ++i)
+		{
+			const Vec3 d = direction((uint32_t)i, 0);
+			const double cosv = std::min(std::max(d.x * center.x + d.y * center.y + d.z * center.z, -1.0), 1.0);
+			const double deg = std::acos(cosv) * 180.0 / 3.14159265358979;
+			sumDeg += deg;
+			degs[(size_t)(i - 1)] = deg;
+			maxOver = std::max(maxOver, deg - 5.0);
+			const double r = d.x * right.x + d.y * right.y + d.z * right.z;
+			const double u = d.x * up.x + d.y * up.y + d.z * up.z;
+			++quadrant[(r >= 0 ? 1 : 0) + (u >= 0 ? 2 : 0)];
+			const Vec3 next = direction((uint32_t)i + 1, 0);
+			const Vec3 nextBullet = direction((uint32_t)i, 1);
+			if (d.x == next.x && d.y == next.y && d.z == next.z) ++sameAsNext;
+			if (d.x == nextBullet.x && d.y == nextBullet.y && d.z == nextBullet.z) ++sameAsNextBullet;
+		}
+		int quadrantMin = n, quadrantMax = 0;
+		for (int q : quadrant)
+		{
+			quadrantMin = std::min(quadrantMin, q);
+			quadrantMax = std::max(quadrantMax, q);
+		}
+		// 이웃 번호끼리 벌어진 각도의 상관 — 번호를 안 섞으면 xorshift 첫 값이 이웃끼리 거의 같아 여기서 걸린다. 평균 · 사분면은 이걸 못 본다.
+		// 기준 0.02 = 표본 20만의 상관계수 표준오차(약 0.0022)의 약 9배. 소총 사격 간격이 9입력이라 9칸도 본다
+		const auto lagCorrelation = [&](int lag)
+		{
+			double sumA = 0, sumB = 0, sumAA = 0, sumBB = 0, sumAB = 0;
+			const int m = n - lag;
+			for (int i = 0; i < m; ++i)
+			{
+				const double a = degs[(size_t)i], b = degs[(size_t)(i + lag)];
+				sumA += a;
+				sumB += b;
+				sumAA += a * a;
+				sumBB += b * b;
+				sumAB += a * b;
+			}
+			return (sumAB - sumA * sumB / m) / std::sqrt((sumAA - sumA * sumA / m) * (sumBB - sumB * sumB / m));
+		};
+		const double corr1 = lagCorrelation(1), corr9 = lagCorrelation(9);
+		std::printf("SEEDED  samples=%d meanDeg=%.3f (기대 2.5) overHalf=%.6f 사분면 %d~%d (기대 %d) 다음번호같음=%d 다음탄같음=%d 이웃상관 1칸=%.4f 9칸=%.4f\n", n, sumDeg / n, maxOver, quadrantMin, quadrantMax, n / 4, sameAsNext, sameAsNextBullet, corr1, corr9);
+		if (std::fabs(sumDeg / n - 2.5) > 0.02 || maxOver > 1e-6 || quadrantMax - quadrantMin > n / 50 || sameAsNext != 0 || sameAsNextBullet != 0 || std::fabs(corr1) > 0.02 || std::fabs(corr9) > 0.02) failed = true;
+	}
+
 	std::printf("%s\n", failed ? "RESULT FAIL" : "RESULT PASS");
 	return failed ? 1 : 0;
 }

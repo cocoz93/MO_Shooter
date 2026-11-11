@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // 서버와 클라(봇·Lyra)가 주고받는 와이어 형식. 리틀 엔디언, 1바이트 정렬, 좌표는 언리얼 그대로 cm.
@@ -9,7 +10,7 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 3;
+		constexpr uint32_t kProtocolVersion = 4;
 		constexpr int kTickRate = 60;
 		constexpr int kMaxPlayersInRoom = 10;
 		constexpr int kMaxBulletsInShot = 9;	// 샷건 한 발의 탄 수
@@ -120,6 +121,33 @@ namespace mo
 			int8_t moveX, moveY;	// 누름 방향(127 = 1.0) — 남의 캐릭터 애니가 가속으로 읽는다. 판정에는 안 쓴다
 		};
 
+		// 애니 상태 한 사람치. S2C_STATE 의 players[count] 바로 뒤에 같은 차례로 붙는다(꼬리, 클립 파일을 준 서버만).
+		// - 겹침 칸은 layerCount 개만 싣는다 — 사람마다 18 + 4 × layerCount 바이트, 최대 34(D35).
+		// - 앞부분(State)만 읽는 쪽은 count 로 끝을 정하므로 꼬리를 무시해도 깨지지 않는다
+		inline constexpr int kAnimLayersOnWire = 4;
+		inline constexpr uint16_t kAnimTimeNone = 0xFFFF;		// 대기 몸짓 · 착지 충격을 안 하는 중
+
+		struct AnimLayerWire
+		{
+			int8_t clip;			// 점프 5개 + 전환 12개의 번호(ACLIP_JUMP_START 기준), -1 = 걷기 · 서기 자리
+			uint16_t time;			// 1/6000초 칸
+			uint8_t fade;			// 아래 칸을 덮은 정도 0~255
+		};
+
+		struct AnimStateWire
+		{
+			uint8_t weights[5];		// 서기 · 앞 · 뒤 · 왼 · 오른 비중 0~255. 받는 쪽이 합을 1 로 맞춘다
+			uint8_t step;			// 몇 번째 걸음인가
+			uint16_t stepFrac;		// 그 걸음의 진행 0~65535
+			uint16_t idleTime;		// 서기 클립 시각, 1/6000초 칸
+			uint8_t aimBlend;		// 255 = 허리 사격 조준만, 0 = 느슨한 조준만
+			uint16_t fidgetTime;	// 대기 몸짓 시각. kAnimTimeNone = 안 함
+			uint16_t recoveryTime;	// 착지 충격 시각. kAnimTimeNone = 안 함
+			int16_t plantDrop;		// 발 디딤 내림 0.01cm 칸
+			uint8_t layerCount;		// 뒤에 실린 겹침 칸 수
+			AnimLayerWire layers[kAnimLayersOnWire];
+		};
+
 		// 보낼 때는 count 만큼만 잘라 보낸다
 		struct State
 		{
@@ -220,6 +248,10 @@ namespace mo
 
 		static_assert(sizeof(Header) == 4, "ServerCore MsgHeader 와 같아야 한다");
 		static_assert(sizeof(State) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
+		static_assert(sizeof(AnimStateWire) == 34, "패킷 크기 어림(D35)과 같아야 한다");
+		inline constexpr size_t kAnimStateHeadSize = sizeof(AnimStateWire) - sizeof(AnimLayerWire) * kAnimLayersOnWire;
+		inline constexpr size_t kMaxStatePacketSize = sizeof(State) + sizeof(AnimStateWire) * kMaxPlayersInRoom;		// 꼬리까지 넣은 최대
+		static_assert(kMaxStatePacketSize <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 		static_assert(sizeof(Shot) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 		static_assert(sizeof(Result) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 	}

@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include "AnimState.h"
 #include "GameProtocol.h"
 #include "MapCollision.h"
 #include "MatchRules.h"
@@ -36,7 +37,17 @@ namespace mo
 		uint32_t limitTicks = kRewindLimitTicks;	// 시험 전용 --rewindLimitTicks. 0 = 되감기 끔
 		bool shadow = false;						// 측정 전용 — 같은 탄을 현재 자리로도 계산해 비교한다
 		bool log = false;							// 대조 전용 — 쏠 때마다 되감은 자리를 찍는다
+		bool bulletLog = false;						// 측정 전용 — 탄마다 결과 한 줄(BULLET). 봇 판정과 (쏜 사람, 입력 번호, 탄 번호)로 잇는다
 		bool noSpread = false;		// 측정 전용 — 무기 퍼짐을 빼고 조준점 그대로 쏜다. 퍼짐(3~14도)이 21m 교전 거리의 몸 크기(약 2도)보다 커서 되감기 효과를 가리는지 가르려고
+	};
+
+	inline constexpr const char* kAnimBundleName = "rifle";		// 지금은 소총 묶음 하나다. 권총 · 샷건은 소총 합격 뒤(D37)
+
+	// 클립을 주면 몸 판정이 서 있는 자세 대신 그 시점의 애니 자세를 쓴다(D32). 비어 있으면 지금까지와 같다
+	struct AnimOptions
+	{
+		const CAnimClips* clips = nullptr;	// 프로세스가 들고 있다. 방보다 오래 산다
+		double boundRadius = 0.0;			// CAnimPoseEvaluator::ComputeBoundRadius
 	};
 
 	// 시점 입력의 네 갈래. 값을 돌려주는 함수로 두어 시험이 갈래를 전수로 볼 수 있게 한다
@@ -56,6 +67,7 @@ namespace mo
 		uint64_t inputsApplied = 0;
 		uint64_t inputsDroppedFull = 0;		// 입력 대기열이 꽉 차서 버림
 		uint64_t inputsDroppedOldSeq = 0;	// 번호가 앞선 입력보다 작거나 같음
+		uint64_t firesDroppedSeqGap = 0;	// 입력 번호를 건너뛴 입력의 사격을 버림(D15)
 		uint64_t inputsWhileDead = 0;		// 죽어 있는 동안 온 입력 — 번호만 기록하고 안 쓴다
 		uint64_t starvedTicks = 0;			// 입력이 안 와서 그 틱에 꺼낼 것이 없음
 		uint64_t idleMoves = 0;				// 입력 없이 오래 지나 빈 입력으로 움직임(공중에 멈추지 않게)
@@ -103,6 +115,14 @@ namespace mo
 		uint64_t hitsNeither = 0;
 		uint64_t rewindOnlyBehindWall = 0;		// 되감기로만 맞았고, 쏜 자리에서 대상의 현재 몸 중심까지 맵이 가로막음
 
+		// 애니 판정 — --clips 일 때만. 셋 합 = poseTargets
+		uint64_t poseTargets = 0;				// 탄마다 판정 대상이 된 몸 수
+		uint64_t poseEvals = 0;					// 자세를 새로 계산
+		uint64_t poseReused = 0;				// 같은 틱에 같은 대상 · 같은 시점을 구해 둔 것을 씀
+		uint64_t poseSkipped = 0;				// 탄이 몸 근처에도 안 와 자세를 안 구함
+		uint64_t animUpdates = 0;				// 애니 상태 갱신 — 살아 있는 사람 × 틱. 입력이 몇 개 왔든 틱당 1회
+		uint64_t stateBytesMax = 0;				// S2C_STATE 의 가장 큰 크기. 합치지 않고 최대를 남긴다(AddRoomStats)
+
 		// 틱 안에서 쓴 시간 — 어느 구간이 가장 오래 걸렸나
 		uint64_t timeInputsNs = 0;				// 입력 처리·이동
 		uint64_t timeShotsNs = 0;				// 광선 판정(결과 보내기 포함)
@@ -118,7 +138,7 @@ namespace mo
 	class CRoom
 	{
 	public:
-		CRoom(const CMapCollision& map, const MoveParams& params, const MatchRules& rules, uint32_t seed, bool allowDebug, IRoomSender& sender, uint32_t roomId, const RewindOptions& rewind = RewindOptions());
+		CRoom(const CMapCollision& map, const MoveParams& params, const MatchRules& rules, uint32_t seed, bool allowDebug, IRoomSender& sender, uint32_t roomId, const RewindOptions& rewind = RewindOptions(), const AnimOptions& anim = AnimOptions());
 
 		// 반환 = 방 안에서 쓰는 번호. 자리가 없거나 경기가 끝나 가면 0. 환영과 시작 자리는 여기서 보낸다
 		uint32_t AddPlayer(int64_t session);
@@ -148,13 +168,15 @@ namespace mo
 			bool isPlace;
 		};
 
-		// 되감기 기록 한 칸. 몸 자세는 보류라 위치·방향만 둔다 — 자세를 넣을 때 칸을 늘린다
+		// 되감기 기록 한 칸. 애니 상태는 패킷과 같은 형식으로 둔다 — 서버 판정과 화면이 같은 수로 자세를 만들게(D32 · D35)
 		struct RewindSample
 		{
 			uint32_t tick = 0;
 			Vec3 location;
 			float yaw = 0;
+			float pitch = 0;
 			bool alive = false;
+			wire::AnimStateWire anim{};
 		};
 
 		struct Player
@@ -178,12 +200,31 @@ namespace mo
 			uint16_t deaths = 0;
 			uint32_t lastSeq = 0;
 			uint32_t lastQueuedSeq = 0;
+			uint32_t lastReceivedSeq = 0;	// 대기열에서 버린 입력도 센다 — 번호를 건너뛰었는지는 받은 번호로 본다
 			int starvedInRow = 0;
 			int tokens = 1;
 			std::array<QueuedInput, kInputQueueSize> queue;
 			int queueHead = 0;
 			int queueCount = 0;
 			std::array<RewindSample, kRewindLimitTicks + 1> rewindHistory;	// 틱 % 크기 자리. 한도 18틱 + 보간용 1칸
+			CAnimState anim;
+		};
+
+		// 몸 하나를 어느 시점 자세로 판정하나 — _bodies 와 같은 차례
+		struct BodyPoseRef
+		{
+			const Player* owner;
+			uint32_t tick;
+			float alpha;
+		};
+
+		// 이번 틱에 구해 둔 자세 — 연사가 겹쳐도 같은 대상 · 같은 시점은 한 번만 계산한다
+		struct CachedPose
+		{
+			uint32_t owner = 0;
+			uint32_t tick = 0;
+			float alpha = 0.f;
+			std::vector<BodyPose> bodies;
 		};
 
 		struct PendingShot
@@ -223,7 +264,11 @@ namespace mo
 		bool IsImmune(const Player& player) const;
 		Vec3 ResolveAimStart(const Player& player, const Vec3& locationBeforeMove, const Vec3& aim);
 		void RecordRewindSamples();
-		bool GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out) const;
+		bool GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out, float& outAlpha) const;
+		void UpdateAnimStates();
+		void MakeMoveInput(const Player& player, AnimMoveInput& out) const;
+		void PrepareBodyPoses(std::vector<BodyPlacement>& bodies, const std::vector<BodyPoseRef>& refs, const Vec3& start, const Vec3& end, double sweepRadius);
+		const BodyPose* GetPoseAt(const Player& owner, uint32_t tick, float alpha, bool countStats = true);
 		void ResolveShots();
 		void ResolveShot(const PendingShot& shot);
 		void HandleVictory(uint8_t team);
@@ -240,9 +285,9 @@ namespace mo
 		IRoomSender& _sender;
 		const uint32_t _roomId;
 		const RewindOptions _rewind;
+		const AnimOptions _anim;
 		CMoveSim _moveSim;
-		CSpreadRng _rng;
-		CSpreadRng _spawnRng;		// 탄 난수와 따로 — 시험 클라가 탄 난수를 그대로 따라갈 수 있게
+		CSpreadRng _spawnRng;		// 시작 자리 고르기 전용. 탄 방향은 입력 번호로 정해져(SpreadSeed) 서버에 탄 난수 상태가 없다
 		uint32_t _tick = 0;
 		uint32_t _nextPlayerId = 1;
 		wire::EMatchPhase _phase = wire::EMatchPhase::Waiting;
@@ -257,6 +302,16 @@ namespace mo
 		std::vector<BodyPlacement> _bodies;		// 사격 판정 때마다 다시 채운다 — 매번 할당하지 않으려고 멤버로 둔다
 		std::vector<BodyPlacement> _bodiesNow;	// --rewindShadow 일 때만 — 같은 탄을 현재 자리로 계산
 		std::vector<Player*> _bodyOwners;
+		bool _animReady = false;
+		CAnimPoseEvaluator _poseEvaluator;
+		CAnimState _animCodec;					// 받은 상태를 자세 입력으로 푸는 데만 쓴다 — 재생 상태는 안 쓴다
+		std::vector<BodyPoseRef> _bodyPoseRefs;
+		std::vector<BodyPoseRef> _bodyNowRefs;
+		std::vector<CachedPose> _poseCache;
+		size_t _poseCacheUsed = 0;
+		std::vector<BoneTransform> _localFrom;
+		std::vector<BoneTransform> _localTo;
+		std::vector<BoneTransform> _localBlend;
 		RoomResult _result;
 		RoomStats _stats;
 	};

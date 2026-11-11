@@ -211,6 +211,12 @@ namespace mo
 	// 난수 값만 다르고(엔진 FRand 는 재현 불가) 분포와 회전 순서는 같다
 	Vec3 SpreadDirection(const Vec3& aimDir, float spreadAngleDegrees, float multiplier, float exponent, CSpreadRng& rng);
 
+	// 탄 방향의 난수 시작값 — 서버와 화면이 입력 번호와 탄 번호로 각자 같은 값을 얻는다(D15). 방향을 주고받지 않는다
+	uint32_t SpreadSeed(uint32_t inputSeq, uint32_t bulletIndex);
+
+	// 시선(요 · 피치, 도) → 단위 방향. 서버가 사격에 쓰는 식 그대로
+	Vec3 AimDirection(float yawDegrees, float pitchDegrees);
+
 	// ─── 몸 판정 ───────────────────────────────────────────
 
 	enum class EBodyShape : uint8_t { Sphere, Sphyl, Box };
@@ -232,23 +238,32 @@ namespace mo
 
 	const BodyShape* GetBodyShapes(size_t& outCount);
 
+	struct BodyPose;
+	struct ClipBody;
+
 	struct BodyPlacement
 	{
 		Vec3 center;		// 캡슐 중심
 		double yawDegrees = 0;
 		uint32_t id = 0;	// 호출하는 쪽이 정한 번호
+		// 애니 자세(D32). 비어 있으면 서 있는 자세(GetBodyShapes)로 판정한다. 가리키는 값은 부른 쪽이 들고 있는다
+		const BodyPose* pose = nullptr;
+		const ClipBody* shapes = nullptr;
+		uint32_t shapeCount = 0;
+		bool skip = false;	// 이 탄이 몸 근처에도 안 온다 — 자세를 구하지 않고 건너뛴다
 	};
 
 	struct BodyHit
 	{
 		double time = 0;	// 0(시작)~1(끝)
 		Vec3 point;			// 맞은 점
-		uint32_t shape = 0;	// GetBodyShapes 번호
+		uint32_t shape = 0;	// GetBodyShapes 번호. 자세를 줬으면 ClipBody 번호
 		bool weakSpot = false;
 	};
 
 	// 고정 포즈 — 애니메이션이 없으므로 Lyra 화면과 다를 수 있다. 일치율은 Tools/WeaponCheck 가 잰다.
 	// radius > 0 이면 구 스윕. 상자는 면을 radius 만큼 밀어 근사한다(모서리에서 조금 넓다)
+	// body.pose 를 주면 고정 포즈 대신 그 자세로 판정한다
 	bool TraceBody(const BodyPlacement& body, const Vec3& start, const Vec3& end, double radius, BodyHit& out);
 
 	// ─── 한 발 ─────────────────────────────────────────────

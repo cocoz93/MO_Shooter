@@ -12,6 +12,12 @@
 // 3. 받은 알림으로 규칙을 검사한다: 무적 중 피해 · 대기·경기 뒤 피해 · 죽은 사람의 발사 · 처치 집계 ↔ 결과.
 //
 // 일부러 틀리기: --breakRecord 는 기록을, --breakMirror 는 여기 쪽 가속을 바꿔 비교가 실패해야 한다.
+// 판정 대조(후보 1, 7단계): --judgeClips=<클립 파일> --judgeLog=<파일> [--judgeNoSpread] 면 봇이 화면 역할을 한다.
+//   받은 상태로 서버와 같은 식의 몸 자세를 만들어 탄마다 자기 판정을 남긴다. 서버 --rewindBulletLog 줄과 Tools/Regress/check_bot_hits.py 로 견준다
+//   --judgeFireAlways 면 적이 안 보여도 방아쇠를 놓지 않는다(10명 전원 연사 비용 측정)
+#include "AnimClips.h"
+#include "AnimPose.h"
+#include "AnimState.h"
 #include "GameProtocol.h"
 #include "KillRecord.h"
 #include "MapCollision.h"
@@ -82,7 +88,55 @@ namespace
 		double measureFromSeconds = 0;
 		double measureSeconds = 0;
 		bool measureView = false;		// 되감기 측정 모드 — 꺼져 있으면 기존 시험과 같은 입력을 보낸다
+		std::string judgeClips;			// 주면 봇이 화면 역할로 탄마다 자기 판정을 남긴다(후보 1, 7단계). measureView 를 함께 켠다
+		std::string judgeLog;
+		bool judgeNoSpread = false;		// 서버 --rewindNoSpread 와 같이 쓴다 — 자세만 본다
+		bool judgeFireAlways = false;	// 비용 측정 — 적이 보이든 말든 방아쇠를 놓지 않는다(10명 전원 연사)
 	};
+
+	// 봇이 화면 역할로 쓰는 자세 계산. 봇들이 한 스레드에서 번갈아 쓰므로 한 벌만 둔다
+	struct JudgeShared
+	{
+		CAnimClips clips;
+		CAnimState codec;
+		CAnimPoseEvaluator evaluator;
+		std::vector<BoneTransform> localFrom, localTo, localBlend;
+		FILE* log = nullptr;
+		bool noSpread = false;
+		bool fireAlways = false;
+	};
+
+	constexpr const char* kJudgeBundle = "rifle";	// 서버 kAnimBundleName 과 같은 값
+
+	// 서버 Room.cpp NormalizeAxis 와 같은 식
+	float NormalizeAxis(float degrees)
+	{
+		float d = std::fmod(degrees, 360.f);
+		if (d > 180.f) d -= 360.f;
+		else if (d < -180.f) d += 360.f;
+		return d;
+	}
+
+	// 받은 상태의 꼬리에서 한 사람치를 읽는다(Lyra 다리 ReadAnimTail 과 같은 식). false = 꼬리가 없거나 잘렸다
+	bool ReadAnimTail(const char* data, int size, int& at, wire::AnimStateWire& out)
+	{
+		const int head = (int)wire::kAnimStateHeadSize;
+		if (at + head > size)
+		{
+			at = size;
+			return false;
+		}
+		std::memcpy(&out, data + at, head);
+		const int layerBytes = (int)sizeof(wire::AnimLayerWire) * out.layerCount;
+		if (out.layerCount > wire::kAnimLayersOnWire || at + head + layerBytes > size)
+		{
+			at = size;
+			return false;
+		}
+		std::memcpy(out.layers, data + at + head, layerBytes);
+		at += head + layerBytes;
+		return true;
+	}
 
 	// 대조군 — 서버 숫자가 멀쩡한데 이 값이 나쁘면 송신 쪽 문제다. 측정 구간에만 가리킨다
 	std::vector<float>* g_stateGapsMs = nullptr;
@@ -112,7 +166,7 @@ namespace
 	{
 	public:
 		CBot(const CMapCollision& map, CMoveSim& sim, const MatchRules& rules, uint32_t seed)
-			: _map(map), _rules(rules), _rng(seed), _self(sim, rules, MakeLyraMoveParams().maxWalkSpeed)
+			: _map(map), _rules(rules), _rng(seed), _self(sim, rules, MakeLyraMoveParams().maxWalkSpeed), _judgeRng(seed ^ 0x5A5A1234u)
 		{
 		}
 
@@ -146,12 +200,28 @@ namespace
 			Think(input);
 			_self.SetDebugMoveScale(breakMirror ? 0.999 : 1.0);
 			_self.AddInput(input);
+			if (_judge && _self.GetLastWeaponEvents().fired) JudgeShot(input, _self.GetLastWeaponEvents());
 			if (!_net.SendPacket(input, wire::Msg::C2S_INPUT)) _net.Close();
 		}
 
 		void Close() { _net.Close(); }
 
 		void SetMeasureView(bool on) { _measureView = on; }
+		void SetJudge(JudgeShared* judge)
+		{
+			_judge = judge;
+			if (!judge) return;
+			_judgeBodies.reserve(wire::kMaxPlayersInRoom);
+			_judgePoses.resize(wire::kMaxPlayersInRoom);
+			for (std::vector<BodyPose>& pose : _judgePoses) pose.resize(judge->evaluator.BodyCount());
+		}
+		uint64_t GetJudgeShots() const { return _judgeShots; }
+		uint64_t GetJudgeBullets() const { return _judgeBullets; }
+		uint64_t GetJudgeNoView() const { return _judgeNoView; }
+		uint64_t GetJudgeNoSnap() const { return _judgeNoSnap; }
+		uint64_t GetJudgeNoAnim() const { return _judgeNoAnim; }
+		uint64_t GetJudgeClamped() const { return _judgeClamped; }
+		uint64_t GetRecvBytes() const { return _recvBytes; }
 		uint64_t GetAckLagSum() const { return _ackLagSum; }
 		uint64_t GetAckLagSamples() const { return _ackLagSamples; }
 		uint32_t GetAckLagMax() const { return _ackLagMax; }
@@ -189,6 +259,7 @@ namespace
 
 		void OnPacket(const wire::Header& header, const char* data, int size)
 		{
+			_recvBytes += header.size;
 			switch ((wire::Msg)header.type)
 			{
 			case wire::Msg::S2C_WELCOME:
@@ -306,14 +377,18 @@ namespace
 			uint32_t stateTick = 0;
 			std::memcpy(&stateTick, data + offsetof(wire::State, tick), sizeof(stateTick));
 			if (_measureView) UpdateViewClock(stateTick);
+			_newestStateTick = stateTick;
 			uint8_t count = 0;
 			std::memcpy(&count, data + offsetof(wire::State, count), 1);
+			int tailAt = (int)offsetof(wire::State, players) + (int)sizeof(wire::PlayerState) * count;
 			for (int i = 0; i < count; ++i)
 			{
 				wire::PlayerState p;
 				std::memcpy(&p, data + offsetof(wire::State, players) + sizeof(wire::PlayerState) * i, sizeof(p));
 				_players[p.id] = p;
-				if (_measureView) _viewHistory[p.id].Add(p, stateTick);
+				wire::AnimStateWire anim;
+				const bool hasAnim = _judge && ReadAnimTail(data, size, tailAt, anim);
+				if (_measureView) _viewHistory[p.id].Add(p, stateTick, hasAnim ? &anim : nullptr);
 				if (p.id == _welcome.playerId)
 				{
 					CompareSelf(p);
@@ -406,6 +481,107 @@ namespace
 			}
 		}
 
+		// 머리나 몸통 둘레의 무작위 점을 겨눈다. 가운데만 쏘면 1틱 어긋나도 맞아서 틱 번호 버그를 못 본다.
+		// 71cm = 서 있는 Quinn 의 머리 중심 높이(game_vm3_server.txt 의 REWINDP bone=head, 70.6~71.3).
+		// 16cm = 머리 반지름 10.6 + 탄 반지름 5.5. 40cm = 몸통 · 팔 폭. 몸통 높이 10cm 는 캡슐 중심 근처(제 판단)
+		Vec3 JudgeAimOffset()
+		{
+			if (--_judgeAimHold <= 0)
+			{
+				_judgeAimHold = 8 + (int)(_judgeRng.NextFloat() * 16.f);
+				const bool head = _judgeRng.NextFloat() < 0.5f;
+				const double radius = head ? 16.0 : 40.0;
+				Vec3 p;
+				do
+				{
+					p = Vec3(_judgeRng.NextFloat() * 2.f - 1.f, _judgeRng.NextFloat() * 2.f - 1.f, _judgeRng.NextFloat() * 2.f - 1.f);
+				} while (Length(p) > 1.0);
+				_judgeAimOffset = p * radius + Vec3(0, 0, head ? 71.0 : 10.0);
+			}
+			return _judgeAimOffset;
+		}
+
+		// 화면 판정 — 서버 ResolveShot 과 같은 식(GetRewoundBody · GetPoseAt)으로 받은 상태에서 몸을 만들고 ResolveBullet 을 그대로 쓴다
+		void JudgeShot(const wire::Input& input, const WeaponEvents& fired)
+		{
+			if (input.viewTick == 0)
+			{
+				++_judgeNoView;
+				return;
+			}
+			JudgeShared& js = *_judge;
+			++_judgeShots;
+			_judgeBodies.clear();
+			_judgeSpeeds.clear();
+			for (const auto& entry : _viewHistory)
+			{
+				if (entry.first == _welcome.playerId || _judgeBodies.size() >= _judgePoses.size()) continue;
+				const ViewHistory::Snap* from = entry.second.Find(input.viewTick);
+				if (!from)
+				{
+					++_judgeNoSnap;
+					continue;
+				}
+				if (from->flags & wire::STATE_DEAD) continue;
+				if (!from->hasAnim)
+				{
+					++_judgeNoAnim;
+					continue;
+				}
+				BodyPlacement body;
+				body.center = from->at;
+				body.yawDegrees = from->yaw;
+				body.id = entry.first;
+				const ViewHistory::Snap* to = input.viewAlpha > 0.f ? entry.second.Find(input.viewTick + 1) : nullptr;
+				float poseAlpha = 0.f;
+				if (to && to->hasAnim && Length(to->at - from->at) <= wire::kRemoteTeleportDistance)
+				{
+					body.center = from->at + (to->at - from->at) * (double)input.viewAlpha;
+					body.yawDegrees = from->yaw + input.viewAlpha * NormalizeAxis(to->yaw - from->yaw);
+					poseAlpha = input.viewAlpha;
+				}
+
+				AnimPoseInput pose;
+				js.codec.FromWire(from->anim, from->pitch, pose);
+				js.evaluator.EvaluateLocal(pose, js.localFrom.data());
+				const BoneTransform* local = js.localFrom.data();
+				if (poseAlpha > 0.f)
+				{
+					AnimPoseInput nextPose;
+					js.codec.FromWire(to->anim, to->pitch, nextPose);
+					js.evaluator.EvaluateLocal(nextPose, js.localTo.data());
+					js.evaluator.BlendLocal(js.localFrom.data(), js.localTo.data(), poseAlpha, js.localBlend.data());
+					local = js.localBlend.data();
+				}
+				std::vector<BodyPose>& out = _judgePoses[_judgeBodies.size()];
+				js.evaluator.BodiesFromLocal(local, out.data());
+				body.pose = out.data();
+				body.shapes = js.clips.Bodies().data();
+				body.shapeCount = (uint32_t)js.clips.Bodies().size();
+				_judgeBodies.push_back(body);
+				_judgeSpeeds.push_back(from->speed);
+			}
+
+			const uint8_t weapon = _self.GetWeaponIndex();
+			const WeaponDef& def = GetWeaponDef((EWeapon)weapon);
+			const Vec3 start((double)input.aimX, (double)input.aimY, (double)input.aimZ);
+			const Vec3 aim = AimDirection(input.yaw, input.pitch);
+			const int count = std::min(def.bulletsPerCartridge, (int32_t)wire::kMaxBulletsInShot);
+			for (int i = 0; i < count; ++i)
+			{
+				CSpreadRng bulletRng(SpreadSeed(input.seq, (uint32_t)i));
+				Vec3 dir = SpreadDirection(aim, fired.spreadAngle, fired.spreadMultiplier, def.spreadExponent, bulletRng);
+				if (js.noSpread) dir = aim;
+				BulletResult result;
+				ResolveBullet(_map, _judgeBodies.data(), _judgeBodies.size(), start, start + dir * (double)def.maxDamageRange, def.sweepRadius, result);
+				++_judgeBullets;
+				if (!js.log) continue;
+				const bool hitBody = result.kind == EBulletHit::Body;
+				std::fprintf(js.log, "BOTSHOT seq=%u shooter=%u i=%d weapon=%u kind=%d target=%u weak=%d viewTick=%u alpha=%.4f speed=%.1f\n", input.seq, _welcome.playerId, i, (unsigned)weapon, (int)result.kind,
+					hitBody ? _judgeBodies[result.bodyIndex].id : 0u, hitBody && result.weakSpot ? 1 : 0, input.viewTick, input.viewAlpha, hitBody ? _judgeSpeeds[result.bodyIndex] : 0.f);
+			}
+		}
+
 		// 두뇌 — 가장 가까운 산 적을 보고 쏘며 다가간다. 길찾기가 없어 막히면 무작위로 돌아간다
 		void Think(wire::Input& input)
 		{
@@ -414,7 +590,13 @@ namespace
 
 			if (_measureView && _hasViewClock)
 			{
-				const double renderTick = std::chrono::duration<double>(Clock::now().time_since_epoch()).count() * wire::kTickRate + _viewClockOffset - kViewDelayTicks;
+				double renderTick = std::chrono::duration<double>(Clock::now().time_since_epoch()).count() * wire::kTickRate + _viewClockOffset - kViewDelayTicks;
+				if (_judge && renderTick > (double)_newestStateTick)
+				{
+					// Lyra 다리의 bViewClamp 와 같은 식 — 상태가 늦으면 화면은 마지막 받은 자리에 서 있고, 보고하는 시점도 거기까지다
+					renderTick = (double)_newestStateTick;
+					++_judgeClamped;
+				}
 				BuildShownPlayers(renderTick);
 				const double whole = std::floor(renderTick);
 				input.viewTick = renderTick >= 1.0 ? (uint32_t)whole : 0;
@@ -442,7 +624,7 @@ namespace
 			if (enemy)
 			{
 				const Vec3 target(enemy->x, enemy->y, enemy->z);
-				const Vec3 d = target - eye;
+				const Vec3 d = (_judge ? target + JudgeAimOffset() : target) - eye;
 				const double error = _measureView ? 0.0 : 2.0;	// 도 — 사람 흉내가 아니라 전부 머리에 맞지 않게. 측정은 본 자리를 그대로 조준해 빗나감을 무기 퍼짐으로만 남긴다
 				yaw = (float)(std::atan2(d.y, d.x) * 180.0 / kPi + (_rng.NextFloat() - 0.5f) * error);
 				pitch = (float)(std::atan2(d.z, std::sqrt(d.x * d.x + d.y * d.y)) * 180.0 / kPi + (_rng.NextFloat() - 0.5f) * error);
@@ -514,7 +696,7 @@ namespace
 				input.buttons |= wire::BUTTON_RELOAD;
 			}
 			// 죽어 있어도 방아쇠를 놓지 않는다 — 서버가 거절하는지 보려고. 대기 중에도 쏜다 — 피해 0 인지 보려고
-			if (canShoot || _self.IsWaitingSpawn()) input.buttons |= wire::BUTTON_FIRE;
+			if (canShoot || _self.IsWaitingSpawn() || (_judge && _judge->fireAlways)) input.buttons |= wire::BUTTON_FIRE;
 		}
 
 		const CMapCollision& _map;
@@ -560,16 +742,35 @@ namespace
 				uint32_t tick = 0;
 				Vec3 at;
 				uint8_t flags = 0;
+				float yaw = 0, pitch = 0, speed = 0;
+				bool hasAnim = false;
+				wire::AnimStateWire anim;
 			};
 			std::array<Snap, kSnaps> snaps;
 			uint32_t count = 0;
-			void Add(const wire::PlayerState& p, uint32_t tick)
+			void Add(const wire::PlayerState& p, uint32_t tick, const wire::AnimStateWire* anim)
 			{
 				Snap& s = snaps[count % kSnaps];
 				s.tick = tick;
 				s.at = Vec3(p.x, p.y, p.z);
 				s.flags = p.flags;
+				s.yaw = p.yaw;
+				s.pitch = p.pitch;
+				s.speed = (float)std::sqrt(p.vx * p.vx + p.vy * p.vy);
+				s.hasAnim = anim != nullptr;
+				if (anim) s.anim = *anim;
 				++count;
+			}
+			const Snap* Find(uint32_t tick) const
+			{
+				const uint32_t available = std::min<uint32_t>(count, kSnaps);
+				for (uint32_t back = 0; back < available; ++back)
+				{
+					const Snap& s = snaps[(count - 1 - back) % kSnaps];
+					if (s.tick == tick) return &s;
+					if (s.tick < tick) break;
+				}
+				return nullptr;
 			}
 		};
 		static constexpr double kViewDelayTicks = 6.0;	// Lyra 다리 kRemoteDelayTicks 와 같은 값(0.1초)
@@ -578,6 +779,15 @@ namespace
 		double _viewClockOffset = 0;
 		std::map<uint32_t, ViewHistory> _viewHistory;
 		std::map<uint32_t, wire::PlayerState> _shownPlayers;
+		uint32_t _newestStateTick = 0;
+		JudgeShared* _judge = nullptr;
+		CSpreadRng _judgeRng;
+		int _judgeAimHold = 0;
+		Vec3 _judgeAimOffset;
+		std::vector<BodyPlacement> _judgeBodies;
+		std::vector<float> _judgeSpeeds;
+		std::vector<std::vector<BodyPose>> _judgePoses;
+		uint64_t _judgeShots = 0, _judgeBullets = 0, _judgeNoView = 0, _judgeNoSnap = 0, _judgeNoAnim = 0, _judgeClamped = 0, _recvBytes = 0;
 		uint64_t _ackLagSum = 0, _ackLagSamples = 0;
 		uint32_t _ackLagMax = 0;
 
@@ -611,6 +821,10 @@ namespace
 			else if (value("--seconds=", v)) out.seconds = std::atof(v.c_str());
 			else if (value("--measureFrom=", v)) out.measureFromSeconds = std::atof(v.c_str());
 			else if (value("--measureSeconds=", v)) out.measureSeconds = std::atof(v.c_str());
+			else if (value("--judgeClips=", v)) { out.judgeClips = v; out.measureView = true; }
+			else if (value("--judgeLog=", v)) out.judgeLog = v;
+			else if (s == "--judgeNoSpread") out.judgeNoSpread = true;
+			else if (s == "--judgeFireAlways") out.judgeFireAlways = true;
 			else if (s == "--measureView") out.measureView = true;
 			else if (s == "--breakRecord") out.breakRecord = true;
 			else if (s == "--breakMirror") out.breakMirror = true;
@@ -643,11 +857,39 @@ int main(int argc, char** argv)
 	CMoveSim sim(map, params);	// 틱 사이에 들고 가는 것이 MoveState 뿐이라 봇끼리 나눠 쓴다
 	const MatchRules rules;
 
+	JudgeShared judge;
+	const bool judging = !args.judgeClips.empty();
+	if (judging)
+	{
+		FILE* file = std::fopen(args.judgeClips.c_str(), "rb");
+		std::vector<char> data;
+		if (file)
+		{
+			std::fseek(file, 0, SEEK_END);
+			data.resize((size_t)std::ftell(file));
+			std::fseek(file, 0, SEEK_SET);
+			if (std::fread(data.data(), 1, data.size(), file) != data.size()) data.clear();
+			std::fclose(file);
+		}
+		if (data.empty() || judge.clips.LoadFromMemory(data.data(), data.size()) != EClipLoad::Ok || !judge.evaluator.Init(judge.clips, kJudgeBundle) || !judge.codec.Init(judge.clips, kJudgeBundle))
+		{
+			std::printf("클립 파일을 읽지 못함 %s\n", args.judgeClips.c_str());
+			return 2;
+		}
+		judge.localFrom.resize(judge.evaluator.BoneCount());
+		judge.localTo.resize(judge.evaluator.BoneCount());
+		judge.localBlend.resize(judge.evaluator.BoneCount());
+		judge.noSpread = args.judgeNoSpread;
+		judge.fireAlways = args.judgeFireAlways;
+		if (!args.judgeLog.empty()) judge.log = std::fopen(args.judgeLog.c_str(), "w");
+	}
+
 	std::vector<std::unique_ptr<CBot>> bots;
 	for (int i = 0; i < args.bots; ++i)
 	{
 		bots.emplace_back(new CBot(map, sim, rules, args.seed + 100 + (uint32_t)i));
 		bots.back()->SetMeasureView(args.measureView);
+		bots.back()->SetJudge(judging ? &judge : nullptr);
 		if (!bots.back()->Connect(args.port))
 		{
 			std::printf("BOT %d 접속 실패\n", i);
@@ -733,6 +975,22 @@ int main(int argc, char** argv)
 			ammoDiff += bot->GetAmmoDiff();
 			flagDiff += bot->GetFlagDiff();
 			states += bot->GetStates();
+		}
+		if (judging)
+		{
+			uint64_t shots = 0, bullets = 0, noView = 0, noSnap = 0, noAnim = 0, clamped = 0, recvBytes = 0;
+			for (const std::unique_ptr<CBot>& bot : bots)
+			{
+				shots += bot->GetJudgeShots();
+				bullets += bot->GetJudgeBullets();
+				noView += bot->GetJudgeNoView();
+				noSnap += bot->GetJudgeNoSnap();
+				noAnim += bot->GetJudgeNoAnim();
+				clamped += bot->GetJudgeClamped();
+				recvBytes += bot->GetRecvBytes();
+			}
+			if (judge.log) std::fclose(judge.log);
+			std::printf("JUDGE shots=%llu bullets=%llu noView=%llu noSnap=%llu noAnim=%llu clampedThinks=%llu recvBytesPerBotPerSec=%.0f\n", (unsigned long long)shots, (unsigned long long)bullets, (unsigned long long)noView, (unsigned long long)noSnap, (unsigned long long)noAnim, (unsigned long long)clamped, (double)recvBytes / (double)bots.size() / args.seconds);
 		}
 		uint64_t ackLagSum = 0, ackLagSamples = 0;
 		uint32_t ackLagMax = 0;

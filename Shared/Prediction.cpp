@@ -27,6 +27,7 @@ namespace mo
 		slot.input = input;
 		slot.seq = input.seq;
 		slot.valid = false;
+		_lastWeaponEvents = WeaponEvents();
 		if (_waitingSpawn) return;
 		Equip(input);
 		ApplyMove(input);
@@ -151,7 +152,8 @@ namespace mo
 		// 서버와 같은 순서(Room.cpp ApplyInput)
 		_fireGate.NextInput();
 		if (weaponInput.fireHeld && _fireGate.IsBlocked((EWeapon)_weapon, _weapons[_weapon].IsFireActive())) weaponInput.fireHeld = false;
-		if (_weapons[_weapon].Tick(kTick, weaponInput, motion).fired) _fireGate.OnFired((EWeapon)_weapon, _weapons[_weapon].GetDef(), kTick);
+		_lastWeaponEvents = _weapons[_weapon].Tick(kTick, weaponInput, motion);
+		if (_lastWeaponEvents.fired) _fireGate.OnFired((EWeapon)_weapon, _weapons[_weapon].GetDef(), kTick);
 	}
 
 	void CSelfPrediction::RememberMove(Slot& slot) const
