@@ -10,7 +10,7 @@ param(
     [int]$TimeoutSec = 590
 )
 # Records weapon table, damage samples, scripted firing, real hits and body rays to Saved/MOB/weaponrec_<Tag>.csv (answer sheet for Tools/WeaponCheck).
-$proj = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue   = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $out  = "$proj\Saved\MOB"
 New-Item -ItemType Directory -Force $out | Out-Null

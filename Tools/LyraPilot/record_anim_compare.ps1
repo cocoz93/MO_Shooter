@@ -19,7 +19,7 @@ param(
 # -Script startstop records starts, stops and direction reversals in four directions (third look, start-stop-pivot-test.md).
 # -Transitions (with -Simple) also puts the start, stop and reversal clips into the plain blend.
 # -Probe also writes animcmp_<Tag>_probe.csv: per frame anim blueprint variables, state machine states, curves and body-space bone positions.
-$proj = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue   = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $out  = "$proj\Saved\MOB"
 New-Item -ItemType Directory -Force $out | Out-Null

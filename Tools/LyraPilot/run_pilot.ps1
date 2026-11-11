@@ -8,7 +8,7 @@ param(
 )
 $resX, $resY = $Res -split 'x'
 # Runs pilot server + Lyra (-game, offscreen) once, then collects MOB_ lines.
-$proj   = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue     = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $srvExe = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Tools\LyraPilot\build\Release\LyraPilot.exe'
 $outDir = "$proj\Saved\MOB"

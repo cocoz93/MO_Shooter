@@ -4,7 +4,7 @@ param(
     [int]$TimeoutSec = 240
 )
 # Runs Lyra once (-game, offscreen) with the same input script and prints MOB_LOCAL lines.
-$proj = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue   = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $out  = "$proj\Saved\MOB"
 New-Item -ItemType Directory -Force $out | Out-Null

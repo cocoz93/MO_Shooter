@@ -9,7 +9,7 @@ param(
 )
 # Runs match server + optional bots + Lyra (-game, offscreen) once, then prints MOB_ lines and the server result lines.
 $resX, $resY = $Res -split 'x'
-$proj   = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue     = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $repo   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter'
 $srvExe = "$repo\build\Server\Release\Server.exe"

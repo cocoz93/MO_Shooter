@@ -8,7 +8,7 @@ param(
 # Stands Lyra's two stock bodies (Manny, Quinn) side by side and takes four stills: front, front + hit shapes, side, side + hit shapes.
 # Needs the MOBridge plugin mode -MOBBodyShot (MOBBodyShotSubsystem). Borrows the bodies of two bots, so the map URL carries NumBots=2.
 # Results: Saved\MOB\bodyshot_<Tag>_<n>_<name>.bgra (raw stills) -> make_body_shot.py -> Saved\MOB\bodyshot_<Tag>.png
-$proj = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue   = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $out  = "$proj\Saved\MOB"
 New-Item -ItemType Directory -Force $out | Out-Null

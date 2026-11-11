@@ -4,7 +4,7 @@
 //
 //  ★ 두 벌이다. 같은 내용이
 //      MO_Shooter/Tools/LyraPilot/PilotProtocol.h          (파일럿 서버)
-//      LyraStarterGame/Plugins/MOBridge/Source/MOBridge/Private/PilotProtocol.h  (Lyra 쪽)
+//      MO_Shooter/Client/Lyra/Plugins/MOBridge/Source/MOBridge/Private/PilotProtocol.h  (Lyra 쪽)
 //    에 있다. 한쪽을 고치면 다른 쪽도 똑같이 고칠 것 — 파일럿이라 공용 폴더를 만들지 않았다.
 //
 //  머리말 = ServerCore 의 MsgHeader 와 같은 4바이트(size = 머리말 포함 전체, type).

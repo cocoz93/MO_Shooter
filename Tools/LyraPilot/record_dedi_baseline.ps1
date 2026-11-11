@@ -10,7 +10,7 @@ param(
 # The server moves its bot along the same script as the look test; server and client both write the bot's 22 hit shapes.
 # -Script startstop | aimjump | run. -LagMs and -JitterMs are added to each direction by the engine's packet simulation.
 # Results: Saved\MOB\dedi_<Tag>_server.csv and dedi_<Tag>_client.csv, compared by check_dedi_baseline.py.
-$proj = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue   = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $out  = "$proj\Saved\MOB"
 New-Item -ItemType Directory -Force $out | Out-Null

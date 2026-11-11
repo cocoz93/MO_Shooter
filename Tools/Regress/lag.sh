@@ -14,7 +14,7 @@ done
 [ -n "$OUT" ] || OUT="$BIN/regress/lag_$(date +%H%M%S)"
 mkdir -p "$OUT"
 OUT_W="$(cygpath -m "$OUT")"
-MAP="C:/Users/USER/Documents/Unreal Projects/LyraStarterGame/Saved/MOB/map_expanse.mocl"
+MAP="C:/Users/USER/Desktop/MyGit/MO_Shooter/Client/Lyra/Saved/MOB/map_expanse.mocl"
 SRV="$BIN/Server/Release/Server.exe"; BOT="$BIN/BotClient/Release/BotClient.exe"; RELAY="$BIN/Tools/LagRelay/Release/LagRelay.exe"
 FAILS=0; PORT=7810
 for d in 0 50 100 150; do

@@ -19,7 +19,7 @@ done
 [ -n "$OUT" ] || OUT="$BIN/regress/edge_$(date +%H%M%S)"
 mkdir -p "$OUT"
 
-MAP="C:/Users/USER/Documents/Unreal Projects/LyraStarterGame/Saved/MOB/map_expanse.mocl"
+MAP="C:/Users/USER/Desktop/MyGit/MO_Shooter/Client/Lyra/Saved/MOB/map_expanse.mocl"
 SRV="$BIN/Server/Release/Server.exe"
 BOT="$BIN/BotClient/Release/BotClient.exe"
 EDGE="$BIN/Tools/EdgeProbe/Release/EdgeProbe.exe"

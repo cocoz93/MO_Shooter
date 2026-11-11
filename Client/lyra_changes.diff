@@ -1,7 +1,7 @@
 diff --git a/Source/LyraGame/AbilitySystem/Abilities/LyraGameplayAbility_Reset.cpp b/Source/LyraGame/AbilitySystem/Abilities/LyraGameplayAbility_Reset.cpp
 index bdf4730..33681c0 100644
 --- a/Source/LyraGame/AbilitySystem/Abilities/LyraGameplayAbility_Reset.cpp	
-+++ b/Source/LyraGame/AbilitySystem/Abilities/LyraGameplayAbility_Reset.cpp	
++++ b/Source/LyraGame/AbilitySystem/Abilities/LyraGameplayAbility_Reset.cpp
 @@ -9,6 +9,11 @@
  
  #include UE_INLINE_GENERATED_CPP_BY_NAME(LyraGameplayAbility_Reset)
@@ -31,7 +31,7 @@ index bdf4730..33681c0 100644
 diff --git a/Source/LyraGame/AbilitySystem/Executions/LyraDamageExecution.cpp b/Source/LyraGame/AbilitySystem/Executions/LyraDamageExecution.cpp
 index 41f11e3..31a43b9 100644
 --- a/Source/LyraGame/AbilitySystem/Executions/LyraDamageExecution.cpp	
-+++ b/Source/LyraGame/AbilitySystem/Executions/LyraDamageExecution.cpp	
++++ b/Source/LyraGame/AbilitySystem/Executions/LyraDamageExecution.cpp
 @@ -27,6 +27,12 @@ static FDamageStatics& DamageStatics()
  	return Statics;
  }
@@ -62,7 +62,7 @@ index 41f11e3..31a43b9 100644
 diff --git a/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h b/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h
 index fd082c0..ec3447d 100644
 --- a/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h	
-+++ b/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h	
++++ b/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h
 @@ -31,7 +31,7 @@ struct FLyraGameplayEffectContext : public FGameplayEffectContext
  	static LYRAGAME_API FLyraGameplayEffectContext* ExtractEffectContext(struct FGameplayEffectContextHandle Handle);
  
@@ -75,7 +75,7 @@ index fd082c0..ec3447d 100644
 diff --git a/Source/LyraGame/AbilitySystem/Phases/LyraGamePhaseSubsystem.h b/Source/LyraGame/AbilitySystem/Phases/LyraGamePhaseSubsystem.h
 index 6d03558..f46bf66 100644
 --- a/Source/LyraGame/AbilitySystem/Phases/LyraGamePhaseSubsystem.h	
-+++ b/Source/LyraGame/AbilitySystem/Phases/LyraGamePhaseSubsystem.h	
++++ b/Source/LyraGame/AbilitySystem/Phases/LyraGamePhaseSubsystem.h
 @@ -43,7 +43,7 @@ enum class EPhaseTagMatchType : uint8
   *     Game.Playing will remain active, while Game.Playing.CaptureTheFlag will end.
   */
@@ -88,7 +88,7 @@ index 6d03558..f46bf66 100644
 diff --git a/Source/LyraGame/Character/LyraCharacterMovementComponent.cpp b/Source/LyraGame/Character/LyraCharacterMovementComponent.cpp
 index 4be612b..96850a2 100644
 --- a/Source/LyraGame/Character/LyraCharacterMovementComponent.cpp	
-+++ b/Source/LyraGame/Character/LyraCharacterMovementComponent.cpp	
++++ b/Source/LyraGame/Character/LyraCharacterMovementComponent.cpp
 @@ -51,6 +51,56 @@ void ULyraCharacterMovementComponent::InitializeComponent()
  	Super::InitializeComponent();
  }
@@ -149,7 +149,7 @@ index 4be612b..96850a2 100644
 diff --git a/Source/LyraGame/Character/LyraCharacterMovementComponent.h b/Source/LyraGame/Character/LyraCharacterMovementComponent.h
 index 0632a3e..b27aa08 100644
 --- a/Source/LyraGame/Character/LyraCharacterMovementComponent.h	
-+++ b/Source/LyraGame/Character/LyraCharacterMovementComponent.h	
++++ b/Source/LyraGame/Character/LyraCharacterMovementComponent.h
 @@ -63,6 +63,13 @@ public:
  
  	UE_API void SetReplicatedAcceleration(const FVector& InAcceleration);
@@ -179,7 +179,7 @@ index 0632a3e..b27aa08 100644
 diff --git a/Source/LyraGame/Equipment/LyraQuickBarComponent.h b/Source/LyraGame/Equipment/LyraQuickBarComponent.h
 index 1c3d15b..ed4beab 100644
 --- a/Source/LyraGame/Equipment/LyraQuickBarComponent.h	
-+++ b/Source/LyraGame/Equipment/LyraQuickBarComponent.h	
++++ b/Source/LyraGame/Equipment/LyraQuickBarComponent.h
 @@ -14,7 +14,7 @@ class UObject;
  struct FFrame;
  
@@ -192,7 +192,7 @@ index 1c3d15b..ed4beab 100644
 diff --git a/Source/LyraGame/GameModes/LyraGameMode.cpp b/Source/LyraGame/GameModes/LyraGameMode.cpp
 index 50535a2..4d385a8 100644
 --- a/Source/LyraGame/GameModes/LyraGameMode.cpp	
-+++ b/Source/LyraGame/GameModes/LyraGameMode.cpp	
++++ b/Source/LyraGame/GameModes/LyraGameMode.cpp
 @@ -30,6 +30,11 @@
  
  #include UE_INLINE_GENERATED_CPP_BY_NAME(LyraGameMode)
@@ -222,7 +222,7 @@ index 50535a2..4d385a8 100644
 diff --git a/Source/LyraGame/Inventory/LyraInventoryItemInstance.h b/Source/LyraGame/Inventory/LyraInventoryItemInstance.h
 index 88365e2..c4c1de8 100644
 --- a/Source/LyraGame/Inventory/LyraInventoryItemInstance.h	
-+++ b/Source/LyraGame/Inventory/LyraInventoryItemInstance.h	
++++ b/Source/LyraGame/Inventory/LyraInventoryItemInstance.h
 @@ -18,7 +18,7 @@ struct FGameplayTag;
   * ULyraInventoryItemInstance
   */
@@ -235,7 +235,7 @@ index 88365e2..c4c1de8 100644
 diff --git a/Source/LyraGame/Messages/LyraVerbMessage.h b/Source/LyraGame/Messages/LyraVerbMessage.h
 index be15f18..23f90dc 100644
 --- a/Source/LyraGame/Messages/LyraVerbMessage.h	
-+++ b/Source/LyraGame/Messages/LyraVerbMessage.h	
++++ b/Source/LyraGame/Messages/LyraVerbMessage.h
 @@ -9,7 +9,7 @@
  
  // Represents a generic message of the form Instigator Verb Target (in Context, with Magnitude)
@@ -255,7 +255,7 @@ index be15f18..23f90dc 100644
 diff --git a/Source/LyraGame/System/LyraDevelopmentStatics.cpp b/Source/LyraGame/System/LyraDevelopmentStatics.cpp
 index 47cf2ef..346deb1 100644
 --- a/Source/LyraGame/System/LyraDevelopmentStatics.cpp	
-+++ b/Source/LyraGame/System/LyraDevelopmentStatics.cpp	
++++ b/Source/LyraGame/System/LyraDevelopmentStatics.cpp
 @@ -13,8 +13,17 @@
  
  #include UE_INLINE_GENERATED_CPP_BY_NAME(LyraDevelopmentStatics)
@@ -277,7 +277,7 @@ index 47cf2ef..346deb1 100644
 diff --git a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp
 index 1ccf483..370ebaf 100644
 --- a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp	
-+++ b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp	
++++ b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp
 @@ -379,6 +379,8 @@ void ULyraGameplayAbility_RangedWeapon::PerformLocalTargeting(OUT TArray<FHitRes
  	}
  }
@@ -303,7 +303,7 @@ index 1ccf483..370ebaf 100644
 diff --git a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h
 index f1b56ba..bf876ff 100644
 --- a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h	
-+++ b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h	
++++ b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h
 @@ -120,4 +120,8 @@ protected:
  
  private:
@@ -316,7 +316,7 @@ index f1b56ba..bf876ff 100644
 diff --git a/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h b/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h
 index a2fa9f9..c0ca42d 100644
 --- a/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h	
-+++ b/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h	
++++ b/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h
 @@ -17,7 +17,7 @@ class UPhysicalMaterial;
   * A piece of equipment representing a ranged weapon spawned and applied to a pawn
   */
@@ -329,7 +329,7 @@ index a2fa9f9..c0ca42d 100644
 diff --git a/Source/LyraGame/Weapons/LyraWeaponStateComponent.h b/Source/LyraGame/Weapons/LyraWeaponStateComponent.h
 index c3ddfb1..f6350d4 100644
 --- a/Source/LyraGame/Weapons/LyraWeaponStateComponent.h	
-+++ b/Source/LyraGame/Weapons/LyraWeaponStateComponent.h	
++++ b/Source/LyraGame/Weapons/LyraWeaponStateComponent.h
 @@ -38,7 +38,7 @@ struct FLyraServerSideHitMarkerBatch
  
  // Tracks weapon state and recent confirmed hit markers to display on screen

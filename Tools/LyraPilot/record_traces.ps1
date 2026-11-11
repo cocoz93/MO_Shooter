@@ -8,7 +8,7 @@ param(
 )
 # Runs Lyra once (-game, offscreen): dumps map collision and records the same rays/capsules with Lyra physics.
 # Output: Saved/MOB/map_<Tag>.mocl, trace_<Tag>.csv, tracerun_<Tag>.log
-$proj = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue   = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $out  = "$proj\Saved\MOB"
 New-Item -ItemType Directory -Force $out | Out-Null

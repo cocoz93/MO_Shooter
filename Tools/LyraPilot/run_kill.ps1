@@ -6,7 +6,7 @@ param(
     [int]$Bots = 9
 )
 # Kills the server or Lyra mid-match on purpose and reports who is left. Judges only crashes and exit codes, never time.
-$proj   = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue     = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $repo   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter'
 $outDir = "$proj\Saved\MOB"

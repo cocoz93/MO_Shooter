@@ -11,7 +11,7 @@ param(
 # Runs match server + two Lyra clients (-game) + bots once. Lyras go first so both get a seat before bots fill the room.
 # Results: Saved\MOB\game2_<Tag>_*. Compare them with check_game2.py.
 $resX, $resY = $Res -split 'x'
-$proj   = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue     = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $repo   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter'
 $srvExe = "$repo\build\Server\Release\Server.exe"

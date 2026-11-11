@@ -26,7 +26,7 @@ done
 [ -n "$OUT" ] || OUT="$BIN/regress/$(date +%H%M%S)"
 mkdir -p "$OUT"
 
-DATA="C:/Users/USER/Documents/Unreal Projects/LyraStarterGame/Saved/MOB"
+DATA="C:/Users/USER/Desktop/MyGit/MO_Shooter/Client/Lyra/Saved/MOB"
 MAP="$DATA/map_expanse.mocl"
 SRV="$BIN/Server/Release/Server.exe"
 BOT="$BIN/BotClient/Release/BotClient.exe"

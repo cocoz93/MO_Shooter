@@ -10,7 +10,7 @@ param(
 )
 # Replays a fixed random input on Lyra movement and writes Saved/MOB/move_<Tag>.csv (answer sheet for Tools/MoveCheck).
 # Default = fixed 60 Hz frames. -FreeDt = let the frame time vary.
-$proj = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue   = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $out  = "$proj\Saved\MOB"
 New-Item -ItemType Directory -Force $out | Out-Null

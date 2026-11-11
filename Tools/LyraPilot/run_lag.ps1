@@ -10,7 +10,7 @@ param(
     [string]$LyraExtra = ''
 )
 # One Lyra (no rendering) + bots, everyone through Tools/LagRelay. Judges only whether the match breaks; the sent-ack gap proves the delay is real.
-$proj   = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue     = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $repo   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter'
 $outDir = "$proj\Saved\MOB"

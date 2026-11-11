@@ -12,7 +12,7 @@ param(
 	[int]$Port = 7951,
 	[string]$Tag = "",
 	[string]$OutDir = "",
-	[string]$Map = "$env:USERPROFILE\Documents\Unreal Projects\LyraStarterGame\Saved\MOB\map_expanse.mocl"
+	[string]$Map = "$env:USERPROFILE\Desktop\MyGit\MO_Shooter\Client\Lyra\Saved\MOB\map_expanse.mocl"
 )
 $ErrorActionPreference = 'Stop'
 

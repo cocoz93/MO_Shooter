@@ -5,7 +5,7 @@ param(
     [string]$Out = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\build\regress\soak'
 )
 # Runs short matches one after another on one server and samples memory, handles and threads after each. Counts only, no timing verdicts.
-$map = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame\Saved\MOB\map_expanse.mocl'
+$map = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra\Saved\MOB\map_expanse.mocl'
 New-Item -ItemType Directory -Force $Out | Out-Null
 $srv = Start-Process -FilePath "$Bin\Server\Release\Server.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", "--duration=$($Rounds * 28 + 30)", '--warmup=1', '--matchSeconds=5', '--seed=61') -RedirectStandardOutput "$Out\srv.log" -RedirectStandardError "$Out\srv.err" -PassThru -WindowStyle Hidden
 $null = $srv.Handle   # without this ExitCode stays empty after the process ends

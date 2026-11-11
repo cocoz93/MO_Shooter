@@ -6,7 +6,7 @@ param(
     [string]$ExtraArgs = ''
 )
 # Runs Lyra once (-game, offscreen) and dumps the map collision to Saved/MOB/map_<Tag>.mocl
-$proj = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue   = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $out  = "$proj\Saved\MOB"
 New-Item -ItemType Directory -Force $out | Out-Null

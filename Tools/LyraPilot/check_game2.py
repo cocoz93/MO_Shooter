@@ -6,7 +6,7 @@ import re
 import sys
 import pathlib
 
-DEFAULT_DIR = r"C:\Users\USER\Documents\Unreal Projects\LyraStarterGame\Saved\MOB"
+DEFAULT_DIR = r"C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra\Saved\MOB"
 
 
 def read(path):

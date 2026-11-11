@@ -7,8 +7,8 @@ public class MOBridge : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		// Shared code lives in the MO_Shooter repo, not here: server, bots and this plugin build the same files (MOBShared*.cpp wrappers).
-		string SharedDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../../../../../../Desktop/MyGit/MO_Shooter/Shared"));
+		// Shared code lives at the MO_Shooter repo root, not in this plugin: server, bots and this plugin build the same files (MOBShared*.cpp wrappers).
+		string SharedDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../../../../../Shared"));
 		if (!Directory.Exists(SharedDir)) throw new BuildException("MO_Shooter/Shared not found: " + SharedDir);
 		PrivateIncludePaths.Add(SharedDir);
 		bUseUnity = false;	// each Shared .cpp has its own anonymous-namespace names

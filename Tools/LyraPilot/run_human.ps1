@@ -9,7 +9,7 @@ param(
 # One human game: match server + windowed Lyra (keyboard and mouse) + bots. Bots join once Lyra is welcomed.
 # Results: Saved\MOB\game_<Tag>_*. Ends when the Lyra window is closed.
 $resX, $resY = $Res -split 'x'
-$proj   = 'C:\Users\USER\Documents\Unreal Projects\LyraStarterGame'
+$proj   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue     = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
 $repo   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter'
 $outDir = "$proj\Saved\MOB"
