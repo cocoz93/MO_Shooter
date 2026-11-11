@@ -1,6 +1,7 @@
 ﻿#include "MOBSimpleAnimInstance.h"
 
 #include "Animation/AnimNodeBase.h"
+#include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimationPoseData.h"
 #include "Animation/BlendSpace.h"
@@ -18,6 +19,11 @@
 #include "Misc/Parse.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/SkeletalBodySetup.h"
+#include "Engine/SkeletalMesh.h"
+#include "Cosmetics/LyraCharacterPartTypes.h"
+
+#include "AnimClips.h"
+#include "AnimPose.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(MOBSimpleAnimInstance)
 
@@ -117,6 +123,76 @@ namespace
 	constexpr float GROUND_TRACE_DISTANCE = 100000.f;	// 땅까지 거리를 재는 선 길이 — Lyra GetGroundInfo 와 같은 값
 	constexpr int32 LAND_TABLE_HZ = 120;		// 착지 클립 거리 곡선을 뽑는 간격
 
+	// 출발 · 멈춤 · 돌아서기(-MOBSimpleTransitions) — Lyra 원본 실행값에서 읽은 값(animcmp_ssp_lyra_probe.csv, 11-10 · 60프레임 · 네 방향).
+	// 넘어가는 때는 그 순간 나가는 클립의 시각으로 적었다. 네 칸의 차례 = 앞 · 뒤 · 왼쪽 · 오른쪽
+	enum ETransitionKind { TRANSITION_START, TRANSITION_STOP, TRANSITION_PIVOT };
+	enum EDirection { DIR_FWD, DIR_BWD, DIR_LEFT, DIR_RIGHT };
+	const TCHAR* const TRANSITION_KINDS[] = { TEXT("Start"), TEXT("Stop"), TEXT("Pivot") };
+	const TCHAR* const DIRECTION_NAMES[] = { TEXT("Fwd"), TEXT("Bwd"), TEXT("Left"), TEXT("Right") };
+	const FName TRANSITION_DISTANCE_CURVE(TEXT("Distance"));	// 클립마다 든 거리 곡선. 시작 · 멈춤 지점이 0 이고 그전은 음수다
+	constexpr int32 TRANSITION_TABLE_HZ = 120;
+	constexpr float CARDINAL_DEAD_ZONE = 10.f;		// 네 방향 나눌 때 앞 · 뒤를 넓히는 각. 확인: Lyra 변수 CardinalDirectionDeadZone = 10, 45도 대각선 출발이 앞 클립
+	// 섞는 시간 = 상태가 바뀐 뒤 새 클립 몫의 프레임별 값에 Smooth 곡선을 최소 제곱으로 맞춘 값(앞뒤 조합마다 1~11회, 평균 오차는 아래 적었다)
+	constexpr float TO_START_SECONDS = 0.21f;		// 서기 → 출발. 오차 0.044 — 끝자락이 곡선보다 길게 늘어진다
+	constexpr float STOP_TO_START_SECONDS = 0.175f;	// 멈춤 → 출발. 오차 0.069 — 위와 같은 끝자락
+	constexpr float TO_STOP_SECONDS = 0.28f;		// 달리기 · 돌아서기 → 멈춤. 맞춘 값 0.26 + 시작이 1프레임 늦음(오차 0.020). 단순 계산은 늦게 시작하는 칸이 없어 합친 길이에 가깝게 잡았다
+	constexpr float TO_PIVOT_SECONDS = 0.25f;		// 달리기 · 출발 → 돌아서기. 오차 0.003
+	constexpr float START_TO_CYCLE_SECONDS = 0.99f;	// 출발 → 달리기. 오차 0.004
+	constexpr float PIVOT_TO_CYCLE_SECONDS = 0.5f;	// 돌아서기 → 달리기. 오차 0.003
+	constexpr float STOP_TO_IDLE_SECONDS = 0.74f;	// 멈춤 → 서기. 오차 0.003
+	constexpr float START_EXIT_TIMES[] = { 0.791f, 1.165f, 1.185f, 1.122f };	// 출발 클립이 이 시각을 지나면 달리기로. 왜 이 값인지는 모른다(애니 블루프린트를 안 열었다) — 판을 바꿔도 같았다
+	constexpr float STOP_EXIT_TIMES[] = { 1.712f, 2.046f, 2.180f, 2.277f };		// 멈춤 클립이 이 시각을 지나면 서기로
+	constexpr float PIVOT_EXIT_TIMES[] = { 1.344f, 1.591f, 1.565f, 1.358f };	// 돌아서기 클립이 이 시각을 지나면 달리기로. 클립의 TransitionToLocomotion 표시 시작(1.325 · 1.572 · 1.543 · 1.335) 바로 다음 프레임이다
+	constexpr float STEP_LEADER_WEIGHT = 0.5f;		// 나가는 전환 클립의 몫이 이보다 크면 달리기 클립이 그 발을 따른다(언리얼 동기화 그룹은 가장 무거운 클립이 앞장선다)
+	constexpr float PIVOT_MIN_SPEED = 10.f;			// 이보다 느리면 돌아설 것 없이 출발로 본다(제안값)
+	constexpr float DISTANCE_RATE_MIN = 0.25f;		// 거리로 진행할 때 재생 속도 범위. 확인: 돌아선 직후 0.42배까지 내려감 · 출발 첫 프레임 2.4배
+	constexpr float DISTANCE_RATE_MAX = 5.f;
+
+	FString TransitionName(int32 Kind, int32 Direction)
+	{
+		return FString::Printf(TEXT("MF_Rifle_Jog_%s_%s"), DIRECTION_NAMES[Direction], TRANSITION_KINDS[Kind]);
+	}
+
+	int32 CardinalFromAngle(float Angle)
+	{
+		const float Abs = FMath::Abs(Angle);
+		if (Abs <= 45.f + CARDINAL_DEAD_ZONE) return DIR_FWD;
+		if (Abs >= 135.f - CARDINAL_DEAD_ZONE) return DIR_BWD;
+		return Angle > 0.f ? DIR_RIGHT : DIR_LEFT;
+	}
+
+	float AngleOf(const FVector& V)
+	{
+		return FMath::RadiansToDegrees(FMath::Atan2((float)V.Y, (float)V.X));
+	}
+
+	// 지금 속도로 멈출 때까지 갈 거리 — 엔진 PredictGroundMovementStopLocation 과 같은 식. 입력은 속도와 이동 상수뿐이라 서버도 같은 값을 낸다
+	float PredictStopDistance(float Speed, const UCharacterMovementComponent* Move)
+	{
+		if (!Move) return 0.f;
+		const float Friction = FMath::Max(0.f, (Move->bUseSeparateBrakingFriction ? Move->BrakingFriction : Move->GroundFriction) * FMath::Max(0.f, Move->BrakingFrictionFactor));
+		const float Braking = FMath::Max(0.f, Move->BrakingDecelerationWalking);
+		const float Divisor = Friction * Speed + Braking;
+		if (Divisor <= 0.f) return 0.f;
+		const float Time = Speed / Divisor;
+		return FMath::Max(0.f, Speed * Time + 0.5f * (-Friction * Speed - Braking) * Time * Time);
+	}
+
+	// 방향이 바뀌는 지점까지 거리 — 엔진 PredictGroundMovementPivotLocation 과 같은 식. 입력은 가속 · 속도 · 지면 마찰뿐이다
+	float PredictPivotDistance(const FVector& Acceleration, const FVector& Velocity, float GroundFriction)
+	{
+		const FVector Acceleration2D(Acceleration.X, Acceleration.Y, 0.0);
+		FVector Direction;
+		float Size = 0.f;
+		Acceleration2D.ToDirectionAndLength(Direction, Size);
+		const float Along = (float)(Velocity | Direction);
+		if (Along >= 0.f) return 0.f;
+		const float SpeedAlong = -Along;
+		const float Time = SpeedAlong / (Size + 2.f * SpeedAlong * GroundFriction);
+		const FVector Force = Acceleration - (Velocity - Direction * Velocity.Size2D()) * GroundFriction;
+		return (float)(Velocity * Time + 0.5 * Force * Time * Time).Size2D();
+	}
+
 	float Smooth(float X)
 	{
 		X = FMath::Clamp(X, 0.f, 1.f);
@@ -170,7 +246,9 @@ void UMOBSimpleAnimInstance::LoadClips()
 {
 	if (bClipsLoaded) return;
 	bClipsLoaded = true;
-	bAimJump = FParse::Param(FCommandLine::Get(), TEXT("MOBSimpleAimJump"));
+	const bool bServerAnim = FParse::Param(FCommandLine::Get(), TEXT("MOBServerAnim"));	// 받은 상태의 클립 번호는 전환 클립까지 가리키므로 전부 읽는다
+	bAimJump = bServerAnim || FParse::Param(FCommandLine::Get(), TEXT("MOBSimpleAimJump"));
+	bTransitions = bServerAnim || (bAimJump && FParse::Param(FCommandLine::Get(), TEXT("MOBSimpleTransitions")));
 	const TCHAR* const RIFLE_FOLDER = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle");
 	const TCHAR* const AIM_FOLDER = TEXT("/Game/Characters/Heroes/Mannequin/Animations/AimOffsets");
 	const auto Load = [](const TCHAR* Folder, const TCHAR* Name, const TCHAR* Kind)
@@ -192,6 +270,7 @@ void UMOBSimpleAnimInstance::LoadClips()
 	for (int32 I = 0; I < FMOBSimpleAnimProxy::kAim; ++I) LoadedAim.Add(Load(AIM_FOLDER, AIM_NAMES[I], TEXT("AIM")));
 	for (int32 I = 0; I < FMOBSimpleAnimProxy::kAim; ++I) LoadedReadyAim.Add(Load(AIM_FOLDER, READY_AIM_NAMES[I], TEXT("AIM")));
 	for (int32 I = 0; I < FMOBSimpleAnimProxy::kJump; ++I) LoadedJump.Add(Load(RIFLE_FOLDER, JUMP_NAMES[I], TEXT("JUMP")));
+	for (int32 I = 0; I < FMOBSimpleAnimProxy::kTransitions && bTransitions; ++I) LoadedJump.Add(Load(RIFLE_FOLDER, *TransitionName(I / 4, I % 4), TEXT("LOAD")));
 	LoadedRecovery = Load(RIFLE_FOLDER, RECOVERY_NAME, TEXT("JUMP"));
 	LoadedFidget = Load(RIFLE_FOLDER, FIDGET_NAME, TEXT("IDLE"));
 
@@ -236,6 +315,8 @@ void UMOBSimpleAnimInstance::ResetPlayback()
 
 void FMOBSimpleAnimProxy::ResetPlayback()
 {
+	++ResetGeneration;
+	MoveSeq = 0;
 	for (int32 I = 0; I < kClips; ++I) Weights[I] = I == CLIP_IDLE ? 1.f : 0.f;
 	Step = 0;
 	StepFrac = 0.f;
@@ -254,6 +335,70 @@ void FMOBSimpleAnimProxy::ResetPlayback()
 	StandTime = 0.f;
 	FidgetTime = -1.f;
 	bFidgetLeaving = false;
+	MoveState = EMoveState::Idle;
+	MoveDirection = 0;
+	PivotAccelDirection = FVector2D::ZeroVector;
+	bBeforePivot = false;
+	FollowClip = INDEX_NONE;
+}
+
+// 받은 상태를 언리얼 경로의 재생 상태로 옮기고(손가락 · 꼬임 뼈용), 판정 뼈에 덮을 자세를 받아 둔다
+void FMOBSimpleAnimProxy::SetServerFrame(const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames)
+{
+	bServerDriven = true;
+	for (int32 I = 0; I < kClips; ++I)
+	{
+		Weights[I] = Input.weights[I];
+		Times[I] = Input.times[I];
+	}
+	JumpCount = FMath::Min(Input.layerCount, kJumpStack);
+	for (int32 I = 0; I < JumpCount; ++I)
+	{
+		JumpStack[I].Clip = Input.layers[I].clip;
+		JumpStack[I].Time = Input.layers[I].time;
+		JumpStack[I].Fade = Input.layers[I].fade;
+		JumpStack[I].FadeSeconds = 0.f;
+	}
+	FidgetTime = Input.fidgetTime;
+	RecoveryTime = Input.recoveryTime;
+	AimBlend = Input.aimBlend;
+	Pitch = Input.pitch;
+	PlantOffset = FVector(Input.plantOffset[0], Input.plantOffset[1], Input.plantOffset[2]);
+
+	if (ServerBoneNames.Num() != Count) ServerBoneNames = BoneNames;
+	ServerLocal.SetNumUninitialized(Count, EAllowShrinking::No);
+	for (int32 I = 0; I < Count; ++I)
+	{
+		const mo::BoneTransform& B = Local[I];
+		ServerLocal[I] = FTransform(FQuat(B.q[0], B.q[1], B.q[2], B.q[3]), FVector(B.p[0], B.p[1], B.p[2]));
+	}
+}
+
+// 클립 파일의 뼈를 Shared 결과로 덮는다. 크기는 언리얼 경로 값을 둔다 — Shared 는 크기를 안 다룬다
+void FMOBSimpleAnimProxy::ApplyServerBones(FPoseContext& Output)
+{
+	const FBoneContainer& Bones = Output.Pose.GetBoneContainer();
+	if (ServerBoneSerial != Bones.GetSerialNumber() || ServerBoneMap.Num() != ServerBoneNames.Num())
+	{
+		ServerBoneSerial = Bones.GetSerialNumber();
+		ServerBoneMap.Reset();
+		int32 Found = 0;
+		for (const FName& Name : ServerBoneNames)
+		{
+			const FCompactPoseBoneIndex Index = FindCompactBone(Bones, *Name.ToString());
+			ServerBoneMap.Add(Index.IsValid() ? Index.GetInt() : INDEX_NONE);
+			Found += Index.IsValid() ? 1 : 0;
+		}
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SERVERANIM map bones=%d found=%d serial=%d"), ServerBoneNames.Num(), Found, (int32)ServerBoneSerial);
+	}
+	const int32 Count = FMath::Min(ServerBoneMap.Num(), ServerLocal.Num());
+	for (int32 I = 0; I < Count; ++I)
+	{
+		if (ServerBoneMap[I] == INDEX_NONE) continue;
+		FTransform& Bone = Output.Pose[FCompactPoseBoneIndex(ServerBoneMap[I])];
+		Bone.SetTranslation(ServerLocal[I].GetTranslation());
+		Bone.SetRotation(ServerLocal[I].GetRotation());
+	}
 }
 
 void FMOBSimpleAnimProxy::GetAimJump(float& OutPitch, int32& OutJumpClip, float& OutJumpWeight) const
@@ -306,12 +451,229 @@ void FMOBSimpleAnimProxy::PushJump(int32 Clip, float FadeSeconds)
 	{
 		for (int32 I = 1; I < kJumpStack; ++I) JumpStack[I - 1] = JumpStack[I];
 		--JumpCount;
+		++StackOverflows;
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_STACK max=%d overflow=%d"), StackMax, StackOverflows);
 	}
 	FJumpLayer& Layer = JumpStack[JumpCount++];
 	Layer.Clip = Clip;
 	Layer.Time = 0.f;
 	Layer.Fade = FadeSeconds > 0.f ? 0.f : 1.f;
 	Layer.FadeSeconds = FadeSeconds;
+	if (JumpCount > StackMax)
+	{
+		StackMax = JumpCount;
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_STACK max=%d overflow=%d"), StackMax, StackOverflows);
+	}
+}
+
+// Distance 곡선에서 이 값이 되는 시각. 곡선은 시간이 갈수록 커진다(엔진 GetAnimPositionFromDistance 와 같은 가정)
+float FMOBSimpleAnimProxy::TimeFromDistance(int32 Transition, float Value) const
+{
+	const TArray<float>& Table = TransitionDistances[Transition];
+	const int32 Num = Table.Num();
+	if (Num < 2) return 0.f;
+	int32 First = 1;
+	int32 Count = Num - 2;
+	while (Count > 0)
+	{
+		const int32 Half = Count / 2;
+		const int32 Middle = First + Half;
+		if (Value > Table[Middle])
+		{
+			First = Middle + 1;
+			Count -= Half + 1;
+		}
+		else
+		{
+			Count = Half;
+		}
+	}
+	const float Span = Table[First] - Table[First - 1];
+	const float Alpha = !FMath::IsNearlyZero(Span) ? FMath::Clamp((Value - Table[First - 1]) / Span, 0.f, 1.f) : 0.f;
+	return FMath::Min(((float)(First - 1) + Alpha) / TRANSITION_TABLE_HZ, JumpLengths[kJump + Transition]);
+}
+
+float FMOBSimpleAnimProxy::DistanceAtTime(int32 Transition, float Time) const
+{
+	const TArray<float>& Table = TransitionDistances[Transition];
+	if (Table.Num() == 0) return 0.f;
+	const float Position = FMath::Clamp(Time * TRANSITION_TABLE_HZ, 0.f, (float)(Table.Num() - 1));
+	const int32 Index = FMath::Min(FMath::FloorToInt32(Position), Table.Num() - 2);
+	return Index < 0 ? Table[0] : FMath::Lerp(Table[Index], Table[Index + 1], Position - (float)Index);
+}
+
+// 전환 클립의 다음 시각 — 출발은 움직인 거리만큼, 멈춤은 남은 거리에 맞춰, 돌아서기는 방향이 바뀌기 전엔 남은 거리에 맞추고 바뀐 뒤엔 움직인 거리만큼 간다.
+// 멈춤 곡선을 다 쓰면(속도 0) 그대로 시간을 흘린다
+float FMOBSimpleAnimProxy::TransitionClipTime(const FJumpLayer& Layer, float DeltaSeconds) const
+{
+	const int32 Transition = Layer.Clip - kJump;
+	const auto AdvanceByTravel = [&]()
+	{
+		const float Target = TimeFromDistance(Transition, DistanceAtTime(Transition, Layer.Time) + FrameTravel);
+		const float Rate = DeltaSeconds > 0.f ? FMath::Clamp((Target - Layer.Time) / DeltaSeconds, DISTANCE_RATE_MIN, DISTANCE_RATE_MAX) : 1.f;
+		return Layer.Time + Rate * DeltaSeconds;
+	};
+	switch (MoveState)
+	{
+	case EMoveState::Start:
+		return AdvanceByTravel();
+	case EMoveState::Stop:
+		return StopDistance > 0.f ? FMath::Max(Layer.Time, TimeFromDistance(Transition, -StopDistance)) : Layer.Time + DeltaSeconds;
+	case EMoveState::Pivot:
+		return bBeforePivot ? FMath::Max(Layer.Time, TimeFromDistance(Transition, -PivotDistance)) : AdvanceByTravel();
+	case EMoveState::Idle:
+	case EMoveState::Cycle:
+	case EMoveState::Air:
+		break;
+	}
+	return Layer.Time + DeltaSeconds;
+}
+
+// 점프 쪽 층이 남아 있나 — 출발 · 멈춤 · 돌아서기 층은 세지 않는다(그 층이 빠지는 동안에도 대기 몸짓 시계는 흘러야 한다)
+bool FMOBSimpleAnimProxy::HasJumpLayer() const
+{
+	for (int32 I = 0; I < JumpCount; ++I)
+	{
+		if (JumpStack[I].Clip != JUMP_NONE && JumpStack[I].Clip < kJump) return true;
+	}
+	return false;
+}
+
+const TCHAR* FMOBSimpleAnimProxy::MoveStateName(EMoveState State)
+{
+	switch (State)
+	{
+	case EMoveState::Idle: return TEXT("Idle");
+	case EMoveState::Start: return TEXT("Start");
+	case EMoveState::Cycle: return TEXT("Cycle");
+	case EMoveState::Stop: return TEXT("Stop");
+	case EMoveState::Pivot: return TEXT("Pivot");
+	case EMoveState::Air: return TEXT("Air");
+	}
+	return TEXT("?");
+}
+
+void FMOBSimpleAnimProxy::EnterTransition(EMoveState State, int32 Direction, float FadeSeconds)
+{
+	const int32 Kind = State == EMoveState::Start ? TRANSITION_START : State == EMoveState::Stop ? TRANSITION_STOP : TRANSITION_PIVOT;
+	MoveState = State;
+	MoveDirection = Direction;
+	FollowClip = INDEX_NONE;
+	PushJump(kJump + Kind * 4 + Direction, FadeSeconds);
+}
+
+// 달리기 · 서기로 돌아간다
+void FMOBSimpleAnimProxy::EnterLocomotion(EMoveState State, float FadeSeconds)
+{
+	FollowClip = INDEX_NONE;
+	if (State == EMoveState::Cycle && JumpCount > 0 && JumpStack[JumpCount - 1].Clip >= kJump)
+	{
+		// 달리기 클립은 처음부터 시작해 같은 발 구간의 첫 자리로 간다. 확인: 왼발→오른발 구간이면 걸음 0, 오른발→왼발이면 클립 맨 끝 걸음(0초를 넘어 이어지는 구간) — 네 방향 다 StepCycle-1 이 그 구간이다
+		const FJumpLayer& Top = JumpStack[JumpCount - 1];
+		const int32 Transition = Top.Clip - kJump;
+		const int32 Marker = StepMarkerAt(Transition, Top.Time);
+		if (Marker != INDEX_NONE)
+		{
+			Step = TransitionMarkers[Transition][Marker - 1].bLeft ? 0 : StepCycle - 1;
+			FollowClip = Top.Clip;
+			FollowBaseStep = Step;
+			FollowBaseMarker = Marker;
+		}
+	}
+	if (State == EMoveState::Idle) IdleTime = 0.f;	// Lyra 는 서기 상태에 들어갈 때 서기 클립을 처음부터 튼다
+	MoveState = State;
+	PushJump(JUMP_NONE, FadeSeconds);
+}
+
+// 이 시각이 든 발 구간의 끝 표시 번호. 첫 표시 앞이나 마지막 표시 뒤면 INDEX_NONE
+int32 FMOBSimpleAnimProxy::StepMarkerAt(int32 Transition, float Time) const
+{
+	const TArray<FStepMarker, TInlineAllocator<8>>& Markers = TransitionMarkers[Transition];
+	for (int32 K = 1; K < Markers.Num(); ++K)
+	{
+		if (Time >= Markers[K - 1].Time && Time < Markers[K].Time) return K;
+	}
+	return INDEX_NONE;
+}
+
+// 나가는 전환 클립이 아직 더 무거우면 달리기 클립의 걸음을 그 클립의 발 표시에 맞춘다. 맞췄으면 true — 이 프레임엔 달리기 클립 자기 속도로 걷지 않는다
+bool FMOBSimpleAnimProxy::FollowStepsOfTransition(float DeltaSeconds)
+{
+	if (FollowClip == INDEX_NONE) return false;
+	float Layers[kJumpStack] = {};
+	JumpWeights(Layers);
+	for (int32 I = 0; I < JumpCount; ++I)
+	{
+		if (JumpStack[I].Clip != FollowClip) continue;
+		if (Layers[I] < STEP_LEADER_WEIGHT) break;
+		const int32 Transition = FollowClip - kJump;
+		const float Time = JumpStack[I].Time + DeltaSeconds;	// 이 프레임에 그 클립이 평가될 시각 — 아래층은 UpdateJump 가 같은 만큼 민다
+		const int32 Marker = StepMarkerAt(Transition, Time);
+		if (Marker == INDEX_NONE) break;
+		const TArray<FStepMarker, TInlineAllocator<8>>& Markers = TransitionMarkers[Transition];
+		Step = (FollowBaseStep + Marker - FollowBaseMarker) % StepCycle;
+		StepFrac = FMath::Clamp((Time - Markers[Marker - 1].Time) / FMath::Max(Markers[Marker].Time - Markers[Marker - 1].Time, 0.001f), 0.f, 1.f);
+		return true;
+	}
+	FollowClip = INDEX_NONE;
+	return false;
+}
+
+// 이동 상태 — Lyra 상태 기계의 Idle · Start · Cycle · Stop · Pivot 다섯을 실행값대로 흉내 낸다. 공중에서는 점프 쪽(UpdateJump)이 맡는다
+void FMOBSimpleAnimProxy::UpdateTransitions(bool bFalling, bool bAccelerating, const FVector& LocalVelocity, const FVector& LocalAcceleration, const UCharacterMovementComponent* Move, float DeltaSeconds)
+{
+	if (bFalling)
+	{
+		MoveState = EMoveState::Air;
+		return;
+	}
+	if (MoveState == EMoveState::Air) MoveState = bAccelerating ? EMoveState::Cycle : EMoveState::Idle;	// 땅에 닿을 때의 섞기는 UpdateJump 가 맡는다
+
+	const float Speed = (float)LocalVelocity.Size2D();
+	FrameTravel = Speed * DeltaSeconds;
+	const FVector2D AccelDirection = FVector2D(LocalAcceleration).GetSafeNormal();
+	bBeforePivot = bAccelerating && FVector2D::DotProduct(FVector2D(LocalVelocity), AccelDirection) < 0.f;
+	StopDistance = PredictStopDistance(Speed, Move);
+	PivotDistance = bBeforePivot && Move ? PredictPivotDistance(LocalAcceleration, LocalVelocity, Move->GroundFriction) : 0.f;
+
+	const bool bPivotNeeded = bBeforePivot && Speed > PIVOT_MIN_SPEED;
+	const float TopTime = JumpCount > 0 ? JumpStack[JumpCount - 1].Time : 0.f;
+	const auto EnterPivot = [&]()
+	{
+		PivotAccelDirection = AccelDirection;
+		EnterTransition(EMoveState::Pivot, CardinalFromAngle(AngleOf(LocalVelocity)), TO_PIVOT_SECONDS);
+	};
+	switch (MoveState)
+	{
+	case EMoveState::Idle:
+		if (bAccelerating) EnterTransition(EMoveState::Start, CardinalFromAngle(AngleOf(LocalAcceleration)), TO_START_SECONDS);
+		break;
+	case EMoveState::Start:
+		if (!bAccelerating && Speed < 1.f)	// 입력이 몸을 못 움직이고 끝났다(촬영 판 시작의 한 프레임 입력이 이 경우) — 멈출 것이 없어 서기로 바로 돌아간다. Lyra 는 여기서도 멈춤 상태를 거치지만 그 구간 기록이 없어 맞추지 않았다
+		{
+			MoveState = EMoveState::Idle;
+			PushJump(JUMP_NONE, TO_START_SECONDS);
+		}
+		else if (!bAccelerating) EnterTransition(EMoveState::Stop, CardinalFromAngle(AngleOf(LocalVelocity)), TO_STOP_SECONDS);
+		else if (bPivotNeeded) EnterPivot();
+		else if (TopTime >= START_EXIT_TIMES[MoveDirection]) EnterLocomotion(EMoveState::Cycle, START_TO_CYCLE_SECONDS);
+		break;
+	case EMoveState::Cycle:
+		if (!bAccelerating) EnterTransition(EMoveState::Stop, CardinalFromAngle(AngleOf(LocalVelocity)), TO_STOP_SECONDS);
+		else if (bPivotNeeded) EnterPivot();
+		break;
+	case EMoveState::Stop:
+		if (bAccelerating) EnterTransition(EMoveState::Start, CardinalFromAngle(AngleOf(LocalAcceleration)), STOP_TO_START_SECONDS);
+		else if (Speed < 1.f && TopTime >= STOP_EXIT_TIMES[MoveDirection]) EnterLocomotion(EMoveState::Idle, STOP_TO_IDLE_SECONDS);
+		break;
+	case EMoveState::Pivot:
+		if (!bAccelerating) EnterTransition(EMoveState::Stop, CardinalFromAngle(AngleOf(LocalVelocity)), TO_STOP_SECONDS);
+		else if (bPivotNeeded && FVector2D::DotProduct(AccelDirection, PivotAccelDirection) < 0.f) EnterPivot();
+		else if (TopTime >= PIVOT_EXIT_TIMES[MoveDirection]) EnterLocomotion(EMoveState::Cycle, PIVOT_TO_CYCLE_SECONDS);
+		break;
+	case EMoveState::Air:
+		break;
+	}
 }
 
 // 쌓인 상태마다의 몫 — 위 것이 덮은 만큼 아래 것들이 함께 줄어든다
@@ -388,7 +750,8 @@ void FMOBSimpleAnimProxy::UpdateJump(bool bFalling, bool bAccelerating, float Ve
 	for (int32 I = 0; I < JumpCount; ++I)
 	{
 		FJumpLayer& Layer = JumpStack[I];
-		Layer.Time = Layer.Clip == JUMP_LAND && LandDistances.Num() > 0 ? FMath::Max(Layer.Time, LandTimeFromDistance(GroundDistance)) : Layer.Time + DeltaSeconds;
+		if (bTransitions && I == JumpCount - 1 && Layer.Clip >= kJump) Layer.Time = TransitionClipTime(Layer, DeltaSeconds);
+		else Layer.Time = Layer.Clip == JUMP_LAND && LandDistances.Num() > 0 ? FMath::Max(Layer.Time, LandTimeFromDistance(GroundDistance)) : Layer.Time + DeltaSeconds;
 		if (Layer.FadeSeconds > 0.f) Layer.Fade = FMath::Min(Layer.Fade + DeltaSeconds / Layer.FadeSeconds, 1.f);
 	}
 	// 다 덮인 아래 상태는 버린다. 걷기·서기만 남으면 점프 쪽을 끈다
@@ -518,6 +881,36 @@ void FMOBSimpleAnimProxy::GetState(float OutWeights[kClips], float OutTimes[kCli
 	}
 }
 
+void FMOBSimpleAnimProxy::AppendPoseState(FString& Out) const
+{
+	Out += FString::Printf(TEXT(",%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d"), FidgetTime, RecoveryTime, AimBlend, Pitch, PlantOffset.X, PlantOffset.Y, PlantOffset.Z, JumpCount);
+	for (int32 I = 0; I < kJumpStack; ++I) Out += FString::Printf(TEXT(",%d,%.9g,%.9g"), JumpStack[I].Clip, JumpStack[I].Time, JumpStack[I].Fade);
+	Out += FString::Printf(TEXT(",%d,%d"), ResetGeneration, MoveSeq - 1);	// 이 줄의 상태 = 이 판의 입력을 이 번호까지 넣은 결과
+}
+
+void FMOBSimpleAnimProxy::AppendPlayers(FString& Out) const
+{
+	if (bTransitions) Out += FString::Printf(TEXT("~%s;"), MoveStateName(MoveState));	// 「@」 가 없는 칸 — 클립을 읽는 쪽은 건너뛴다. Lyra 상태 기계와 프레임을 맞춰 대조한다
+	float Layers[kJumpStack] = {};
+	JumpWeights(Layers);
+	float Base = JumpCount == 0 ? 1.f : 0.f;
+	for (int32 I = 0; I < JumpCount; ++I)
+	{
+		const FJumpLayer& Layer = JumpStack[I];
+		if (Layer.Clip == JUMP_NONE || !JumpClips[Layer.Clip])
+		{
+			Base += Layers[I];
+			continue;
+		}
+		if (Layers[I] >= 0.01f) Out += FString::Printf(TEXT("%s@%.3f*%.2f;"), *JumpClips[Layer.Clip]->GetName(), Layer.Time, Layers[I]);
+	}
+	for (int32 I = 0; I < kClips; ++I)
+	{
+		const float Weight = Weights[I] * Base;
+		if (Clips[I] && Weight >= 0.01f) Out += FString::Printf(TEXT("%s@%.3f*%.2f;"), *Clips[I]->GetName(), Times[I], Weight);
+	}
+}
+
 void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones) const
 {
 	// 자세를 읽는 길은 Evaluate 와 같다(GetAnimationPose, 뿌리 이동 안 뽑음, 반복 재생)
@@ -540,27 +933,63 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 		Line(*FString::Printf(TEXT("BONE,%d,%s,%d"), B, *Name.ToString(), Parent), Bones.GetRefPoseTransform(Index));
 	}
 
-	for (int32 I = 0; I < kClips; ++I)
+	// 클립 번호 = 걸음 5 · 조준 3 · 느슨한 조준 3 · 점프 5 · 전환 12 · 착지 충격 · 대기 몸짓(-MOBSimpleAimJump -MOBSimpleTransitions 일 때 30개, Shared/AnimClips.h 와 같은 차례).
+	// 그 플래그가 없으면 예전처럼 앞의 5개뿐이다. 반복 여부는 Evaluate 와 같게 준다 — 표본을 끝까지 읽을 때 앞으로 감기는지가 달라진다
+	struct FDumpClip { const UAnimSequence* Clip; float Length; bool bLoop; float RootSpeed; };
+	TArray<FDumpClip, TInlineAllocator<32>> All;
+	for (int32 I = 0; I < kClips; ++I) All.Add({ Clips[I], Lengths[I], true, RootSpeeds[I] });
+	if (bAimJump && bTransitions)
 	{
-		if (!Clips[I]) continue;
-		const int32 Samples = FMath::CeilToInt32(Lengths[I] * SampleHz) + 1;
-		Out += FString::Printf(TEXT("CLIP,%d,%s,%.9g,%d\n"), I, ClipName(bAimJump, I), Lengths[I], Samples);
+		const auto Add = [&All](const UAnimSequence* Clip, bool bLoop) { All.Add({ Clip, Clip ? FMath::Max(Clip->GetPlayLength(), 0.01f) : 0.f, bLoop, 0.f }); };
+		for (int32 I = 0; I < kAim; ++I) Add(AimClips[I], false);
+		for (int32 I = 0; I < kAim; ++I) Add(ReadyAimClips[I], false);
+		for (int32 I = 0; I < kStackClips; ++I) Add(JumpClips[I], I == JUMP_START_LOOP || I == JUMP_FALL_LOOP);
+		Add(RecoveryClip, false);
+		Add(FidgetClip, false);
+		Out += FString::Printf(TEXT("AIMPITCH,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n"), AimPitches[AIM_UP], AimPitches[AIM_CENTER], AimPitches[AIM_DOWN], ReadyAimPitches[AIM_UP], ReadyAimPitches[AIM_CENTER], ReadyAimPitches[AIM_DOWN]);
+	}
+
+	for (int32 I = 0; I < All.Num(); ++I)
+	{
+		const FDumpClip& Entry = All[I];
+		if (!Entry.Clip)
+		{
+			Out += FString::Printf(TEXT("CLIPFAIL,%d\n"), I);
+			continue;
+		}
+		const int32 Samples = FMath::CeilToInt32(Entry.Length * SampleHz) + 1;
+		Out += FString::Printf(TEXT("CLIP,%d,%s,%.9g,%d,%d,%.6f,%d\n"), I, *Entry.Clip->GetName(), Entry.Length, Samples, (int32)Entry.Clip->GetAdditiveAnimType(), Entry.RootSpeed, Entry.bLoop ? 1 : 0);
+		for (const FAnimSyncMarker& Marker : Entry.Clip->AuthoredSyncMarkers) Out += FString::Printf(TEXT("MARK,%d,%.6f,%s\n"), I, Marker.Time, *Marker.MarkerName.ToString());
 		for (int32 S = 0; S < Samples; ++S)
 		{
-			const double Time = FMath::Min((double)S / SampleHz, (double)Lengths[I]);
+			const double Time = FMath::Min((double)S / SampleHz, (double)Entry.Length);
 			FCompactPose Pose;
 			Pose.SetBoneContainer(&Bones);
 			FBlendedCurve Curve;
 			Curve.InitFrom(Bones);
 			UE::Anim::FStackAttributeContainer Attributes;
 			FAnimationPoseData Data(Pose, Curve, Attributes);
-			Clips[I]->GetAnimationPose(Data, FAnimExtractContext(Time, false, FDeltaTimeRecord(), true));
+			Entry.Clip->GetAnimationPose(Data, FAnimExtractContext(Time, false, FDeltaTimeRecord(), Entry.bLoop));
 			for (int32 B = 0; B < NumBones; ++B)
 			{
 				if (!KeepBones.Contains(B)) continue;
 				Line(*FString::Printf(TEXT("KEY,%d,%d,%d"), I, S, B), Pose[FCompactPoseBoneIndex(B)]);
 			}
 		}
+	}
+
+	// 거리 곡선 표 — PreUpdate 에서 뽑아 둔 값 그대로. 전환 클립 = 움직인 거리, 착지 클립 = 땅까지 거리(양수로 뒤집은 값)
+	const auto CurveLine = [&Out](int32 Clip, const TCHAR* Name, int32 Hz, const TArray<float>& Values)
+	{
+		Out += FString::Printf(TEXT("CURVE,%d,%s,%d,%d"), Clip, Name, Hz, Values.Num());
+		for (const float V : Values) Out += FString::Printf(TEXT(",%.6f"), V);
+		Out += TEXT("\n");
+	};
+	if (bAimJump && bTransitions)
+	{
+		constexpr int32 FIRST_JUMP_INDEX = kClips + kAim + kAim;
+		for (int32 T = 0; T < kTransitions; ++T) CurveLine(FIRST_JUMP_INDEX + kJump + T, TEXT("Distance"), TRANSITION_TABLE_HZ, TransitionDistances[T]);
+		CurveLine(FIRST_JUMP_INDEX + JUMP_LAND, TEXT("GroundDistance"), LAND_TABLE_HZ, LandDistances);
 	}
 }
 
@@ -573,6 +1002,7 @@ void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 	{
 		Instance->LoadClips();
 		bAimJump = Instance->bAimJump;
+		bTransitions = Instance->bTransitions;
 
 		for (int32 I = 0; I < kClips; ++I)
 		{
@@ -617,10 +1047,40 @@ void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 		}
 		AimAdditiveType = Additive(AimClips[AIM_CENTER]);
 		ReadyAimAdditiveType = Additive(ReadyAimClips[AIM_CENTER]);
-		for (int32 I = 0; I < kJump && bAimJump; ++I)
+		for (int32 I = 0; I < kStackClips && bAimJump; ++I)
 		{
 			JumpClips[I] = Instance->LoadedJump.IsValidIndex(I) ? Instance->LoadedJump[I].Get() : nullptr;
 			JumpLengths[I] = JumpClips[I] ? FMath::Max(JumpClips[I]->GetPlayLength(), 0.01f) : 0.f;
+		}
+		// 전환 클립의 거리 곡선과 발 표시를 뽑아 둔다. 표시 이름까지 로그에 남겨 넘어가는 때의 근거를 대조한다
+		for (int32 T = 0; T < kTransitions && bTransitions; ++T)
+		{
+			const UAnimSequence* Clip = JumpClips[kJump + T];
+			TransitionDistances[T].Reset();
+			TransitionMarkers[T].Reset();
+			if (!Clip) continue;
+			const float Length = JumpLengths[kJump + T];
+			const int32 Samples = FMath::CeilToInt32(Length * TRANSITION_TABLE_HZ) + 1;
+			for (int32 S = 0; S < Samples; ++S)
+			{
+				TransitionDistances[T].Add(Clip->EvaluateCurveData(TRANSITION_DISTANCE_CURVE, FAnimExtractContext(FMath::Min((double)S / TRANSITION_TABLE_HZ, (double)Length))));
+			}
+			FString Steps;
+			for (const FAnimSyncMarker& Marker : Clip->AuthoredSyncMarkers)
+			{
+				FStepMarker& Added = TransitionMarkers[T].AddDefaulted_GetRef();
+				Added.Time = Marker.Time;
+				Added.bLeft = Marker.MarkerName == TEXT("L");
+				Steps += FString::Printf(TEXT("%s@%.3f "), *Marker.MarkerName.ToString(), Marker.Time);
+			}
+			FString Notifies;
+			for (const FAnimNotifyEvent& Notify : Clip->Notifies)
+			{
+				if (Notify.NotifyStateClass) Notifies += FString::Printf(TEXT("%s@%.3f+%.3f "), *Notify.NotifyStateClass->GetClass()->GetName(), Notify.GetTriggerTime(), Notify.GetDuration());
+			}
+			int32 Rises = 0;	// 시간이 가며 거리가 다시 작아지는 칸 수 — 0 이어야 거리로 시각을 하나로 찾는다
+			for (int32 K = 1; K < TransitionDistances[T].Num(); ++K) Rises += TransitionDistances[T][K] < TransitionDistances[T][K - 1] - 0.01f ? 1 : 0;
+			UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_TCLIP name=%s length=%.3f dist=%.1f..%.1f falls=%d markers=[%s] states=[%s]"), *Clip->GetName(), Length, TransitionDistances[T][0], TransitionDistances[T].Last(), Rises, *Steps, *Notifies);
 		}
 		RecoveryClip = bAimJump ? Instance->LoadedRecovery.Get() : nullptr;
 		RecoveryLength = RecoveryClip ? FMath::Max(RecoveryClip->GetPlayLength(), 0.01f) : 0.f;
@@ -657,6 +1117,8 @@ void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 			if (!bLandCurve) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL land curve=%s — 착지 클립을 거리로 못 맞춰 떨어지는 중에서 바로 땅에 닿는다"), *LAND_DISTANCE_CURVE.ToString());
 		}
 	}
+
+	if (bServerDriven) return;	// 재생 상태는 SetServerFrame 이 넣는다 — 여기서 시간을 쌓지 않는다
 
 	// 입력은 속도와 몸 방향뿐이다
 	const AActor* Owner = InAnimInstance->GetOwningActor();
@@ -717,7 +1179,8 @@ void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 		RootSpeed += Weights[I] * RootSpeeds[I];
 		StepSeconds += Weights[I] * (End - Start);
 	}
-	if (DirectionWeight > 0.001f && StepSeconds > UE_SMALL_NUMBER)
+	const bool bStepsFollow = FollowStepsOfTransition(DeltaSeconds);
+	if (!bStepsFollow && DirectionWeight > 0.001f && StepSeconds > UE_SMALL_NUMBER)
 	{
 		RootSpeed /= DirectionWeight;
 		StepSeconds /= DirectionWeight;
@@ -757,10 +1220,12 @@ void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 		const float GroundDistance = bFalling ? MeasureGroundDistance(Character, Move) : 0.f;
 
 		// 땅에서 이동 입력을 놓은 순간 — 서기 클립이 STOP_CLIP_SECONDS 뒤 0초를 지나게 옮긴다(위 상수 설명)
-		if (!bFalling && bWasAccelerating && !bAccelerating && Lengths[CLIP_IDLE] > STOP_CLIP_SECONDS) IdleTime = Lengths[CLIP_IDLE] - STOP_CLIP_SECONDS;
+		if (!bTransitions && !bFalling && bWasAccelerating && !bAccelerating && Lengths[CLIP_IDLE] > STOP_CLIP_SECONDS) IdleTime = Lengths[CLIP_IDLE] - STOP_CLIP_SECONDS;
 		bWasAccelerating = bAccelerating;
 
 		// 발 디딤 내림 — 땅에선 잰 거리만큼, 뜬 직후엔 마지막으로 잰 거리만큼 내린다. bWasFalling 은 아직 지난 프레임 값이다
+		bool bGapMeasured = false;
+		float MeasuredGap = 0.f;
 		if (bFalling)
 		{
 			AirTime = bWasFalling ? AirTime + DeltaSeconds : 0.f;
@@ -778,6 +1243,8 @@ void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 					bPlantLogged = true;
 				}
 				PlantDrop = Gap;
+				bGapMeasured = true;
+				MeasuredGap = Gap;
 			}
 		}
 		if (bFalling) bPlantLogged = false;
@@ -785,8 +1252,20 @@ void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 		const USkeletalMeshComponent* Mesh = Character ? Character->GetMesh() : nullptr;
 		PlantOffset = bPlant && Mesh ? Mesh->GetComponentTransform().InverseTransformVectorNoScale(FVector(0.0, 0.0, -PlantDrop)) : FVector::ZeroVector;
 
+		// 대조 기록용 — 언리얼 밖 상태 계산의 입력 원본. 판 시작부터 매 프레임 남긴다(기록하지 않는 대기 프레임에도 상태는 움직인다)
+		const FVector LocalAccelLog = Owner && Move ? Owner->GetActorRotation().UnrotateVector(Move->GetCurrentAcceleration()) : FVector::ZeroVector;
+		MoveLog += FString::Printf(TEXT("%d,%d,%.9g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%d,%.9g,%.9g,%d,%.9g\n"), ResetGeneration, MoveSeq, DeltaSeconds, Local.X, Local.Y, Local.Z, LocalAccelLog.X, LocalAccelLog.Y, LocalAccelLog.Z,
+			bAccelerating ? 1 : 0, bFalling ? 1 : 0, Pitch, GroundDistance, bGapMeasured ? 1 : 0, MeasuredGap);
+		++MoveSeq;
+
+		if (bTransitions && Owner && Move)
+		{
+			const EMoveState Before = MoveState;
+			UpdateTransitions(bFalling, bAccelerating, Local, Owner->GetActorRotation().UnrotateVector(Move->GetCurrentAcceleration()), Move, DeltaSeconds);
+			if (MoveState != Before) UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_STATE %s>%s dir=%d speed=%.1f accel=%d"), MoveStateName(Before), MoveStateName(MoveState), MoveDirection, (float)Local.Size2D(), bAccelerating ? 1 : 0);
+		}
 		UpdateJump(bFalling, bAccelerating, (float)Velocity.Z, TimeToApex, GroundDistance, DeltaSeconds);
-		UpdateIdleBreak(!bFalling && !bAccelerating && Speed < 1.f && JumpCount == 0, DeltaSeconds);
+		UpdateIdleBreak(!bFalling && !bAccelerating && Speed < 1.f && (bTransitions ? !HasJumpLayer() : JumpCount == 0), DeltaSeconds);
 	}
 }
 
@@ -815,6 +1294,7 @@ bool FMOBSimpleAnimProxy::Evaluate(FPoseContext& Output)
 	if (Count == 0)
 	{
 		Output.ResetToRefPose();
+		if (bServerDriven) ApplyServerBones(Output);
 		return true;
 	}
 
@@ -852,6 +1332,7 @@ bool FMOBSimpleAnimProxy::Evaluate(FPoseContext& Output)
 	const FCompactPoseBoneIndex RootBone(0);
 	Output.Pose[RootBone] = Output.Pose.GetRefPose(RootBone);
 	if (bAimJump) ApplyPlant(Output);
+	if (bServerDriven) ApplyServerBones(Output);
 	return true;
 }
 
@@ -934,9 +1415,61 @@ bool MOBGetSimpleAimJump(const ACharacter* Character, float& OutPitch, int32& Ou
 	return true;
 }
 
+void UMOBSimpleAnimInstance::SetServerFrame(const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames)
+{
+	GetProxyOnGameThread<FMOBSimpleAnimProxy>().SetServerFrame(Input, Local, Count, BoneNames);
+}
+
 void UMOBSimpleAnimInstance::GetAimJump(float& OutPitch, int32& OutJumpClip, float& OutJumpWeight)
 {
 	GetProxyOnGameThread<FMOBSimpleAnimProxy>().GetAimJump(OutPitch, OutJumpClip, OutJumpWeight);
+}
+
+bool MOBGetSimplePlayers(const ACharacter* Character, FString& Out)
+{
+	const USkeletalMeshComponent* Mesh = Character ? Character->GetMesh() : nullptr;
+	UMOBSimpleAnimInstance* Instance = Mesh ? Cast<UMOBSimpleAnimInstance>(Mesh->GetAnimInstance()) : nullptr;
+	if (!Instance) return false;
+	Instance->GetPlayers(Out);
+	return true;
+}
+
+void MOBAppendSimplePoseState(const ACharacter* Character, FString& Out)
+{
+	const USkeletalMeshComponent* Mesh = Character ? Character->GetMesh() : nullptr;
+	UMOBSimpleAnimInstance* Instance = Mesh ? Cast<UMOBSimpleAnimInstance>(Mesh->GetAnimInstance()) : nullptr;
+	if (Instance)
+	{
+		Instance->GetPoseState(Out);
+		return;
+	}
+	Out += TEXT(",-1,-1,1,0,0,0,0,0");
+	for (int32 I = 0; I < FMOBSimpleAnimProxy::kJumpStack; ++I) Out += TEXT(",-1,0,1");
+	Out += TEXT(",-1,-1");
+}
+
+bool MOBGetSimpleMoveLog(const ACharacter* Character, FString& Out)
+{
+	const USkeletalMeshComponent* Mesh = Character ? Character->GetMesh() : nullptr;
+	UMOBSimpleAnimInstance* Instance = Mesh ? Cast<UMOBSimpleAnimInstance>(Mesh->GetAnimInstance()) : nullptr;
+	if (!Instance) return false;
+	Instance->GetMoveLog(Out);
+	return true;
+}
+
+void UMOBSimpleAnimInstance::GetMoveLog(FString& Out)
+{
+	Out = GetProxyOnGameThread<FMOBSimpleAnimProxy>().GetMoveLog();
+}
+
+void UMOBSimpleAnimInstance::GetPoseState(FString& Out)
+{
+	GetProxyOnGameThread<FMOBSimpleAnimProxy>().AppendPoseState(Out);
+}
+
+void UMOBSimpleAnimInstance::GetPlayers(FString& Out)
+{
+	GetProxyOnGameThread<FMOBSimpleAnimProxy>().AppendPlayers(Out);
 }
 
 void UMOBSimpleAnimInstance::GetPlaybackState(float OutWeights[FMOBSimpleAnimProxy::kClips], float OutTimes[FMOBSimpleAnimProxy::kClips])
@@ -967,7 +1500,95 @@ bool UMOBSimpleAnimInstance::DumpClips(int32 SampleHz, FString& Out)
 			Index = Bones.GetParentBoneIndex(Index);
 		}
 	}
+	// 손 붙이기에 쓰는 뼈 — 판정 모양이 없어도 자세 계산에 필요하다
+	for (const TCHAR* Name : { HAND_R, IK_GUN, IK_HAND_L, LEFT_ARM[0], LEFT_ARM[1], LEFT_ARM[2] })
+	{
+		FCompactPoseBoneIndex Index = FindCompactBone(Bones, Name);
+		if (!Index.IsValid())
+		{
+			UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL dump bone=%s"), Name);
+			continue;
+		}
+		while (Index.GetInt() != INDEX_NONE)
+		{
+			Keep.Add(Index.GetInt());
+			if (Index.IsRootBone()) break;
+			Index = Bones.GetParentBoneIndex(Index);
+		}
+	}
+	// 이동 상수 — 멈춤 · 돌아서기 거리 예측과 꼭대기 시간에 쓴다. 서버의 Shared/Movement 상수와 대조한다
+	const ACharacter* Character = Cast<ACharacter>(GetOwningActor());
+	const UCharacterMovementComponent* Move = Character ? Character->GetCharacterMovement() : nullptr;
+	if (Move)
+	{
+		Out += FString::Printf(TEXT("MOVE,groundFriction,%.6f,brakingFriction,%.6f,brakingFrictionFactor,%.6f,separateBraking,%d,brakingDecelerationWalking,%.6f,gravityZ,%.6f,maxWalkSpeed,%.6f\n"),
+			Move->GroundFriction, Move->BrakingFriction, Move->BrakingFrictionFactor, Move->bUseSeparateBrakingFriction ? 1 : 0, Move->BrakingDecelerationWalking, Move->GetGravityZ(), Move->MaxWalkSpeed);
+	}
 	Proxy.AppendClipDump(Out, SampleHz, Keep);
+	return true;
+}
+
+bool MOBSetServerAnim(ACharacter* Character, const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames)
+{
+	USkeletalMeshComponent* Mesh = Character ? Character->GetMesh() : nullptr;
+	UMOBSimpleAnimInstance* Instance = Mesh ? Cast<UMOBSimpleAnimInstance>(Mesh->GetAnimInstance()) : nullptr;
+	if (!Instance) return false;
+	Instance->SetServerFrame(Input, Local, Count, BoneNames);
+
+	// 다리는 액터 틱이 다 끝난 뒤에 돈다. 여기서 안 당기면 이번 프레임에 그려지는 자세가 위치보다 한 프레임 늦다(쏠 때 보고하는 시점과 어긋난다)
+	Mesh->RefreshBoneTransforms();
+	const USkeletalMesh* Asset = Mesh->GetSkeletalMeshAsset();
+	const USkeleton* Skeleton = Asset ? Asset->GetSkeleton() : nullptr;
+	TArray<AActor*> Attached;
+	Character->GetAttachedActors(Attached, true, true);
+	for (AActor* Actor : Attached)
+	{
+		TInlineComponentArray<USkeletalMeshComponent*> Bodies(Actor);
+		for (USkeletalMeshComponent* Body : Bodies)
+		{
+			const USkeletalMesh* BodyAsset = Body->GetSkeletalMeshAsset();
+			if (!BodyAsset || BodyAsset->GetSkeleton() != Skeleton || !Body->GetAnimInstance()) continue;	// 무기는 뼈대가 다르고, 리더 자세를 따르는 몸은 위 갱신이 같이 옮긴다
+			Body->TickAnimation(0.f, false);
+			Body->RefreshBoneTransforms();
+		}
+	}
+	return true;
+}
+
+// Lyra 의 부품 컴포넌트(ULyraControllerComponent_CharacterParts)는 모듈 밖에 공개되지 않아 직접 부를 수 없다 →
+// 블루프린트용으로 열린 함수 RemoveAllCharacterParts · AddCharacterPart 를 이름으로 찾아 부른다
+bool MOBSetBodyPart(ACharacter* Character, const TCHAR* PartClassPath)
+{
+	AController* Ctrl = Character ? Character->GetController() : nullptr;
+	UClass* PartsClass = StaticLoadClass(UActorComponent::StaticClass(), nullptr, TEXT("/Script/LyraGame.LyraControllerComponent_CharacterParts"));
+	UClass* PartClass = StaticLoadClass(AActor::StaticClass(), nullptr, PartClassPath);
+	if (!Ctrl || !PartsClass || !PartClass)
+	{
+		UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL body ctrl=%d partsClass=%d part=%d path=%s"), Ctrl ? 1 : 0, PartsClass ? 1 : 0, PartClass ? 1 : 0, PartClassPath);
+		return false;
+	}
+	TArray<UActorComponent*> Comps;
+	Ctrl->GetComponents(Comps);
+	UActorComponent* First = nullptr;
+	int32 Found = 0;
+	for (UActorComponent* C : Comps)
+	{
+		if (!C || !C->IsA(PartsClass)) continue;
+		++Found;
+		if (UFunction* RemoveAll = C->FindFunction(TEXT("RemoveAllCharacterParts"))) C->ProcessEvent(RemoveAll, nullptr);
+		if (!First) First = C;
+	}
+	UFunction* Add = First ? First->FindFunction(TEXT("AddCharacterPart")) : nullptr;
+	// 인자는 FLyraCharacterPart 하나다. 크기가 다르면 인자 모양이 바뀐 것이라 부르지 않는다
+	if (!Add || Add->ParmsSize != sizeof(FLyraCharacterPart))
+	{
+		UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL body components=%d add=%d parmsSize=%d expected=%d"), Found, Add ? 1 : 0, Add ? Add->ParmsSize : -1, (int32)sizeof(FLyraCharacterPart));
+		return false;
+	}
+	FLyraCharacterPart Part;
+	Part.PartClass = PartClass;
+	First->ProcessEvent(Add, &Part);
+	UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_BODY character=%s part=%s components=%d"), *GetNameSafe(Character), *GetNameSafe(PartClass), Found);
 	return true;
 }
 

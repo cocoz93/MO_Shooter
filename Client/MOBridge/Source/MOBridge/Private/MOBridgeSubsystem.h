@@ -13,7 +13,7 @@ class APlayerState;
 class ULyraEquipmentInstance;
 struct FMOBCore;
 
-namespace mo { namespace wire { struct PlayerState; struct Damage; struct Kill; struct Match; struct Shot; } }
+namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; } }
 
 // 남의 캐릭터 — 서버 상태를 틱 번호와 함께 쌓아 0.1초 뒤 시점을 보여 준다
 struct FMOBSnapshot
@@ -47,6 +47,9 @@ struct FMOBRemote
 	uint32 RespawnTick = 0;
 
 	uint32 ShownNewestTick = 0;	// 지난 프레임에 이 상대를 놓을 때 받아 둔 가장 새 상태의 틱(-MOBViewLog 진단)
+
+	double NextBodyTryAt = 0;		// 서버 애니(-MOBServerAnim) — 몸을 Quinn 으로 맞추는 재시도 시각
+	int32 BodyTries = 0;
 
 	uint8 Weapon = 0;
 	uint8 ShownWeapon = 0xFF;
@@ -87,6 +90,9 @@ public:
 	virtual TStatId GetStatId() const override;
 	virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Always; }
 
+	// Lyra 능력이 탄을 쏠 때 — 서버와 같은 식으로 방향을 구한다(D15)
+	bool ComputeBulletDirection(const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir);
+
 private:
 	void ParseCommandLine();
 	bool TryBecomeReady();
@@ -95,7 +101,11 @@ private:
 	void FlushSend();
 	void HandlePacket(const uint8* Data, int32 Size);
 	void ApplySelfState(const mo::wire::PlayerState& P);
-	void AddRemoteSnapshot(const mo::wire::PlayerState& P, uint32 ServerTick);
+	void AddRemoteSnapshot(const mo::wire::PlayerState& P, uint32 ServerTick, const mo::wire::AnimStateWire* Anim);
+	void ApplyServerAnim(FMOBRemote& R, ACharacter* Ch, const FMOBSnapshot& From, const FMOBSnapshot* To, float Alpha);
+	void EnsureRemoteBody(FMOBRemote& R, ACharacter* Ch);
+	void LogViewParts(uint32 InSeq, uint32 Target, const ACharacter& Shown);
+	void CheckEngineRays(uint32 InSeq, uint32 Target, const ACharacter& Shown);
 	void SpawnRemote(FMOBRemote& R);
 	void TickSelfVisual(double Now, float DeltaTime);
 	void TickRemotes(double Now);
@@ -137,6 +147,12 @@ private:
 	bool bEventShots = false;
 	bool bKeepPickups = false;
 	bool bSimpleAnim = false;
+	bool bServerAnim = false;		// -MOBServerAnim — 남의 캐릭터 자세를 서버가 보낸 상태로 정한다(후보 1, D32)
+	bool bAnimBonesChecked = false;
+	bool bAbilitySpread = false;	// -MOBAbilitySpread — Lyra 능력의 탄에 입력 번호 짐작을 넣어 서버와 견준다(측정 전용. 능력의 발사 간격이 서버와 달라 아직 기본값이 아니다)
+	bool bRayCheck = false;			// -MOBRayCheck — 같은 자세에 엔진 광선과 TraceBody 를 쏴 견준다(5단계)
+	FString RayBreak;				// -MOBRayBreak=yaw|nothick — 이 대조가 틀림을 잡는지 볼 때만
+	FRandomStream RayRng{ 7 };
 	float BreakAt = -1;
 	float BreakPredictAt = -1;
 
@@ -177,6 +193,8 @@ private:
 
 	// 자동 입력이 고른 값 — 키보드 대신
 	bool bAutoFire = false;
+	double LastBulletAt = 0;		// 능력이 마지막으로 탄을 쏜 시각(FPlatformTime) — 자동 시험의 다시 누르기용
+	double LastAutoRepressAt = 0;
 	bool bAutoSeesEnemy = false;
 	bool bNamedSelf = false;
 	double NextPickupCheckAt = 0;
@@ -206,6 +224,7 @@ private:
 	bool bAutoJump = false;
 	bool bAutoReload = false;
 	uint8 AutoWeapon = 0;
+	int32 AutoWeaponFixed = -1;		// -MOBAutoWeapon=N — 자동 시험의 무기를 고정한다(-1 = 10초마다 바꿈). 무기별 대조에 쓴다
 
 	// 관측값
 	int64 InputsSent = 0, InputsSkipped = 0;
@@ -222,6 +241,10 @@ private:
 	double MaxFrameGap = 0;
 	int32 RemoteSpawned = 0, RemoteSpawnFail = 0;
 	int64 RemoteFrames = 0, RemoteUnderrun = 0, RemoteTeleports = 0, RemoteDriftOver1cm = 0;
+	int64 AnimTailPlayers = 0, AnimTailBad = 0, AnimNoState = 0, AnimPoseEvals = 0, AnimPoseFrames = 0, AnimPoseFail = 0;
+	struct FMOBRayStats { int64 Rays = 0, Map = 0, EngHit = 0, Same = 0, EngOnly = 0, MineOnly = 0, Both = 0, BoneSame = 0, EngWeak = 0, WeakLost = 0, WeakGain = 0; };
+	FMOBRayStats RayStats[2][2];		// [선 · 구 5.5][몸 쪽 · 머리 쪽 겨눔]
+	int64 RayNoBody = 0, RayDiffLogged = 0;
 	// -MOBAnimLog 진단 — 남의 캐릭터가 움직이는 프레임에 애니가 무슨 상태였나
 	bool bViewLog = false;		// -MOBViewLog 쏠 때마다 상대 화면 자리를 찍는다. 서버 REWIND 줄과 대조
 	double RemotePitchWantMax = 0;		// -MOBViewLog — 상대에게 넣은 위아래 시선의 최대

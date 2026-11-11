@@ -274,6 +274,45 @@ index 47cf2ef..346deb1 100644
  #if WITH_EDITOR
  	if (GIsEditor)
  	{
+diff --git a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp
+index 1ccf483..370ebaf 100644
+--- a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp	
++++ b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp	
+@@ -379,6 +379,8 @@ void ULyraGameplayAbility_RangedWeapon::PerformLocalTargeting(OUT TArray<FHitRes
+ 	}
+ }
+ 
++bool (*ULyraGameplayAbility_RangedWeapon::MOBBulletDirectionHook)(const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir) = nullptr;
++
+ void ULyraGameplayAbility_RangedWeapon::TraceBulletsInCartridge(const FRangedWeaponFiringInput& InputData, OUT TArray<FHitResult>& OutHits)
+ {
+ 	ULyraRangedWeaponInstance* WeaponData = InputData.WeaponData;
+@@ -394,7 +396,11 @@ void ULyraGameplayAbility_RangedWeapon::TraceBulletsInCartridge(const FRangedWea
+ 
+ 		const float HalfSpreadAngleInRadians = FMath::DegreesToRadians(ActualSpreadAngle * 0.5f);
+ 
+-		const FVector BulletDir = VRandConeNormalDistribution(InputData.AimDir, HalfSpreadAngleInRadians, WeaponData->GetSpreadExponent());
++		FVector BulletDir;
++		if (!MOBBulletDirectionHook || !MOBBulletDirectionHook(InputData.AimDir, BaseSpreadAngle, SpreadAngleMultiplier, WeaponData->GetSpreadExponent(), BulletIndex, /*out*/ BulletDir))
++		{
++			BulletDir = VRandConeNormalDistribution(InputData.AimDir, HalfSpreadAngleInRadians, WeaponData->GetSpreadExponent());
++		}
+ 
+ 		const FVector EndTrace = InputData.StartTrace + (BulletDir * WeaponData->GetMaxDamageRange());
+ 		FVector HitLocation = EndTrace;
+diff --git a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h
+index f1b56ba..bf876ff 100644
+--- a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h	
++++ b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h	
+@@ -120,4 +120,8 @@ protected:
+ 
+ private:
+ 	FDelegateHandle OnTargetDataReadyCallbackDelegateHandle;
++
++public:
++	// [MOBridge] When an external server owns the match, the plugin computes the bullet direction with the same function as the server (Shared SpreadDirection). Returns false to keep Lyra's own random.
++	LYRAGAME_API static bool (*MOBBulletDirectionHook)(const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir);
+ };
 diff --git a/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h b/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h
 index a2fa9f9..c0ca42d 100644
 --- a/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h	

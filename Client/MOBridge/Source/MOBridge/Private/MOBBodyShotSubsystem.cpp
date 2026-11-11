@@ -9,7 +9,7 @@
 #include "Camera/PlayerCameraManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Cosmetics/LyraCharacterPartTypes.h"
+#include "MOBSimpleAnimInstance.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 #include "Engine/GameEngine.h"
@@ -163,41 +163,10 @@ bool UMOBBodyShotSubsystem::IsMatchPlaying(float DeltaTime)
 	return ClearSeconds > MATCH_SETTLE_SECONDS;
 }
 
-// 몸 부품을 바꾼다. Lyra 의 부품 컴포넌트(ULyraControllerComponent_CharacterParts)는 모듈 밖에 공개되지 않아 직접 부를 수 없다 →
-// 블루프린트용으로 열린 함수 RemoveAllCharacterParts · AddCharacterPart 를 이름으로 찾아 부른다
+// 몸 부품을 바꾼다
 bool UMOBBodyShotSubsystem::SetBody(ACharacter* Foe, const TCHAR* PartClassPath) const
 {
-	AController* Ctrl = Foe ? Foe->GetController() : nullptr;
-	UClass* PartsClass = StaticLoadClass(UActorComponent::StaticClass(), nullptr, TEXT("/Script/LyraGame.LyraControllerComponent_CharacterParts"));
-	UClass* PartClass = StaticLoadClass(AActor::StaticClass(), nullptr, PartClassPath);
-	if (!Ctrl || !PartsClass || !PartClass)
-	{
-		UE_LOG(LogMOBBodyShot, Error, TEXT("MOB_BODYSHOT_FAIL setbody ctrl=%d partsClass=%d part=%d path=%s"), Ctrl ? 1 : 0, PartsClass ? 1 : 0, PartClass ? 1 : 0, PartClassPath);
-		return false;
-	}
-	TArray<UActorComponent*> Comps;
-	Ctrl->GetComponents(Comps);
-	UActorComponent* First = nullptr;
-	int32 Found = 0;
-	for (UActorComponent* C : Comps)
-	{
-		if (!C || !C->IsA(PartsClass)) continue;
-		++Found;
-		if (UFunction* RemoveAll = C->FindFunction(TEXT("RemoveAllCharacterParts"))) C->ProcessEvent(RemoveAll, nullptr);
-		if (!First) First = C;
-	}
-	UFunction* Add = First ? First->FindFunction(TEXT("AddCharacterPart")) : nullptr;
-	// 인자는 FLyraCharacterPart 하나다. 크기가 다르면 인자 모양이 바뀐 것이라 부르지 않는다
-	if (!Add || Add->ParmsSize != sizeof(FLyraCharacterPart))
-	{
-		UE_LOG(LogMOBBodyShot, Error, TEXT("MOB_BODYSHOT_FAIL setbody components=%d add=%d parmsSize=%d expected=%d"), Found, Add ? 1 : 0, Add ? Add->ParmsSize : -1, (int32)sizeof(FLyraCharacterPart));
-		return false;
-	}
-	FLyraCharacterPart Part;
-	Part.PartClass = PartClass;
-	First->ProcessEvent(Add, &Part);
-	UE_LOG(LogMOBBodyShot, Log, TEXT("MOB_BODYSHOT setbody foe=%s part=%s components=%d"), *GetNameSafe(Foe), *GetNameSafe(PartClass), Found);
-	return true;
+	return MOBSetBodyPart(Foe, PartClassPath);
 }
 
 bool UMOBBodyShotSubsystem::Prepare(bool& bFatal)

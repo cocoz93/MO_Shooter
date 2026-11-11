@@ -22,9 +22,13 @@ class UPhysicalMaterial;
  *   -MOBACProbe         프레임마다 애니 쪽 속사정을 남긴다 → animcmp_<tag>_probe.csv. 애니 블루프린트 변수 · 상태 기계의 지금 상태 · 곡선 값 · 몸 기준 뼈 자리(손 · 발 · 머리).
  *                       Lyra 원본이 언제 무엇을 하는지 실행값으로 보고 단순 계산을 맞추려고 넣었다
  *   -MOBACScript=aimjump  달리기 경로 대신 위아래 시선과 점프를 섞은 경로로 찍는다(2차 화면 시험). 조각마다 「MOB_ACOMP seg」 줄로 실제 시선 각 · 뜬 높이 · 단순 재생이 받은 값을 남긴다
+ *   -MOBACScript=startstop 네 방향 출발 · 멈춤 · 돌아서기를 한 번씩 찍는다(3차 화면 시험, start-stop-pivot-test.md)
  * 산출물 = Saved/MOB/animcmp_<tag>.csv(프레임별 머리·골반 자리) · rec_animcmp_<tag>.bgra(원시 영상, 바깥에서 ffmpeg 로 변환)
  * 판정에 쓰는 줄은 전부 「MOB_ACOMP」 로 시작한다.
+ * 데디 서버(-server)에 주면 서버의 봇을 같은 경로로 움직인다. 카메라와 촬영은 건너뛴다(candidate1-impl-plan.md 0단계)
  */
+enum class EMOBACScript : uint8 { Run, AimJump, StartStop };
+
 UCLASS()
 class UMOBAnimCompareSubsystem : public UTickableWorldSubsystem
 {
@@ -36,6 +40,10 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 	virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Always; }
+
+	// 데디 서버에서 돌 때 기준값 기록(UMOBDediBaselineSubsystem)이 읽는다
+	ACharacter* GetFoe() const { return Foe.Get(); }
+	bool GetRunPosition(int32& OutPass, const TCHAR*& OutSegment, float& OutSegmentTime) const;		// 경로를 도는 중이면 true
 
 private:
 	enum class EStage : uint8 { WaitActors, Settle, Run, Stopping, Done };
@@ -64,7 +72,8 @@ private:
 	bool bVideo = true;
 	bool bShapes = false;
 	bool bDumpClips = false;
-	bool bAimJump = false;
+	EMOBACScript Script = EMOBACScript::Run;
+	bool bAimJump = false;		// 시선을 바깥에서 정하는 경로(aimjump · startstop)
 	bool bProbe = false;
 
 	// -MOBACProbe — 읽을 변수와 상태 기계 목록(BuildProbe 가 첫 촬영 프레임에 만든다)

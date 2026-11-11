@@ -99,11 +99,66 @@ namespace
 		{ TEXT("stop_end"),  1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false },
 	};
 	constexpr int32 NUM_AIMJUMP_SEGMENTS = UE_ARRAY_COUNT(AIMJUMP_SCRIPT);
+
+	// 3차 화면 시험(-MOBACScript=startstop) — 네 방향 출발 · 멈춤 · 돌아서기. 지금 기록에 왼쪽 · 오른쪽 클립이 없어 새로 찍는다.
+	// 달리기 2.5초 = 기록에서 출발 클립이 1.6초까지 돌았으므로 달리기로 다 넘어가는 데까지. 멈춤 2초 = 멈춤 클립 최대 1.81초보다 길고 대기 몸짓(6초 뒤)보다 짧게.
+	// 돌아서기 1.5초 = 기록(run_down)에서 방향 전환 클립이 도는 시간. 좌우 0.4초 = 짧게 번갈아 움직일 때 방향 전환이 끊기는 모습을 보려는 제안값
+	const FScriptSegment STARTSTOP_SCRIPT[] = {
+		{ TEXT("idle"),       2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("fwd"),        2.5f, true,    0.f, 0.f, 0.f },
+		{ TEXT("stop_fwd"),   2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("bwd"),        2.5f, true,  180.f, 0.f, 0.f },
+		{ TEXT("stop_bwd"),   2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("left"),       2.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("stop_left"),  2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("right"),      2.5f, true,   90.f, 0.f, 0.f },
+		{ TEXT("stop_right"), 2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("diag"),       2.5f, true,   45.f, 0.f, 0.f },
+		{ TEXT("stop_diag"),  2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("piv_bf_a"),   1.5f, true,  180.f, 0.f, 0.f },
+		{ TEXT("piv_bf_b"),   1.5f, true,    0.f, 0.f, 0.f },
+		{ TEXT("stop_bf"),    2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("piv_fb_a"),   1.5f, true,    0.f, 0.f, 0.f },
+		{ TEXT("piv_fb_b"),   1.5f, true,  180.f, 0.f, 0.f },
+		{ TEXT("stop_fb"),    2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("piv_lr_a"),   1.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("piv_lr_b"),   1.5f, true,   90.f, 0.f, 0.f },
+		{ TEXT("stop_lr"),    2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("piv_rl_a"),   1.5f, true,   90.f, 0.f, 0.f },
+		{ TEXT("piv_rl_b"),   1.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("stop_rl"),    2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("ad1"),        0.4f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("ad2"),        0.4f, true,   90.f, 0.f, 0.f },
+		{ TEXT("ad3"),        0.4f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("ad4"),        0.4f, true,   90.f, 0.f, 0.f },
+		{ TEXT("ad5"),        0.4f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("ad6"),        0.4f, true,   90.f, 0.f, 0.f },
+		{ TEXT("stop_ad"),    2.0f, false,   0.f, 0.f, 0.f },
+	};
+	constexpr int32 NUM_STARTSTOP_SEGMENTS = UE_ARRAY_COUNT(STARTSTOP_SCRIPT);
 	constexpr double AIM_MARK_DISTANCE = 1000.0;	// 시선 표적을 둘 거리. 멀수록 상대가 움직여도 각이 덜 흔들린다
 	constexpr float JUMP_PRESS_SECONDS = 0.1f;		// 뛰기 입력을 누르고 있는 시간 — 계속 누르면 내려앉자마자 또 뛴다
 
-	const FScriptSegment& Seg(bool bAimJump, int32 I) { return bAimJump ? AIMJUMP_SCRIPT[I] : SCRIPT[I]; }
-	int32 SegCount(bool bAimJump) { return bAimJump ? NUM_AIMJUMP_SEGMENTS : NUM_SEGMENTS; }
+	const FScriptSegment& Seg(EMOBACScript Kind, int32 I)
+	{
+		switch (Kind)
+		{
+		case EMOBACScript::AimJump: return AIMJUMP_SCRIPT[I];
+		case EMOBACScript::StartStop: return STARTSTOP_SCRIPT[I];
+		case EMOBACScript::Run: break;
+		}
+		return SCRIPT[I];
+	}
+	int32 SegCount(EMOBACScript Kind)
+	{
+		switch (Kind)
+		{
+		case EMOBACScript::AimJump: return NUM_AIMJUMP_SEGMENTS;
+		case EMOBACScript::StartStop: return NUM_STARTSTOP_SEGMENTS;
+		case EMOBACScript::Run: break;
+		}
+		return NUM_SEGMENTS;
+	}
 
 	// 두 번 찍는다 — 가까이(결함이 잘 보임) · 실제 교전 거리쯤(사람이 평소 보는 크기). 거리는 제안값이다
 	constexpr int32 NUM_PASSES = 2;
@@ -120,6 +175,7 @@ namespace
 	constexpr float MATCH_SETTLE_SECONDS = 3.f;	// 경기 시작 때 캐릭터가 한 번 바뀐다 — 면역이 풀린 채 이만큼 이어져야 그 캐릭터로 찍는다(MOBWeaponRecordSubsystem 과 같은 절차)
 	constexpr int32 CAPTURE_EVERY = 2;			// 60프레임 중 하나 걸러 30fps — 720p 원시 영상이 한 판 약 5GB 로 끝나는 간격
 	constexpr double WAIT_LIMIT_SECONDS = 120.0;
+	constexpr double DEDI_WAIT_LIMIT_SECONDS = 420.0;	// 데디 서버는 클라가 붙고 경기가 시작될 때까지 기다린다. 에디터 실행 파일이 맵을 읽는 시간까지 들어간다(제안값)
 
 	UAbilitySystemComponent* FindASC(AActor* A)
 	{
@@ -145,18 +201,29 @@ void UMOBAnimCompareSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	bShapes = FParse::Param(Cmd, TEXT("MOBACShapes"));
 	bDumpClips = FParse::Param(Cmd, TEXT("MOBACDumpClips"));
 	FString ScriptName;
-	bAimJump = FParse::Value(Cmd, TEXT("MOBACScript="), ScriptName) && ScriptName == TEXT("aimjump");
+	FParse::Value(Cmd, TEXT("MOBACScript="), ScriptName);
+	Script = ScriptName == TEXT("aimjump") ? EMOBACScript::AimJump : ScriptName == TEXT("startstop") ? EMOBACScript::StartStop : EMOBACScript::Run;
+	bAimJump = Script != EMOBACScript::Run;
 	bProbe = FParse::Param(Cmd, TEXT("MOBACProbe"));
-	if (bShapes) PhysWeak = LoadObject<UPhysicalMaterial>(nullptr, TEXT("/Game/Characters/Heroes/PhysMat_Player_WeakSpot.PhysMat_Player_WeakSpot"));
+	if (bShapes || bDumpClips) PhysWeak = LoadObject<UPhysicalMaterial>(nullptr, TEXT("/Game/Characters/Heroes/PhysMat_Player_WeakSpot.PhysMat_Player_WeakSpot"));
 	GAreScreenMessagesEnabled = false;	// 봇이 그전에 쏠 때 남은 오류 글자가 화면을 가린다
 	FMath::RandInit(20261105);		// Lyra 는 캐릭터마다 몸을 무작위로 고른다 — 판끼리 몸을 맞추려는 시도. 실제로 맞았는지는 MOB_ACOMP ready 줄로 본다
 	// w0~w4·t0~t4 = 단순 재생이 그 프레임 자세에 쓴 클립 가중치와 클립 시각(Lyra 원본 판은 0). 언리얼 밖 계산이 같은 상태에서 출발하게 하려고 남긴다
-	Csv = TEXT("pass,frame,segment,segTime,x,y,z,velX,velY,yaw,headX,headY,headZ,pelvisX,pelvisY,pelvisZ,w0,w1,w2,w3,w4,t0,t1,t2,t3,t4\n");
+	Csv = TEXT("pass,frame,segment,segTime,x,y,z,velX,velY,yaw,headX,headY,headZ,pelvisX,pelvisY,pelvisZ,w0,w1,w2,w3,w4,t0,t1,t2,t3,t4,fidget,recovery,aimBlend,pitch,plantX,plantY,plantZ,layers,c0,tm0,f0,c1,tm1,f1,c2,tm2,f2,c3,tm3,f3,reset,seq\n");
 }
 
 TStatId UMOBAnimCompareSubsystem::GetStatId() const
 {
 	RETURN_QUICK_DECLARE_CYCLE_STAT(UMOBAnimCompareSubsystem, STATGROUP_Tickables);
+}
+
+bool UMOBAnimCompareSubsystem::GetRunPosition(int32& OutPass, const TCHAR*& OutSegment, float& OutSegmentTime) const
+{
+	if (Stage != EStage::Run) return false;
+	OutPass = Pass;
+	OutSegment = Seg(Script, Segment).Name;
+	OutSegmentTime = SegmentTime;
+	return true;
 }
 
 bool UMOBAnimCompareSubsystem::IsMatchPlaying(float DeltaTime)
@@ -260,6 +327,14 @@ bool UMOBAnimCompareSubsystem::Prepare()
 	if (UCharacterMovementComponent* MyMove = Me->GetCharacterMovement()) MyMove->DisableMovement();
 	Me->SetActorEnableCollision(false);
 
+	// 데디 서버에는 화면이 없다 — 카메라와 위젯은 건너뛰고 봇만 움직인다
+	if (World->GetNetMode() == NM_DedicatedServer)
+	{
+		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP ready tag=%s dedicated=1 foe=%s rifle=%s removedWeapons=%d pads=%d home=(%.0f,%.0f,%.0f) yaw=%.1f"),
+			*Tag, *GetNameSafe(Target), *GetNameSafe(Rifle), Old.Num(), PadsHidden, Home.X, Home.Y, Home.Z, BodyYaw);
+		return true;
+	}
+
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	SpawnParams.ObjectFlags |= RF_Transient;
@@ -301,8 +376,8 @@ void UMOBAnimCompareSubsystem::BeginPass()
 	Segment = 0;
 	SegmentTime = 0.f;
 	BodyYaw = StartYaw;
-	MoveAngle = Seg(bAimJump, 0).Angle;
-	AimPitch = Seg(bAimJump, 0).PitchFrom;
+	MoveAngle = Seg(Script,0).Angle;
+	AimPitch = Seg(Script,0).PitchFrom;
 	ResetSegmentStats();
 	if (UCharacterMovementComponent* Move = Target->GetCharacterMovement()) Move->StopMovementImmediately();
 	Target->TeleportTo(Home, FRotator(0.f, BodyYaw, 0.f), false, true);
@@ -310,7 +385,7 @@ void UMOBAnimCompareSubsystem::BeginPass()
 	float Delay = 0.f, AfterStop = 0.f;
 	MOBGetSimpleIdleBreak(Delay, AfterStop);
 	IdleBreakForceLeft = AfterStop;		// 단순 재생도 판 시작을 「방금 멈췄다」로 보고 이만큼 뒤에 몸짓을 시작한다
-	bIdleBreakForcing = !bSimple && bAimJump;
+	bIdleBreakForcing = !bSimple && Script == EMOBACScript::AimJump;	// startstop 경로는 서 있는 구간이 2초뿐이라 몸짓을 안 띄운다 — 덮으면 첫 멈춤에 Lyra 쪽만 몸짓이 나온다
 }
 
 void UMOBAnimCompareSubsystem::ResetSegmentStats()
@@ -476,7 +551,7 @@ void UMOBAnimCompareSubsystem::WriteProbe(float SegTime)
 	if (!Mesh) return;
 	const FVector Loc = Target->GetActorLocation();
 	const FQuat ActorInv = FRotator(0, Target->GetActorRotation().Yaw, 0).Quaternion().Inverse();
-	FString Row = FString::Printf(TEXT("%d,%d,%s,%.3f"), Pass, Frame, Seg(bAimJump, Segment).Name, SegTime);
+	FString Row = FString::Printf(TEXT("%d,%d,%s,%.3f"), Pass, Frame, Seg(Script,Segment).Name, SegTime);
 	for (const TCHAR* Bone : PROBE_BONES)
 	{
 		const FVector P = ActorInv.RotateVector(Mesh->GetBoneLocation(Bone) - Loc);
@@ -518,6 +593,7 @@ void UMOBAnimCompareSubsystem::WriteProbe(float SegTime)
 		for (const TPair<FName, FAnimGroupInstance>& G : Inst->GetSyncGroupMapRead()) AddPlayers(G.Value.ActivePlayers);
 		AddPlayers(Inst->GetUngroupedActivePlayersRead());
 	});
+	if (bSimple) MOBGetSimplePlayers(Target, Players);	// 단순 재생은 엔진 재생 기록을 안 남겨 직접 받는다
 	Row += TEXT(",") + Players;
 	FString Curves;
 	if (Main)
@@ -537,7 +613,7 @@ void UMOBAnimCompareSubsystem::WriteProbe(float SegTime)
 void UMOBAnimCompareSubsystem::LogSegment() const
 {
 	if (!bAimJump) return;
-	const FScriptSegment& S = Seg(bAimJump, Segment);
+	const FScriptSegment& S = Seg(Script,Segment);
 	UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP seg pass=%d name=%s pitchSet=%.0f..%.0f aimPitch=%.1f..%.1f simplePitch=%.1f..%.1f riseMax=%.1f fallFrames=%d jumpWeightMax=%.2f jumpClips=0x%x"),
 		Pass, S.Name, S.PitchFrom, S.PitchTo, SegPitchMin, SegPitchMax, bSimple ? SegSimplePitchMin : 0.f, bSimple ? SegSimplePitchMax : 0.f, SegRiseMax, SegFallFrames, SegJumpWeightMax, SegJumpClips);
 }
@@ -546,7 +622,7 @@ void UMOBAnimCompareSubsystem::DriveFoe(float DeltaTime)
 {
 	ACharacter* Target = Foe.Get();
 	if (!Target) return;
-	const FScriptSegment& S = Seg(bAimJump, Segment);
+	const FScriptSegment& S = Seg(Script,Segment);
 	BodyYaw += S.YawRate * DeltaTime;
 	MoveAngle += S.AngleRate * DeltaTime;
 
@@ -592,9 +668,11 @@ void UMOBAnimCompareSubsystem::WriteRow(float SegTime)
 	float Wt[FMOBSimpleAnimProxy::kClips] = {};
 	float Tm[FMOBSimpleAnimProxy::kClips] = {};
 	if (bSimple) MOBGetSimpleAnimState(Target, Wt, Tm);
-	Csv += FString::Printf(TEXT("%d,%d,%s,%.3f,%.2f,%.2f,%.2f,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n"),
-		Pass, Frame, Seg(bAimJump, Segment).Name, SegTime, L.X, L.Y, L.Z, V.X, V.Y, Target->GetActorRotation().Yaw, Head.X, Head.Y, Head.Z, Pelvis.X, Pelvis.Y, Pelvis.Z,
+	Csv += FString::Printf(TEXT("%d,%d,%s,%.3f,%.2f,%.2f,%.2f,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g"),
+		Pass, Frame, Seg(Script,Segment).Name, SegTime, L.X, L.Y, L.Z, V.X, V.Y, Target->GetActorRotation().Yaw, Head.X, Head.Y, Head.Z, Pelvis.X, Pelvis.Y, Pelvis.Z,
 		Wt[0], Wt[1], Wt[2], Wt[3], Wt[4], Tm[0], Tm[1], Tm[2], Tm[3], Tm[4]);
+	MOBAppendSimplePoseState(bSimple ? Target : nullptr, Csv);	// 자세 계산의 나머지 입력(Shared/AnimPose, 2단계 대조)
+	Csv += TEXT("\n");
 	if (bShapes) WriteShapes();
 }
 
@@ -730,6 +808,17 @@ void UMOBAnimCompareSubsystem::Finish()
 	const FString CsvPath = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("animcmp_%s.csv"), *Tag);
 	const bool bSaved = FFileHelper::SaveStringToFile(Csv, *CsvPath);
 	UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP done tag=%s frames=%d captureCalls=%d grabbed=%d size=%dx%d csvSaved=%d"), *Tag, Frame, CaptureCalls, GrabbedFrames, GrabSize.X, GrabSize.Y, bSaved ? 1 : 0);
+	if (bSimple)
+	{
+		// 언리얼 밖 상태 계산의 입력(candidate1-impl-plan.md 3단계). 대기 프레임까지 들어 있어 위 csv 와 reset · seq 칸으로 잇는다
+		FString Moves = TEXT("reset,seq,dt,vx,vy,vz,ax,ay,az,accel,falling,pitch,ground,hasGap,gap\n");
+		FString Body;
+		const bool bHasMoves = MOBGetSimpleMoveLog(Foe.Get(), Body);
+		Moves += Body;
+		const FString MovesPath = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("animcmp_%s_moves.csv"), *Tag);
+		const bool bMovesSaved = FFileHelper::SaveStringToFile(Moves, *MovesPath);
+		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP moves has=%d chars=%d saved=%d"), bHasMoves ? 1 : 0, Moves.Len(), bMovesSaved ? 1 : 0);
+	}
 	if (bShapes)
 	{
 		const FString ShapePath = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("animcmp_%s_shapes.csv"), *Tag);
@@ -764,7 +853,7 @@ void UMOBAnimCompareSubsystem::Tick(float DeltaTime)
 			SettleLeft = FIRST_SETTLE_SECONDS;
 			Stage = EStage::Settle;
 		}
-		else if (WaitSeconds > WAIT_LIMIT_SECONDS)
+		else if (WaitSeconds > (GetWorld()->GetNetMode() == NM_DedicatedServer ? DEDI_WAIT_LIMIT_SECONDS : WAIT_LIMIT_SECONDS))
 		{
 			UE_LOG(LogMOBAComp, Error, TEXT("MOB_ACOMP_FAIL no actors after %.0fs"), WaitSeconds);
 			Finish();
@@ -794,19 +883,19 @@ void UMOBAnimCompareSubsystem::Tick(float DeltaTime)
 		TickCapture();
 		++Frame;
 		SegmentTime += DeltaTime;
-		if (SegmentTime >= Seg(bAimJump, Segment).Seconds)
+		if (SegmentTime >= Seg(Script,Segment).Seconds)
 		{
 			LogSegment();
 			ResetSegmentStats();
 			SegmentTime = 0.f;
 			++Segment;
-			if (Segment >= SegCount(bAimJump))
+			if (Segment >= SegCount(Script))
 			{
 				++Pass;
 				UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP pass_end pass=%d frames=%d"), Pass, Frame);
 				if (Pass >= NUM_PASSES)
 				{
-					Segment = SegCount(bAimJump) - 1;
+					Segment = SegCount(Script) - 1;
 					Stage = EStage::Stopping;
 					if (Grabber) Grabber->StopCapturingFrames();
 					break;
@@ -816,7 +905,7 @@ void UMOBAnimCompareSubsystem::Tick(float DeltaTime)
 				Stage = EStage::Settle;
 				break;
 			}
-			MoveAngle = Seg(bAimJump, Segment).Angle;
+			MoveAngle = Seg(Script,Segment).Angle;
 		}
 		break;
 

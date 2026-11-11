@@ -6,11 +6,17 @@
 #include "Movement.h"
 #include "Prediction.h"
 #include "Weapon.h"
+#include "AnimClips.h"
+#include "AnimPose.h"
+#include "AnimState.h"
+
+#include <vector>
 
 #include "AIController.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimNode_StateMachine.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
 #include "Camera/PlayerCameraManager.h"
@@ -39,9 +45,14 @@
 #include "GameFramework/GameplayMessageSubsystem.h"
 #include "MOBServerDamageEffect.h"
 #include "MOBSimpleAnimInstance.h"
+#include "Physics/LyraCollisionChannels.h"
+#include "PhysicsEngine/BodyInstance.h"
+#include "PhysicsEngine/PhysicsAsset.h"
+#include "PhysicsEngine/SkeletalBodySetup.h"
 
 #include "AbilitySystem/Attributes/LyraHealthSet.h"
 #include "AbilitySystem/LyraAbilitySystemComponent.h"
+#include "Weapons/LyraGameplayAbility_RangedWeapon.h"
 #include "AbilitySystem/Phases/LyraGamePhaseAbility.h"
 #include "AbilitySystem/Phases/LyraGamePhaseSubsystem.h"
 #include "Character/LyraCharacter.h"
@@ -110,6 +121,14 @@ namespace
 		return FVector(V.x, V.y, V.z);
 	}
 
+	// Lyra 능력(다른 모듈)은 이 다리를 모른다 — 함수 포인터로 부른다
+	UMOBridgeSubsystem* GBulletBridge = nullptr;
+
+	bool BulletDirectionHook(const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir)
+	{
+		return GBulletBridge && GBulletBridge->ComputeBulletDirection(AimDir, SpreadAngle, SpreadMultiplier, SpreadExponent, BulletIndex, OutDir);
+	}
+
 	// 위치는 서버(·내 예측) 값을 입히므로 언리얼 이동 계산은 쉰다. 입력 소비와 가속 계산은 그대로 돈다 — 애니가 읽는 값
 	void NoLyraMove(ULyraCharacterMovementComponent*, float)
 	{
@@ -125,6 +144,41 @@ namespace
 	}
 }
 
+// S2C_STATE 꼬리에서 한 사람치를 읽는다. 머리 뒤에 겹침 칸 × layerCount. 틀린 꼬리면 false 를 돌려주고 At 을 끝으로 옮겨 뒤 사람들도 안 읽는다
+static bool ReadAnimTail(const uint8* Data, int32 Size, int32& At, wire::AnimStateWire& Out, int64& BadCount)
+{
+	if (At >= Size) return false;
+	const int32 Head = (int32)wire::kAnimStateHeadSize;
+	if (At + Head > Size)
+	{
+		++BadCount;
+		At = Size;
+		return false;
+	}
+	FMemory::Memcpy(&Out, Data + At, Head);
+	const int32 LayerBytes = (int32)sizeof(wire::AnimLayerWire) * Out.layerCount;
+	if (Out.layerCount > wire::kAnimLayersOnWire || At + Head + LayerBytes > Size)
+	{
+		++BadCount;
+		At = Size;
+		return false;
+	}
+	FMemory::Memcpy(Out.layers, Data + At + Head, LayerBytes);
+	At += Head + LayerBytes;
+	return true;
+}
+
+// 남의 캐릭터 한 사람의 받은 애니 상태와 계산해 둔 자세. 칸 번호는 FMOBRemote::Snaps 와 같다
+struct FMOBRemoteAnim
+{
+	wire::AnimStateWire States[FMOBRemote::kSnapshots];
+	bool bHas[FMOBRemote::kSnapshots] = {};
+	// 최근 두 틱의 자세 — 틱마다 한 번만 계산하고 프레임마다 섞는다
+	uint32 PoseTick[2] = {};
+	bool bPoseValid[2] = {};
+	std::vector<mo::BoneTransform> PoseLocal[2];
+};
+
 // 공용 코드 묶음 — 헤더에 Shared 를 드러내지 않으려고 여기에 둔다
 struct FMOBCore
 {
@@ -134,10 +188,65 @@ struct FMOBCore
 	mo::MatchRules Rules;
 	mo::CSelfPrediction Prediction;
 
+	// 서버 애니(-MOBServerAnim) — 게임 스레드에서만 쓴다
+	mo::CAnimClips AnimClips;
+	mo::CAnimState AnimCodec;			// 받은 상태를 자세 입력으로 푸는 데만 쓴다
+	mo::CAnimPoseEvaluator AnimEvaluator;
+	std::vector<mo::BoneTransform> AnimBlend;
+	TArray<FName> AnimBoneNames;
+	TMap<uint32, FMOBRemoteAnim> RemoteAnims;
+
 	FMOBCore()
 		: Sim(Map, Params)
 		, Prediction(Sim, Rules, Params.maxWalkSpeed)
 	{
+	}
+
+	bool LoadAnim(const FString& Path, FString& OutWhy)
+	{
+		static const char* const BUNDLE = "rifle";	// 서버 Room.h 의 kAnimBundleName 과 같은 묶음
+		TArray<uint8> Bytes;
+		if (!FFileHelper::LoadFileToArray(Bytes, *Path))
+		{
+			OutWhy = TEXT("file");
+			return false;
+		}
+		if (AnimClips.LoadFromMemory(Bytes.GetData(), (size_t)Bytes.Num()) != mo::EClipLoad::Ok)
+		{
+			OutWhy = TEXT("parse");
+			return false;
+		}
+		if (!AnimEvaluator.Init(AnimClips, BUNDLE) || !AnimCodec.Init(AnimClips, BUNDLE))
+		{
+			OutWhy = TEXT("bundle");
+			return false;
+		}
+		AnimBlend.resize(AnimEvaluator.BoneCount());
+		for (const mo::ClipBone& Bone : AnimClips.Bones()) AnimBoneNames.Add(FName(UTF8_TO_TCHAR(Bone.name.c_str())));
+		return true;
+	}
+
+	// 이 칸의 틱 자세가 든 칸(0·1)을 돌려준다. 없으면 계산해 넣는다. Keep 칸은 덮지 않는다 — 두 틱을 섞을 때 앞 틱 결과를 지키려고
+	int32 PoseSlot(FMOBRemoteAnim& Anim, int32 SnapIndex, uint32 Tick, float Pitch, int32 Keep, int64& Evals)
+	{
+		for (int32 I = 0; I < 2; ++I)
+		{
+			if (Anim.bPoseValid[I] && Anim.PoseTick[I] == Tick) return I;
+		}
+		int32 Slot = 0;
+		if (Keep != INDEX_NONE) Slot = 1 - Keep;
+		else if (!Anim.bPoseValid[0]) Slot = 0;
+		else if (!Anim.bPoseValid[1]) Slot = 1;
+		else Slot = Anim.PoseTick[0] <= Anim.PoseTick[1] ? 0 : 1;
+
+		if (Anim.PoseLocal[Slot].size() != AnimEvaluator.BoneCount()) Anim.PoseLocal[Slot].resize(AnimEvaluator.BoneCount());
+		mo::AnimPoseInput Input;
+		AnimCodec.FromWire(Anim.States[SnapIndex], Pitch, Input);
+		AnimEvaluator.EvaluateLocal(Input, Anim.PoseLocal[Slot].data());
+		Anim.PoseTick[Slot] = Tick;
+		Anim.bPoseValid[Slot] = true;
+		++Evals;
+		return Slot;
 	}
 };
 
@@ -174,6 +283,8 @@ void UMOBridgeSubsystem::Deinitialize()
 	if (Core)
 	{
 		ULyraCharacterMovementComponent::MOBMoveHook = nullptr;
+		ULyraGameplayAbility_RangedWeapon::MOBBulletDirectionHook = nullptr;
+		GBulletBridge = nullptr;
 		delete Core;
 		Core = nullptr;
 	}
@@ -203,11 +314,16 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	FParse::Value(Cmd, TEXT("MOBBreakPredictAt="), BreakPredictAt);
 	bAutoInput = FParse::Param(Cmd, TEXT("MOBAutoInput"));
 	bAutoAim = FParse::Param(Cmd, TEXT("MOBAutoAim"));
+	FParse::Value(Cmd, TEXT("MOBAutoWeapon="), AutoWeaponFixed);
 	bEventShots = FParse::Param(Cmd, TEXT("MOBEventShots"));
 	bKeepPickups = FParse::Param(Cmd, TEXT("MOBKeepPickups"));
-	bSimpleAnim = FParse::Param(Cmd, TEXT("MOBSimpleAnim"));
+	bServerAnim = FParse::Param(Cmd, TEXT("MOBServerAnim"));
+	bSimpleAnim = bServerAnim || FParse::Param(Cmd, TEXT("MOBSimpleAnim"));
 	bAnimLog = FParse::Param(Cmd, TEXT("MOBAnimLog"));
 	bViewLog = FParse::Param(Cmd, TEXT("MOBViewLog"));
+	bRayCheck = FParse::Param(Cmd, TEXT("MOBRayCheck"));
+	bAbilitySpread = FParse::Param(Cmd, TEXT("MOBAbilitySpread"));
+	FParse::Value(Cmd, TEXT("MOBRayBreak="), RayBreak);
 	bViewClamp = !FParse::Param(Cmd, TEXT("MOBNoViewClamp"));
 	FParse::Value(Cmd, TEXT("MOBBreakAt="), BreakAt);
 	// 대기 단계는 경험 로드 직후 시작한다 — 준비(캐릭터 생성)를 기다리면 늦는다
@@ -336,6 +452,26 @@ void UMOBridgeSubsystem::Connect()
 		return;
 	}
 	ULyraCharacterMovementComponent::MOBMoveHook = &NoLyraMove;
+	if (bAbilitySpread)
+	{
+		GBulletBridge = this;
+		ULyraGameplayAbility_RangedWeapon::MOBBulletDirectionHook = &BulletDirectionHook;
+	}
+
+	if (bServerAnim)
+	{
+		const FString ClipPath = FPaths::ProjectSavedDir() / TEXT("MOB") / TEXT("clips_rifle.bin");
+		FString Why;
+		if (Core->LoadAnim(ClipPath, Why))
+		{
+			UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM ready bones=%d"), Core->AnimBoneNames.Num());
+		}
+		else
+		{
+			UE_LOG(LogMOB, Error, TEXT("MOB_SERVERANIM_FAIL why=%s path=%s"), *Why, *ClipPath);
+			bServerAnim = false;
+		}
+	}
 
 	wire::Hello Hello = wire::Hello();
 	Hello.h.size = sizeof(Hello);
@@ -475,12 +611,16 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 		{
 			TickClockOffset += 0.02 * (TickSample - TickClockOffset);
 		}
+		int32 TailAt = (int32)offsetof(wire::State, players) + (int32)sizeof(wire::PlayerState) * FMath::Min<int32>(M.count, wire::kMaxPlayersInRoom);	// 꼬리 = 사람 차례대로 애니 상태
 		for (int32 i = 0; i < M.count && i < wire::kMaxPlayersInRoom; ++i)
 		{
 			const wire::PlayerState& P = M.players[i];
+			wire::AnimStateWire Anim;
+			const bool bAnim = ReadAnimTail(Data, Size, TailAt, Anim, AnimTailBad);
+			AnimTailPlayers += bAnim ? 1 : 0;
 			if (P.id != PlayerId)
 			{
-				AddRemoteSnapshot(P, M.tick);
+				AddRemoteSnapshot(P, M.tick, bAnim ? &Anim : nullptr);
 				continue;
 			}
 			bFoundMe = true;
@@ -629,12 +769,19 @@ void UMOBridgeSubsystem::TickSelfVisual(double Now, float DeltaTime)
 //  남의 캐릭터 — 서버 상태를 0.1초 뒤 시점으로 입힌다. 위치·속도는 서버 값, 애니는 Lyra 그대로
 // ─────────────────────────────────────────────────────────────
 
-void UMOBridgeSubsystem::AddRemoteSnapshot(const wire::PlayerState& P, uint32 ServerTick)
+void UMOBridgeSubsystem::AddRemoteSnapshot(const wire::PlayerState& P, uint32 ServerTick, const wire::AnimStateWire* Anim)
 {
 	FMOBRemote& R = Remotes.FindOrAdd(P.id);
 	R.Id = P.id;
 	R.ServerTeam = P.team;
 	FMOBSnapshot& S = R.Snaps[R.SnapCount % FMOBRemote::kSnapshots];
+	if (bServerAnim)
+	{
+		FMOBRemoteAnim& Stored = Core->RemoteAnims.FindOrAdd(P.id);
+		const int32 Index = (int32)(R.SnapCount % FMOBRemote::kSnapshots);
+		Stored.bHas[Index] = Anim != nullptr;
+		if (Anim) Stored.States[Index] = *Anim;
+	}
 	S.Tick = ServerTick;
 	S.Pos = FVector(P.x, P.y, P.z);
 	S.Vel = FVector(P.vx, P.vy, P.vz);
@@ -821,11 +968,16 @@ void UMOBridgeSubsystem::TickRemotes(double Now)
 		}
 
 		FMOBSnapshot Shown;
+		// 서버 애니 — 서버 되감기(CRoom::GetRewoundBody)와 같은 규칙. 바로 다음 틱이 있고 순간이동이 아닐 때만 두 틱을 섞는다
+		const FMOBSnapshot* PoseFrom = nullptr;
+		const FMOBSnapshot* PoseTo = nullptr;
+		float PoseAlpha = 0.f;
 		if (From && To)
 		{
 			const double Span = FMath::Max<double>((double)To->Tick - (double)From->Tick, 1.0);
 			const double Alpha = FMath::Clamp((RenderTick - (double)From->Tick) / Span, 0.0, 1.0);
 			Shown = *From;
+			PoseFrom = From;
 			if (FVector::Dist(From->Pos, To->Pos) > wire::kRemoteTeleportDistance)
 			{
 				++RemoteTeleports;
@@ -836,16 +988,23 @@ void UMOBridgeSubsystem::TickRemotes(double Now)
 				Shown.Vel = FMath::Lerp(From->Vel, To->Vel, Alpha);
 				Shown.Yaw = From->Yaw + (float)Alpha * FRotator::NormalizeAxis(To->Yaw - From->Yaw);
 				Shown.Pitch = FMath::Lerp(From->Pitch, To->Pitch, (float)Alpha);
+				if (To->Tick == From->Tick + 1)
+				{
+					PoseTo = To;
+					PoseAlpha = (float)Alpha;
+				}
 			}
 		}
 		else if (From)
 		{
 			Shown = *From;		// 새 상태가 아직 안 왔다 — 그 자리에 둔다
+			PoseFrom = From;
 			++RemoteUnderrun;
 		}
 		else
 		{
 			Shown = *To;		// 쌓인 상태 전부가 보여 줄 시점보다 뒤다(막 나타남)
+			PoseFrom = To;
 		}
 		++RemoteFrames;
 		RemoteLagSum += FVector::Dist(Shown.Pos, Newest.Pos);
@@ -866,7 +1025,74 @@ void UMOBridgeSubsystem::TickRemotes(double Now)
 		// 위치는 위에서 정했고, 입력은 애니가 읽는 가속을 만들 뿐이다
 		if (Shown.MoveX != 0 || Shown.MoveY != 0) Ch->AddMovementInput(FVector(Shown.MoveX / 127.f, Shown.MoveY / 127.f, 0.f), 1.f);
 		if (bAnimLog) MeasureRemoteAnim(Ch, R.Id, Shown.Vel, Shown.MoveX, Shown.MoveY, Now);
+		if (bServerAnim)
+		{
+			EnsureRemoteBody(R, Ch);
+			ApplyServerAnim(R, Ch, *PoseFrom, PoseTo, PoseAlpha);
+		}
 	}
+}
+
+// 받은 상태로 자세를 만들어 이번 프레임 화면에 넣는다. 서버 판정(CRoom::GetPoseAt)과 같은 차례다 — 틱별 자세를 계산하고 뼈별로 섞는다
+void UMOBridgeSubsystem::ApplyServerAnim(FMOBRemote& R, ACharacter* Ch, const FMOBSnapshot& From, const FMOBSnapshot* To, float Alpha)
+{
+	FMOBRemoteAnim* Anim = Core->RemoteAnims.Find(R.Id);
+	const int32 FromIndex = (int32)(&From - R.Snaps);
+	if (!Anim || !Anim->bHas[FromIndex])
+	{
+		++AnimNoState;
+		return;
+	}
+	const int32 FromSlot = Core->PoseSlot(*Anim, FromIndex, From.Tick, From.Pitch, INDEX_NONE, AnimPoseEvals);
+	const mo::BoneTransform* Local = Anim->PoseLocal[FromSlot].data();
+	const int32 ToIndex = To ? (int32)(To - R.Snaps) : INDEX_NONE;
+	if (To && Alpha > 0.f && Anim->bHas[ToIndex])
+	{
+		const int32 ToSlot = Core->PoseSlot(*Anim, ToIndex, To->Tick, To->Pitch, FromSlot, AnimPoseEvals);
+		Core->AnimEvaluator.BlendLocal(Anim->PoseLocal[FromSlot].data(), Anim->PoseLocal[ToSlot].data(), Alpha, Core->AnimBlend.data());
+		Local = Core->AnimBlend.data();
+	}
+	mo::AnimPoseInput Input;
+	Core->AnimCodec.FromWire(Anim->States[FromIndex], From.Pitch, Input);
+	if (MOBSetServerAnim(Ch, Input, Local, Core->AnimBoneNames.Num(), Core->AnimBoneNames)) ++AnimPoseFrames;
+	else ++AnimPoseFail;
+}
+
+// 남의 캐릭터 몸을 전부 Quinn 으로 맞춘다(D33). Lyra 가 컨트롤러마다 몸을 무작위로 고르는데, 그 시점이 캐릭터 생성보다 늦을 수 있어 맞을 때까지 다시 건다
+void UMOBridgeSubsystem::EnsureRemoteBody(FMOBRemote& R, ACharacter* Ch)
+{
+	static const FName QUINN_BODY(TEXT("SKM_Quinn_Invis"));
+	constexpr int32 BODY_TRY_LIMIT = 20;
+	constexpr double BODY_RETRY_SECONDS = 0.5;
+
+	USkeletalMeshComponent* Mesh = Ch->GetMesh();
+	const USkeletalMesh* Asset = Mesh ? Mesh->GetSkeletalMeshAsset() : nullptr;
+	if (Asset && Asset->GetFName() == QUINN_BODY)
+	{
+		if (!bAnimBonesChecked)
+		{
+			// 클립 파일의 뼈대가 이 몸과 같은가 — 부모가 다르면 덮어쓴 자세가 틀어진다
+			bAnimBonesChecked = true;
+			int32 Found = 0, ParentBad = 0;
+			const std::vector<mo::ClipBone>& Bones = Core->AnimClips.Bones();
+			for (int32 I = 0; I < Core->AnimBoneNames.Num(); ++I)
+			{
+				const FName Name = Core->AnimBoneNames[I];
+				if (Mesh->GetBoneIndex(Name) == INDEX_NONE) continue;
+				++Found;
+				const FName Want = Bones[I].parent >= 0 ? Core->AnimBoneNames[Bones[I].parent] : NAME_None;
+				ParentBad += Mesh->GetParentBone(Name) != Want ? 1 : 0;
+			}
+			UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM body=%s bones=%d found=%d parentBad=%d tries=%d"), *Asset->GetName(), Core->AnimBoneNames.Num(), Found, ParentBad, R.BodyTries);
+		}
+		return;
+	}
+	const double Now = FPlatformTime::Seconds();
+	if (Now < R.NextBodyTryAt || R.BodyTries >= BODY_TRY_LIMIT) return;
+	R.NextBodyTryAt = Now + BODY_RETRY_SECONDS;
+	++R.BodyTries;
+	const bool bSet = MOBSetBodyPart(Ch, TEXT("/Game/Characters/Cosmetics/B_Quinn.B_Quinn_C"));
+	if (!bSet || R.BodyTries == BODY_TRY_LIMIT) UE_LOG(LogMOB, Error, TEXT("MOB_SERVERANIM_FAIL body id=%u tries=%d set=%d mesh=%s"), R.Id, R.BodyTries, bSet ? 1 : 0, *GetNameSafe(Asset));
 }
 
 // 진단 — 안 그려지는 캐릭터는 애니가 안 돌 수 있으므로 그려진 프레임만 상태를 센다. 내 캐릭터와 나란히 찍어 대조한다
@@ -1023,6 +1249,21 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		// 번호를 붙이고 여기서도 돌린다 — 서버 답을 기다리지 않고 바로 움직이려고
 		Core->Prediction.AddInput(In);
 		Seq = In.seq;
+		const mo::WeaponEvents& PredictedFire = Core->Prediction.GetLastWeaponEvents();
+		if (bViewLog && PredictedFire.fired)
+		{
+			// 서버 SPREAD 줄과 (입력 번호, 탄 번호) 로 잇는다 — 같은 입력이면 같은 방향이어야 한다(D15)
+			const mo::WeaponDef& FiredDef = mo::GetWeaponDef((mo::EWeapon)Core->Prediction.GetWeaponIndex());
+			const mo::Vec3 PredictedAim = mo::AimDirection(In.yaw, In.pitch);
+			const int32 BulletCount = FMath::Min((int32)FiredDef.bulletsPerCartridge, (int32)wire::kMaxBulletsInShot);
+			for (int32 Bullet = 0; Bullet < BulletCount; ++Bullet)
+			{
+				mo::CSpreadRng BulletRng(mo::SpreadSeed(In.seq, (uint32)Bullet));
+				const mo::Vec3 Dir = mo::SpreadDirection(PredictedAim, PredictedFire.spreadAngle, PredictedFire.spreadMultiplier, FiredDef.spreadExponent, BulletRng);
+				UE_LOG(LogMOB, Log, TEXT("MOB_PREDSHOT seq=%u i=%d frame=%llu spread=%.6f mult=%.6f aim=%.7f,%.7f,%.7f dir=%.7f,%.7f,%.7f"),
+					In.seq, Bullet, (unsigned long long)GFrameCounter, PredictedFire.spreadAngle, PredictedFire.spreadMultiplier, PredictedAim.x, PredictedAim.y, PredictedAim.z, Dir.x, Dir.y, Dir.z);
+			}
+		}
 		if (bViewLog && bFire)
 		{
 			// 서버 REWIND 줄과 (seq, 상대) 로 잇는다 — 서버가 되돌린 자리 = 그때 화면 자리인가
@@ -1033,6 +1274,8 @@ void UMOBridgeSubsystem::TickInput(double Now)
 				if (!Shown || R.bKilled) continue;
 				const FVector At = Shown->GetActorLocation();
 				UE_LOG(LogMOB, Log, TEXT("MOB_VIEW seq=%u target=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f newest=%u wall=%.3f"), In.seq, R.Id, ViewTick, ViewAlpha, At.X, At.Y, At.Z, Shown->GetActorRotation().Yaw, R.ShownNewestTick, ShownWallTick);
+				if (bServerAnim) LogViewParts(In.seq, R.Id, *Shown);
+				if (bServerAnim && bRayCheck) CheckEngineRays(In.seq, R.Id, *Shown);
 			}
 		}
 		if (!Core->Prediction.IsWaitingSpawn())
@@ -1047,7 +1290,178 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	}
 }
 
+// 화면의 탄 방향 = 서버와 같은 식(D15). 능력은 이번 프레임의 입력을 만들기 전에 돌아서, 다음 입력 번호를 이 사격의 번호로 본다
+bool UMOBridgeSubsystem::ComputeBulletDirection(const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir)
+{
+	if (!Core || Core->Prediction.IsWaitingSpawn()) return false;
+	const uint32 ShotSeq = Core->Prediction.GetSeq() + 1;
+	mo::CSpreadRng BulletRng(mo::SpreadSeed(ShotSeq, (uint32)BulletIndex));
+	const mo::Vec3 Dir = mo::SpreadDirection(mo::Vec3(AimDir.X, AimDir.Y, AimDir.Z), SpreadAngle, SpreadMultiplier, SpreadExponent, BulletRng);
+	OutDir = ToFVector(Dir);
+	LastBulletAt = FPlatformTime::Seconds();
+	if (bViewLog)
+	{
+		UE_LOG(LogMOB, Log, TEXT("MOB_SHOTDIR seq=%u i=%d frame=%llu spread=%.6f mult=%.6f aim=%.7f,%.7f,%.7f dir=%.7f,%.7f,%.7f"),
+			ShotSeq, BulletIndex, (unsigned long long)GFrameCounter, SpreadAngle, SpreadMultiplier, AimDir.X, AimDir.Y, AimDir.Z, Dir.x, Dir.y, Dir.z);
+	}
+	return true;
+}
+
 // 사람 없이 시험하는 입력 — 시선을 돌리며 앞·왼·뒤·오른으로 걷고, 점프·사격·재장전·무기 바꾸기를 번갈아 낸다
+// 쏠 때 화면에 그려진 22부위를 몸 기준 좌표(캡슐 중심, 요 0)로 남긴다 — 서버 REWINDP 줄과 (seq, 상대, 부위) 로 잇는다.
+// 이 함수는 TickRemotes 앞에 돌므로 메시의 뼈는 지난 프레임에 그린 자세 = 사람이 보고 쏜 자세다. 형식은 POSEB 와 같은 뼈 자리
+void UMOBridgeSubsystem::LogViewParts(uint32 InSeq, uint32 Target, const ACharacter& Shown)
+{
+	const USkeletalMeshComponent* Mesh = Shown.GetMesh();
+	const UPhysicsAsset* PA = Mesh ? Mesh->GetPhysicsAsset() : nullptr;
+	if (!PA) return;
+	const FVector Loc = Shown.GetActorLocation();
+	const FQuat ActorInv = FRotator(0, Shown.GetActorRotation().Yaw, 0).Quaternion().Inverse();
+	for (const USkeletalBodySetup* B : PA->SkeletalBodySetups)
+	{
+		if (!B) continue;
+		const int32 BoneIndex = Mesh->GetBoneIndex(B->BoneName);
+		if (BoneIndex == INDEX_NONE) continue;
+		FTransform BoneW = Mesh->GetBoneTransform(BoneIndex);
+		BoneW.SetScale3D(FVector::OneVector);
+		const auto Emit = [&](const FTransform& ElemLocal)
+		{
+			const FTransform W = ElemLocal * BoneW;
+			const FVector P = ActorInv.RotateVector(W.GetLocation() - Loc);
+			const FVector X = ActorInv.RotateVector(W.GetUnitAxis(EAxis::X));
+			const FVector Y = ActorInv.RotateVector(W.GetUnitAxis(EAxis::Y));
+			const FVector Z = ActorInv.RotateVector(W.GetUnitAxis(EAxis::Z));
+			UE_LOG(LogMOB, Log, TEXT("MOB_VIEWP seq=%u target=%u bone=%s p=%.4f,%.4f,%.4f x=%.5f,%.5f,%.5f y=%.5f,%.5f,%.5f z=%.5f,%.5f,%.5f"), InSeq, Target, *B->BoneName.ToString(), P.X, P.Y, P.Z, X.X, X.Y, X.Z, Y.X, Y.Y, Y.Z, Z.X, Z.Y, Z.Z);
+		};
+		for (const FKSphereElem& E : B->AggGeom.SphereElems) Emit(FTransform(E.Center));
+		for (const FKSphylElem& E : B->AggGeom.SphylElems) Emit(FTransform(E.Rotation, E.Center));
+		for (const FKBoxElem& E : B->AggGeom.BoxElems) Emit(FTransform(E.Rotation, E.Center));
+	}
+}
+
+// 같은 자세에 엔진 광선 ↔ TraceBody. 엔진이 실제로 쏘는 물리 몸체 자리로 자세를 만들어 같은 광선을 양쪽에 쏜다.
+// 광선을 고르는 식은 무기 기록의 RAY 줄과 같고(MOBWeaponRecordSubsystem::TickRays), 머리 쪽을 겨눈 절반을 더했다 — 머리 합격선을 보려면 머리에 맞는 발이 충분해야 한다
+void UMOBridgeSubsystem::CheckEngineRays(uint32 InSeq, uint32 Target, const ACharacter& Shown)
+{
+	UWorld* World = GetWorld();
+	const USkeletalMeshComponent* Mesh = Shown.GetMesh();
+	if (!World || !Mesh || !Core) return;
+	const std::vector<mo::ClipBody>& Shapes = Core->AnimClips.Bodies();
+	const FVector Loc = Shown.GetActorLocation();
+	const double Yaw = Shown.GetActorRotation().Yaw;
+	const FQuat ActorInv = FRotator(0, Yaw, 0).Quaternion().Inverse();
+	std::vector<mo::BodyPose> Poses(Shapes.size());
+	FVector Head = Loc;
+	for (size_t I = 0; I < Shapes.size(); ++I)
+	{
+		const mo::ClipBody& S = Shapes[I];
+		const FName BoneName = Core->AnimBoneNames[S.bone];
+		const FBodyInstance* Inst = Mesh->GetBodyInstance(BoneName);
+		if (!Inst || !Inst->IsValidBodyInstance())
+		{
+			++RayNoBody;
+			return;
+		}
+		FTransform BodyW = Inst->GetUnrealWorldTransform();
+		BodyW.SetScale3D(FVector::OneVector);
+		const FTransform W = FTransform(FQuat(S.q[0], S.q[1], S.q[2], S.q[3]), FVector(S.center[0], S.center[1], S.center[2])) * BodyW;
+		const FVector P = ActorInv.RotateVector(W.GetLocation() - Loc);
+		const FVector X = ActorInv.RotateVector(W.GetUnitAxis(EAxis::X));
+		const FVector Y = ActorInv.RotateVector(W.GetUnitAxis(EAxis::Y));
+		const FVector Z = ActorInv.RotateVector(W.GetUnitAxis(EAxis::Z));
+		mo::BodyPose& Out = Poses[I];
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			Out.center[Axis] = P[Axis];
+			Out.axisX[Axis] = X[Axis];
+			Out.axisY[Axis] = Y[Axis];
+			Out.axisZ[Axis] = Z[Axis];
+		}
+		if (BoneName == FName(TEXT("head"))) Head = W.GetLocation();
+	}
+
+	mo::BodyPlacement Body;
+	Body.center = mo::Vec3(Loc.X, Loc.Y, Loc.Z);
+	Body.yawDegrees = RayBreak == TEXT("yaw") ? -Yaw : Yaw;
+	Body.pose = Poses.data();
+	Body.shapes = Shapes.data();
+	Body.shapeCount = (uint32)Shapes.size();
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBRayCheck), /*bTraceComplex=*/ true);
+	const APlayerController* PC = World->GetFirstPlayerController();
+	if (PC && PC->GetPawn()) Params.AddIgnoredActor(PC->GetPawn());
+	for (const TPair<uint32, FMOBRemote>& Pair : Remotes)
+	{
+		const ACharacter* Other = Pair.Value.Pawn.Get();
+		if (Other && Other != &Shown) Params.AddIgnoredActor(Other);
+	}
+
+	const auto ShapeOf = [&](FName Bone) -> int32
+	{
+		for (size_t I = 0; I < Shapes.size(); ++I)
+		{
+			if (Core->AnimBoneNames[Shapes[I].bone] == Bone) return (int32)I;
+		}
+		return INDEX_NONE;
+	};
+
+	constexpr int32 RaysPerTarget = 40;
+	static const double Radii[] = { 0.0, 5.5 };	// 선 · 소총 구
+	for (int32 Ray = 0; Ray < RaysPerTarget; ++Ray)
+	{
+		const int32 AimHead = Ray & 1;
+		const FVector Aim = AimHead
+			? Head + RayRng.GetUnitVector() * (60.0 * FMath::Pow((double)RayRng.FRand(), 1.0 / 3.0))
+			: Loc + FVector(RayRng.FRandRange(-50.f, 50.f), RayRng.FRandRange(-50.f, 50.f), RayRng.FRandRange(-95.f, 95.f));
+		const FVector Dir = (RayRng.GetUnitVector() * FVector(1.0, 1.0, 0.5)).GetSafeNormal();
+		const double Len = RayRng.FRandRange(100.f, 3000.f);
+		const FVector A = Aim - Dir * Len;
+		const FVector B = Aim + Dir * 200.0;
+
+		for (int32 RadiusIndex = 0; RadiusIndex < 2; ++RadiusIndex)
+		{
+			const double R = Radii[RadiusIndex];
+			FMOBRayStats& Stats = RayStats[RadiusIndex][AimHead];
+			TArray<FHitResult> Hits;
+			if (R > 0.0) World->SweepMultiByChannel(Hits, A, B, FQuat::Identity, Lyra_TraceChannel_Weapon, FCollisionShape::MakeSphere((float)R), Params);
+			else World->LineTraceMultiByChannel(Hits, A, B, Lyra_TraceChannel_Weapon, Params);
+			if (Hits.Num() > 0 && Hits[0].GetActor() != &Shown)
+			{
+				++Stats.Map;		// 맵이 먼저 맞은 광선은 몸 판정 대조가 아니다(D28 과 같이 뺀다)
+				continue;
+			}
+			++Stats.Rays;
+			const bool bEng = Hits.Num() > 0;
+			const FName EngBone = bEng ? Hits[0].BoneName : NAME_None;
+			const int32 EngShape = bEng ? ShapeOf(EngBone) : INDEX_NONE;
+			const bool bEngWeak = EngShape != INDEX_NONE && Shapes[EngShape].weakSpot;
+
+			mo::BodyHit Hit;
+			const bool bMine = mo::TraceBody(Body, mo::Vec3(A.X, A.Y, A.Z), mo::Vec3(B.X, B.Y, B.Z), RayBreak == TEXT("nothick") ? 0.0 : R, Hit);
+			const bool bMineWeak = bMine && Hit.weakSpot;
+			const FName MineBone = bMine ? Core->AnimBoneNames[Shapes[Hit.shape].bone] : NAME_None;
+
+			Stats.EngHit += bEng;
+			Stats.EngWeak += bEngWeak;
+			if (bEng == bMine) ++Stats.Same;
+			else if (bEng) ++Stats.EngOnly;
+			else ++Stats.MineOnly;
+			if (bEng && bMine)
+			{
+				++Stats.Both;
+				Stats.BoneSame += EngBone == MineBone;
+			}
+			Stats.WeakLost += bEngWeak && !bMineWeak;
+			Stats.WeakGain += !bEngWeak && bMineWeak;
+			if ((bEng != bMine || bEngWeak != bMineWeak) && RayDiffLogged < 200)
+			{
+				++RayDiffLogged;
+				UE_LOG(LogMOB, Log, TEXT("MOB_RAYDIFF seq=%u target=%u r=%.1f aimHead=%d eng=%s mine=%s engWeak=%d mineWeak=%d"), InSeq, Target, R, AimHead, *EngBone.ToString(), *MineBone.ToString(), bEngWeak ? 1 : 0, bMineWeak ? 1 : 0);
+			}
+		}
+	}
+}
+
 void UMOBridgeSubsystem::TickAutoInput(double T)
 {
 	APlayerController* PC = GetWorld()->GetFirstPlayerController();
@@ -1118,6 +1532,18 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 			else LASC->AbilityInputTagReleased(FireTag);
 		}
 	}
+	// 자동 시험 전용 — 무기를 바꾸거나 되살아나면 새 능력은 눌린 줄 모른다. 누르고 있는데 안 쏘면 다시 누른다
+	const double RepressNow = FPlatformTime::Seconds();
+	if (bAbilitySpread && bFireNow && bAutoFire && RepressNow - LastBulletAt > 0.5 && RepressNow - LastAutoRepressAt > 0.5)
+	{
+		static const FGameplayTag RepressTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Fire"));
+		if (ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch)))
+		{
+			LASC->AbilityInputTagReleased(RepressTag);
+			LASC->AbilityInputTagPressed(RepressTag);
+		}
+		LastAutoRepressAt = RepressNow;
+	}
 	bAutoFire = bFireNow;
 	bAutoReload = FMath::Fmod(S, 20.0) >= 19.0 || (bAutoAim && ServerMagazine == 0);
 	if (bAutoReload != bAutoReloadPressed)
@@ -1131,7 +1557,7 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 		}
 		bAutoReloadPressed = bAutoReload;
 	}
-	AutoWeapon = (uint8)((int32)(S / 10.0) % (int32)mo::EWeapon::Count);
+	AutoWeapon = AutoWeaponFixed >= 0 ? (uint8)AutoWeaponFixed : (uint8)((int32)(S / 10.0) % (int32)mo::EWeapon::Count);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1243,6 +1669,22 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY4 remotes=%d remoteFail=%d frames=%lld underrun=%lld teleports=%lld driftMax=%.3f driftOver1cm=%lld yawDiffMax=%.3f lagAvg=%.1f behindTicksAvg=%.2f"),
 		RemoteSpawned, RemoteSpawnFail, RemoteFrames, RemoteUnderrun, RemoteTeleports, RemoteDriftMax, RemoteDriftOver1cm, RemoteYawDiffMax, RemoteFrames ? RemoteLagSum / RemoteFrames : 0.0, RemoteFrames ? RemoteBehindSum / RemoteFrames : 0.0);
 
+	if (bServerAnim)
+	{
+		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_SUMMARY tailPlayers=%lld tailBad=%lld noState=%lld poseEvals=%lld poseFrames=%lld poseFail=%lld"), AnimTailPlayers, AnimTailBad, AnimNoState, AnimPoseEvals, AnimPoseFrames, AnimPoseFail);
+		if (bRayCheck)
+		{
+			UE_LOG(LogMOB, Log, TEXT("MOB_RAYCHECK_NOBODY count=%lld"), RayNoBody);
+			for (int32 RadiusIndex = 0; RadiusIndex < 2; ++RadiusIndex)
+			{
+				for (int32 AimHead = 0; AimHead < 2; ++AimHead)
+				{
+					const FMOBRayStats& S = RayStats[RadiusIndex][AimHead];
+					UE_LOG(LogMOB, Log, TEXT("MOB_RAYCHECK r=%.1f aimHead=%d rays=%lld map=%lld engHit=%lld same=%lld engOnly=%lld mineOnly=%lld both=%lld boneSame=%lld engWeak=%lld weakLost=%lld weakGain=%lld"), RadiusIndex ? 5.5 : 0.0, AimHead, S.Rays, S.Map, S.EngHit, S.Same, S.EngOnly, S.MineOnly, S.Both, S.BoneSame, S.EngWeak, S.WeakLost, S.WeakGain);
+				}
+			}
+		}
+	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_PICKUPS hidden=%d hpFixes=%lld"), PickupsHidden, HpFixes);
 	if (bAnimLog)
 	{

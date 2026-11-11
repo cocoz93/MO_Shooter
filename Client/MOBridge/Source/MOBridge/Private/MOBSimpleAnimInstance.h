@@ -8,6 +8,8 @@
 class ACharacter;
 class UAnimSequence;
 
+namespace mo { struct AnimPoseInput; struct BoneTransform; }
+
 /**
  * 화면 시험용 — 상대 캐릭터를 Lyra 애니 구성 대신 소총 클립 5개를 섞는 단순 재생으로 움직인다.
  * 판정 후보 「서버와 화면이 같은 자세 계산을 쓴다」를 택했을 때 화면이 어떻게 보이는지 눈으로 보려고 넣었다. 판정에는 안 쓴다.
@@ -27,6 +29,11 @@ class UAnimSequence;
  *   발 = 땅에 있을 때 몸을 실제 바닥까지 내린다(메시 뿌리가 바닥보다 약 4cm 위라 그냥 두면 떠 보인다). 뜨고 0.2초 뒤 풀고, 닿고 0.1초 뒤 다시 내린다
  *   일부러 안 넣은 것(이 판에도) = 달리기 시작 · 멈춤 · 방향 전환 전용 클립, 달리며 몸 기울이기
  *   이 플래그가 없으면 예전과 같은 자세가 나온다(파일럿 1 기록을 다시 낼 수 있게). 11-06 첫 촬영의 단순 판(MM_ 클립 · 시간으로만 잇는 점프)은 이 판으로 바뀌었다
+ * -MOBSimpleTransitions 를 -MOBSimpleAimJump 와 함께 주면 달리기 시작 · 멈춤 · 돌아서기 클립(네 방향 × 셋 = 12개)도 넣는다(3차 화면 시험, start-stop-pivot-test.md).
+ *   입력은 서버가 아는 값뿐이다 — 위 입력에 가속(이동 입력)과 이동 상수(지면 마찰 · 제동 값)를 더한다.
+ *   점프 쌓기(JumpStack)와 거리 곡선 표를 같이 쓴다. 보폭 보정 · 방향 틀기 · 달리며 몸 기울이기는 이 판에도 없다
+ * -MOBServerAnim 이면(후보 1, D32) 남의 캐릭터는 프레임마다 시간을 쌓지 않고 서버가 보낸 상태를 그대로 쓴다.
+ *   자세는 서버와 같은 Shared/AnimPose 한 벌로 계산해, 클립 파일의 27뼈(판정 뼈 · 그 조상 · 손 뼈)를 Evaluate 끝에서 덮는다. 손가락 · 꼬임 뼈는 아래 언리얼 경로가 맡는다
  */
 USTRUCT()
 struct FMOBSimpleAnimProxy : public FAnimInstanceProxy
@@ -37,11 +44,16 @@ struct FMOBSimpleAnimProxy : public FAnimInstanceProxy
 	static constexpr int32 kAim = 3;	// 위 · 가운데 · 아래
 	static constexpr int32 kJump = 5;	// 뛰어오름 · 오르는 중 · 꼭대기 · 떨어지는 중 · 내려앉음
 	static constexpr int32 kJumpStack = 4;	// 점프 전환이 겹칠 때 함께 섞이는 상태 수의 상한(Lyra 실행값에서 많아야 셋)
+	static constexpr int32 kTransitions = 12;	// 네 방향 × 출발 · 멈춤 · 돌아서기(-MOBSimpleTransitions)
+	static constexpr int32 kStackClips = kJump + kTransitions;	// 쌓기가 틀 수 있는 클립 수. 번호 = 점프 5개 뒤에 종류 × 4 + 방향
 
 	FMOBSimpleAnimProxy() {}
 	FMOBSimpleAnimProxy(UAnimInstance* InAnimInstance) : FAnimInstanceProxy(InAnimInstance) {}
 
 	void ResetPlayback();
+
+	// 서버 구동(-MOBServerAnim) — 받은 상태와 계산해 둔 자세를 넣는다. 게임 스레드에서만 부른다. Local 은 BoneNames 차례의 뼈별 변환(부모 뼈 기준)
+	void SetServerFrame(const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames);
 
 	// 대조 기록용 — 이번 프레임 자세에 쓴 가중치와 클립 시각을 그대로 내준다(언리얼 밖 계산의 입력)
 	void GetState(float OutWeights[kClips], float OutTimes[kClips]) const;
@@ -49,6 +61,12 @@ struct FMOBSimpleAnimProxy : public FAnimInstanceProxy
 	void AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones) const;
 	// 촬영 기록용 — 위아래 조준 · 점프에 쓴 입력과 상태
 	void GetAimJump(float& OutPitch, int32& OutJumpClip, float& OutJumpWeight) const;
+	// 대조 기록용 — 지금 재생 중인 클립을 Lyra 기록(-MOBACProbe)과 같은 「클립@시각*가중치;」 꼴로 붙인다
+	void AppendPlayers(FString& Out) const;
+	// 대조 기록용 — 자세 계산의 입력 중 가중치 · 시각을 뺀 나머지를 csv 칸으로 붙인다
+	void AppendPoseState(FString& Out) const;
+	// 대조 기록용 — 판 시작부터 매 프레임의 입력 원본(언리얼 밖 상태 계산의 입력, candidate1-impl-plan.md 3단계)
+	const FString& GetMoveLog() const { return MoveLog; }
 
 protected:
 	virtual void PreUpdate(UAnimInstance* InAnimInstance, float DeltaSeconds) override;
@@ -86,8 +104,8 @@ private:
 	float AimBlend = 1.f;		// 1 = 허리 사격 조준만, 0 = 느슨한 조준만
 	float Pitch = 0.f;
 
-	const UAnimSequence* JumpClips[kJump] = {};
-	float JumpLengths[kJump] = {};
+	const UAnimSequence* JumpClips[kStackClips] = {};
+	float JumpLengths[kStackClips] = {};
 	TArray<float> LandDistances;	// 착지 클립의 땅까지 거리 곡선을 일정 간격으로 뽑은 값. 비면 거리로 못 맞춘다
 	// 점프 쪽 상태를 쌓아 섞는다 — 새 상태가 겹쳐 들어오며 아래 것들을 덮는다(언리얼 상태 기계의 전환 섞기를 직접 한 것). Clip -1 = 걷기·서기
 	struct FJumpLayer
@@ -104,6 +122,42 @@ private:
 	float JumpWeight = 0.f;		// 기록용 — 걷기·서기가 아닌 몫
 	bool bWasFalling = false;
 
+	// 출발 · 멈춤 · 돌아서기(-MOBSimpleTransitions) — 점프 쌓기 위에 같은 방식으로 얹는다
+	enum class EMoveState : uint8 { Idle, Start, Cycle, Stop, Pivot, Air };
+	struct FStepMarker
+	{
+		float Time = 0.f;
+		bool bLeft = false;
+	};
+	void UpdateTransitions(bool bFalling, bool bAccelerating, const FVector& LocalVelocity, const FVector& LocalAcceleration, const class UCharacterMovementComponent* Move, float DeltaSeconds);
+	void EnterTransition(EMoveState State, int32 Direction, float FadeSeconds);
+	void EnterLocomotion(EMoveState State, float FadeSeconds);
+	float TransitionClipTime(const FJumpLayer& Layer, float DeltaSeconds) const;
+	float TimeFromDistance(int32 Transition, float Value) const;
+	float DistanceAtTime(int32 Transition, float Time) const;
+	int32 StepMarkerAt(int32 Transition, float Time) const;
+	bool FollowStepsOfTransition(float DeltaSeconds);
+	bool HasJumpLayer() const;
+	static const TCHAR* MoveStateName(EMoveState State);
+	int32 FollowClip = INDEX_NONE;	// 달리기 클립이 발을 따라가는 나가는 전환 클립
+	int32 FollowBaseStep = 0;		// 따라가기 시작할 때의 걸음과
+	int32 FollowBaseMarker = 0;		// 그때 그 클립의 발 표시 번호
+	bool bTransitions = false;
+	EMoveState MoveState = EMoveState::Idle;
+	int32 MoveDirection = 0;		// 지금 틀고 있는 전환 클립의 방향
+	FVector2D PivotAccelDirection = FVector2D::ZeroVector;	// 돌아서기에 들어갈 때의 가속 방향 — 다시 뒤집혔는지 본다
+	float FrameTravel = 0.f;		// 이번 프레임에 땅 위로 움직인 거리(cm)
+	float StopDistance = 0.f;		// 지금 속도로 멈출 때까지 남은 거리(cm)
+	float PivotDistance = 0.f;		// 방향이 바뀌는 지점까지 남은 거리(cm)
+	bool bBeforePivot = false;		// 아직 옛 방향으로 밀려 가는 중인가
+	TArray<float> TransitionDistances[kTransitions];	// 클립의 Distance 곡선을 일정 간격으로 뽑은 값
+	TArray<FStepMarker, TInlineAllocator<8>> TransitionMarkers[kTransitions];	// 클립의 발 표시 — 달리기로 넘어갈 때 발을 맞춘다
+	int32 StackMax = 0;				// 시험 기록 — 쌓기에 함께 올라온 상태 수의 최대
+	int32 StackOverflows = 0;		// 시험 기록 — 자리가 없어 맨 아래를 버린 횟수
+	FString MoveLog;				// 시험 기록 — 입력 원본
+	int32 ResetGeneration = 0;		// 시험 기록 — 판 시작(ResetPlayback) 횟수
+	int32 MoveSeq = 0;				// 시험 기록 — 판 시작 뒤 지난 프레임 수
+
 	const UAnimSequence* RecoveryClip = nullptr;	// 내려앉은 뒤 얹는 착지 충격 덧붙임
 	float RecoveryLength = 0.f;
 	int32 RecoveryAdditiveType = 0;
@@ -115,6 +169,14 @@ private:
 	float FidgetTime = -1.f;	// -1 = 안 보임
 	bool bFidgetLeaving = false;	// 움직이기 시작했다 — 서기 몫이 다 빠지면 끝낸다
 	bool bWasAccelerating = false;	// 지난 프레임에 이동 입력이 있었나 — 놓는 순간 서기 클립 시각을 옮긴다
+
+	// 서버 구동(-MOBServerAnim)
+	void ApplyServerBones(FPoseContext& Output);
+	bool bServerDriven = false;
+	TArray<FName> ServerBoneNames;		// 클립 파일의 뼈 이름. 차례 = Shared 결과의 차례
+	TArray<FTransform> ServerLocal;		// 이번에 덮을 뼈별 변환(부모 뼈 기준)
+	TArray<int32, TInlineAllocator<32>> ServerBoneMap;	// 뼈 차례 → 압축 뼈 번호. -1 = 이 메시에 없음
+	uint16 ServerBoneSerial = 0;		// ServerBoneMap 을 만들 때의 뼈 목록 번호 — LOD 가 바뀌면 다시 만든다
 
 	// 손 붙이기 · 발 디딤 내림(-MOBSimpleAimJump)
 	void ApplyHandIK(FPoseContext& Output) const;
@@ -140,6 +202,10 @@ public:
 	void GetPlaybackState(float OutWeights[FMOBSimpleAnimProxy::kClips], float OutTimes[FMOBSimpleAnimProxy::kClips]);
 	bool DumpClips(int32 SampleHz, FString& Out);
 	void GetAimJump(float& OutPitch, int32& OutJumpClip, float& OutJumpWeight);
+	void GetPlayers(FString& Out);
+	void GetPoseState(FString& Out);
+	void GetMoveLog(FString& Out);
+	void SetServerFrame(const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames);
 
 protected:
 	virtual FAnimInstanceProxy* CreateAnimInstanceProxy() override;
@@ -165,6 +231,7 @@ private:
 
 	bool bClipsLoaded = false;
 	bool bAimJump = false;
+	bool bTransitions = false;
 };
 
 // 캐릭터의 본체 메시를 단순 재생으로 바꾼다. 눈에 보이는 몸(SKM_Quinn)이 본체(SKM_Quinn_Invis) 자세를 따라가는 것은 촬영 화면으로 확인했다
@@ -179,6 +246,21 @@ bool MOBDumpSimpleClips(const ACharacter* Character, int32 SampleHz, FString& Ou
 
 // 촬영 기록용 — 단순 재생이 쓴 위아래 각 · 점프 클립(-1 = 없음) · 점프 가중치. 단순 재생이 아니면 false
 bool MOBGetSimpleAimJump(const ACharacter* Character, float& OutPitch, int32& OutJumpClip, float& OutJumpWeight);
+
+// 대조 기록용 — 단순 재생이 지금 틀고 있는 클립. 단순 재생이 아니면 false
+bool MOBGetSimplePlayers(const ACharacter* Character, FString& Out);
+
+// 대조 기록용 — 자세 계산의 입력 중 가중치 · 시각을 뺀 나머지를 csv 칸으로 붙인다(Shared/AnimPose 의 AnimPoseInput 과 같은 칸). 단순 재생이 아니면 기본값
+void MOBAppendSimplePoseState(const ACharacter* Character, FString& Out);
+
+// 대조 기록용 — 판 시작부터 매 프레임의 입력 원본. 단순 재생이 아니면 false
+bool MOBGetSimpleMoveLog(const ACharacter* Character, FString& Out);
+
+// 서버 구동(-MOBServerAnim) — 받은 상태와 계산해 둔 자세를 넣고, 이번 프레임 화면에 바로 반영한다. 단순 재생이 아니면 false
+bool MOBSetServerAnim(ACharacter* Character, const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames);
+
+// 몸 부품을 바꾼다. PartClassPath = 부품 블루프린트 클래스 경로. 컴포넌트나 부품을 못 찾으면 false
+bool MOBSetBodyPart(ACharacter* Character, const TCHAR* PartClassPath);
 
 // 촬영 대조용 — 단순 재생의 대기 몸짓 지연과, 멈춘 뒤 몸짓까지의 시간(멈춤 클립 몫 + 지연). Lyra 쪽 무작위 지연을 이 값으로 덮어 두 화면을 맞춘다
 void MOBGetSimpleIdleBreak(float& OutDelay, float& OutAfterStop);
