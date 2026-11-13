@@ -4,6 +4,7 @@
 # ① 부위 차이: 부위 중심 cm, 축 각도(상자 = 세 축, 캡슐 = 긴 축, 구 = 없음). 기준 0.1cm · 0.3도는 제안값
 # ② 같은 탄: 화면에서 맞은 탄이 서버에서도 맞는가. 소총 규칙(선 먼저 → 구 5.5)으로 머리 둘레 60cm · 몸 중심 둘레 100cm 공을 지나는 탄을 줄마다 쏜다.
 #    머리 = 약점에 맞은 탄 기준, 몸 = 어디든 맞은 탄 기준. 100발당 오탈 = 화면에서 맞고 서버에서 안 맞은 발 수
+# ③ 상대가 몽타주 중인 쏨을 따로 센다 — 서버 REWIND 줄의 montages(그 자세에 든 몽타주 칸 수). 판정 줄 VIEWPOSE 는 전부를 본다
 # rc=0 기준 안 · rc=1 기준 밖이거나 이은 줄이 0 (0 은 「맞다」가 아니라 「못 읽었다」)
 import math
 import re
@@ -34,7 +35,9 @@ TRI = NUM + ',' + NUM + ',' + NUM
 VIEWP = re.compile(r'MOB_VIEWP seq=(\d+) target=(\d+) bone=(\S+) p=' + TRI + ' x=' + TRI + ' y=' + TRI + ' z=' + TRI)
 SRVP = re.compile(r'REWINDP seq=(\d+) shooter=(\d+) target=(\d+) bone=(\S+) kind=(\d) weak=(\d) p=' + TRI + ' x=' + TRI + ' y=' + TRI + ' z=' + TRI + ' s=' + TRI)
 VIEW = re.compile(r'MOB_VIEW seq=(\d+) target=(\d+) viewTick=(\d+) alpha=([\d.]+) x=' + NUM + ' y=' + NUM + ' z=' + NUM + ' yaw=' + NUM)
-REW = re.compile(r'REWIND seq=(\d+) shooter=(\d+) target=(\d+) now=(\d+) viewTick=(\d+) alpha=([\d.]+) x=' + NUM + ' y=' + NUM + ' z=' + NUM + ' yaw=' + NUM)
+REW = re.compile(r'REWIND seq=(\d+) shooter=(\d+) target=(\d+) now=(\d+) viewTick=(\d+) alpha=([\d.]+) x=' + NUM + ' y=' + NUM + ' z=' + NUM + ' yaw=' + NUM + r'(?: animWeapon=(\d+))?(?: montages=(\d+))?')
+WEAPON_NAMES = {0: '권총', 1: '소총', 2: '샷건', -1: '무기칸없음'}    # 서버 EWeapon 차례. -1 = 9단계 전 서버 기록(REWIND 에 animWeapon 이 없다)
+MONTAGE_GROUPS = {1: '몽타주 중', 0: '몽타주 없음', -1: '몽타주칸없음'}    # -1 = 5-c 전 서버 기록(REWIND 에 montages 가 없다)
 
 me = None
 screen = {}
@@ -71,7 +74,8 @@ for line in open(srv_path, encoding='utf-8', errors='replace'):
     m = REW.match(line)
     if m and int(m.group(2)) == me:
         g = m.groups()
-        server_at[(int(g[0]), int(g[2]))] = (int(g[4]), float(g[5]), np.array(g[6:9], float), float(g[9]), int(g[3]))
+        server_at[(int(g[0]), int(g[2]))] = (int(g[4]), float(g[5]), np.array(g[6:9], float), float(g[9]), int(g[3]), int(g[10]) if g[10] is not None else -1,
+                                             min(int(g[11]), 1) if g[11] is not None else -1)
 
 
 def angle(a, b):
@@ -90,11 +94,17 @@ cms = []
 degs = []
 worst_c = (0.0, None)
 worst_a = (0.0, None)
+per_weapon = {}     # 서버가 그 자세를 푼 무기 묶음별 [쏨, 부위행, 중심 최대, 각도 최대] — 권총 · 샷건 상대를 실제로 대조했는지 센다
+per_montage = {}    # 상대가 몽타주 중인가(MONTAGE_GROUPS)별 같은 칸
 for key in keys:
     s, v = server[key], screen[key]
     if len(s) != 22 or len(v) != 22 or set(s) != set(v):
         partial += 1
         continue
+    pw = per_weapon.setdefault(server_at[key][5] if key in server_at else -1, [0, 0, 0.0, 0.0])
+    pw[0] += 1
+    pm = per_montage.setdefault(server_at[key][6] if key in server_at else -1, [0, 0, 0.0, 0.0])
+    pm[0] += 1
     for bone, (kind, _weak, sv, _size) in s.items():
         w = v[bone]
         rows += 1
@@ -107,12 +117,21 @@ for key in keys:
             da = 0.0
         cms.append(dc)
         degs.append(da)
+        pw[1] += 1
+        pw[2] = max(pw[2], dc)
+        pw[3] = max(pw[3], da)
+        pm[1] += 1
+        pm[2] = max(pm[2], dc)
+        pm[3] = max(pm[3], da)
         if dc > worst_c[0]:
             worst_c = (dc, key + (bone,))
         if da > worst_a[0]:
             worst_a = (da, key + (bone,))
 
 print('me=%s 화면줄=%d 서버줄=%d 이은쏨=%d 한도걸림=%d 화면만=%d 서버만=%d 부위수다름=%d 부위행=%d' % (me, view_lines, srv_lines, len(keys), len(clamped), only_screen, only_server, partial, rows))
+print('무기별(서버 묶음): ' + (' | '.join('%s 쏨=%d 부위행=%d 중심최대=%.4fcm 각도최대=%.4f도' % (WEAPON_NAMES.get(w, str(w)), p[0], p[1], p[2], p[3]) for w, p in sorted(per_weapon.items())) or '없음'))
+print('몽타주별(서버 자세): ' + (' | '.join('%s 쏨=%d 부위행=%d 중심최대=%.4fcm 각도최대=%.4f도 %s' % (MONTAGE_GROUPS.get(g, str(g)), p[0], p[1], p[2], p[3], 'PASS' if p[2] <= limit_cm and p[3] <= limit_deg else 'FAIL')
+                                    for g, p in sorted(per_montage.items(), reverse=True)) or '없음'))
 ok = rows > 0
 if rows:
     c = np.array(cms)
@@ -208,6 +227,7 @@ def rays(c, n, ball):
 
 
 head_hit = head_lost = head_gain = body_hit = body_lost = body_gain = 0
+group_bullets = {}  # 몽타주 묶음별 [머리 분모, 머리 오탈, 몸 분모, 몸 오탈]
 place_max = 0.0
 bullet_rows = 0
 for key in keys:
@@ -221,7 +241,8 @@ for key in keys:
     head = int(np.argmax(weak))
     Ts = to_arrays({b: s[b][2] for b in bones}, bones)
     Tv = to_arrays(v, bones)
-    _, _, spos, syaw, _ = server_at[key]
+    spos, syaw = server_at[key][2], server_at[key][3]
+    gb = group_bullets.setdefault(server_at[key][6], [0, 0, 0, 0])
     _, _, vpos, vyaw = screen_at[key]
     bullet_rows += 1
     place_max = max(place_max, float(np.linalg.norm(vpos - spos)))
@@ -236,11 +257,15 @@ for key in keys:
             a, b = (hv >= 0) & weak[np.maximum(hv, 0)], (hs >= 0) & weak[np.maximum(hs, 0)]
             head_hit += int(a.sum())
             head_lost += int((a & ~b).sum())
+            gb[0] += int(a.sum())
+            gb[1] += int((a & ~b).sum())
             head_gain += int((~a & b).sum())
         else:
             a, b = hv >= 0, hs >= 0
             body_hit += int(a.sum())
             body_lost += int((a & ~b).sum())
+            gb[2] += int(a.sum())
+            gb[3] += int((a & ~b).sum())
             body_gain += int((~a & b).sum())
 
 if bullet_rows:
@@ -248,6 +273,8 @@ if bullet_rows:
     body_rate = 100.0 * body_lost / max(1, body_hit)
     print('같은 탄 %d줄 x %d발: 머리 100발당 오탈 %.3f (덤 %.3f, 분모 %d) | 몸 100발당 오탈 %.3f (덤 %.3f, 분모 %d)' % (bullet_rows, bullets, head_rate, 100.0 * head_gain / max(1, head_hit), head_hit, body_rate, 100.0 * body_gain / max(1, body_hit), body_hit))
     print('캡슐 자리 차이 최대 %.3fcm' % place_max)
+    print('몽타주별 오탈(100발당): ' + ' | '.join('%s 머리 %.3f (분모 %d) 몸 %.3f (분모 %d)' % (MONTAGE_GROUPS.get(g, str(g)), 100.0 * b[1] / max(1, b[0]), b[0], 100.0 * b[3] / max(1, b[2]), b[2])
+                                       for g, b in sorted(group_bullets.items(), reverse=True)))
     good_head = head_rate <= LIMIT_HEAD
     print('머리 기준 %.1f발: %s' % (LIMIT_HEAD, 'PASS' if good_head else 'FAIL'))
     ok = ok and good_head

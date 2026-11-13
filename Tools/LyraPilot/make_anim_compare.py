@@ -31,6 +31,13 @@ SEGMENT_LABELS = {
     "piv_rl_a": "오른쪽으로 달리기", "piv_rl_b": "오른쪽 → 왼쪽 돌아서기", "stop_rl": "멈춤",
     "ad1": "좌우 번갈아 (0.4초씩)", "ad2": "좌우 번갈아 (0.4초씩)", "ad3": "좌우 번갈아 (0.4초씩)",
     "ad4": "좌우 번갈아 (0.4초씩)", "ad5": "좌우 번갈아 (0.4초씩)", "ad6": "좌우 번갈아 (0.4초씩)", "stop_ad": "멈춤",
+    # -Script events (9단계 사건 경로, MOBAnimCompareSubsystem EVENTS_SCRIPT · BotClient kEventsScript — idle 은 위와 같다)
+    "fire_stand": "서서 한 발", "fire_hold": "당긴 채 연사 (0.5초)", "run_fire": "앞으로 달리며 두 발", "stop_f": "멈춤",
+    "up_fire": "위로 겨누며 한 발 (0 → 45도)", "down_fire": "아래로 겨누며 한 발 (45 → -45도)", "mid": "가운데로 (-45 → 0도)",
+    "reload": "재장전", "fire_b": "한 발", "reload_cancel": "재장전 중에 쏘기", "settle_c": "서 있기",
+    "run_reload": "오른쪽으로 달리며 재장전", "stop_r": "멈춤", "swap_out": "무기 바꾸기", "swap_back": "원래 무기로",
+    "swap_fire": "바꾸자마자 쏘기", "swap_back2": "원래 무기로", "run_swap": "왼쪽으로 달리며 바꾸고 돌아오기", "stop_s": "멈춤",
+    "spawn": "부활 동작", "idle_end": "서 있기",
 }
 RECORD_FPS = 60.0
 VIDEO_FPS = 30

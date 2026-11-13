@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Put a record_remote_shot.ps1 recording next to the passed animation comparison, same motion on the same frame.
 
-usage: make_remote_compare.py <ffmpeg> <Saved/MOB dir> <remote tag> <reference tag> <out dir> [--check]
+usage: make_remote_compare.py <ffmpeg> <Saved/MOB dir> <remote tag> <reference tag> <out dir> [--check] [--left=<label>]
 
 The reference ran on a fixed clock at 60 frames per second; the remote shot ran on real time and stamped each frame.
 Matches the two routes by position, then picks the nearest remote frame for every reference frame at 30 frames per second.
 --check only prints the route comparison and writes no video.
+--left names the left picture. The events route reference (ev_<weapon>) is Lyra's own record, not the passed simple playback: pass --left="Lyra 원본".
 """
 import csv
 import math
@@ -70,8 +71,9 @@ def segments(reference):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a != "--check"]
+    args = [a for a in sys.argv[1:] if a != "--check" and not a.startswith("--left=")]
     check_only = "--check" in sys.argv
+    left_label = next((a[len("--left="):] for a in sys.argv[1:] if a.startswith("--left=")), LEFT_LABEL)
     if len(args) != 5:
         print(__doc__)
         return 2
@@ -127,7 +129,7 @@ def main():
     print(f"output frames={count} repeated={repeated}")
 
     labels = ",".join(caption(t, "(w-text_w)/2", "h-60", 34, f":enable='between(t,{a:.3f},{b:.3f})'") for t, a, b in segments(reference))
-    graph = (f"[0:v]scale=960:540,{caption(LEFT_LABEL, 20, 16, 30)}[a];"
+    graph = (f"[0:v]scale=960:540,{caption(left_label, 20, 16, 30)}[a];"
              f"[1:v]scale=960:540,{caption(RIGHT_LABEL, 20, 16, 30)}[b];"
              f"[a][b]hstack=shortest=1,{labels}[v]")
     script = os.path.join(out, "_filter.txt")

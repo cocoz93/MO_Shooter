@@ -110,7 +110,7 @@ for w in sorted(set(weapon_of.values())):
 pred_ok = both and max(diffs) <= LIMIT and server_only == 0
 print(f'기준 {LIMIT}도, 서버만 0: {"PASS" if pred_ok else "FAIL"}')
 
-# 2) 능력 <-> 서버 (능력은 입력을 만들기 전에 돌아서 번호를 다음 입력으로 짐작한다)
+# 2) 능력 <-> 서버 (다리가 예측이 쏜 입력에서 능력을 켜고, 훅이 그 입력의 번호 · 조준 · 퍼짐을 쓴다, D53)
 shot_keys = {(s['seq'], s['i']) for s in shots}
 matched = [s for s in shots if (s['seq'], s['i']) in server]
 missed = len(shots) - len(matched)
@@ -119,7 +119,7 @@ m_aim = [angle(s['aim'], server[(s['seq'], s['i'])]['aim']) for s in matched]
 m_spread = [abs(s['spread'] * s['mult'] - server[(s['seq'], s['i'])]['spread'] * server[(s['seq'], s['i'])]['mult']) for s in matched]
 m_local = [angle(local(s['aim'], s['dir']), local(server[(s['seq'], s['i'])]['aim'], server[(s['seq'], s['i'])]['dir'])) for s in matched]
 if not shots:
-    print('능력 줄 없음(-MOBAbilitySpread 를 안 켠 판) — 예측만 판정')
+    print('능력 줄 없음(-MOBAbilityOwnTimer 로 Lyra 자기 타이머에 둔 판) — 예측만 판정')
     print('SPREADCHECK ' + ('PASS' if pred_ok else 'FAIL') + f' 예측={"PASS" if pred_ok else "FAIL"} 능력=안 봄')
     sys.exit(0 if pred_ok else 1)
 print(f'능력 <-> 서버: 능력 탄 {len(shots)}, 서버에 같은 번호 있음 {len(matched)}, 없음 {missed}, 능력이 안 쏜 서버 탄 {len(server.keys() - shot_keys)}')

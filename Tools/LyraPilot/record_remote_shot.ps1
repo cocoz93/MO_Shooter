@@ -3,11 +3,18 @@ param(
     [int]$DelayMs = 100,
     [int]$JitterMs = 33,
     [int]$Port = 7850,
-    [double]$HoldSec = 4.5,   # longer than the 4 s the shot waits before filming; route must start before the 7.35 s idle fidget, as the passed video did
+    [string]$Weapon = 'rifle',   # bot weapon (BotClient --scriptWeapon: pistol, rifle, shotgun); the screen poses it with that weapon's clips
+    [double]$HoldSec = -1,   # longer than the 4 s the shot waits before filming; route must start before the idle fidget, as the passed video did. -1 = by weapon (below)
     [string]$Res = '1280x720',
+    [string]$Script = 'startstop',   # BotClient --script: startstop (passed start/stop video) or events (fire, reload, swap; record_anim_compare.ps1 -Script events)
     [int]$TimeoutSec = 400
 )
-# Films one server-driven opponent with the same camera and the same route as the passed animation comparison (record_anim_compare.ps1 -Script startstop).
+# The route starts at hold + 2.02 s (first script piece = stand 121 ticks). The fidget comes at stop clip seconds + 6 s after the bot is placed:
+# rifle and shotgun 1.35 + 6 = 7.35 s, pistol 0.35 + 6 = 6.35 s (Shared/AnimState.cpp kBundleTimings). Lyra's own pistol and shotgun records show no fidget before the route either.
+if ($HoldSec -lt 0) { $HoldSec = if ($Weapon -eq 'pistol') { 4.25 } else { 4.5 } }
+# Films one server-driven opponent with the same camera and the same route as the passed animation comparison (record_anim_compare.ps1 -Script startstop or events).
+# The shot stops 47.3 s + 1 s after the first move (MOBRemoteShotSubsystem SCRIPT_AFTER_MOVE, the start/stop route). The events route first moves at tick 333 and ends at 2470,
+# so its film carries about 13 s of standing after the route (333/60 + 48.28 - 2470/60 = 12.7 s); make_remote_compare.py stops at the reference end. The bot stays connected for the same time either way.
 # Lyra goes through Tools/LagRelay with a real-match delay; the bot runs the fixed route and connects directly. Lyra sends no input, only a debug place every 20 s: the map has no spawn floor, and the server drops a session silent for 60 s.
 # Results: Saved\MOB\remoteshot_<Tag>.csv and rec_remoteshot_<Tag>.bgra; make_remote_compare.py turns them into the side-by-side video.
 $proj   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
@@ -15,7 +22,7 @@ $ue     = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor
 $repo   = 'C:\Users\USER\Desktop\MyGit\MO_Shooter'
 $outDir = "$proj\Saved\MOB"
 $map    = "$outDir\map_gym.mocl"
-$clips  = "$outDir\clips_rifle.bin"
+$clips  = "$outDir\clips.bin"
 $srvOut = "$outDir\remoteshot_${Tag}_server.txt"
 $botOut = "$outDir\remoteshot_${Tag}_bot.txt"
 $relayOut = "$outDir\remoteshot_${Tag}_relay.txt"
@@ -41,7 +48,7 @@ while ((Get-Date) -lt $deadline -and -not $lyra.HasExited) {
     Start-Sleep -Milliseconds 500
 }
 Start-Sleep -Seconds 3   # the 1 s warmup ends and the match starts before the bot joins
-$bot = Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", '--bots=1', '--script=startstop', "--scriptHold=$HoldSec", "--seconds=$botSeconds") -RedirectStandardOutput $botOut -PassThru -WindowStyle Hidden
+$bot = Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", '--bots=1', "--script=$Script", "--scriptHold=$HoldSec", "--scriptWeapon=$Weapon", "--seconds=$botSeconds") -RedirectStandardOutput $botOut -PassThru -WindowStyle Hidden
 $null = $bot.Handle
 
 $timedOut = $false

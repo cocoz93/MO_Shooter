@@ -10,6 +10,7 @@
 #  - 조건은 플랜 7단계 그대로: 합격 = 왕복 20 · 100 · 150 고정, 100 + 흔들림 33, 20 + 흔들림 100. 값만 = 100 + 흔들림 66 · 100
 #  - 조건당 600발 이상이 플랜 값이다. 봇이 서로 자주 못 봐서 한 판 분당 머리 30~79발뿐이라(파일럿 실측) 같은 조건을 MEASURE_GAMES 판 동시에 돌려 합산한다
 #  - 비용(cost)은 시간을 재므로 한 판만, --judgeFireAlways 로 10명이 쏠 수 있을 때 계속 쏜다. 무기 셋의 탄이 약 35초치라 MEASURE_SECONDS 는 30 이하로 준다
+#  - 9-6: 「상대가 몽타주 중」 머리 · 몸(mont*) 열을 더 낸다. MEASURE_SERVER_EXTRA = 서버에 더 줄 인자(일부러 틀림 --rewindMontageShift=1 확인용)
 import concurrent.futures
 import csv
 import os
@@ -30,6 +31,7 @@ SECONDS_NOSPREAD = int(os.environ.get('MEASURE_SECONDS_NOSPREAD', str(SECONDS)))
 LEAD = os.environ.get('MEASURE_LEAD', '3')
 GAMES = int(os.environ.get('MEASURE_GAMES', '5'))
 SEED_BASE = int(os.environ.get('MEASURE_SEED_BASE', '20261102'))		# 분모가 모자란 조건을 더 돌릴 때 앞 판과 다른 시드를 준다
+SERVER_EXTRA = os.environ.get('MEASURE_SERVER_EXTRA', '').split()
 
 
 def num(text, key):
@@ -42,7 +44,7 @@ def run_one(out_dir, clips, label, port, rtt, jitter, no_spread, logs=True, seed
     srv_path = os.path.join(out_dir, f'{label}_server.txt')
     bot_path = os.path.join(out_dir, f'{label}_bot.txt')
     judge_path = os.path.join(out_dir, f'{label}_judge.txt')
-    srv_args = [SERVER, f'--map={MAP}', f'--port={port}', '--exitWhenEmpty', '--warmup=0', '--matchSeconds=100000', '--targetScore=100000', f'--clips={clips}', f'--seed={seed}']
+    srv_args = [SERVER, f'--map={MAP}', f'--port={port}', '--exitWhenEmpty', '--warmup=0', '--matchSeconds=100000', '--targetScore=100000', f'--clips={clips}', f'--seed={seed}'] + SERVER_EXTRA
     bot_args = [BOT, f'--map={MAP}', f'--port={port + 1 if rtt or jitter else port}', f'--bots={BOTS}', f'--seconds={seconds}', f'--lead={LEAD}', f'--judgeClips={clips}', f'--seed={seed}']
     if fire_always:
         bot_args.append('--judgeFireAlways')
@@ -85,7 +87,8 @@ def run_one(out_dir, clips, label, port, rtt, jitter, no_spread, logs=True, seed
         res = subprocess.run([sys.executable, CHECK, judge_path, srv_path], capture_output=True, encoding='utf-8', errors='replace')
         open(os.path.join(out_dir, f'{label}_hits.txt'), 'w', encoding='utf-8').write(res.stdout + res.stderr)
         row['hitsPass'] = res.returncode == 0
-        for name, rx in (('head', r'^머리: 분모 (\d+), 오탈 (\d+)'), ('body', r'^몸: 분모 (\d+), 오탈 (\d+)'), ('headRun', r'^달리는 상대 머리: 분모 (\d+), 오탈 (\d+)'), ('bodyRun', r'^달리는 상대 몸: 분모 (\d+), 오탈 (\d+)')):
+        for name, rx in (('head', r'^머리: 분모 (\d+), 오탈 (\d+)'), ('body', r'^몸: 분모 (\d+), 오탈 (\d+)'), ('headRun', r'^달리는 상대 머리: 분모 (\d+), 오탈 (\d+)'), ('bodyRun', r'^달리는 상대 몸: 분모 (\d+), 오탈 (\d+)'),
+                         ('montHead', r'^몽타주 중 머리: 분모 (\d+), 오탈 (\d+)'), ('montBody', r'^몽타주 중 몸: 분모 (\d+), 오탈 (\d+)')):
             mm = re.search(rx, res.stdout, re.M)
             row[name + 'N'], row[name + 'Lost'] = (int(mm.group(1)), int(mm.group(2))) if mm else (None, None)
             n = row[name + 'N']
@@ -110,10 +113,11 @@ def fmt(v):
 
 
 COLUMNS = ['label', 'rtt', 'jitter', 'spread', 'hitsPass', 'headN', 'headLost', 'headRate', 'bodyN', 'bodyLost', 'bodyRate', 'headRunN', 'headRunLost', 'headRunRate', 'bodyRunN', 'bodyRunLost', 'bodyRunRate',
+           'montHeadN', 'montHeadLost', 'montHeadRate', 'montBodyN', 'montBodyLost', 'montBodyRate',
            'botOnly', 'serverOnly', 'deadExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks', 'rewindClamped', 'rewindOk', 'rewindFuture', 'rewindNoView', 'idleMoves', 'kills',
            'workP50', 'workP99', 'workMax', 'recvBytesPerBotPerSec', 'stateBytesMax', 'poseEvals', 'poseReused', 'poseSkipped', 'botPass', 'botRc', 'serverRc']
 
-SUMMED = ['headN', 'headLost', 'bodyN', 'bodyLost', 'headRunN', 'headRunLost', 'bodyRunN', 'bodyRunLost', 'botOnly', 'serverOnly', 'deadExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks',
+SUMMED = ['headN', 'headLost', 'bodyN', 'bodyLost', 'headRunN', 'headRunLost', 'bodyRunN', 'bodyRunLost', 'montHeadN', 'montHeadLost', 'montBodyN', 'montBodyLost', 'botOnly', 'serverOnly', 'deadExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks',
           'rewindClamped', 'rewindOk', 'rewindFuture', 'rewindNoView', 'idleMoves', 'kills', 'poseEvals', 'poseReused', 'poseSkipped']
 
 
@@ -129,7 +133,7 @@ def combine(rows, label, limit=0.5):
         out[key] = max(values) if values else None
     values = [r['workP50'] for r in rows if r.get('workP50') is not None]
     out['workP50'] = sum(values) / len(values) if values else None
-    for name in ('head', 'body', 'headRun', 'bodyRun'):
+    for name in ('head', 'body', 'headRun', 'bodyRun', 'montHead', 'montBody'):
         n, lost = out.get(name + 'N'), out.get(name + 'Lost')
         out[name + 'Rate'] = 100.0 * lost / n if n else None
     out['hitsPass'] = bool(out.get('headN')) and bool(out.get('bodyN')) and out['headRate'] <= limit and out['bodyRate'] <= limit
