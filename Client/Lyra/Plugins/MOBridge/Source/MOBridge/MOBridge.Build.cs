@@ -30,6 +30,7 @@ public class MOBridge : ModuleRules
 			"GameplayTasks",
 			"GameplayMessageRuntime",
 			"AIModule",
+			"NavigationSystem",	// reads the walkable-floor data for the bots (MOBNavDumpSubsystem)
 			"ModularGameplay",
 			"MovieSceneCapture",
 			"Slate",
