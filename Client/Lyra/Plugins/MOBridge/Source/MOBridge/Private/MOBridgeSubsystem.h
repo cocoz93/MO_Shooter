@@ -75,6 +75,7 @@ struct FMOBRemote
  *   -MOBTag=name                산출물 파일 이름 앞부분
  *   -MOBBreakPredictAt=N        일부러 틀리기 — 준비된 뒤 N초에 내 예측 위치를 1m 민다(보정이 잡는지 보려고)
  *   -MOBSimpleAnim              화면 시험 — 상대를 Lyra 애니 대신 소총 클립 단순 재생으로 움직인다(MOBSimpleAnimInstance.h)
+ *   -MOBStandAt=x,y,z           촬영 전용 — 내 입력을 보내지 않고 서버에 이 자리에 서 있겠다고만 알린다. 서버 --debug 필요(MOBRemoteShotSubsystem.h)
  * 판정에 쓰는 줄은 전부 「MOB_」 로 시작한다.
  */
 UCLASS()
@@ -143,6 +144,9 @@ private:
 	FString Tag = TEXT("mob");
 	bool bBlockDamage = true;
 	bool bAutoInput = false;
+	bool bStandOnly = false;
+	FVector StandAt = FVector::ZeroVector;
+	double NextStandAt = 0;
 	bool bAutoAim = false;
 	bool bEventShots = false;
 	bool bKeepPickups = false;

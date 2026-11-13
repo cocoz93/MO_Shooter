@@ -317,6 +317,15 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	FParse::Value(Cmd, TEXT("MOBAutoWeapon="), AutoWeaponFixed);
 	bEventShots = FParse::Param(Cmd, TEXT("MOBEventShots"));
 	bKeepPickups = FParse::Param(Cmd, TEXT("MOBKeepPickups"));
+	if (FParse::Value(Cmd, TEXT("MOBStandAt="), S, false))
+	{
+		const TArray<float> V = ParseFloats(S);
+		if (V.Num() == 3)
+		{
+			bStandOnly = true;
+			StandAt = FVector(V[0], V[1], V[2]);
+		}
+	}
 	bServerAnim = FParse::Param(Cmd, TEXT("MOBServerAnim"));
 	bSimpleAnim = bServerAnim || FParse::Param(Cmd, TEXT("MOBSimpleAnim"));
 	bAnimLog = FParse::Param(Cmd, TEXT("MOBAnimLog"));
@@ -588,6 +597,7 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 			if (Core)
 			{
 				Core->Prediction.OnSpawn(M.x, M.y, M.z, M.lastSeq);
+				NextStandAt = 0;	// 촬영 전용 — 시작 자리로 돌아갔으면 바로 다시 옮긴다(맵이 달라 시작 자리는 허공이다)
 				SelfCur = ToFVector(Core->Prediction.GetMove().location);
 				SelfPrev = SelfCur;
 				VisualError = FVector::ZeroVector;
@@ -1149,6 +1159,23 @@ void UMOBridgeSubsystem::MeasureRemoteAnim(ACharacter* Ch, uint32 Id, const FVec
 void UMOBridgeSubsystem::TickInput(double Now)
 {
 	if (!Socket || !Core || !bHasSpawn || ResultAt > 0) return;
+	if (bStandOnly)
+	{
+		// 서버 코어는 60초 동안 아무것도 안 받은 접속을 끊는다(IOCPServer.h SESSION_TIMEOUT_SEC) — 그 3분의 1 간격으로 알린다
+		constexpr double StandIntervalSeconds = 20.0;
+		if (Now < NextStandAt) return;
+		NextStandAt = Now + StandIntervalSeconds;
+		wire::DebugPlace Place = wire::DebugPlace();
+		Place.h.size = sizeof(Place);
+		Place.h.type = (uint16)wire::Msg::C2S_DEBUG_PLACE;
+		Place.seq = ++Seq;
+		Place.x = StandAt.X;
+		Place.y = StandAt.Y;
+		Place.z = StandAt.Z;
+		Place.hp = 100.f;
+		QueuePacket(&Place, sizeof(Place));
+		return;
+	}
 	APlayerController* PC = GetWorld()->GetFirstPlayerController();
 	ACharacter* Ch = PC ? Cast<ACharacter>(PC->GetPawn()) : nullptr;
 	if (!Ch)

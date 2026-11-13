@@ -4,6 +4,7 @@
 //   BotClient --map=<파일.mocl> --seconds=초 [--measureFrom=초 --measureSeconds=초] ... = 부하 시험. 경기 끝을 기다리지 않고 시간이 되면 끊고 LOADBOT 줄을 낸다.
 //   봇이 많으면 서버가 방을 나눠 앉힌다 — 기록은 같은 방 봇끼리만 맞춰 본다. 방 2부터는 기록 이름 뒤에 .room<번호>
 //   --measureView = 되감기 측정. Lyra 처럼 상태를 쌓아 0.1초 뒤 보간한 자리를 오차 없이 조준하고, 그 시점을 입력에 실어 보낸다. 기본 꺼짐
+//   --script=startstop [--scriptHold=초] = 화면 판정 촬영. 서버 --debug 로 애니 비교 촬영의 시작 자리에 서서, 그 촬영과 같은 경로를 달린다. 쏘지 않는다
 //
 // 판정은 하지 않는다 — 입력을 보내고 받은 것을 적어 맞춰 볼 뿐이다.
 // 1. 봇마다 같은 공용 코드(Shared)로 자기 입력을 여기서도 돌려, 돌아온 상태와 위치·속도·탄창까지 비교한다.
@@ -92,7 +93,35 @@ namespace
 		std::string judgeLog;
 		bool judgeNoSpread = false;		// 서버 --rewindNoSpread 와 같이 쓴다 — 자세만 본다
 		bool judgeFireAlways = false;	// 비용 측정 — 적이 보이든 말든 방아쇠를 놓지 않는다(10명 전원 연사)
+		std::string script;				// 주면 두뇌 대신 정해진 경로를 달린다
+		double scriptHoldSeconds = 4.5;	// 자리에 선 뒤 경로 시작까지 — 촬영 쪽 대기 4초보다 길고, 첫 서 있기 2초를 더해도 제자리 장난 동작(서 있은 지 7.35초)이 나오기 전에 출발해야 합격 영상과 같다
 	};
+
+	// 화면 판정 촬영의 경로 — MOBAnimCompareSubsystem.cpp STARTSTOP_SCRIPT 와 같은 값. 합격 영상과 나란히 놓으려면 동작이 같아야 한다
+	struct ScriptStep
+	{
+		const char* name;
+		uint32_t ticks;	// 합격 영상이 실제로 돈 프레임 수(animcmp_ssp_v_simple.csv) — 그쪽은 시간 합이 조금 모자라 조각마다 1프레임 더 돈다(0.4초 조각만 딱 맞는다)
+		bool moving;
+		double angle;	// 몸 방향 기준 이동 각도
+	};
+	constexpr ScriptStep kStartStopScript[] = {
+		{ "idle", 121, false, 0 },
+		{ "fwd", 151, true, 0 }, { "stop_fwd", 121, false, 0 },
+		{ "bwd", 151, true, 180 }, { "stop_bwd", 121, false, 0 },
+		{ "left", 151, true, -90 }, { "stop_left", 121, false, 0 },
+		{ "right", 151, true, 90 }, { "stop_right", 121, false, 0 },
+		{ "diag", 151, true, 45 }, { "stop_diag", 121, false, 0 },
+		{ "piv_bf_a", 91, true, 180 }, { "piv_bf_b", 91, true, 0 }, { "stop_bf", 121, false, 0 },
+		{ "piv_fb_a", 91, true, 0 }, { "piv_fb_b", 91, true, 180 }, { "stop_fb", 121, false, 0 },
+		{ "piv_lr_a", 91, true, -90 }, { "piv_lr_b", 91, true, 90 }, { "stop_lr", 121, false, 0 },
+		{ "piv_rl_a", 91, true, 90 }, { "piv_rl_b", 91, true, -90 }, { "stop_rl", 121, false, 0 },
+		{ "ad1", 24, true, -90 }, { "ad2", 24, true, 90 }, { "ad3", 24, true, -90 },
+		{ "ad4", 24, true, 90 }, { "ad5", 24, true, -90 }, { "ad6", 24, true, 90 },
+		{ "stop_ad", 121, false, 0 },
+	};
+	const Vec3 kScriptHome(-1020.0, -1070.0, 142.0);	// MOBAnimCompareSubsystem.cpp FIXED_HOME
+	constexpr float kScriptYaw = 180.f;					// MOBAnimCompareSubsystem.cpp FIXED_YAW
 
 	// 봇이 화면 역할로 쓰는 자세 계산. 봇들이 한 스레드에서 번갈아 쓰므로 한 벌만 둔다
 	struct JudgeShared
@@ -196,8 +225,14 @@ namespace
 		void SendNextInput(bool breakMirror)
 		{
 			if (!_hasSpawn || !_net.IsOpen() || _hasResult) return;
+			if (_scripted && !_scriptPlaced)
+			{
+				PlaceForScript();
+				return;
+			}
 			wire::Input input = wire::Input();
-			Think(input);
+			if (_scripted) ThinkScript(input);
+			else Think(input);
 			_self.SetDebugMoveScale(breakMirror ? 0.999 : 1.0);
 			_self.AddInput(input);
 			if (_judge && _self.GetLastWeaponEvents().fired) JudgeShot(input, _self.GetLastWeaponEvents());
@@ -207,6 +242,12 @@ namespace
 		void Close() { _net.Close(); }
 
 		void SetMeasureView(bool on) { _measureView = on; }
+		bool IsScriptDone() const { return _scriptStep == (int)(sizeof(kStartStopScript) / sizeof(kStartStopScript[0])); }
+		void SetScript(double holdSeconds)
+		{
+			_scripted = true;
+			_scriptHoldTicks = (uint32_t)std::lround(holdSeconds * wire::kTickRate);
+		}
 		void SetJudge(JudgeShared* judge)
 		{
 			_judge = judge;
@@ -327,6 +368,7 @@ namespace
 			_stuckCheckAt = Vec3(spawn.x, spawn.y, spawn.z);
 			_stuckTicks = 0;
 			_detourLeft = 0;
+			_scriptPlaced = false;	// 경기 시작이 시작 자리로 돌려놓으면 다시 옮기고 처음부터
 		}
 
 		void OnKill(const wire::Kill& kill)
@@ -391,7 +433,8 @@ namespace
 				if (_measureView) _viewHistory[p.id].Add(p, stateTick, hasAnim ? &anim : nullptr);
 				if (p.id == _welcome.playerId)
 				{
-					CompareSelf(p);
+					// 경로 모드는 비교하지 않는다 — 자리 옮기기는 걷는 상태로, 봇의 OnSpawn 은 떨어지는 상태로 시작해 처음부터 어긋난다
+					if (!_scripted) CompareSelf(p);
 					const uint32_t ackLag = _self.GetSeq() - p.lastSeq;
 					_ackLagSum += ackLag;
 					++_ackLagSamples;
@@ -582,6 +625,73 @@ namespace
 			}
 		}
 
+		// 촬영 시작 자리로 옮긴다. 서버는 자리 옮기기도 입력과 같은 번호 줄에서 받으므로 입력 번호 하나를 받아 쓴다
+		void PlaceForScript()
+		{
+			if (!_welcome.debugAllowed)
+			{
+				std::printf("SCRIPT 실패 — 서버가 --debug 없이 떴다\n");
+				_net.Close();
+				return;
+			}
+			wire::Input reserved = wire::Input();
+			_self.AddInput(reserved);
+			wire::DebugPlace place = wire::DebugPlace();
+			place.seq = reserved.seq;
+			place.x = kScriptHome.x;
+			place.y = kScriptHome.y;
+			place.z = kScriptHome.z;
+			place.hp = 100.f;
+			if (!_net.SendPacket(place, wire::Msg::C2S_DEBUG_PLACE))
+			{
+				_net.Close();
+				return;
+			}
+			_self.OnSpawn(kScriptHome.x, kScriptHome.y, kScriptHome.z, place.seq);
+			_scriptPlaced = true;
+			_scriptTick = 0;
+			_scriptStep = -1;
+			std::printf("SCRIPT placed seq=%u\n", place.seq);
+		}
+
+		// 정해진 경로 — 틱을 세어 조각을 고른다. 자리에 선 뒤 몇 초는 소총을 들고 서 있기만 한다
+		void ThinkScript(wire::Input& input)
+		{
+			input.yaw = kScriptYaw;
+			input.weapon = (uint8_t)EWeapon::Rifle;
+			const uint32_t tick = _scriptTick++;
+			if (tick < _scriptHoldTicks) return;
+			uint32_t at = tick - _scriptHoldTicks;
+			int step = 0;
+			for (const ScriptStep& item : kStartStopScript)
+			{
+				if (at < item.ticks)
+				{
+					if (step != _scriptStep)
+					{
+						_scriptStep = step;
+						const auto server = _players.find(_welcome.playerId);
+						std::printf("SCRIPT step=%s tick=%u server=%.2f,%.2f,%.2f\n", item.name, tick,
+							server != _players.end() ? server->second.x : 0.f, server != _players.end() ? server->second.y : 0.f, server != _players.end() ? server->second.z : 0.f);
+					}
+					if (item.moving)
+					{
+						const double radians = ((double)kScriptYaw + item.angle) * 3.14159265358979323846 / 180.0;
+						input.moveX = (float)std::cos(radians);
+						input.moveY = (float)std::sin(radians);
+					}
+					return;
+				}
+				at -= item.ticks;
+				++step;
+			}
+			if (_scriptStep != step)
+			{
+				_scriptStep = step;
+				std::printf("SCRIPT end tick=%u\n", tick);
+			}
+		}
+
 		// 두뇌 — 가장 가까운 산 적을 보고 쏘며 다가간다. 길찾기가 없어 막히면 무작위로 돌아간다
 		void Think(wire::Input& input)
 		{
@@ -722,6 +832,12 @@ namespace
 		uint8_t _chosenWeapon = 0;
 		bool _hasSpawn = false;
 
+		bool _scripted = false;
+		bool _scriptPlaced = false;
+		uint32_t _scriptHoldTicks = 0;
+		uint32_t _scriptTick = 0;
+		int _scriptStep = -1;
+
 		float _lastYaw = 0;
 		int _sightWait = 0;
 		bool _hasSight = false;
@@ -823,6 +939,8 @@ namespace
 			else if (value("--measureSeconds=", v)) out.measureSeconds = std::atof(v.c_str());
 			else if (value("--judgeClips=", v)) { out.judgeClips = v; out.measureView = true; }
 			else if (value("--judgeLog=", v)) out.judgeLog = v;
+			else if (value("--script=", v)) out.script = v;
+			else if (value("--scriptHold=", v)) out.scriptHoldSeconds = std::atof(v.c_str());
 			else if (s == "--judgeNoSpread") out.judgeNoSpread = true;
 			else if (s == "--judgeFireAlways") out.judgeFireAlways = true;
 			else if (s == "--measureView") out.measureView = true;
@@ -833,6 +951,11 @@ namespace
 				std::printf("모르는 인자 %s\n", s.c_str());
 				return false;
 			}
+		}
+		if (!out.script.empty() && out.script != "startstop")
+		{
+			std::printf("모르는 경로 %s\n", out.script.c_str());
+			return false;
 		}
 		return !out.mapPath.empty();
 	}
@@ -890,6 +1013,7 @@ int main(int argc, char** argv)
 		bots.emplace_back(new CBot(map, sim, rules, args.seed + 100 + (uint32_t)i));
 		bots.back()->SetMeasureView(args.measureView);
 		bots.back()->SetJudge(judging ? &judge : nullptr);
+		if (!args.script.empty()) bots.back()->SetScript(args.scriptHoldSeconds);
 		if (!bots.back()->Connect(args.port))
 		{
 			std::printf("BOT %d 접속 실패\n", i);
@@ -964,6 +1088,12 @@ int main(int argc, char** argv)
 	}
 
 	// ─── 부하 시험 — 끝까지 안 가므로 결과 대조는 없다. 도중 값이 서버와 같은지만 ──
+	if (!args.script.empty())
+	{
+		const bool done = bots.front()->IsScriptDone();
+		std::printf("SCRIPT result %s\n", done ? "PASS" : "FAIL");
+		return done ? 0 : 1;
+	}
 	if (args.seconds > 0)
 	{
 		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0;
