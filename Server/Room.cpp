@@ -73,6 +73,21 @@ namespace mo
 			return gap.x * gap.x + gap.y * gap.y + gap.z * gap.z;
 		}
 
+		// 일부러 틀림 전용 --rewindMontageShift(Room.h RewindOptions) — 판정이 푸는 몽타주 시각만 민다. 0 이면 기록 그대로를 돌려준다.
+		//   기록은 안 고친다 — SendState 가 같은 칸(rewindHistory[_tick].anim)을 보내므로, 기록을 밀면 화면도 같이 밀려 틀림이 안 드러난다
+		const wire::AnimStateWire& JudgeAnim(const wire::AnimStateWire& recorded, uint32_t shiftTicks, wire::AnimStateWire& scratch)
+		{
+			if (shiftTicks == 0) return recorded;
+			scratch = recorded;
+			for (int m = 0; m < (int)scratch.montageCount; ++m)
+			{
+				// 1틱 = 1/60초 = 와이어 시각 100칸(1/6000초). 0xFFFF 는 「안 함」 표시라 그 앞에서 멈춘다. 끝을 넘으면 자세 쪽이 몽타주 길이에서 멈춘다
+				const uint32_t shifted = (uint32_t)scratch.montages[m].time + 100u * shiftTicks;
+				scratch.montages[m].time = (uint16_t)std::min<uint32_t>(shifted, 0xFFFEu);
+			}
+			return scratch;
+		}
+
 		wire::EShotHit ToWireHit(EBulletHit hit)
 		{
 			switch (hit)
@@ -99,12 +114,19 @@ namespace mo
 		if (_anim.clips)
 		{
 			// main 이 시작할 때 같은 초기화로 확인했으므로 여기서 실패하지 않는다
-			_animReady = _poseEvaluator.Init(*_anim.clips, kAnimBundleName) && _animCodec.Init(*_anim.clips, kAnimBundleName);
+			_animReady = true;
+			for (size_t weapon = 0; weapon < _poseEvaluators.size(); ++weapon)
+			{
+				const char* bundle = AnimBundleOf((uint8_t)weapon);
+				_animReady = _animReady && _poseEvaluators[weapon].Init(*_anim.clips, bundle) && _animCodecs[weapon].Init(*_anim.clips, bundle);
+				_animBundleIndex[weapon] = _animCodecs[weapon].BundleIndex();
+			}
 			if (_animReady)
 			{
-				_localFrom.resize(_poseEvaluator.BoneCount());
-				_localTo.resize(_poseEvaluator.BoneCount());
-				_localBlend.resize(_poseEvaluator.BoneCount());
+				// 뼈대는 묶음끼리 같다(make_clip_pack.py 한 몸 검사) — 뼈 수는 어느 묶음 것이든 같다
+				_localFrom.resize(_poseEvaluators[0].BoneCount());
+				_localTo.resize(_poseEvaluators[0].BoneCount());
+				_localBlend.resize(_poseEvaluators[0].BoneCount());
 			}
 		}
 
@@ -180,7 +202,11 @@ namespace mo
 		const uint32_t id = player->id;
 		Player& added = *player;
 		_players.push_back(std::move(player));
-		if (_animReady) added.anim.Init(*_anim.clips, kAnimBundleName);
+		if (_animReady)
+		{
+			added.anim.Init(*_anim.clips, AnimBundleOf(added.weapon));
+			added.animWeapon = added.weapon;
+		}
 		SpawnPlayer(added);
 
 		if (_phase == wire::EMatchPhase::Waiting)
@@ -444,11 +470,18 @@ namespace mo
 		player.move.location = slot.point.location;
 		player.move.maxSpeed = _params.maxWalkSpeed;
 		_moveSim.RefreshFloor(player.move);
-		if (_animReady) player.anim.Reset();
 		player.jumpHeld = false;
 		player.yaw = slot.point.yawDegrees;
 		player.pitch = 0;
 		player.weapon = 0;
+		if (_animReady)
+		{
+			// 부활하면 처음 무기(권총)를 든다 — 자세도 그 묶음으로 처음부터, 부활 몽타주를 튼다
+			player.anim.Init(*_anim.clips, AnimBundleOf(player.weapon));
+			player.animWeapon = player.weapon;
+			DropAnimEvents(player);
+			PushAnimEvent(player, EAnimEvent::Spawn, player.weapon);
+		}
 		for (size_t i = 0; i < player.weapons.size(); ++i)
 		{
 			player.weapons[i].Init((EWeapon)i);		// 부활하면 탄을 다시 채운다 — 무기 줍기가 5단계라 처음 든 셋 그대로
@@ -522,6 +555,14 @@ namespace mo
 		player.immuneUntilTick = 0;
 		player.moveLockInputs = 0;
 		player.lastSeq = place.seq;
+		if (_animReady)
+		{
+			// 순간이동 + 멈춤 = 판 시작과 같다 — 자세를 든 무기 묶음으로 처음부터(경로 봇이 무기를 든 뒤 옮기면 서기 시계가 옮긴 틱에서 시작).
+			// 이 틱에 앞서 쌓인 사건(무기 들기의 꺼내기 등)도 버린다 — 몽타주 없는 서기에서 시작
+			player.anim.Init(*_anim.clips, AnimBundleOf(player.weapon));
+			player.animWeapon = player.weapon;
+			DropAnimEvents(player);
+		}
 	}
 
 	void CRoom::ApplyInput(Player& player, const wire::Input& input)
@@ -543,6 +584,8 @@ namespace mo
 		{
 			player.weapon = input.weapon;
 			player.weapons[player.weapon].Equip();
+			++_stats.weaponChanges;		// 자세 묶음은 이 틱의 UpdateAnimStates 가 따라 바꾼다
+			PushAnimEvent(player, EAnimEvent::Swap, player.weapon);
 		}
 
 		const bool jump = (input.buttons & wire::BUTTON_JUMP) != 0;
@@ -603,6 +646,7 @@ namespace mo
 		}
 		if (events.fired)
 		{
+			PushAnimEvent(player, EAnimEvent::Fire, player.weapon);
 			player.fireGate.OnFired((EWeapon)player.weapon, cycle.GetDef(), kTickSeconds);
 			PendingShot shot;
 			shot.shooter = player.id;
@@ -616,6 +660,7 @@ namespace mo
 			shot.seq = input.seq;
 			_pendingShots.push_back(shot);
 		}
+		if (events.reloadStarted) PushAnimEvent(player, EAnimEvent::Reload, player.weapon);		// 손으로 · 탄창이 비어 스스로 둘 다. 무기 순환 차례(쏘기 → 재장전) 그대로
 	}
 
 	// 사격 시작점은 클라가 보내지만 믿지는 않는다. 쏜 사실 자체는 안 물리고(탄·연사는 같은 입력이면 클라와 같아야 한다) 시작점만 바꾼다 —
@@ -741,7 +786,11 @@ namespace mo
 			sample.yaw = player->yaw;
 			sample.pitch = player->pitch;
 			sample.alive = !player->dead;
-			if (_animReady) player->anim.ToWire(sample.anim);
+			if (_animReady)
+			{
+				player->anim.ToWire(sample.anim);
+				sample.animWeapon = player->animWeapon;
+			}
 		}
 	}
 
@@ -786,12 +835,96 @@ namespace mo
 		if (!_animReady) return;
 		for (const std::unique_ptr<Player>& player : _players)
 		{
-			if (player->dead) continue;
+			// 무기를 바꾼 틱 — 그 틱 입력을 다 적용한 뒤 마지막 무기로 한 번 바꾼다. 패킷의 weapon 과 이 틱 상태의 묶음이 늘 같게 죽은 사람도 맞춘다
+			if (player->animWeapon != player->weapon)
+			{
+				if (player->anim.ChangeBundle(*_anim.clips, AnimBundleOf(player->weapon)))
+				{
+					player->animWeapon = player->weapon;
+					++_stats.animBundleChanges;
+				}
+				else
+				{
+					++_stats.animBundleFails;
+				}
+			}
+			if (player->dead)
+			{
+				DropAnimEvents(*player);		// 이 틱 입력에서 떨어져 죽었다 — 몸이 없으니 틀지 않는다
+				continue;
+			}
+			PlayAnimEvents(*player);
+			player->anim.SetFiring(player->weapons[player->weapon].IsFireActive());		// Lyra IsFiring 태그 = 쏘기 능력이 켜진 동안(소총 · 권총 8프레임이 기록과 같다)
 			AnimMoveInput input;
 			MakeMoveInput(*player, input);
 			player->anim.Update(input);
 			++_stats.animUpdates;
 		}
+	}
+
+	void CRoom::PushAnimEvent(Player& player, EAnimEvent kind, uint8_t weapon)
+	{
+		if (!_animReady) return;
+		++_stats.animEvents[(size_t)kind];
+		if (player.animEventCount == (int)player.animEvents.size())
+		{
+			++_stats.animEventsDropped[(size_t)kind];
+			return;
+		}
+		player.animEvents[(size_t)player.animEventCount++] = { kind, weapon };
+	}
+
+	void CRoom::DropAnimEvents(Player& player)
+	{
+		for (int i = 0; i < player.animEventCount; ++i) ++_stats.animEventsDropped[(size_t)player.animEvents[(size_t)i].kind];
+		player.animEventCount = 0;
+	}
+
+	// 이번 틱 사건을 생긴 차례대로 몽타주로 튼다. 앞 틱 갱신 뒤 · 이번 갱신 앞이라 새 칸은 시각 0 · 비중 0 으로 생겨 이번 갱신부터 움직인다(CAnimState::PlayMontage).
+	// Lyra 는 사건 프레임의 갱신 뒤에 틀고 다음 프레임 갱신 앞에 무기 층을 바꾼다 — 서버는 입력 틱에 묶음을 바꾸므로(D46) 이 자리가 「튼 뒤 첫 갱신 = 새 층 첫 갱신」을 Lyra 와 같게 둔다.
+	// 속도: 쏘기 · 재장전 = 무기 표(autoRate · reloadRate), 빼기 · 꺼내기 · 부활 = 1.0(9-1 기록 세 무기 다, 실측). 몽타주는 사건 무기의 묶음에서 찾는다(대조 도구 AnimCheck 와 같다)
+	void CRoom::PlayAnimEvents(Player& player)
+	{
+		constexpr float kAnimEventRate = 1.f;
+		CAnimState& anim = player.anim;
+		const int dropsBefore = anim.MontageDrops();
+		const auto play = [this, &anim](uint8_t kind, float rate, int bundle)
+		{
+			if (anim.PlayMontage(kind, rate, bundle)) ++_stats.montageStarts[kind];
+			else ++_stats.montageFails;
+		};
+		for (int i = 0; i < player.animEventCount; ++i)
+		{
+			const Player::AnimEvent& event = player.animEvents[(size_t)i];
+			const int bundle = _animBundleIndex[event.weapon];
+			const WeaponDef& def = GetWeaponDef((EWeapon)event.weapon);
+			switch (event.kind)
+			{
+			case EAnimEvent::Spawn:
+				play(MONTAGE_SPAWN, kAnimEventRate, bundle);
+				break;
+			case EAnimEvent::Swap:
+				// Lyra 는 앞 무기를 넣는 빼기를 틀고 같은 프레임에 꺼내기가 같은 무리로 끈다 — 빼기는 비중 0 인 채 빠진다(9-1 기록)
+				play(MONTAGE_UNEQUIP, kAnimEventRate, bundle);
+				play(MONTAGE_EQUIP, kAnimEventRate, bundle);
+				break;
+			case EAnimEvent::Fire:
+			{
+				bool cancelledReload = false;
+				if (anim.PlayFireMontage(def.autoRate, bundle, cancelledReload)) ++_stats.montageStarts[MONTAGE_FIRE];
+				else ++_stats.montageFails;
+				if (cancelledReload) ++_stats.reloadCancels;
+				break;
+			}
+			case EAnimEvent::Reload:
+				play(MONTAGE_RELOAD, def.reloadRate, bundle);
+				break;
+			case EAnimEvent::Count:
+				break;
+			}
+		}
+		player.animEventCount = 0;
+		_stats.montageDrops += (uint64_t)(anim.MontageDrops() - dropsBefore);
 	}
 
 	// Lyra 가 남의 캐릭터를 그리는 식과 같다(MOBridgeSubsystem::TickRemotes). false = 그 시점에 몸이 없었다(죽었거나 아직 안 들어옴)
@@ -851,7 +984,7 @@ namespace mo
 		if (_poseCacheUsed == _poseCache.size())
 		{
 			_poseCache.emplace_back();
-			_poseCache.back().bodies.resize(_poseEvaluator.BodyCount());
+			_poseCache.back().bodies.resize(_poseEvaluators[0].BodyCount());
 		}
 		CachedPose& cached = _poseCache[_poseCacheUsed++];
 		cached.owner = owner.id;
@@ -859,22 +992,29 @@ namespace mo
 		cached.alpha = alpha;
 
 		const size_t size = owner.rewindHistory.size();
+		// 틱마다 그 틱 상태를 만든 묶음으로 푼다. 무기를 바꾼 틱 사이도 두 묶음 자세를 뼈별로 섞는다 — 뼈대가 같아 섞기 · 부위 계산은 어느 평가기로 해도 같다
 		const RewindSample& from = owner.rewindHistory[tick % size];
+		CAnimPoseEvaluator& evaluator = _poseEvaluators[from.animWeapon];
 		AnimPoseInput input;
-		_animCodec.FromWire(from.anim, from.pitch, input);
-		_poseEvaluator.EvaluateLocal(input, _localFrom.data());
+		wire::AnimStateWire shiftedFrom, shiftedTo;	// 일부러 틀림 때만 쓴다(JudgeAnim)
+		_animCodecs[from.animWeapon].FromWire(JudgeAnim(from.anim, _rewind.montageShiftTicks, shiftedFrom), from.pitch, input);
+		evaluator.EvaluateLocal(input, _localFrom.data());
 		const BoneTransform* local = _localFrom.data();
 		if (alpha > 0.f)
 		{
 			const RewindSample& to = owner.rewindHistory[(tick + 1) % size];
 			AnimPoseInput nextInput;
-			_animCodec.FromWire(to.anim, to.pitch, nextInput);
-			_poseEvaluator.EvaluateLocal(nextInput, _localTo.data());
-			_poseEvaluator.BlendLocal(_localFrom.data(), _localTo.data(), alpha, _localBlend.data());
+			_animCodecs[to.animWeapon].FromWire(JudgeAnim(to.anim, _rewind.montageShiftTicks, shiftedTo), to.pitch, nextInput);
+			_poseEvaluators[to.animWeapon].EvaluateLocal(nextInput, _localTo.data());
+			evaluator.BlendLocal(_localFrom.data(), _localTo.data(), alpha, _localBlend.data());
 			local = _localBlend.data();
 		}
-		_poseEvaluator.BodiesFromLocal(local, cached.bodies.data());
-		if (countStats) ++_stats.poseEvals;
+		evaluator.BodiesFromLocal(local, cached.bodies.data());
+		if (countStats)
+		{
+			++_stats.poseEvals;
+			++_stats.poseEvalsByWeapon[from.animWeapon];
+		}
 		return cached.bodies.data();
 	}
 
@@ -933,7 +1073,14 @@ namespace mo
 			if (useHistory && !GetRewoundBody(*player, bodyTick, bodyAlpha, body, poseAlpha)) continue;
 			if (_rewind.log)
 			{
-				std::printf("REWIND seq=%u shooter=%u target=%u now=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f\n", shot.seq, shot.shooter, player->id, _tick, bodyTick, bodyAlpha, body.center.x, body.center.y, body.center.z, body.yawDegrees);
+				// animWeapon = 아래 자세를 푼 묶음(GetPoseAt 이 읽는 그 틱 기록) — 화면 대조를 무기별로 나눠 센다
+				// montages = 그 자세에 든 몽타주 칸 수(그 틱 기록, 다음 틱과 섞으면 둘 중 큰 쪽) — 「상대가 몽타주 중」인 쏨을 따로 센다(9-5)
+				const size_t historySize = player->rewindHistory.size();
+				const uint32_t poseTick = useHistory ? bodyTick : _tick;
+				const RewindSample& poseSample = player->rewindHistory[poseTick % historySize];
+				uint8_t poseMontages = poseSample.anim.montageCount;
+				if (poseAlpha > 0.f) poseMontages = std::max(poseMontages, player->rewindHistory[(poseTick + 1) % historySize].anim.montageCount);
+				std::printf("REWIND seq=%u shooter=%u target=%u now=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f animWeapon=%u montages=%u\n", shot.seq, shot.shooter, player->id, _tick, bodyTick, bodyAlpha, body.center.x, body.center.y, body.center.z, body.yawDegrees, (unsigned)poseSample.animWeapon, (unsigned)poseMontages);
 				if (_animReady)
 				{
 					// 화면 MOB_VIEWP 줄과 (seq, 상대, 부위) 로 잇는다. 기록용이라 비용 집계에 넣지 않는다
@@ -1119,10 +1266,9 @@ namespace mo
 		const int headSize = (int)(offsetof(wire::State, players) + sizeof(wire::PlayerState) * packet.count);
 		int size = headSize;
 		const auto animOf = [this](const Player& player) -> const wire::AnimStateWire& { return player.rewindHistory[_tick % player.rewindHistory.size()].anim; };
-		const auto animSize = [](const wire::AnimStateWire& anim) { return wire::kAnimStateHeadSize + sizeof(wire::AnimLayerWire) * anim.layerCount; };
 		if (_animReady)
 		{
-			for (const std::unique_ptr<Player>& player : _players) size += (int)animSize(animOf(*player));
+			for (const std::unique_ptr<Player>& player : _players) size += (int)wire::AnimTailSize(animOf(*player));
 		}
 		packet.h.size = (uint16_t)size;
 		packet.h.type = (uint16_t)wire::Msg::S2C_STATE;
@@ -1132,13 +1278,7 @@ namespace mo
 			char bytes[wire::kMaxStatePacketSize];
 			std::memcpy(bytes, &packet, (size_t)headSize);
 			size_t at = (size_t)headSize;
-			for (const std::unique_ptr<Player>& player : _players)
-			{
-				const wire::AnimStateWire& anim = animOf(*player);
-				const size_t length = animSize(anim);
-				std::memcpy(bytes + at, &anim, length);
-				at += length;
-			}
+			for (const std::unique_ptr<Player>& player : _players) at += wire::WriteAnimTail(animOf(*player), bytes + at);
 			SendToAll(bytes, size);
 			_stats.stateBytesMax = std::max(_stats.stateBytesMax, (uint64_t)size);
 		}

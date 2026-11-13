@@ -102,6 +102,7 @@ namespace
 			else if (s == "--rewindLog") out.rewind.log = true;
 			else if (s == "--rewindNoSpread") out.rewind.noSpread = true;
 			else if (s == "--rewindBulletLog") out.rewind.bulletLog = true;
+			else if (value("--rewindMontageShift=", v)) out.rewind.montageShiftTicks = (uint32_t)std::max(std::atoi(v.c_str()), 0);	// 일부러 틀림 전용(Room.h RewindOptions)
 			else if (value("--rewindLimitTicks=", v)) out.rewind.limitTicks = (uint32_t)std::min(std::atoi(v.c_str()), (int)mo::kRewindLimitTicks);	// 시험 전용. 기록 칸이 상수만큼뿐이라 더 키우지는 못한다
 			else
 			{
@@ -137,15 +138,21 @@ namespace
 		return map.LoadFromMemory(data.data(), data.size()) == mo::EMapLoad::Ok;
 	}
 
-	// 클립을 읽고, 방에서 쓸 초기화가 되는지 시작할 때 확인한다
-	bool LoadClips(const std::string& path, mo::CAnimClips& clips, double& outBoundRadius)
+	// 클립을 읽고, 방에서 쓸 초기화가 무기 묶음마다 되는지 시작할 때 확인한다. 넓은 공 = 세 묶음 중 가장 큰 것
+	bool LoadClips(const std::string& path, mo::CAnimClips& clips, double& outBoundRadius, double (&outBundleRadius)[(size_t)mo::EWeapon::Count])
 	{
 		std::vector<char> data;
 		if (!ReadFile(path, data) || clips.LoadFromMemory(data.data(), data.size()) != mo::EClipLoad::Ok) return false;
-		mo::CAnimPoseEvaluator evaluator;
-		mo::CAnimState state;
-		if (!evaluator.Init(clips, mo::kAnimBundleName) || !state.Init(clips, mo::kAnimBundleName)) return false;
-		outBoundRadius = evaluator.ComputeBoundRadius();
+		outBoundRadius = 0.0;
+		for (size_t weapon = 0; weapon < (size_t)mo::EWeapon::Count; ++weapon)
+		{
+			const char* bundle = mo::AnimBundleOf((uint8_t)weapon);
+			mo::CAnimPoseEvaluator evaluator;
+			mo::CAnimState state;
+			if (!evaluator.Init(clips, bundle) || !state.Init(clips, bundle)) return false;
+			outBundleRadius[weapon] = evaluator.ComputeBoundRadius();
+			outBoundRadius = std::max(outBoundRadius, outBundleRadius[weapon]);
+		}
 		return true;
 	}
 
@@ -519,13 +526,15 @@ int main(int argc, char** argv)
 	mo::CAnimClips clips;		// 서버가 멈출 때까지 방들이 읽는다
 	if (!args.clipsPath.empty())
 	{
-		if (!LoadClips(args.clipsPath, clips, args.anim.boundRadius))
+		double bundleRadius[(size_t)mo::EWeapon::Count] = {};
+		if (!LoadClips(args.clipsPath, clips, args.anim.boundRadius, bundleRadius))
 		{
 			std::printf("[오류] 클립을 읽지 못함: %s\n", args.clipsPath.c_str());
 			return 1;
 		}
 		args.anim.clips = &clips;
-		std::printf("ANIMBOUND radius=%.3f meshZ=%.3f bones=%zu bodies=%zu\n", args.anim.boundRadius, clips.MeshPlacement().p[2], clips.Bones().size(), clips.Bodies().size());
+		std::printf("ANIMBOUND radius=%.3f meshZ=%.3f bones=%zu bodies=%zu %s=%.3f %s=%.3f %s=%.3f\n", args.anim.boundRadius, clips.MeshPlacement().p[2], clips.Bones().size(), clips.Bodies().size(),
+			mo::AnimBundleOf(0), bundleRadius[0], mo::AnimBundleOf(1), bundleRadius[1], mo::AnimBundleOf(2), bundleRadius[2]);
 	}
 
 	const mo::MoveParams params = mo::MakeLyraMoveParams();
@@ -669,6 +678,19 @@ int main(int argc, char** argv)
 	{
 		std::printf("SERVER anim updates=%llu poseTargets=%llu poseEvals=%llu poseReused=%llu poseSkipped=%llu stateBytesMax=%llu\n",
 			(unsigned long long)room.animUpdates, (unsigned long long)room.poseTargets, (unsigned long long)room.poseEvals, (unsigned long long)room.poseReused, (unsigned long long)room.poseSkipped, (unsigned long long)room.stateBytesMax);
+		std::printf("SERVER animBundle weaponChanges=%llu changes=%llu fails=%llu poseEvals %s=%llu %s=%llu %s=%llu\n",
+			(unsigned long long)room.weaponChanges, (unsigned long long)room.animBundleChanges, (unsigned long long)room.animBundleFails,
+			mo::AnimBundleOf(0), (unsigned long long)room.poseEvalsByWeapon[0], mo::AnimBundleOf(1), (unsigned long long)room.poseEvalsByWeapon[1], mo::AnimBundleOf(2), (unsigned long long)room.poseEvalsByWeapon[2]);
+		// 사건 → 튼 몽타주(9단계 조각 4). 종류마다 사건 − 버림 = 튼 수(교체는 빼기 · 꺼내기 둘 다 그 수)여야 한다
+		using mo::EAnimEvent;
+		const auto ev = [&room](EAnimEvent kind) { return (unsigned long long)room.animEvents[(size_t)kind]; };
+		const auto dropped = [&room](EAnimEvent kind) { return (unsigned long long)room.animEventsDropped[(size_t)kind]; };
+		const auto starts = [&room](uint8_t kind) { return (unsigned long long)room.montageStarts[kind]; };
+		std::printf("SERVER animMontage events spawn=%llu swap=%llu fire=%llu reload=%llu dropped spawn=%llu swap=%llu fire=%llu reload=%llu starts spawn=%llu unequip=%llu equip=%llu fire=%llu reload=%llu fails=%llu reloadCancels=%llu montageDropped=%llu\n",
+			ev(EAnimEvent::Spawn), ev(EAnimEvent::Swap), ev(EAnimEvent::Fire), ev(EAnimEvent::Reload),
+			dropped(EAnimEvent::Spawn), dropped(EAnimEvent::Swap), dropped(EAnimEvent::Fire), dropped(EAnimEvent::Reload),
+			starts(mo::MONTAGE_SPAWN), starts(mo::MONTAGE_UNEQUIP), starts(mo::MONTAGE_EQUIP), starts(mo::MONTAGE_FIRE), starts(mo::MONTAGE_RELOAD),
+			(unsigned long long)room.montageFails, (unsigned long long)room.reloadCancels, (unsigned long long)room.montageDrops);
 	}
 	std::printf("SERVER kills=%llu falls=%llu spawns=%llu spawnsFromFallback=%llu phaseChanges=%llu finished=%d\n",
 		(unsigned long long)room.kills, (unsigned long long)room.falls, (unsigned long long)room.spawns, (unsigned long long)room.spawnsFromFallback, (unsigned long long)room.phaseChanges, firstFinished ? 1 : 0);

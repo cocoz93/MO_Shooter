@@ -13,6 +13,7 @@
 //   언리얼이 프레임마다 쓴 입력만으로 상태를 만들어 언리얼 상태 칸과 비교하고, 그 상태로 22부위를 계산해 POSE 줄을 낸다.
 //   판정은 pose 와 같은 check_pose.py. --brakeScale / --groundAdd 는 일부러 틀림이다.
 //   --wire 는 상태를 패킷 형식으로 한 번 왕복시킨 값으로 자세를 계산한다 — 패킷 눈금이 언리얼 대비 얼마를 더하는지 잰다.
+//   --wireKeepNew 는 --wire 에서 프로토콜 5 에 더한 칸(몽타주 · 덮기 · 왼손)만 바로 값으로 둔다 — 새 칸의 눈금 몫을 가른다(9단계 조각 4).
 
 #include "AnimClips.h"
 #include "AnimPose.h"
@@ -46,6 +47,8 @@ namespace
 		case EClipLoad::BadBundle: return "BadBundle";
 		case EClipLoad::BadClip: return "BadClip";
 		case EClipLoad::BadTail: return "BadTail";
+		case EClipLoad::BadSlot: return "BadSlot";
+		case EClipLoad::BadMontage: return "BadMontage";
 		}
 		return "?";
 	}
@@ -87,6 +90,19 @@ namespace
 			std::fprintf(file, "BODY,%s,%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n", bones[(size_t)body.bone].name.c_str(), (int)body.kind, body.weakSpot ? 1 : 0,
 				body.center[0], body.center[1], body.center[2], body.q[0], body.q[1], body.q[2], body.q[3], body.a, body.b, body.c);
 		}
+		// 뼈별 비중 표 · 끼움 자리(9단계 3-a) — 비중은 뼈 차례 그대로
+		const std::vector<ClipProfile>& profiles = clips.Profiles();
+		for (size_t p = 0; p < profiles.size(); ++p)
+		{
+			std::fprintf(file, "PROFILE,%zu,%s,%d", p, profiles[p].name.c_str(), (int)profiles[p].mode);
+			for (const float weight : profiles[p].weights) std::fprintf(file, ",%.9g", weight);
+			std::fprintf(file, "\n");
+		}
+		const std::vector<ClipSlot>& slots = clips.Slots();
+		for (size_t s = 0; s < slots.size(); ++s)
+		{
+			std::fprintf(file, "SLOT,%zu,%s,%d,%s\n", s, slots[s].name.c_str(), (int)slots[s].mode, slots[s].profile < 0 ? "-" : profiles[(size_t)slots[s].profile].name.c_str());
+		}
 		for (const ClipBundle& bundle : clips.Bundles())
 		{
 			std::fprintf(file, "BUNDLE,%s,%u\n", bundle.name.c_str(), bundle.sampleHz);
@@ -114,6 +130,22 @@ namespace
 					}
 				}
 			}
+			for (const ClipMontage& montage : bundle.montages)
+			{
+				std::fprintf(file, "MONTAGE,%d,%s,%s,%.9g,%.9g,%.9g,%d,%.9g,%d,%.9g,%d\n", (int)montage.kind, montage.name.c_str(), montage.group.c_str(), montage.length, montage.rate,
+					montage.blendIn, (int)montage.blendInOption, montage.blendOut, (int)montage.blendOutOption, montage.blendOutTrigger, montage.autoBlendOut ? 1 : 0);
+				for (const MontageTrack& track : montage.tracks)
+				{
+					std::fprintf(file, "TRACK,%d,%s,%u,%.9g,%.9g,%.9g,%.9g\n", (int)montage.kind, slots[track.slot].name.c_str(), (unsigned)track.clip, track.startPos, track.clipStart, track.clipEnd, track.playRate);
+				}
+				for (const MontageCurve& curve : montage.curves)
+				{
+					std::fprintf(file, "MCURVE,%d,%s,%d,%u,%zu", (int)montage.kind, curve.name.c_str(), curve.owner, curve.hz, curve.values.size());
+					for (const float value : curve.values) std::fprintf(file, ",%.9g", value);
+					std::fprintf(file, "\n");
+				}
+			}
+			std::fprintf(file, "OVERRIDE,%d,%s\n", bundle.overrideClip, bundle.overrideSlot < 0 ? "-" : slots[(size_t)bundle.overrideSlot].name.c_str());
 		}
 		std::fclose(file);
 		return true;
@@ -162,7 +194,12 @@ namespace
 			}
 			std::printf("ANIMCLIPS loaded=%zu bundle=%s bones=%zu hz=%u samples=%llu seconds=%.2f keyBytes=%zu keyMB=%.2f\n",
 				bundle.clips.size(), bundle.name.c_str(), clips.Bones().size(), bundle.sampleHz, (unsigned long long)samples, seconds, clips.KeyBytes(), clips.KeyBytes() / (1024.0 * 1024.0));
+			// 몽타주 표(9단계 3-a) — 파일 차례로 종류:이름 · 줄 수 · 곡선 수
+			std::printf("ANIMCLIPS montages bundle=%s count=%zu override=%d", bundle.name.c_str(), bundle.montages.size(), bundle.overrideClip);
+			for (const ClipMontage& montage : bundle.montages) std::printf(" %d:%s/tracks=%zu/curves=%zu", (int)montage.kind, montage.name.c_str(), montage.tracks.size(), montage.curves.size());
+			std::printf("\n");
 		}
+		std::printf("ANIMCLIPS slots=%zu profiles=%zu\n", clips.Slots().size(), clips.Profiles().size());
 
 		if (!dumpPath.empty() && !Dump(clips, dumpPath.c_str()))
 		{
@@ -548,22 +585,195 @@ namespace
 		}
 	};
 
+	// Lyra 기록(animcmp_ev_<무기>_probe.csv)의 몽타주 칸 하나 — 「이름#번호@시각*비중>목표 r속도 b섞기시간;」
+	struct ProbeMontage
+	{
+		std::string name;
+		int id = -1;
+		float position = 0.f;
+		float weight = 0.f;
+		float desired = 0.f;
+		float rate = 1.f;
+		float blendTime = 0.f;
+	};
+
+	// Lyra 기록 한 줄에서 3-b 가 쓰는 칸. 줄 f = 갱신 f · 자세 f 뒤 사건 f 까지 반영한 값이다(3-b 기록 읽기, 실측)
+	struct ProbeRow
+	{
+		bool firing = false;
+		bool hasLayer = false;			// 기록 머리의 무기 층이 지금 층일 때만 층 변수 칸이 찬다
+		float timeSinceFired = 0.f;
+		float overrideWeight = 0.f;
+		float handLeftAlpha = 1.f;
+		float aimBlend = 1.f;
+		float upperAdditive = 0.f;
+		float disableLeftHand = 0.f;
+		std::string weapon;
+		std::string events;
+		std::vector<ProbeMontage> montages;
+	};
+
+	bool ParseProbeMontages(const std::string& cell, std::vector<ProbeMontage>& out)
+	{
+		size_t pos = 0;
+		while (pos < cell.size())
+		{
+			size_t end = cell.find(';', pos);
+			if (end == std::string::npos) end = cell.size();
+			const std::string item = cell.substr(pos, end - pos);
+			pos = end + 1;
+			if (item.empty()) continue;
+			const size_t hash = item.find('#');
+			const size_t at = item.find('@');
+			const size_t star = item.find('*');
+			const size_t gt = item.find('>');
+			const size_t r = item.find(" r");
+			const size_t b = item.find(" b");
+			if (hash == std::string::npos || at == std::string::npos || star == std::string::npos || gt == std::string::npos || r == std::string::npos || b == std::string::npos) return false;
+			ProbeMontage m;
+			m.name = item.substr(0, hash);
+			m.id = std::atoi(item.c_str() + hash + 1);
+			m.position = std::strtof(item.c_str() + at + 1, nullptr);
+			m.weight = std::strtof(item.c_str() + star + 1, nullptr);
+			m.desired = std::strtof(item.c_str() + gt + 1, nullptr);
+			m.rate = std::strtof(item.c_str() + r + 2, nullptr);
+			m.blendTime = std::strtof(item.c_str() + b + 2, nullptr);
+			out.push_back(m);
+		}
+		return true;
+	}
+
+	bool ReadProbe(const char* path, std::map<std::pair<int, int>, ProbeRow>& out)
+	{
+		std::vector<char> data;
+		if (!ReadFile(path, data))
+		{
+			std::printf("STATE FAIL Lyra 기록을 못 읽음: %s\n", path);
+			return false;
+		}
+		std::string text(data.begin(), data.end());
+		size_t pos = text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+		std::vector<std::string> header;
+		int cPass = -1, cFrame = -1, cFiring = -1, cSince = -1, cOverride = -1, cHand = -1, cAim = -1, cUpper = -1, cCurves = -1, cEvents = -1, cMontages = -1, cWeapon = -1;
+		const auto bySuffix = [&](const char* suffix)
+		{
+			const size_t n = std::strlen(suffix);
+			for (size_t i = 0; i < header.size(); ++i)
+			{
+				if (header[i].size() >= n && header[i].compare(header[i].size() - n, n, suffix) == 0) return (int)i;
+			}
+			return -1;
+		};
+		size_t lineNumber = 0;
+		while (pos < text.size())
+		{
+			size_t end = text.find('\n', pos);
+			if (end == std::string::npos) end = text.size();
+			std::string line = text.substr(pos, end - pos);
+			pos = end + 1;
+			if (!line.empty() && line.back() == '\r') line.pop_back();
+			if (line.empty()) continue;
+			++lineNumber;
+			std::vector<std::string> cells = SplitComma(line);
+			if (header.empty())
+			{
+				header = std::move(cells);
+				cPass = Column(header, "pass");
+				cFrame = Column(header, "frame");
+				cFiring = bySuffix(".GameplayTag_IsFiring");
+				cSince = bySuffix(".TimeSinceFiredWeapon");
+				cOverride = bySuffix(".HipFireUpperBodyOverrideWeight");
+				cHand = bySuffix(".HandIK_Left_Alpha");
+				cAim = bySuffix(".AimOffsetBlendWeight");
+				cUpper = bySuffix(".UpperbodyDynamicAdditiveWeight");
+				cCurves = Column(header, "curves");
+				cEvents = Column(header, "events");
+				cMontages = Column(header, "montages");
+				cWeapon = Column(header, "weapon");
+				const int need[] = { cPass, cFrame, cFiring, cSince, cOverride, cHand, cAim, cUpper, cCurves, cEvents, cMontages, cWeapon };
+				for (int column : need)
+				{
+					if (column < 0)
+					{
+						std::printf("STATE FAIL Lyra 기록에 3-b 칸이 없음(머리 %zu 칸)\n", header.size());
+						return false;
+					}
+				}
+				continue;
+			}
+			if (cells.size() != header.size())
+			{
+				std::printf("STATE FAIL Lyra 기록 줄 %zu 의 칸 수 %zu, 머리 %zu\n", lineNumber, cells.size(), header.size());
+				return false;
+			}
+			ProbeRow row;
+			row.firing = std::atoi(cells[(size_t)cFiring].c_str()) != 0;
+			row.timeSinceFired = std::strtof(cells[(size_t)cSince].c_str(), nullptr);
+			row.hasLayer = !cells[(size_t)cOverride].empty();
+			row.overrideWeight = std::strtof(cells[(size_t)cOverride].c_str(), nullptr);
+			row.handLeftAlpha = std::strtof(cells[(size_t)cHand].c_str(), nullptr);
+			row.aimBlend = std::strtof(cells[(size_t)cAim].c_str(), nullptr);
+			row.upperAdditive = std::strtof(cells[(size_t)cUpper].c_str(), nullptr);
+			const std::string& curves = cells[(size_t)cCurves];
+			const size_t hand = curves.find("DisableLHandIK=");
+			row.disableLeftHand = hand == std::string::npos ? 0.f : std::strtof(curves.c_str() + hand + 15, nullptr);
+			row.weapon = cells[(size_t)cWeapon];
+			row.events = cells[(size_t)cEvents];
+			if (!ParseProbeMontages(cells[(size_t)cMontages], row.montages))
+			{
+				std::printf("STATE FAIL Lyra 기록 줄 %zu 몽타주 칸을 못 읽음: %s\n", lineNumber, cells[(size_t)cMontages].c_str());
+				return false;
+			}
+			const int pass = std::atoi(cells[(size_t)cPass].c_str());
+			const int frame = std::atoi(cells[(size_t)cFrame].c_str());
+			out[{ pass, frame }] = std::move(row);
+		}
+		return true;
+	}
+
+	// 묶음에서 이름으로 몽타주 종류를 찾는다. 없으면 -1
+	int MontageKindByName(const ClipBundle& bundle, const std::string& name)
+	{
+		for (const ClipMontage& montage : bundle.montages)
+		{
+			if (montage.name == name) return montage.kind;
+		}
+		return -1;
+	}
+
 	int RunState(int argc, char** argv)
 	{
 		if (argc < 6)
 		{
-			std::printf("사용: AnimCheck state <clips.bin> <animcmp_<Tag>.csv> <animcmp_<Tag>_moves.csv> <out.csv> [--brakeScale=배율] [--groundAdd=cm] [--wire]\n");
+			std::printf("사용: AnimCheck state <clips.bin> <animcmp_<Tag>.csv> <animcmp_<Tag>_moves.csv> <out.csv> [--brakeScale=배율] [--groundAdd=cm] [--wire] [--wireKeepNew] [--probe=<animcmp_ev_<무기>_probe.csv>] [--montDump=<out.csv>] [--montageTest=N] [--poseTest=N] [--slotProfile=<비중 표 이름>] [--overrideProfile=<비중 표 이름>]\n");
 			return 2;
 		}
 		float brakeScale = 1.f;
 		float groundAdd = 0.f;
 		bool useWire = false;
+		bool wireKeepNew = false;
+		const char* probePath = nullptr;
+		const char* montDumpPath = nullptr;
+		int montageTest = 0;
+		int poseTest = 0;							// 끼움 자리 후보 고르기(CAnimPoseEvaluator::kPoseTest*)
+		const char* slotProfileName = nullptr;		// 비중 표가 있는 끼움 자리(덮기 자리 빼고)를 이 표로
+		const char* overrideProfileName = nullptr;	// 쏜 뒤 덮기 자리를 이 표로
 		double maxReach = 0;
+		size_t poseMontageRows = 0, poseOverrideRows = 0, poseHandRows = 0;		// 자세에 몽타주 · 덮기 · 왼팔 비중이 실제로 들어간 줄(새 길을 지났는지)
+		double poseKindSeconds[3] = {};		// 자세 한 번(EvaluateLocal + BodiesFromLocal) 시간 — 몽타주 있음 · 덮기만 · 둘 다 없음
+		size_t poseKindRows[3] = {};
 		for (int i = 6; i < argc; ++i)
 		{
 			if (std::strncmp(argv[i], "--brakeScale=", 13) == 0) brakeScale = std::strtof(argv[i] + 13, nullptr);
 			else if (std::strncmp(argv[i], "--groundAdd=", 12) == 0) groundAdd = std::strtof(argv[i] + 12, nullptr);
 			else if (std::strcmp(argv[i], "--wire") == 0) useWire = true;
+			else if (std::strcmp(argv[i], "--wireKeepNew") == 0) useWire = wireKeepNew = true;
+			else if (std::strncmp(argv[i], "--probe=", 8) == 0) probePath = argv[i] + 8;
+			else if (std::strncmp(argv[i], "--montDump=", 11) == 0) montDumpPath = argv[i] + 11;
+			else if (std::strncmp(argv[i], "--montageTest=", 14) == 0) montageTest = std::atoi(argv[i] + 14);
+			else if (std::strncmp(argv[i], "--poseTest=", 11) == 0) poseTest = std::atoi(argv[i] + 11);
+			else if (std::strncmp(argv[i], "--slotProfile=", 14) == 0) slotProfileName = argv[i] + 14;
+			else if (std::strncmp(argv[i], "--overrideProfile=", 18) == 0) overrideProfileName = argv[i] + 18;
 			else
 			{
 				std::printf("[오류] 모르는 인자: %s\n", argv[i]);
@@ -584,15 +794,6 @@ namespace
 			std::printf("STATE FAIL result=%s\n", LoadName(result));
 			return 1;
 		}
-		CAnimPoseEvaluator evaluator;
-		CAnimState state;
-		if (!evaluator.Init(clips, "rifle") || !state.Init(clips, "rifle"))
-		{
-			std::printf("STATE FAIL 계산기를 못 만듦\n");
-			return 1;
-		}
-		if (brakeScale != 1.f) state.SetBrakingScaleForTest(brakeScale);
-
 		std::vector<PoseRow> rows;
 		std::vector<MoveRow> moves;
 		if (!ReadPoseRows(argv[3], rows) || !ReadMoves(argv[4], moves)) return 1;
@@ -601,6 +802,70 @@ namespace
 			std::printf("STATE FAIL 줄 0 rows=%zu moves=%zu\n", rows.size(), moves.size());
 			return 1;
 		}
+
+		// Lyra 기록을 주면 그 기록의 무기 · 사격 · 몽타주 사건으로 상태를 몰고, 몽타주 칸 · 쏜 뒤 변수를 기록과 비교한다(9단계 3-b)
+		std::map<std::pair<int, int>, ProbeRow> probe;
+		if (probePath && !ReadProbe(probePath, probe)) return 1;
+		const auto probeAt = [&](int pass, int frame) -> const ProbeRow*
+		{
+			const auto found = probe.find({ pass, frame });
+			return found == probe.end() ? nullptr : &found->second;
+		};
+		std::string bundleName = "rifle";
+		if (probePath)
+		{
+			const ProbeRow* first = probeAt(rows[0].pass, rows[0].frame);
+			if (!first)
+			{
+				std::printf("STATE FAIL Lyra 기록에 첫 줄(pass=%d frame=%d)이 없음\n", rows[0].pass, rows[0].frame);
+				return 1;
+			}
+			bundleName = first->weapon;
+		}
+
+		// 묶음마다 자세 계산기 하나 — 상태가 든 묶음의 것으로 자세를 만든다
+		const std::vector<ClipBundle>& bundles = clips.Bundles();
+		std::vector<CAnimPoseEvaluator> evaluators(bundles.size());
+		for (size_t b = 0; b < bundles.size(); ++b)
+		{
+			if (!evaluators[b].Init(clips, bundles[b].name.c_str()))
+			{
+				std::printf("STATE FAIL 계산기를 못 만듦: %s\n", bundles[b].name.c_str());
+				return 1;
+			}
+			evaluators[b].SetPoseTestFlags((uint32_t)poseTest);
+		}
+		// 이름 → 비중 표 번호. 뼈 가림(방식 2)이 아니면 자리 섞기에 못 쓴다
+		const auto findProfile = [&](const char* name) -> int
+		{
+			for (size_t p = 0; p < clips.Profiles().size(); ++p)
+			{
+				if (clips.Profiles()[p].name == name && clips.Profiles()[p].mode == 2) return (int)p;
+			}
+			std::printf("STATE FAIL 뼈 가림 비중 표가 없음: %s\n", name);
+			return -1;
+		};
+		if (slotProfileName)
+		{
+			const int profile = findProfile(slotProfileName);
+			if (profile < 0) return 1;
+			for (CAnimPoseEvaluator& evaluator : evaluators) evaluator.SetSlotProfileForTest(profile);
+		}
+		if (overrideProfileName)
+		{
+			const int profile = findProfile(overrideProfileName);
+			if (profile < 0) return 1;
+			for (CAnimPoseEvaluator& evaluator : evaluators) evaluator.SetOverrideProfileForTest(profile);
+		}
+		CAnimState state;
+		if (!state.Init(clips, bundleName.c_str()))
+		{
+			std::printf("STATE FAIL 상태를 못 만듦: %s\n", bundleName.c_str());
+			return 1;
+		}
+		if (brakeScale != 1.f) state.SetBrakingScaleForTest(brakeScale);
+		state.SetMontageTestFlags(montageTest);
+		CAnimPoseEvaluator& firstEvaluator = evaluators[(size_t)state.BundleIndex()];
 
 		// 판별 입력을 번호 순으로 묶는다. 번호가 비면 어느 입력이 빠졌는지 모른 채 상태가 어긋나므로 거부한다
 		std::map<int, std::vector<const MoveRow*>> byReset;
@@ -625,8 +890,49 @@ namespace
 		static const char* const kKinds[] = { "sphere", "sphyl", "box" };
 		const std::vector<ClipBone>& bones = clips.Bones();
 		const std::vector<ClipBody>& bodies = clips.Bodies();
-		std::vector<BoneTransform> local(evaluator.BoneCount());
-		std::vector<BodyPose> poses(evaluator.BodyCount());
+		std::vector<BoneTransform> local(firstEvaluator.BoneCount());
+		std::vector<BodyPose> poses(firstEvaluator.BodyCount());
+
+		// 몽타주 · 쏜 뒤 변수 대조(--probe). 문턱 = 패킷 눈금(시각 1/6000초 · 비중 1/255)과 기록이 찍은 자릿수(섞기 시간 · 속도 소수 셋째)
+		DiffColumn montPosition{ "montPosition", 1.f / 6000.f };
+		DiffColumn montWeight{ "montWeight", 1.f / 255.f };
+		DiffColumn montDesired{ "montDesired", 0.5f };
+		DiffColumn montBlend{ "montBlendTime", 0.0006f };
+		DiffColumn montRate{ "montRate", 0.0006f };
+		DiffColumn* const montColumns[] = { &montPosition, &montWeight, &montDesired, &montBlend, &montRate };
+		// 쏜 뒤 시간은 기록이 유효숫자 넷만 찍어 1초 넘으면 0.001 까지 반올림된다. 층 변수는 기록 머리의 무기 층일 때만 칸이 찬다
+		DiffColumn fireSince{ "timeSinceFired", 0.002f };
+		DiffColumn fireOverride{ "overrideWeight", 1.f / 255.f };
+		DiffColumn lyraAim{ "lyraAimBlend", 1.f / 255.f };
+		DiffColumn handLeft{ "handLeftAlpha", 1.f / 255.f };
+		DiffColumn leftCurve{ "disableLeftHand", 1.f / 255.f };
+		DiffColumn* const fireColumns[] = { &fireSince, &fireOverride, &lyraAim, &handLeft, &leftCurve };
+		size_t montRows = 0, montCountDiff = 0, montNameDiff = 0, births = 0, unknownBirths = 0, failedPlays = 0, lateBirths = 0;
+		size_t bundleChanges = 0, multiUpdateRows = 0, udwRows = 0, udwBelow = 0;
+		size_t reloadCancels = 0, layerRows = 0, layerSwapRows = 0;		// 재장전 중 쏘기로 재장전을 먼저 끈 수 · 층 변수를 댄 줄 · 교체 사건 줄이라 뺀 줄
+		size_t beforeFireRows = 0;		// 판에서 처음 쏘기 전이라 쏜 뒤 시간 · 덮기 비중을 안 댄 줄
+		bool firedSinceReset = false;
+		bool hasCountFirst = false;
+		size_t countFirstRow = 0;
+		std::vector<int> seenIds;
+		std::map<std::string, std::vector<float>> birthRates;		// 「무기 종류」 → 기록이 준 속도들
+		bool lastHadMontage = false;
+		FILE* montDump = nullptr;
+		if (montDumpPath && (fopen_s(&montDump, montDumpPath, "wb") != 0 || !montDump))
+		{
+			std::printf("STATE FAIL 몽타주 덤프를 못 씀: %s\n", montDumpPath);
+			std::fclose(file);
+			return 1;
+		}
+		if (montDump) std::fprintf(montDump, "pass,frame,ref,got,sinceRef,sinceGot,ovrRef,ovrGot,aimRef,aimGot,handRef,handGot,curveRef,curveGot\n");
+		const auto bundleIndexOf = [&](const std::string& name)
+		{
+			for (size_t b = 0; b < bundles.size(); ++b)
+			{
+				if (bundles[b].name == name) return (int)b;
+			}
+			return -1;
+		};
 
 		DiffColumn weights{ "weights", 0.001f };
 		DiffColumn times{ "times", 0.001f };
@@ -660,11 +966,14 @@ namespace
 				std::fclose(file);
 				return 1;
 			}
-			if (row.reset != currentReset)
+			const bool newReset = row.reset != currentReset;
+			if (newReset)
 			{
 				state.Reset();
 				currentReset = row.reset;
 				nextSeq = 0;
+				lastHadMontage = false;
+				firedSinceReset = false;
 			}
 			const auto found = byReset.find(row.reset);
 			if (found == byReset.end() || row.seq >= (int)found->second.size() || row.seq + 1 < nextSeq)
@@ -672,6 +981,34 @@ namespace
 				std::printf("STATE FAIL 줄 %zu reset=%d seq=%d 입력 없음 또는 역행(다음 %d)\n", i, row.reset, row.seq, nextSeq);
 				std::fclose(file);
 				return 1;
+			}
+
+			const ProbeRow* lyra = nullptr;
+			if (probePath)
+			{
+				lyra = probeAt(row.pass, row.frame);
+				if (!lyra)
+				{
+					std::printf("STATE FAIL Lyra 기록에 pass=%d frame=%d 가 없음\n", row.pass, row.frame);
+					std::fclose(file);
+					return 1;
+				}
+				// 무기 층은 사건 다음 갱신부터 바뀐다 — 앞 줄(사건 f-1 뒤)의 무기가 지금 묶음과 다르면 이번 갱신 앞에 바꾼다(D46). 판 처음은 그 줄의 무기로 새로 잡는다
+				const ProbeRow* before = newReset ? nullptr : probeAt(row.pass, row.frame - 1);
+				const std::string& want = before ? before->weapon : lyra->weapon;
+				if (want != bundles[(size_t)state.BundleIndex()].name)
+				{
+					const bool ok = newReset ? state.Init(clips, want.c_str()) : state.ChangeBundle(clips, want.c_str());
+					if (!ok)
+					{
+						std::printf("STATE FAIL 묶음을 못 바꿈: %s (pass=%d frame=%d)\n", want.c_str(), row.pass, row.frame);
+						std::fclose(file);
+						return 1;
+					}
+					if (brakeScale != 1.f) state.SetBrakingScaleForTest(brakeScale);		// 묶음을 읽으면 제동 값이 묶음 것으로 돌아간다
+					++bundleChanges;
+				}
+				if (!newReset && row.seq != nextSeq) ++multiUpdateRows;		// 이 줄 앞 갱신이 하나가 아니다 — 그 사이 사건은 기록에 없다
 			}
 			const auto t0 = std::chrono::steady_clock::now();
 			for (; nextSeq <= row.seq; ++nextSeq)
@@ -683,13 +1020,129 @@ namespace
 			}
 			updateSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
+			if (lyra)
+			{
+				// 사건 f — 기록에 처음 나온 몽타주를 기록 차례대로 튼다. 종류는 사건 뒤 무기(새 무기)의 묶음에서 이름으로 찾는다
+				const int weaponBundle = bundleIndexOf(lyra->weapon);
+				for (const ProbeMontage& m : lyra->montages)
+				{
+					if (std::find(seenIds.begin(), seenIds.end(), m.id) != seenIds.end()) continue;
+					seenIds.push_back(m.id);
+					++births;
+					if (m.position != 0.f || m.weight != 0.f) ++lateBirths;		// 갓 튼 칸은 시각 0 · 비중 0 이어야 한다 — 아니면 기록 앞에서 튼 것이다
+					const int kind = weaponBundle < 0 ? -1 : MontageKindByName(bundles[(size_t)weaponBundle], m.name);
+					if (kind < 0)
+					{
+						if (unknownBirths++ == 0) std::printf("STATEMONT 묶음 %s 에 없는 몽타주 %s (pass=%d frame=%d)\n", lyra->weapon.c_str(), m.name.c_str(), row.pass, row.frame);
+						continue;
+					}
+					// 재장전 중 쏘기 — Lyra 는 쏘기 능력이 재장전 능력을 취소해 재장전 몽타주를 자산 빼기 시간으로 먼저 끄고 쏘기를 튼다(1053 기록, 실측). 서버와 같은 함수(PlayFireMontage)를 부른다
+					bool played = false;
+					if (kind == MONTAGE_FIRE)
+					{
+						bool cancelledReload = false;
+						played = state.PlayFireMontage(m.rate, weaponBundle, cancelledReload);
+						if (cancelledReload) ++reloadCancels;
+					}
+					else
+					{
+						played = state.PlayMontage((uint8_t)kind, m.rate, weaponBundle);
+					}
+					if (!played) ++failedPlays;
+					char key[64];
+					std::snprintf(key, sizeof(key), "%s kind=%d", lyra->weapon.c_str(), kind);
+					birthRates[key].push_back(m.rate);
+				}
+				state.SetFiring(lyra->firing);
+
+				// 사건 뒤 목록 대조 — 엔진 배열 차례 그대로
+				++montRows;
+				const int gotCount = state.MontageCount();
+				if (gotCount != (int)lyra->montages.size())
+				{
+					++montCountDiff;
+					if (!hasCountFirst)
+					{
+						hasCountFirst = true;
+						countFirstRow = i;
+					}
+				}
+				const int common = std::min(gotCount, (int)lyra->montages.size());
+				for (int k = 0; k < common; ++k)
+				{
+					const CAnimState::MontageView view = state.MontageAt(k);
+					const ProbeMontage& m = lyra->montages[(size_t)k];
+					if (view.montage->name != m.name) ++montNameDiff;
+					montPosition.Add(m.position, view.position, i);
+					montWeight.Add(m.weight, view.weight, i);
+					montDesired.Add(m.desired, view.desired, i);
+					montBlend.Add(m.blendTime, view.blendTime, i);
+					montRate.Add(m.rate, view.playRate, i);
+				}
+
+				// 쏜 뒤 변수(갱신 f 값). 쏜 뒤 시간 · 덮기 비중은 그 판에서 처음 쏜 다음 줄부터 — 판 시작 값이 서로 다르다
+				// (기록은 레벨 시작부터 센다: 권총 판 시작 4.033초 · 덮기 0.0279, 우리는 「안 쏨」 1000초 · 0).
+				// 쏜 뒤 시간은 어느 한쪽이 5초 안일 때만 더 본다 — 기록이 유효숫자 4자리라(1662 줄 10.02) 그 위에선 기준 0.002 를 못 맞춘다. 덮기 비중이 가르는 건 0.5초뿐이다
+				if (!firedSinceReset) ++beforeFireRows;
+				else if (lyra->timeSinceFired < 5.f || state.TimeSinceFired() < 5.f) fireSince.Add(lyra->timeSinceFired, state.TimeSinceFired(), i);
+				// 무기를 바꾼 사건 줄은 층 칸에 새 층의 처음 값이 먼저 찍히고, 그 줄 갱신 · 자세는 앞 층이 했다(D46) — 층 변수 대조에서 빼고 수를 센다
+				const ProbeRow* previous = newReset ? nullptr : probeAt(row.pass, row.frame - 1);
+				const bool swapRow = previous && previous->weapon != lyra->weapon;
+				if (lyra->hasLayer && swapRow) ++layerSwapRows;
+				if (lyra->hasLayer && !swapRow)
+				{
+					++layerRows;
+					if (firedSinceReset) fireOverride.Add(lyra->overrideWeight, state.OverrideWeight(), i);
+					lyraAim.Add(lyra->aimBlend, state.AimBlend(), i);
+					handLeft.Add(lyra->handLeftAlpha, state.HandLeftAlpha(), i);
+				}
+				leftCurve.Add(lyra->disableLeftHand, state.DisableLeftHand(), i);
+				// 윗몸 덧붙임 비중이 1 이 아닌 줄 — 앞 줄 사건 뒤에 몽타주가 있었는데도 1 이 아니면 그 비중을 옮겨야 한다
+				if (lastHadMontage)
+				{
+					++udwRows;
+					if (lyra->upperAdditive < 0.999f) ++udwBelow;
+				}
+				lastHadMontage = !lyra->montages.empty();
+				if (lyra->firing) firedSinceReset = true;		// 이 줄 사건의 발사는 다음 줄 갱신부터 보인다
+
+				if (montDump)
+				{
+					std::string refCell, gotCell;
+					for (const ProbeMontage& m : lyra->montages)
+					{
+						char cell[160];
+						std::snprintf(cell, sizeof(cell), "%s@%.5f*%.4f>%.0f b%.3f;", m.name.c_str(), m.position, m.weight, m.desired, m.blendTime);
+						refCell += cell;
+					}
+					for (int k = 0; k < gotCount; ++k)
+					{
+						const CAnimState::MontageView view = state.MontageAt(k);
+						char cell[160];
+						std::snprintf(cell, sizeof(cell), "%s@%.5f*%.4f>%.0f b%.3f;", view.montage->name.c_str(), view.position, view.weight, view.desired, view.blendTime);
+						gotCell += cell;
+					}
+					std::fprintf(montDump, "%d,%d,%s,%s,%.4f,%.4f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.4f\n", row.pass, row.frame, refCell.c_str(), gotCell.c_str(),
+						lyra->timeSinceFired, state.TimeSinceFired(), lyra->overrideWeight, state.OverrideWeight(), lyra->aimBlend, state.AimBlend(),
+						lyra->handLeftAlpha, state.HandLeftAlpha(), lyra->disableLeftHand, state.DisableLeftHand());
+				}
+			}
+
 			AnimPoseInput got;
 			state.ToPoseInput(got);
 			if (useWire)
 			{
 				wire::AnimStateWire onWire{};
 				state.ToWire(onWire);
+				const AnimPoseInput exact = got;
 				state.FromWire(onWire, got.pitch, got);
+				if (wireKeepNew)
+				{
+					got.montageCount = exact.montageCount;
+					for (int k = 0; k < kAnimMontageMax; ++k) got.montages[k] = exact.montages[k];
+					got.overrideWeight = exact.overrideWeight;
+					got.handLeftAlpha = exact.handLeftAlpha;
+				}
 			}
 			const AnimPoseInput& ref = row.input;
 			for (int k = 0; k < kAnimWalkClips; ++k)
@@ -726,8 +1179,17 @@ namespace
 			if (top) ++sameTop;
 			if (walk && top) ++sameBoth;
 
+			CAnimPoseEvaluator& evaluator = evaluators[(size_t)state.BundleIndex()];
+			if (got.montageCount > 0) ++poseMontageRows;
+			if (got.overrideWeight > 0.00001f) ++poseOverrideRows;
+			if (got.handLeftAlpha < 1.f) ++poseHandRows;
+			const auto poseStart = std::chrono::steady_clock::now();
 			evaluator.EvaluateLocal(got, local.data());
 			evaluator.BodiesFromLocal(local.data(), poses.data());
+			const double poseSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - poseStart).count();
+			const int poseKind = got.montageCount > 0 ? 0 : (got.overrideWeight > 0.00001f ? 1 : 2);
+			poseKindSeconds[poseKind] += poseSeconds;
+			++poseKindRows[poseKind];
 			for (size_t b = 0; b < bodies.size(); ++b)
 			{
 				const ClipBody& body = bodies[b];
@@ -742,11 +1204,55 @@ namespace
 			}
 		}
 		std::fclose(file);
+		if (montDump) std::fclose(montDump);
 
 		const double count = (double)rows.size();
 		std::printf("STATEOUT rows=%zu moves=%zu fed=%zu lines=%zu resets=%zu brakeScale=%.3f groundAdd=%.1f overflows=%d\n", rows.size(), moves.size(), fed, lines, byReset.size(), brakeScale, groundAdd, state.StackOverflows());
 		std::printf("STATETIME updateUs=%.3f\n", fed > 0 ? updateSeconds * 1e6 / (double)fed : 0.0);
-		std::printf("STATEBOUND reach=%.3f bound=%.3f wire=%d\n", maxReach, evaluator.ComputeBoundRadius(), useWire ? 1 : 0);
+		const auto poseUs = [&](int kind) { return poseKindRows[kind] > 0 ? poseKindSeconds[kind] * 1e6 / (double)poseKindRows[kind] : 0.0; };
+		std::printf("STATEPOSETIME montageUs=%.2f rows=%zu overrideOnlyUs=%.2f rows=%zu plainUs=%.2f rows=%zu\n", poseUs(0), poseKindRows[0], poseUs(1), poseKindRows[1], poseUs(2), poseKindRows[2]);
+		unsigned long long montageMisses = 0, trackOutside = 0;
+		for (const CAnimPoseEvaluator& evaluator : evaluators)
+		{
+			montageMisses += evaluator.MontageMisses();
+			trackOutside += evaluator.TrackOutside();
+		}
+		std::printf("STATEPOSE poseTest=%d slotProfile=%s overrideProfile=%s rows=%zu montageRows=%zu overrideRows=%zu handRows=%zu montageMisses=%llu trackOutside=%llu\n", poseTest, slotProfileName ? slotProfileName : "-", overrideProfileName ? overrideProfileName : "-", rows.size(), poseMontageRows, poseOverrideRows, poseHandRows, montageMisses, trackOutside);
+		double bound = 0;
+		for (CAnimPoseEvaluator& evaluator : evaluators) bound = std::max(bound, evaluator.ComputeBoundRadius());
+		std::printf("STATEBOUND reach=%.3f bound=%.3f wire=%d\n", maxReach, bound, useWire ? (wireKeepNew ? 2 : 1) : 0);
+		if (probePath)
+		{
+			std::printf("STATEMONT rows=%zu countDiff=%zu nameDiff=%zu births=%zu unknownBirths=%zu failedPlays=%zu lateBirths=%zu drops=%d bundleChanges=%zu multiUpdateRows=%zu test=%d",
+				montRows, montCountDiff, montNameDiff, births, unknownBirths, failedPlays, lateBirths, state.MontageDrops(), bundleChanges, multiUpdateRows, montageTest);
+			if (hasCountFirst) std::printf(" countFirst=(pass=%d frame=%d)", rows[countFirstRow].pass, rows[countFirstRow].frame);
+			std::printf("\n");
+			for (const auto& entry : birthRates)
+			{
+				float low = entry.second[0], high = entry.second[0];
+				for (float rate : entry.second)
+				{
+					low = std::min(low, rate);
+					high = std::max(high, rate);
+				}
+				std::printf("STATEBIRTH %s count=%zu rate=%.3f~%.3f\n", entry.first.c_str(), entry.second.size(), low, high);
+			}
+			std::printf("STATEUDW rowsAfterMontage=%zu below1=%zu\n", udwRows, udwBelow);
+			std::printf("STATELAYER rows=%zu swapRowsSkipped=%zu reloadCancels=%zu beforeFireRows=%zu\n", layerRows, layerSwapRows, reloadCancels, beforeFireRows);
+			const auto print = [&](const char* tag, const DiffColumn* column)
+			{
+				std::printf("%s %s max=%.6f over=%zu", tag, column->name, column->max, column->over);
+				if (column->hasFirst)
+				{
+					const PoseRow& first = rows[column->firstRow];
+					std::printf(" first=(pass=%d frame=%d ref=%.6f got=%.6f)", first.pass, first.frame, column->firstRef, column->firstGot);
+				}
+				const PoseRow& worst = rows[column->maxRow];
+				std::printf(" maxAt=(pass=%d frame=%d)\n", worst.pass, worst.frame);
+			};
+			for (const DiffColumn* column : montColumns) print("STATEMONTDIFF", column);
+			for (const DiffColumn* column : fireColumns) print("STATEFIRE", column);
+		}
 		std::printf("STATESAME heaviestWalk=%.4f%% topLayer=%.4f%% both=%.4f%% walkTieRows=%zu walkRealDiffRows=%zu\n", sameWalk * 100.0 / count, sameTop * 100.0 / count, sameBoth * 100.0 / count, tieWalk, realWalk);
 		for (const DiffColumn* column : columns)
 		{

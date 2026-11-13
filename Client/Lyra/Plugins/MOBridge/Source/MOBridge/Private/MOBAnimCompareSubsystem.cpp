@@ -1,10 +1,17 @@
 ﻿#include "MOBAnimCompareSubsystem.h"
 
 #include "AIController.h"
+#include "AbilitySystem/LyraAbilitySystemComponent.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
+#include "Abilities/GameplayAbility.h"
 #include "Animation/AnimClassInterface.h"
 #include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/AnimNotifies/AnimNotify.h"
+#include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "Animation/BlendProfile.h"
+#include "Animation/Skeleton.h"
 #include "Animation/AnimNode_StateMachine.h"
 #include "Animation/AnimStateMachineTypes.h"
 #include "BrainComponent.h"
@@ -23,11 +30,15 @@
 #include "Equipment/LyraEquipmentDefinition.h"
 #include "Equipment/LyraEquipmentInstance.h"
 #include "Equipment/LyraEquipmentManagerComponent.h"
+#include "Equipment/LyraQuickBarComponent.h"
 #include "FrameGrabber.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/FileManager.h"
+#include "Inventory/LyraInventoryItemDefinition.h"
+#include "Inventory/LyraInventoryItemInstance.h"
+#include "Inventory/LyraInventoryManagerComponent.h"
 #include "MOBSimpleAnimInstance.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
@@ -46,8 +57,13 @@ DEFINE_LOG_CATEGORY_STATIC(LogMOBAComp, Log, All);
 
 namespace
 {
+	// 경로 안의 사건(-MOBACScript=events). Fire = 방아쇠를 잠깐(FIRE_TAP_SECONDS) 당긴다 · Hold/Release = 당긴 채 두기/놓기
+	// Swap = 다른 무기로 바꾼다(빠른 칸을 바꾼다 — 까닭은 EquipFoeWeapon 주석) · Back = 처음 무기로
+	// Spawn = 부활 효과 능력(GA_SpawnEffect)을 다시 켠다 — 봇을 죽였다 살리면 몸이 바뀌어 이 도구가 끊기므로 효과만 다시 튼다
+	enum class EACEvent : uint8 { None, Fire, Hold, Release, Reload, Swap, Back, Spawn };
+
 	// 경로 한 조각. Angle = 몸 앞 기준 이동 방향(+90 오른쪽). AngleRate·YawRate = 초당 돌리는 각도
-	// PitchFrom → PitchTo = 조각 동안 시선 위아래 각(+ 위). bJump = 조각 처음에 뛴다
+	// PitchFrom → PitchTo = 조각 동안 시선 위아래 각(+ 위). bJump = 조각 처음에 뛴다. Ev0·Ev1 = 조각 시작에서 At0·At1 초에 일으킬 사건
 	struct FScriptSegment
 	{
 		const TCHAR* Name;
@@ -59,6 +75,10 @@ namespace
 		float PitchFrom = 0.f;
 		float PitchTo = 0.f;
 		bool bJump = false;
+		EACEvent Ev0 = EACEvent::None;
+		float At0 = 0.f;
+		EACEvent Ev1 = EACEvent::None;
+		float At1 = 0.f;
 	};
 
 	// 사람이 눈으로 볼 동작을 한 번씩 — 서기·출발·멈춤·옆·뒤·급한 방향 바꿈·모든 방향·제자리 회전. 길이는 제안값이다(한 동작을 알아볼 만큼)
@@ -136,6 +156,45 @@ namespace
 		{ TEXT("stop_ad"),    2.0f, false,   0.f, 0.f, 0.f },
 	};
 	constexpr int32 NUM_STARTSTOP_SEGMENTS = UE_ARRAY_COUNT(STARTSTOP_SCRIPT);
+
+	// 9단계 사건 경로(-MOBACScript=events, candidate1-step9-plan.md 9-1). 조각 길이 = 그 사건의 몽타주가 다 빠질 만큼(가장 긴 재장전 2.833초 + 빼기 0.35초)에 여유를 둔 제안값.
+	// fire_b = 재장전 직후라 탄창이 차 있어 다음 재장전이 안 걸릴 수 있어 한 발 쓴다. 위아래 각 ±45 = aimjump 의 달리며 겨눔과 같은 폭
+	// 달리는 조각 셋은 startstop 경로가 이미 밟은 바닥 안에 머문다(animcmp_b0_startstop.csv 실측 = x -2782..-1020 · y -2834..353, 높이 142 그대로, 2.5초에 1,350cm).
+	// 앞으로 1.8초(→ x ≈ -2026, startstop 이 좌우로 달린 줄) · 오른쪽 2.5초 · 왼쪽 2.5초로 제자리 줄에 돌아온다.
+	// 처음 판(11-12)은 셋 다 앞으로 7.5초를 달려 바닥 밖으로 떨어졌다(run_reload fallFrames=93) — 그래서 이렇게 나눴다. 재장전은 달리기 2.5초 + 멈춤 1.5초에 걸쳐 끝난다
+	// 당겨 쏘기 0.5초 = 권총은 당긴 채면 8프레임마다 다시 쏴(셋째 시험 1초에 9발) 재장전 조각 전에 탄창이 비고, 그러면 Lyra 가 스스로 재장전해 경로의 재장전이 헛돌았다. 반으로 줄였다(ammo 칸으로 확인)
+	using ACE = EACEvent;
+	const FScriptSegment EVENTS_SCRIPT[] = {
+		{ TEXT("idle"),          2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false },
+		{ TEXT("fire_stand"),    1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Fire, 0.f },
+		{ TEXT("fire_hold"),     2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Hold, 0.f, ACE::Release, 0.5f },
+		{ TEXT("run_fire"),      1.8f, true,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Fire, 0.3f, ACE::Fire, 1.0f },
+		{ TEXT("stop_f"),        1.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false },
+		{ TEXT("up_fire"),       1.5f, false,   0.f, 0.f, 0.f,   0.f,  45.f, false, ACE::Fire, 1.0f },
+		{ TEXT("down_fire"),     1.5f, false,   0.f, 0.f, 0.f,  45.f, -45.f, false, ACE::Fire, 1.0f },
+		{ TEXT("mid"),           1.0f, false,   0.f, 0.f, 0.f, -45.f,   0.f, false },
+		{ TEXT("reload"),        3.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Reload, 0.f },
+		{ TEXT("fire_b"),        1.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Fire, 0.f },
+		{ TEXT("reload_cancel"), 2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Reload, 0.f, ACE::Fire, 0.6f },
+		{ TEXT("settle_c"),      1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false },
+		{ TEXT("run_reload"),    2.5f, true,   90.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Reload, 0.2f },
+		{ TEXT("stop_r"),        1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false },
+		{ TEXT("swap_out"),      2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Swap, 0.f },
+		{ TEXT("swap_back"),     2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Back, 0.f },
+		{ TEXT("swap_fire"),     1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Swap, 0.f, ACE::Fire, 0.25f },
+		{ TEXT("swap_back2"),    2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Back, 0.f },
+		{ TEXT("run_swap"),      2.5f, true,  -90.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Swap, 0.4f, ACE::Back, 1.4f },
+		{ TEXT("stop_s"),        1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false },
+		{ TEXT("spawn"),         3.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Spawn, 0.f },
+		{ TEXT("idle_end"),      1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false },
+	};
+	constexpr int32 NUM_EVENTS_SEGMENTS = UE_ARRAY_COUNT(EVENTS_SCRIPT);
+	constexpr float FIRE_TAP_SECONDS = 0.05f;	// 한 발 사건의 방아쇠 시간 — 3프레임. 연사 소총이 한 발만 내도록 짧게(제안값)
+	constexpr int32 NUM_FOE_WEAPONS = 3;	// 상대 빠른 칸 0 권총 · 1 소총 · 2 샷건
+	const TCHAR* const WEAPON_KEYS[3] = { TEXT("pistol"), TEXT("rifle"), TEXT("shotgun") };
+	const TCHAR* const WEAPON_DIRS[3] = { TEXT("Pistol"), TEXT("Rifle"), TEXT("Shotgun") };
+	const TCHAR* const SPAWN_EFFECT_PATH = TEXT("/ShooterCore/Game/Respawn/GA_SpawnEffect.GA_SpawnEffect_C");
+	const TCHAR* const UPPER_LOWER_MASK = TEXT("UpperBodyLowerBodySplitMask");	// 골격 안의 이름(자산 문자열 기준)
 	constexpr double AIM_MARK_DISTANCE = 1000.0;	// 시선 표적을 둘 거리. 멀수록 상대가 움직여도 각이 덜 흔들린다
 	constexpr float JUMP_PRESS_SECONDS = 0.1f;		// 뛰기 입력을 누르고 있는 시간 — 계속 누르면 내려앉자마자 또 뛴다
 
@@ -145,6 +204,7 @@ namespace
 		{
 		case EMOBACScript::AimJump: return AIMJUMP_SCRIPT[I];
 		case EMOBACScript::StartStop: return STARTSTOP_SCRIPT[I];
+		case EMOBACScript::Events: return EVENTS_SCRIPT[I];
 		case EMOBACScript::Run: break;
 		}
 		return SCRIPT[I];
@@ -155,6 +215,7 @@ namespace
 		{
 		case EMOBACScript::AimJump: return NUM_AIMJUMP_SEGMENTS;
 		case EMOBACScript::StartStop: return NUM_STARTSTOP_SEGMENTS;
+		case EMOBACScript::Events: return NUM_EVENTS_SEGMENTS;
 		case EMOBACScript::Run: break;
 		}
 		return NUM_SEGMENTS;
@@ -202,8 +263,15 @@ void UMOBAnimCompareSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	bDumpClips = FParse::Param(Cmd, TEXT("MOBACDumpClips"));
 	FString ScriptName;
 	FParse::Value(Cmd, TEXT("MOBACScript="), ScriptName);
-	Script = ScriptName == TEXT("aimjump") ? EMOBACScript::AimJump : ScriptName == TEXT("startstop") ? EMOBACScript::StartStop : EMOBACScript::Run;
+	Script = ScriptName == TEXT("aimjump") ? EMOBACScript::AimJump : ScriptName == TEXT("startstop") ? EMOBACScript::StartStop
+		: ScriptName == TEXT("events") ? EMOBACScript::Events : EMOBACScript::Run;
 	bAimJump = Script != EMOBACScript::Run;
+	FString WeaponName = WEAPON_KEYS[1];
+	FParse::Value(Cmd, TEXT("MOBACWeapon="), WeaponName);
+	WeaponIndex = WeaponName == WEAPON_KEYS[0] ? 0 : WeaponName == WEAPON_KEYS[2] ? 2 : 1;
+	HeldWeapon = WeaponIndex;
+	FParse::Value(Cmd, TEXT("MOBACEventDelay="), EventDelay);
+	FParse::Value(Cmd, TEXT("MOBACVideoPass="), VideoPass);
 	bProbe = FParse::Param(Cmd, TEXT("MOBACProbe"));
 	if (bShapes || bDumpClips) PhysWeak = LoadObject<UPhysicalMaterial>(nullptr, TEXT("/Game/Characters/Heroes/PhysMat_Player_WeakSpot.PhysMat_Player_WeakSpot"));
 	GAreScreenMessagesEnabled = false;	// 봇이 그전에 쏠 때 남은 오류 글자가 화면을 가린다
@@ -269,18 +337,42 @@ bool UMOBAnimCompareSubsystem::Prepare()
 		AI->bSetControlRotationFromPawnOrientation = false;
 	}
 
-	// 소총으로 바꾼다 — 단순 재생의 클립이 소총 것이다
-	const TCHAR* const RiflePath = TEXT("/ShooterCore/Weapons/Rifle/WID_Rifle.WID_Rifle_C");
-	UClass* RifleDef = LoadClass<ULyraEquipmentDefinition>(nullptr, RiflePath);
+	// 무기를 쥐여 준다 — 기본은 소총(단순 재생의 클립이 소총 것이다). -MOBACWeapon 으로 권총 · 샷건(9단계 Lyra 원본 기록)
+	// 상대 조종기의 가방 · 빠른 칸에 무기 셋을 0 · 1 · 2 번에 넣고 칸을 고른다(무기 기록 도구 UMOBWeaponRecordSubsystem::AddWeapons 와 같은 방식).
+	// 장비 칸에 바로 넣으면 장비에 가방 아이템이 안 붙어 탄약 비용 확인(LyraAbilityCost_ItemTagStack::CheckCost)이 늘 거짓이라 쏘기 · 재장전이 안 켜진다 — 11-12 첫 시험에서 쏘기 · 재장전 몽타주가 0개였다.
+	// 칸 바꾸기도 장비는 EquipItem 으로 넣고 그 뒤에 아이템을 붙인다(LyraQuickBarComponent::EquipItemInSlot) — 꺼내기 몽타주를 트는 자리는 장비 칸에 바로 넣을 때와 같다
 	ULyraEquipmentManagerComponent* EM = Target->FindComponentByClass<ULyraEquipmentManagerComponent>();
-	if (!EM || !RifleDef)
+	AController* FoeCtrl = Target->GetController();
+	ULyraInventoryManagerComponent* Inv = FoeCtrl ? FoeCtrl->FindComponentByClass<ULyraInventoryManagerComponent>() : nullptr;
+	ULyraQuickBarComponent* QB = FoeCtrl ? FoeCtrl->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	if (!EM || !Inv || !QB)
 	{
-		UE_LOG(LogMOBAComp, Error, TEXT("MOB_ACOMP_FAIL rifle em=%d def=%d"), EM ? 1 : 0, RifleDef ? 1 : 0);
+		UE_LOG(LogMOBAComp, Error, TEXT("MOB_ACOMP_FAIL weapon=%s em=%d inv=%d qb=%d"), WEAPON_KEYS[WeaponIndex], EM ? 1 : 0, Inv ? 1 : 0, QB ? 1 : 0);
 		return false;
 	}
-	const TArray<ULyraEquipmentInstance*> Old = EM->GetEquipmentInstancesOfType(ULyraEquipmentInstance::StaticClass());
-	for (ULyraEquipmentInstance* I : Old) EM->UnequipItem(I);
-	const ULyraEquipmentInstance* Rifle = EM->EquipItem(RifleDef);
+	const int32 OldCount = EM->GetEquipmentInstancesOfType(ULyraEquipmentInstance::StaticClass()).Num();
+	for (int32 I = 0; I < NUM_FOE_WEAPONS; ++I) QB->RemoveItemFromSlot(I);		// 고른 칸이면 장비도 뺀다
+	for (ULyraEquipmentInstance* I : EM->GetEquipmentInstancesOfType(ULyraEquipmentInstance::StaticClass())) EM->UnequipItem(I);	// 칸 밖에서 들어온 장비가 남았으면
+	for (int32 I = 0; I < NUM_FOE_WEAPONS; ++I)
+	{
+		const FString ItemPath = FString::Printf(TEXT("/ShooterCore/Weapons/%s/ID_%s.ID_%s_C"), WEAPON_DIRS[I], WEAPON_DIRS[I], WEAPON_DIRS[I]);
+		UClass* ItemClass = LoadClass<ULyraInventoryItemDefinition>(nullptr, *ItemPath);
+		ULyraInventoryItemInstance* Item = ItemClass ? Inv->AddItemDefinition(ItemClass, 1) : nullptr;
+		if (!Item)
+		{
+			UE_LOG(LogMOBAComp, Error, TEXT("MOB_ACOMP_FAIL item=%s class=%d"), *ItemPath, ItemClass ? 1 : 0);
+			return false;
+		}
+		QB->AddItemToSlot(I, Item);
+	}
+	QB->SetActiveSlotIndex(WeaponIndex);
+	const ULyraEquipmentInstance* Rifle = EM->GetFirstInstanceOfType(ULyraEquipmentInstance::StaticClass());
+	if (QB->GetActiveSlotIndex() != WeaponIndex || !Rifle)
+	{
+		UE_LOG(LogMOBAComp, Error, TEXT("MOB_ACOMP_FAIL weapon=%s slot=%d equipped=%d"), WEAPON_KEYS[WeaponIndex], QB->GetActiveSlotIndex(), Rifle ? 1 : 0);
+		return false;
+	}
+	HeldWeapon = WeaponIndex;
 
 	if (bSimple) MOBApplySimpleAnim(Target);
 
@@ -331,7 +423,7 @@ bool UMOBAnimCompareSubsystem::Prepare()
 	if (World->GetNetMode() == NM_DedicatedServer)
 	{
 		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP ready tag=%s dedicated=1 foe=%s rifle=%s removedWeapons=%d pads=%d home=(%.0f,%.0f,%.0f) yaw=%.1f"),
-			*Tag, *GetNameSafe(Target), *GetNameSafe(Rifle), Old.Num(), PadsHidden, Home.X, Home.Y, Home.Z, BodyYaw);
+			*Tag, *GetNameSafe(Target), *GetNameSafe(Rifle), OldCount, PadsHidden, Home.X, Home.Y, Home.Z, BodyYaw);
 		return true;
 	}
 
@@ -352,8 +444,9 @@ bool UMOBAnimCompareSubsystem::Prepare()
 
 	if (GEngine && GEngine->GameViewport) GEngine->GameViewport->RemoveAllViewportWidgets();	// 조준점·체력바를 뺀다
 
-	UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP ready tag=%s simple=%d video=%d foe=%s rifle=%s removedWeapons=%d pads=%d home=(%.0f,%.0f,%.0f) yaw=%.1f"),
-		*Tag, bSimple ? 1 : 0, bVideo ? 1 : 0, *GetNameSafe(Target), *GetNameSafe(Rifle), Old.Num(), PadsHidden, Home.X, Home.Y, Home.Z, BodyYaw);
+	UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP ready tag=%s simple=%d video=%d foe=%s rifle=%s weapon=%s removedWeapons=%d pads=%d home=(%.0f,%.0f,%.0f) yaw=%.1f"),
+		*Tag, bSimple ? 1 : 0, bVideo ? 1 : 0, *GetNameSafe(Target), *GetNameSafe(Rifle), WEAPON_KEYS[WeaponIndex], OldCount, PadsHidden, Home.X, Home.Y, Home.Z, BodyYaw);
+	if (bProbe) WriteBlendProfiles();
 	return true;
 }
 
@@ -525,7 +618,7 @@ void UMOBAnimCompareSubsystem::BuildProbe()
 			const FString Name = (InstName + TEXT(".") + It->GetName()).Replace(TEXT(","), TEXT(" "));
 			if (Count == 1) Header += TEXT(",") + Name;
 			else Header += FString::Printf(TEXT(",%s.0,%s.1,%s.2"), *Name, *Name, *Name);
-			ProbeVars.Add({ Inst, *It });
+			ProbeVars.Add({ Inst, *It, Inst->GetClass(), Count });
 		}
 		if (const IAnimClassInterface* AC = IAnimClassInterface::GetFromClass(Inst->GetClass()))
 		{
@@ -533,12 +626,13 @@ void UMOBAnimCompareSubsystem::BuildProbe()
 			for (int32 M = 0; M < Machines.Num(); ++M)
 			{
 				MachineHeader += FString::Printf(TEXT(",sm:%s.%s"), *InstName, *Machines[M].MachineName.ToString().Replace(TEXT(","), TEXT(" ")));
-				ProbeMachines.Add({ Inst, Machines[M].MachineName });
+				ProbeMachines.Add({ Inst, Machines[M].MachineName, Inst->GetClass() });
 			}
 		}
 	});
 	// 줄은 변수 전부 → 상태 기계 전부 차례로 쓴다(WriteProbe). 제목도 같은 차례로
-	Header += MachineHeader + TEXT(",montage,players,curves\n");
+	// events · montages · weapon · reloadTag · ammo = 9단계 사건 경로용(다른 경로에서는 events 가 비고 montages 는 대개 빈다)
+	Header += MachineHeader + TEXT(",montage,players,curves,events,montages,weapon,reloadTag,ammo\n");
 	ProbeCsv = Header;
 	UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP probe_build vars=%d machines=%d instances=[%s]"), ProbeVars.Num(), ProbeMachines.Num(), *Instances);
 }
@@ -562,16 +656,35 @@ void UMOBAnimCompareSubsystem::WriteProbe(float SegTime)
 		const FQuat Q = ActorInv * Mesh->GetBoneQuaternion(Bone);
 		Row += FString::Printf(TEXT(",%.6f,%.6f,%.6f,%.6f"), Q.X, Q.Y, Q.Z, Q.W);
 	}
-	for (const FProbeVar& Var : ProbeVars)
+	// 몸에서 떨어진 인스턴스(무기를 바꿔 갈린 무기 층)는 같은 클래스의 지금 인스턴스로 다시 붙인다. 떨어진 옛것은 바로 안 지워져 IsValid 로는 못 가른다 — 지금 몸에 붙은 것과 같은지로 본다
+	TMap<const UClass*, UAnimInstance*> LiveByClass;
+	const_cast<USkeletalMeshComponent*>(Mesh)->ForEachAnimInstance([&LiveByClass](UAnimInstance* Inst) { LiveByClass.Add(Inst->GetClass(), Inst); });
+	const auto Rebind = [this, &LiveByClass](TWeakObjectPtr<UAnimInstance>& Inst, const TWeakObjectPtr<UClass>& Class)
 	{
+		UAnimInstance* Now = LiveByClass.FindRef(Class.Get());
+		if (Now == Inst.Get()) return;
+		Inst = Now;		// 없으면 비워 빈 칸을 쓴다
+		if (Now) ++ProbeRebinds;
+	};
+	bool bBlank = false;
+	for (FProbeVar& Var : ProbeVars)
+	{
+		Rebind(Var.Instance, Var.Class);
 		const UAnimInstance* Inst = Var.Instance.Get();
 		double Value[3] = {};
 		const int32 Count = Inst ? ReadProbeProperty(Var.Prop, Inst, Value) : 0;
 		if (Count == 3) Row += FString::Printf(TEXT(",%.4g,%.4g,%.4g"), Value[0], Value[1], Value[2]);
-		else Row += FString::Printf(TEXT(",%.4g"), Value[0]);
+		else if (Count == 1) Row += FString::Printf(TEXT(",%.4g"), Value[0]);
+		else
+		{
+			Row += Var.Columns == 3 ? TEXT(",,,") : TEXT(",");	// 못 읽음 = 빈 칸(0 과 가른다)
+			bBlank = true;
+		}
 	}
-	for (const FProbeMachine& M : ProbeMachines)
+	if (bBlank) ++ProbeBlankRows;
+	for (FProbeMachine& M : ProbeMachines)
 	{
+		Rebind(M.Instance, M.Class);
 		const UAnimInstance* Inst = M.Instance.Get();
 		const FAnimNode_StateMachine* Node = Inst ? Inst->GetStateMachineInstanceFromName(M.Name) : nullptr;
 		Row += TEXT(",") + (Node ? Node->GetCurrentStateName().ToString().Replace(TEXT(","), TEXT(" ")) : FString());
@@ -606,7 +719,32 @@ void UMOBAnimCompareSubsystem::WriteProbe(float SegTime)
 			if (FMath::Abs(Value) > 1e-4f) Curves += FString::Printf(TEXT("%s=%.3f;"), *Name.ToString().Replace(TEXT(","), TEXT(" ")), Value);
 		}
 	}
-	Row += TEXT(",") + Curves + TEXT("\n");
+	Row += TEXT(",") + Curves;
+	// 재생 중 몽타주 전부 — 「이름#번호@위치*지금 비중>목표 비중 r재생 속도 b섞기 시간;」. 목표 0 = 빠지는 중. 위치는 1/6000초보다 잘게 남긴다
+	FString Montages;
+	if (Main)
+	{
+		NoteMontageAssets();
+		for (const FAnimMontageInstance* I : Main->MontageInstances)
+		{
+			if (!I || !I->Montage) continue;
+			Montages += FString::Printf(TEXT("%s#%d@%.5f*%.4f>%.2f r%.3f b%.3f;"), *I->Montage->GetName(), I->GetInstanceID(), I->GetPosition(), I->GetWeight(), I->GetDesiredWeight(), I->GetPlayRate(), I->GetBlendTime());
+		}
+	}
+	const UAbilitySystemComponent* FoeAsc = FindASC(const_cast<ACharacter*>(Target));
+	const int32 ReloadTag = FoeAsc ? FoeAsc->GetGameplayTagCount(FGameplayTag::RequestGameplayTag(TEXT("Event.Movement.Reload"))) : -1;
+	// 쥔 무기 탄창 — 「탄창/탄창 크기/남은 탄」(태그 이름 = ID_Pistol 자산 문자열 기준). 탄창이 비면 Lyra 가 스스로 재장전해 경로의 재장전 사건이 헛돈다(11-12 셋째 시험)
+	FString Ammo;
+	const AController* FoeCtrl = Target->GetController();
+	const ULyraQuickBarComponent* QB = FoeCtrl ? FoeCtrl->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	if (const ULyraInventoryItemInstance* Item = QB ? QB->GetActiveSlotItem() : nullptr)
+	{
+		static const FGameplayTag MagTag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.MagazineAmmo"));
+		static const FGameplayTag SizeTag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.MagazineSize"));
+		static const FGameplayTag SpareTag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.SpareAmmo"));
+		Ammo = FString::Printf(TEXT("%d/%d/%d"), Item->GetStatTagStackCount(MagTag), Item->GetStatTagStackCount(SizeTag), Item->GetStatTagStackCount(SpareTag));
+	}
+	Row += FString::Printf(TEXT(",%s,%s,%s,%d,%s\n"), *FrameEvents, *Montages, WEAPON_KEYS[HeldWeapon], ReloadTag, *Ammo);
 	ProbeCsv += Row;
 }
 
@@ -643,6 +781,201 @@ void UMOBAnimCompareSubsystem::DriveFoe(float DeltaTime)
 		else Target->StopJumping();
 	}
 	if (S.bMove) Target->AddMovementInput(FRotator(0.f, BodyYaw + MoveAngle, 0.f).Vector(), 1.f);
+	if (Script == EMOBACScript::Events) RunEvents(DeltaTime);
+}
+
+// 사건 경로 — 조각 안의 사건 시각이 이 프레임 [SegmentTime, SegmentTime + DeltaTime) 에 들면 일으킨다. 대기(DeltaTime 0)에는 안 일으킨다.
+// 봇 조종기는 입력 처리를 부르지 않아(ALyraPlayerController::PostProcessInput 만 부른다) 여기서 상대의 능력 입력을 직접 처리한다
+void UMOBAnimCompareSubsystem::RunEvents(float DeltaTime)
+{
+	FrameEvents.Reset();
+	if (FoeFireReleaseLeft >= 0.f)
+	{
+		FoeFireReleaseLeft -= DeltaTime;
+		if (FoeFireReleaseLeft <= 0.f)
+		{
+			SetFoeFire(false);
+			FoeFireReleaseLeft = -1.f;
+		}
+	}
+	const FScriptSegment& S = Seg(Script, Segment);
+	const auto Due = [&](EACEvent Ev, float At) { return Ev != EACEvent::None && DeltaTime > 0.f && At + EventDelay >= SegmentTime && At + EventDelay < SegmentTime + DeltaTime; };
+	const auto Do = [&](EACEvent Ev)
+	{
+		switch (Ev)
+		{
+		case EACEvent::Fire:
+			SetFoeFire(true);
+			FoeFireReleaseLeft = FIRE_TAP_SECONDS;
+			++EvFire;
+			FrameEvents += TEXT("fire;");
+			break;
+		case EACEvent::Hold:
+			SetFoeFire(true);
+			FoeFireReleaseLeft = -1.f;
+			++EvHold;
+			FrameEvents += TEXT("hold;");
+			break;
+		case EACEvent::Release:
+			SetFoeFire(false);
+			FoeFireReleaseLeft = -1.f;
+			++EvRelease;
+			FrameEvents += TEXT("release;");
+			break;
+		case EACEvent::Reload:
+			PulseFoeReload();
+			++EvReload;
+			FrameEvents += TEXT("reload;");
+			break;
+		case EACEvent::Swap:
+		case EACEvent::Back:
+		{
+			const int32 To = Ev == EACEvent::Back ? WeaponIndex : (WeaponIndex == 0 ? 1 : 0);	// 권총이면 소총으로, 아니면 권총으로
+			if (EquipFoeWeapon(To)) ++EvSwap;
+			else ++EvSwapFail;
+			FrameEvents += FString::Printf(TEXT("swap:%s;"), WEAPON_KEYS[To]);
+			break;
+		}
+		case EACEvent::Spawn:
+			if (ActivateFoeSpawnEffect()) ++EvSpawn;
+			else ++EvSpawnFail;
+			FrameEvents += TEXT("spawn;");
+			break;
+		case EACEvent::None:
+			break;
+		}
+	};
+	if (Due(S.Ev0, S.At0)) Do(S.Ev0);
+	if (Due(S.Ev1, S.At1)) Do(S.Ev1);
+	if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get()))) A->ProcessAbilityInput(DeltaTime, false);
+	else ++EvNoAsc;
+}
+
+void UMOBAnimCompareSubsystem::SetFoeFire(bool bHeld)
+{
+	ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get()));
+	if (!A)
+	{
+		++EvNoAsc;
+		return;
+	}
+	const FGameplayTag Fire = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Fire"));
+	const FGameplayTag FireAuto = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.FireAuto"));
+	if (bFoeFireHeld)	// 당긴 채 다시 당기면 새 누름이 되도록 먼저 놓는다(무기 기록 도구 UMOBWeaponRecordSubsystem::SetFire 와 같은 태그)
+	{
+		A->AbilityInputTagReleased(Fire);
+		A->AbilityInputTagReleased(FireAuto);
+		bFoeFireHeld = false;
+	}
+	if (!bHeld) return;
+	A->AbilityInputTagPressed(Fire);
+	A->AbilityInputTagPressed(FireAuto);
+	bFoeFireHeld = true;
+}
+
+void UMOBAnimCompareSubsystem::PulseFoeReload()
+{
+	if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get())))
+	{
+		const FGameplayTag Reload = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Reload"));
+		A->AbilityInputTagPressed(Reload);
+		A->AbilityInputTagReleased(Reload);
+	}
+	else ++EvNoAsc;
+}
+
+// 빠른 칸을 바꾼다 — 지금 장비를 빼고 그 칸 아이템의 장비를 EquipItem 으로 넣는다(LyraQuickBarComponent::SetActiveSlotIndex).
+// 실제 판의 상대는 장비 칸에 바로 넣지만(MOBridgeSubsystem::SyncRemoteWeapon) 둘 다 EquipItem 을 거쳐 꺼내기 동작이 같은 자리에서 튼다. 칸으로 하는 까닭 = 탄약(Prepare 주석)
+bool UMOBAnimCompareSubsystem::EquipFoeWeapon(int32 Index)
+{
+	ACharacter* Target = Foe.Get();
+	AController* Ctrl = Target ? Target->GetController() : nullptr;
+	ULyraQuickBarComponent* QB = Ctrl ? Ctrl->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	if (!QB) return false;
+	if (bFoeFireHeld) SetFoeFire(false);
+	QB->SetActiveSlotIndex(Index);
+	const bool bOk = QB->GetActiveSlotIndex() == Index && QB->GetActiveSlotItem() != nullptr;
+	if (bOk) HeldWeapon = Index;
+	return bOk;
+}
+
+// 부활 효과 능력을 다시 켠다 — 이미 켜져 있으면 끄고 켠다
+bool UMOBAnimCompareSubsystem::ActivateFoeSpawnEffect()
+{
+	UAbilitySystemComponent* A = FindASC(Foe.Get());
+	UClass* C = LoadClass<UGameplayAbility>(nullptr, SPAWN_EFFECT_PATH);
+	FGameplayAbilitySpec* Spec = (A && C) ? A->FindAbilitySpecFromClass(C) : nullptr;
+	if (!Spec)
+	{
+		UE_LOG(LogMOBAComp, Warning, TEXT("MOB_ACOMP spawn_effect asc=%d class=%d spec=0"), A ? 1 : 0, C ? 1 : 0);
+		return false;
+	}
+	if (Spec->IsActive()) A->CancelAbilityHandle(Spec->Handle);
+	return A->TryActivateAbility(Spec->Handle);
+}
+
+// 처음 본 몽타주 자산의 값을 한 줄씩 남긴다 — 서버 쪽 몽타주 표(클립 파일 버전 2)의 입력. 같은 프레임에 살아 있는 몽타주 수의 최대도 센다
+void UMOBAnimCompareSubsystem::NoteMontageAssets()
+{
+	const ACharacter* Target = Foe.Get();
+	const USkeletalMeshComponent* Mesh = Target ? Target->GetMesh() : nullptr;
+	const UAnimInstance* Main = Mesh ? Mesh->GetAnimInstance() : nullptr;
+	if (!Main) return;
+	MaxLiveMontages = FMath::Max(MaxLiveMontages, Main->MontageInstances.Num());
+	if (MontageCsv.IsEmpty())
+		MontageCsv = TEXT("name,group,playLength,rateScale,blendIn,blendInOption,blendOut,blendOutOption,blendOutTrigger,autoBlendOut,blendModeIn,blendModeOut,profileIn,profileOut,slots,notifies,curves,firstFrame,firstSegment\n");
+	for (const FAnimMontageInstance* I : Main->MontageInstances)
+	{
+		const UAnimMontage* M = I ? I->Montage.Get() : nullptr;
+		if (!M || SeenMontages.Contains(M->GetFName())) continue;
+		SeenMontages.Add(M->GetFName());
+		FString Slots;
+		for (const FSlotAnimationTrack& T : M->SlotAnimTracks)
+		{
+			Slots += T.SlotName.ToString() + TEXT(":");
+			for (const FAnimSegment& G : T.AnimTrack.AnimSegments)
+				Slots += FString::Printf(TEXT("%s[%.4f %.4f-%.4f r%.3f x%d]+"), *GetNameSafe(G.GetAnimReference().Get()), G.StartPos, G.AnimStartTime, G.AnimEndTime, G.AnimPlayRate, G.LoopingCount);
+			Slots += TEXT("|");
+		}
+		FString Notifies;
+		for (const FAnimNotifyEvent& N : M->Notifies)
+			Notifies += FString::Printf(TEXT("%s@%.4f(%s);"), *N.NotifyName.ToString(), N.GetTriggerTime(), *GetNameSafe(N.Notify ? N.Notify->GetClass() : (N.NotifyStateClass ? N.NotifyStateClass->GetClass() : nullptr)));
+		FString Curves;
+		for (const FFloatCurve& C : M->GetCurveData().FloatCurves) Curves += C.GetName().ToString() + TEXT(";");
+		MontageCsv += FString::Printf(TEXT("%s,%s,%.5f,%.4f,%.4f,%d,%.4f,%d,%.4f,%d,%d,%d,%s,%s,%s,%s,%s,%d,%s\n"),
+			*M->GetName(), *M->GetGroupName().ToString(), M->GetPlayLength(), M->RateScale,
+			M->BlendIn.GetBlendTime(), (int32)M->BlendIn.GetBlendOption(), M->BlendOut.GetBlendTime(), (int32)M->BlendOut.GetBlendOption(),
+			M->BlendOutTriggerTime, M->bEnableAutoBlendOut ? 1 : 0, (int32)M->BlendModeIn, (int32)M->BlendModeOut,
+			*GetNameSafe(M->BlendProfileIn.Get()), *GetNameSafe(M->BlendProfileOut.Get()),
+			*Slots.Replace(TEXT(","), TEXT(" ")), *Notifies.Replace(TEXT(","), TEXT(" ")), *Curves.Replace(TEXT(","), TEXT(" ")), Frame, Seg(Script, Segment).Name);
+	}
+}
+
+// 골격의 뼈별 비중 표(블렌드 프로파일) 전부 — 윗몸 몽타주가 어느 뼈에 얼마나 섞이는지의 입력(9-1). 표마다 뼈 · 비중 한 줄
+void UMOBAnimCompareSubsystem::WriteBlendProfiles()
+{
+	const ACharacter* Target = Foe.Get();
+	const USkeletalMeshComponent* Mesh = Target ? Target->GetMesh() : nullptr;
+	const USkeletalMesh* SkMesh = Mesh ? Mesh->GetSkeletalMeshAsset() : nullptr;
+	USkeleton* Skel = SkMesh ? const_cast<USkeleton*>(SkMesh->GetSkeleton()) : nullptr;	// 뼈별 비중 표를 이름으로 찾는 함수가 const 가 아니다(읽기만 한다)
+	if (!Skel)
+	{
+		UE_LOG(LogMOBAComp, Warning, TEXT("MOB_ACOMP blend_profiles skeleton=0"));
+		return;
+	}
+	BlendProfileCsv = TEXT("profile,mode,bone,scale\n");
+	int32 Entries = 0;
+	for (const UBlendProfile* P : Skel->BlendProfiles)
+	{
+		if (!P) continue;
+		for (const FBlendProfileBoneEntry& E : P->ProfileEntries)
+		{
+			BlendProfileCsv += FString::Printf(TEXT("%s,%d,%s,%.6f\n"), *P->GetName(), (int32)P->Mode, *E.BoneReference.BoneName.ToString(), E.BlendScale);
+			++Entries;
+		}
+	}
+	UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP blend_profiles skeleton=%s profiles=%d entries=%d upperLower=%d"),
+		*Skel->GetName(), Skel->BlendProfiles.Num(), Entries, Skel->GetBlendProfile(FName(UPPER_LOWER_MASK)) ? 1 : 0);
 }
 
 void UMOBAnimCompareSubsystem::UpdateCamera()
@@ -768,6 +1101,7 @@ void UMOBAnimCompareSubsystem::WriteClipDump(int32 SampleHz) const
 void UMOBAnimCompareSubsystem::TickCapture()
 {
 	if (!bVideo) return;
+	if (VideoPass >= 0 && Pass != VideoPass) return;	// -MOBACVideoPass — 디스크가 모자랄 때 한 판만 찍는다
 	if (!Grabber)
 	{
 		UGameEngine* GE = Cast<UGameEngine>(GEngine);
@@ -829,7 +1163,18 @@ void UMOBAnimCompareSubsystem::Finish()
 	{
 		const FString ProbePath = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("animcmp_%s_probe.csv"), *Tag);
 		const bool bProbeSaved = FFileHelper::SaveStringToFile(ProbeCsv, *ProbePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
-		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP probe vars=%d machines=%d chars=%d saved=%d"), ProbeVars.Num(), ProbeMachines.Num(), ProbeCsv.Len(), bProbeSaved ? 1 : 0);
+		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP probe vars=%d machines=%d chars=%d saved=%d rebinds=%d blankRows=%d"), ProbeVars.Num(), ProbeMachines.Num(), ProbeCsv.Len(), bProbeSaved ? 1 : 0, ProbeRebinds, ProbeBlankRows);
+		const FString MontagePath = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("animcmp_%s_montages.csv"), *Tag);
+		const bool bMontSaved = !MontageCsv.IsEmpty() && FFileHelper::SaveStringToFile(MontageCsv, *MontagePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		const FString ProfilePath = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("animcmp_%s_blendprofiles.csv"), *Tag);
+		const bool bProfSaved = !BlendProfileCsv.IsEmpty() && FFileHelper::SaveStringToFile(BlendProfileCsv, *ProfilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP montages seen=%d maxLive=%d saved=%d profilesSaved=%d"), SeenMontages.Num(), MaxLiveMontages, bMontSaved ? 1 : 0, bProfSaved ? 1 : 0);
+	}
+	if (Script == EMOBACScript::Events)
+	{
+		// 종류마다 센 값 — 경로 표에 적힌 수(판 둘 × 조각의 사건 수)와 대조한다
+		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP events weapon=%s fire=%d hold=%d release=%d reload=%d swap=%d swapFail=%d spawn=%d spawnFail=%d noAsc=%d"),
+			WEAPON_KEYS[WeaponIndex], EvFire, EvHold, EvRelease, EvReload, EvSwap, EvSwapFail, EvSpawn, EvSpawnFail, EvNoAsc);
 	}
 	if (bDumpClips && bSimple)
 	{
@@ -843,6 +1188,14 @@ void UMOBAnimCompareSubsystem::Finish()
 
 void UMOBAnimCompareSubsystem::Tick(float DeltaTime)
 {
+	// 상대가 죽어 사라지면(바닥 밖으로 떨어짐 등) 여기서 끝낸다 — 그냥 두면 BeginPass 가 조각 번호를 안 되돌려 경로 표 밖을 읽는다(11-12 사건 경로 첫 판에서 그렇게 죽었다).
+	// 되살아난 봇은 머리가 켜져 있어 스스로 쏘므로 그 뒤 기록은 쓸 수 없다
+	if ((Stage == EStage::Settle || Stage == EStage::Run) && !Foe.IsValid())
+	{
+		UE_LOG(LogMOBAComp, Error, TEXT("MOB_ACOMP_FAIL foe_lost pass=%d segment=%d frame=%d"), Pass, Segment, Frame);
+		if (Grabber) Grabber->StopCapturingFrames();
+		Stage = EStage::Stopping;
+	}
 	switch (Stage)
 	{
 	case EStage::WaitActors:

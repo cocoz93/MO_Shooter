@@ -72,6 +72,7 @@ namespace mo
 			d.weakSpotMultiplier = 2.f;
 			d.fireDelay = 0.12f;
 			d.autoRate = 1.f;
+			d.reloadRate = 1.5f;
 			d.magazineSize = 12;
 			d.startSpareAmmo = 48;
 			d.bulletsPerCartridge = 1;
@@ -108,6 +109,7 @@ namespace mo
 			d.weakSpotMultiplier = 1.5f;
 			d.fireDelay = 0.12f;
 			d.autoRate = 1.f;
+			d.reloadRate = 1.f;
 			d.magazineSize = 30;
 			d.startSpareAmmo = 60;
 			d.bulletsPerCartridge = 1;
@@ -144,6 +146,7 @@ namespace mo
 			d.weakSpotMultiplier = 1.75f;
 			d.fireDelay = 0.5f;
 			d.autoRate = 2.2f;
+			d.reloadRate = 1.f;
 			d.magazineSize = 8;
 			d.startSpareAmmo = 16;
 			d.bulletsPerCartridge = 9;

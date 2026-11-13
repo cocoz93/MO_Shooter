@@ -275,25 +275,39 @@ index 47cf2ef..346deb1 100644
  	if (GIsEditor)
  	{
 diff --git a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp
-index 1ccf483..370ebaf 100644
+index 1ccf483..92794b3 100644
 --- a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp	
 +++ b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.cpp
-@@ -379,6 +379,8 @@ void ULyraGameplayAbility_RangedWeapon::PerformLocalTargeting(OUT TArray<FHitRes
+@@ -83,6 +83,12 @@ ULyraRangedWeaponInstance* ULyraGameplayAbility_RangedWeapon::GetWeaponInstance(
+ 
+ bool ULyraGameplayAbility_RangedWeapon::CanActivateAbility(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayTagContainer* SourceTags, const FGameplayTagContainer* TargetTags, FGameplayTagContainer* OptionalRelevantTags) const
+ {
++	// [MOBridge] The plugin gate runs first. A blocked attempt gets the engine's generic can-activate failure tag; the fire abilities map a message or montage only to the cost tag, so nothing shows
++	if (MOBCanActivateHook && !MOBCanActivateHook(*this, ActorInfo))
++	{
++		return false;
++	}
++
+ 	bool bResult = Super::CanActivateAbility(Handle, ActorInfo, SourceTags, TargetTags, OptionalRelevantTags);
+ 
+ 	if (bResult)
+@@ -379,6 +385,9 @@ void ULyraGameplayAbility_RangedWeapon::PerformLocalTargeting(OUT TArray<FHitRes
  	}
  }
  
-+bool (*ULyraGameplayAbility_RangedWeapon::MOBBulletDirectionHook)(const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir) = nullptr;
++bool (*ULyraGameplayAbility_RangedWeapon::MOBBulletDirectionHook)(const FVector& StartTrace, const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir) = nullptr;
++bool (*ULyraGameplayAbility_RangedWeapon::MOBCanActivateHook)(const ULyraGameplayAbility_RangedWeapon& Ability, const FGameplayAbilityActorInfo* ActorInfo) = nullptr;
 +
  void ULyraGameplayAbility_RangedWeapon::TraceBulletsInCartridge(const FRangedWeaponFiringInput& InputData, OUT TArray<FHitResult>& OutHits)
  {
  	ULyraRangedWeaponInstance* WeaponData = InputData.WeaponData;
-@@ -394,7 +396,11 @@ void ULyraGameplayAbility_RangedWeapon::TraceBulletsInCartridge(const FRangedWea
+@@ -394,7 +403,11 @@ void ULyraGameplayAbility_RangedWeapon::TraceBulletsInCartridge(const FRangedWea
  
  		const float HalfSpreadAngleInRadians = FMath::DegreesToRadians(ActualSpreadAngle * 0.5f);
  
 -		const FVector BulletDir = VRandConeNormalDistribution(InputData.AimDir, HalfSpreadAngleInRadians, WeaponData->GetSpreadExponent());
 +		FVector BulletDir;
-+		if (!MOBBulletDirectionHook || !MOBBulletDirectionHook(InputData.AimDir, BaseSpreadAngle, SpreadAngleMultiplier, WeaponData->GetSpreadExponent(), BulletIndex, /*out*/ BulletDir))
++		if (!MOBBulletDirectionHook || !MOBBulletDirectionHook(InputData.StartTrace, InputData.AimDir, BaseSpreadAngle, SpreadAngleMultiplier, WeaponData->GetSpreadExponent(), BulletIndex, /*out*/ BulletDir))
 +		{
 +			BulletDir = VRandConeNormalDistribution(InputData.AimDir, HalfSpreadAngleInRadians, WeaponData->GetSpreadExponent());
 +		}
@@ -301,17 +315,20 @@ index 1ccf483..370ebaf 100644
  		const FVector EndTrace = InputData.StartTrace + (BulletDir * WeaponData->GetMaxDamageRange());
  		FVector HitLocation = EndTrace;
 diff --git a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h
-index f1b56ba..bf876ff 100644
+index f1b56ba..fe49db4 100644
 --- a/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h	
 +++ b/Source/LyraGame/Weapons/LyraGameplayAbility_RangedWeapon.h
-@@ -120,4 +120,8 @@ protected:
+@@ -120,4 +120,11 @@ protected:
  
  private:
  	FDelegateHandle OnTargetDataReadyCallbackDelegateHandle;
 +
 +public:
 +	// [MOBridge] When an external server owns the match, the plugin computes the bullet direction with the same function as the server (Shared SpreadDirection). Returns false to keep Lyra's own random.
-+	LYRAGAME_API static bool (*MOBBulletDirectionHook)(const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir);
++	LYRAGAME_API static bool (*MOBBulletDirectionHook)(const FVector& StartTrace, const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir);
++
++	// [MOBridge] When set, the plugin decides whether this ability may activate. It lets the ability fire only on the inputs the server prediction fired, so the drawn shots are the server's shots. Returns false to block.
++	LYRAGAME_API static bool (*MOBCanActivateHook)(const ULyraGameplayAbility_RangedWeapon& Ability, const FGameplayAbilityActorInfo* ActorInfo);
  };
 diff --git a/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h b/Source/LyraGame/Weapons/LyraRangedWeaponInstance.h
 index a2fa9f9..c0ca42d 100644

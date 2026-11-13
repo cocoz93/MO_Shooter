@@ -1,7 +1,13 @@
 ﻿#include "MOBSimpleAnimInstance.h"
 
 #include "Animation/AnimNodeBase.h"
+#include "Animation/AnimNotifies/AnimNotify.h"
+#include "Animation/AnimNotifies/AnimNotify_PlaySound.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/AnimMontageEvaluationState.h"
+#include "Animation/AnimNotifyQueue.h"
+#include "Animation/BlendProfile.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimationPoseData.h"
 #include "Animation/BlendSpace.h"
@@ -24,6 +30,8 @@
 
 #include "AnimClips.h"
 #include "AnimPose.h"
+#include "GameProtocol.h"
+#include "Weapon.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(MOBSimpleAnimInstance)
 
@@ -48,9 +56,9 @@ namespace
 		TEXT("MF_Rifle_Jog_Left"),
 		TEXT("MF_Rifle_Jog_Right"),
 	};
-	const TCHAR* ClipName(bool bAimJump, int32 I)
+	const TCHAR* ClipName(bool bAimJump, const TCHAR* const* WeaponClipNames, int32 I)
 	{
-		return bAimJump ? CLIP_NAMES_FEMININE[I] : CLIP_NAMES[I];
+		return bAimJump ? WeaponClipNames[I] : CLIP_NAMES[I];
 	}
 
 	// 시험용 제안값 — Lyra 원본에서 뽑은 값이 아니다. 서기와 달리기를 섞는 구간과 동작 전환의 부드러움을 정한다
@@ -88,6 +96,86 @@ namespace
 	const TCHAR* const RECOVERY_NAME = TEXT("MM_Rifle_Jump_RecoveryAdditive");
 	const TCHAR* const FIDGET_NAME = TEXT("Mf_Rifle_IdleBreak_Fidget");
 	const FName LAND_DISTANCE_CURVE(TEXT("GroundDistance"));	// Lyra 가 착지 클립을 맞출 때 쓰는 곡선 이름
+
+	// 무기별 클립 이름(9단계) — -MOBSimpleAimJump 의 30자리에 무기마다 무엇을 넣나. 권총 이름은 Lyra 원본 기록(9-1, animcmp_{ss,aj,run}_pistol_probe.csv)의
+	// 재생 칸에서 읽었다(조준 세 자세는 파일 이름 기준 — 뽑을 때 MOB_SIMPLE_AO sample= 로그로 조준 보정 자산 표본과 맞는지 본다).
+	// 샷건 몸 = 소총 몸이라 소총 이름을 그대로 쓴다(D45 — 출발 · 멈춤 경로 22부위 차이 0.42cm, 같은 소총 기록끼리 0.68~0.76cm). 앞의 5개만 쓰는 옛 모드(CLIP_NAMES)는 소총뿐이다
+	const TCHAR* const RIFLE_FOLDER = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle");
+	const TCHAR* const PISTOL_FOLDER = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Pistol");
+	const TCHAR* const PISTOL_CLIP_NAMES[FMOBSimpleAnimProxy::kClips] = {
+		TEXT("MF_Pistol_Idle_Hipfire"),
+		TEXT("MF_Pistol_Jog_Fwd"),
+		TEXT("MF_Pistol_Jog_Bwd"),
+		TEXT("MF_Pistol_Jog_Left"),
+		TEXT("MF_Pistol_Jog_Right"),
+	};
+	const TCHAR* const PISTOL_AIM_NAMES[FMOBSimpleAnimProxy::kAim] = {
+		TEXT("MF_Pistol_Idle_ADS_AO_CU"),
+		TEXT("MF_Pistol_Idle_ADS_AO_CC"),
+		TEXT("MF_Pistol_Idle_ADS_AO_CD"),
+	};
+	const TCHAR* const PISTOL_JUMP_NAMES[FMOBSimpleAnimProxy::kJump] = {
+		TEXT("MM_Pistol_Jump_Start"),
+		TEXT("MM_Pistol_Jump_Start_Loop"),
+		TEXT("MM_Pistol_Jump_Apex"),
+		TEXT("MM_Pistol_Jump_Fall_Loop"),
+		TEXT("MM_Pistol_Jump_Fall_Land"),
+	};
+	struct FWeaponClipNames
+	{
+		const TCHAR* Key;					// -MOBACWeapon 값 = 클립 파일의 묶음 이름
+		const TCHAR* Folder;				// 걸음 · 점프 · 전환 · 착지 충격 · 대기 몸짓 클립이 든 폴더
+		const TCHAR* const* ClipNames;		// kClips 개(서기 · 달리기 넷)
+		const TCHAR* Prefix;				// 전환 클립 이름 앞부분(MF_Rifle_Jog_Fwd_Start 의 MF_Rifle)
+		const TCHAR* AimOffsetPath;
+		const TCHAR* const* AimNames;		// kAim 개
+		const TCHAR* const* JumpNames;		// kJump 개
+		const TCHAR* Recovery;
+		const TCHAR* Fidget;
+	};
+	const FWeaponClipNames WEAPON_CLIPS[] = {
+		{ TEXT("rifle"), RIFLE_FOLDER, CLIP_NAMES_FEMININE, TEXT("MF_Rifle"), AIM_OFFSET_PATH, AIM_NAMES, JUMP_NAMES, RECOVERY_NAME, FIDGET_NAME },
+		{ TEXT("pistol"), PISTOL_FOLDER, PISTOL_CLIP_NAMES, TEXT("MF_Pistol"),
+			TEXT("/Game/Characters/Heroes/Mannequin/Animations/AimOffsets/AO_MF_Pistol_Idle_ADS.AO_MF_Pistol_Idle_ADS"), PISTOL_AIM_NAMES, PISTOL_JUMP_NAMES,
+			TEXT("MM_Pistol_Jump_RecoveryAdditive"), TEXT("MF_Pistol_IdleBreak_Scan") },
+		{ TEXT("shotgun"), RIFLE_FOLDER, CLIP_NAMES_FEMININE, TEXT("MF_Rifle"), AIM_OFFSET_PATH, AIM_NAMES, JUMP_NAMES, RECOVERY_NAME, FIDGET_NAME },
+	};
+
+	// 없거나 모르는 값이면 소총 — 기록 도구(MOBAnimCompareSubsystem)의 기본 무기와 같다
+	const FWeaponClipNames& WeaponClipsFromCommandLine()
+	{
+		FString Key;
+		FParse::Value(FCommandLine::Get(), TEXT("MOBACWeapon="), Key);
+		for (const FWeaponClipNames& Weapon : WEAPON_CLIPS)
+		{
+			if (Key == Weapon.Key) return Weapon;
+		}
+		return WEAPON_CLIPS[0];
+	}
+
+	// 무기별 몽타주(9단계 3-a) — 서버 몽타주 표의 입력. 자산 이름은 Lyra 원본 기록(9단계 1-b, animcmp_ev_<무기>_montages.csv)에서 그 무기를 든 채 사건을 냈을 때 뜬 것이다
+	// (사격 = fire_stand · 재장전 = reload · 꺼내기 = 그 무기로 돌아온 swap_back 조각의 첫 프레임). 차례 = Shared/AnimClips.h EMontageKind(사격 · 재장전 · 꺼내기 · 빼기 · 부활).
+	// 샷건 꺼내기 = 소총 것(샷건 자산이 없고 기록에서도 AM_MM_Rifle_Equip) · 빼기 · 부활은 세 무기가 같은 자산이다
+	constexpr int32 kMontageKinds = 5;
+	const TCHAR* const UNEQUIP_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Generic_Unequip.AM_MM_Generic_Unequip");
+	const TCHAR* const SPAWN_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Pistol_Spawn.AM_MM_Pistol_Spawn");
+	const TCHAR* const RIFLE_EQUIP_MONTAGE = TEXT("/Game/Weapons/Rifle/Animations/AM_MM_Rifle_Equip.AM_MM_Rifle_Equip");
+	struct FWeaponMontageNames
+	{
+		const TCHAR* Key;							// FWeaponClipNames::Key 와 같다
+		const TCHAR* Montages[kMontageKinds];
+		const TCHAR* OverridePose;					// 쏜 뒤 윗몸 덮기 자세(시각 0 고정). 1-c 기록에서 덮기 비중과 함께 움직인 클립
+	};
+	const FWeaponMontageNames WEAPON_MONTAGES[] = {
+		{ TEXT("rifle"), { TEXT("/Game/Weapons/Rifle/Animations/AM_MM_Rifle_Fire.AM_MM_Rifle_Fire"), TEXT("/Game/Weapons/Rifle/Animations/AM_MM_Rifle_Reload.AM_MM_Rifle_Reload"),
+			RIFLE_EQUIP_MONTAGE, UNEQUIP_MONTAGE, SPAWN_MONTAGE }, TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle/MF_Rifle_Idle_Hipfire.MF_Rifle_Idle_Hipfire") },
+		{ TEXT("pistol"), { TEXT("/Game/Weapons/Pistol/Animations/AM_MM_Pistol_Fire.AM_MM_Pistol_Fire"), TEXT("/Game/Weapons/Pistol/Animations/AM_MM_Pistol_Reload.AM_MM_Pistol_Reload"),
+			TEXT("/Game/Weapons/Pistol/Animations/AM_MM_Pistol_Equip.AM_MM_Pistol_Equip"), UNEQUIP_MONTAGE, SPAWN_MONTAGE },
+			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Pistol/MF_Pistol_Hipfire_OverridePose.MF_Pistol_Hipfire_OverridePose") },
+		{ TEXT("shotgun"), { TEXT("/Game/Weapons/Shotgun/Animations/AM_MM_Shotgun_Fire.AM_MM_Shotgun_Fire"), TEXT("/Game/Weapons/Shotgun/Animations/AM_MM_Shotgun_Reload.AM_MM_Shotgun_Reload"),
+			RIFLE_EQUIP_MONTAGE, UNEQUIP_MONTAGE, SPAWN_MONTAGE }, TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle/MF_Rifle_Idle_Hipfire.MF_Rifle_Idle_Hipfire") },
+	};
+	constexpr int32 MONTAGE_CURVE_HZ = 120;		// 몽타주 · 몽타주 클립 곡선을 뽑는 간격(클립 표본과 같은 간격, 제안값)
 
 	// 아래는 Lyra 원본 실행값에서 읽은 값이다(animcmp_probe_lyra_probe.csv, 11-06 · 60프레임 · 제자리 점프와 달리며 점프가 같은 값).
 	// 애니 블루프린트를 열어 본 값이 아니라 프레임별 클립 가중치·시각·변수에서 읽은 것 — 「확인」 옆 숫자가 그 근거다
@@ -148,9 +236,9 @@ namespace
 	constexpr float DISTANCE_RATE_MIN = 0.25f;		// 거리로 진행할 때 재생 속도 범위. 확인: 돌아선 직후 0.42배까지 내려감 · 출발 첫 프레임 2.4배
 	constexpr float DISTANCE_RATE_MAX = 5.f;
 
-	FString TransitionName(int32 Kind, int32 Direction)
+	FString TransitionName(const TCHAR* Prefix, int32 Kind, int32 Direction)
 	{
-		return FString::Printf(TEXT("MF_Rifle_Jog_%s_%s"), DIRECTION_NAMES[Direction], TRANSITION_KINDS[Kind]);
+		return FString::Printf(TEXT("%s_Jog_%s_%s"), Prefix, DIRECTION_NAMES[Direction], TRANSITION_KINDS[Kind]);
 	}
 
 	int32 CardinalFromAngle(float Angle)
@@ -249,7 +337,6 @@ void UMOBSimpleAnimInstance::LoadClips()
 	const bool bServerAnim = FParse::Param(FCommandLine::Get(), TEXT("MOBServerAnim"));	// 받은 상태의 클립 번호는 전환 클립까지 가리키므로 전부 읽는다
 	bAimJump = bServerAnim || FParse::Param(FCommandLine::Get(), TEXT("MOBSimpleAimJump"));
 	bTransitions = bServerAnim || (bAimJump && FParse::Param(FCommandLine::Get(), TEXT("MOBSimpleTransitions")));
-	const TCHAR* const RIFLE_FOLDER = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle");
 	const TCHAR* const AIM_FOLDER = TEXT("/Game/Characters/Heroes/Mannequin/Animations/AimOffsets");
 	const auto Load = [](const TCHAR* Folder, const TCHAR* Name, const TCHAR* Kind)
 	{
@@ -265,14 +352,30 @@ void UMOBSimpleAnimInstance::LoadClips()
 		return Clip;
 	};
 
-	for (int32 I = 0; I < FMOBSimpleAnimProxy::kClips; ++I) LoadedClips.Add(Load(RIFLE_FOLDER, ClipName(bAimJump, I), TEXT("LOAD")));
-	if (!bAimJump) return;
-	for (int32 I = 0; I < FMOBSimpleAnimProxy::kAim; ++I) LoadedAim.Add(Load(AIM_FOLDER, AIM_NAMES[I], TEXT("AIM")));
-	for (int32 I = 0; I < FMOBSimpleAnimProxy::kAim; ++I) LoadedReadyAim.Add(Load(AIM_FOLDER, READY_AIM_NAMES[I], TEXT("AIM")));
-	for (int32 I = 0; I < FMOBSimpleAnimProxy::kJump; ++I) LoadedJump.Add(Load(RIFLE_FOLDER, JUMP_NAMES[I], TEXT("JUMP")));
-	for (int32 I = 0; I < FMOBSimpleAnimProxy::kTransitions && bTransitions; ++I) LoadedJump.Add(Load(RIFLE_FOLDER, *TransitionName(I / 4, I % 4), TEXT("LOAD")));
-	LoadedRecovery = Load(RIFLE_FOLDER, RECOVERY_NAME, TEXT("JUMP"));
-	LoadedFidget = Load(RIFLE_FOLDER, FIDGET_NAME, TEXT("IDLE"));
+	const FWeaponClipNames& Primary = bAimJump ? WeaponClipsFromCommandLine() : WEAPON_CLIPS[0];
+	WeaponKey = Primary.Key;
+
+	// 읽을 무기 — 서버 구동이면 서버 무기 번호(EWeapon) 차례로 전부(무기 이름 = 클립 이름 표의 Key 로 잇는다), 아니면 명령줄 무기 하나
+	TArray<const FWeaponClipNames*, TInlineAllocator<4>> Wanted;
+	if (bServerAnim)
+	{
+		for (int32 W = 0; W < (int32)mo::EWeapon::Count; ++W)
+		{
+			const FString Name = UTF8_TO_TCHAR(mo::GetWeaponDef((mo::EWeapon)W).name);
+			const FWeaponClipNames* Found = nullptr;
+			for (const FWeaponClipNames& Names : WEAPON_CLIPS)
+			{
+				if (Name == Names.Key) Found = &Names;
+			}
+			if (!Found) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL weapon=%d name=%s — 클립 이름 표에 없어 이 무기 한 벌을 못 읽는다"), W, *Name);
+			if (Found == &Primary) PrimarySet = W;
+			Wanted.Add(Found);
+		}
+	}
+	else
+	{
+		Wanted.Add(&Primary);
+	}
 
 	// 세 자세가 맡는 위아래 각은 짐작하지 않고 Lyra 조준 보정 자산의 표본 자리에서 읽는다
 	const auto ReadPitches = [](const TCHAR* AssetPath, const TArray<TObjectPtr<UAnimSequence>>& Set, const TCHAR* const Names[], float OutPitches[])
@@ -304,7 +407,42 @@ void UMOBSimpleAnimInstance::LoadClips()
 			UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL aimoffset asset=%s found=%d matched=%d — 위 90 · 가운데 0 · 아래 -90 으로 둔다"), AssetPath, AO ? 1 : 0, Matched);
 		}
 	};
-	ReadPitches(AIM_OFFSET_PATH, LoadedAim, AIM_NAMES, AimPitches);
+
+	for (const FWeaponClipNames* Weapon : Wanted)
+	{
+		FMOBLoadedClipSet& Set = LoadedSets.AddDefaulted_GetRef();
+		if (!Weapon) continue;
+		Set.Key = Weapon->Key;
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_WEAPON key=%s folder=%s set=%d"), Weapon->Key, Weapon->Folder, LoadedSets.Num() - 1);
+		for (int32 I = 0; I < FMOBSimpleAnimProxy::kClips; ++I) Set.Clips.Add(Load(Weapon->Folder, ClipName(bAimJump, Weapon->ClipNames, I), TEXT("LOAD")));
+		if (!bAimJump) continue;
+		for (int32 I = 0; I < FMOBSimpleAnimProxy::kAim; ++I) Set.Aim.Add(Load(AIM_FOLDER, Weapon->AimNames[I], TEXT("AIM")));
+		for (int32 I = 0; I < FMOBSimpleAnimProxy::kJump; ++I) Set.Jump.Add(Load(Weapon->Folder, Weapon->JumpNames[I], TEXT("JUMP")));
+		for (int32 I = 0; I < FMOBSimpleAnimProxy::kTransitions && bTransitions; ++I) Set.Jump.Add(Load(Weapon->Folder, *TransitionName(Weapon->Prefix, I / 4, I % 4), TEXT("LOAD")));
+		Set.Recovery = Load(Weapon->Folder, Weapon->Recovery, TEXT("JUMP"));
+		Set.Fidget = Load(Weapon->Folder, Weapon->Fidget, TEXT("IDLE"));
+		ReadPitches(Weapon->AimOffsetPath, Set.Aim, Weapon->AimNames, Set.AimPitches);
+		if (!bServerAnim) continue;
+
+		// 몽타주(9단계 5-a) — 받은 몽타주 칸을 언리얼 경로(손가락 · 꼬임 뼈)에 얹을 자산. 차례 = 종류(EMontageKind), 자산 = 클립 파일을 뽑은 표(WEAPON_MONTAGES) 그대로
+		const FWeaponMontageNames* MontageNames = nullptr;
+		for (const FWeaponMontageNames& Names : WEAPON_MONTAGES)
+		{
+			if (FCString::Strcmp(Names.Key, Weapon->Key) == 0) MontageNames = &Names;
+		}
+		if (!MontageNames) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL montages weapon=%s — 몽타주 이름 표에 없다"), Weapon->Key);
+		int32 MontagesLoaded = 0;
+		for (int32 K = 0; MontageNames && K < kMontageKinds; ++K)
+		{
+			UAnimMontage* Montage = LoadObject<UAnimMontage>(nullptr, MontageNames->Montages[K]);
+			if (!Montage) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL montage=%s"), MontageNames->Montages[K]);
+			MontagesLoaded += Montage ? 1 : 0;
+			Set.Montages.Add(Montage);
+		}
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_MONTAGES key=%s loaded=%d of=%d"), Weapon->Key, MontagesLoaded, kMontageKinds);
+	}
+	if (!bAimJump) return;
+	for (int32 I = 0; I < FMOBSimpleAnimProxy::kAim; ++I) LoadedReadyAim.Add(Load(AIM_FOLDER, READY_AIM_NAMES[I], TEXT("AIM")));
 	ReadPitches(READY_AIM_OFFSET_PATH, LoadedReadyAim, READY_AIM_NAMES, ReadyAimPitches);
 }
 
@@ -343,9 +481,44 @@ void FMOBSimpleAnimProxy::ResetPlayback()
 }
 
 // 받은 상태를 언리얼 경로의 재생 상태로 옮기고(손가락 · 꼬임 뼈용), 판정 뼈에 덮을 자세를 받아 둔다
-void FMOBSimpleAnimProxy::SetServerFrame(const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames)
+void FMOBSimpleAnimProxy::SetServerFrame(const mo::AnimPoseInput& Input, int32 Weapon, const int32* MontageWeapons, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames, FMOBServerAnimResult& Out)
 {
 	bServerDriven = true;
+	// 받은 클립 번호 · 시각은 그 무기 한 벌의 것이다 — 한 벌이 다르면 먼저 갈아 넣는다. 아직 안 묶었으면(첫 프레임) 묶을 때 이 한 벌부터 넣는다
+	WantedSet = Weapon;
+	if (ClipSets.Num() > 0 && Weapon != ActiveSet)
+	{
+		if (ClipSets.IsValidIndex(Weapon) && ClipSets[Weapon].bLoaded)
+		{
+			UseSet(ClipSets[Weapon]);
+			ActiveSet = Weapon;
+			Out.SetChange = 1;
+		}
+		else
+		{
+			Out.SetChange = -1;
+		}
+	}
+
+	// 몽타주 칸 — 칸마다 그 칸 무기 한 벌의 자산을 쓴다(무기를 바꾸는 틱엔 앞 무기 「빼기」와 새 무기 「꺼내기」가 함께 돈다, D51).
+	// 알림은 여기서 안 튼다 — 이 함수엔 보여 줄 상태만 오므로, 받은 상태를 하나씩 넣는 StepMontages 가 따로 훑는다
+	MontageCellCount = 0;
+	for (int32 M = 0; M < Input.montageCount && M < mo::kAnimMontageMax; ++M)
+	{
+		const mo::AnimMontageSlot& View = Input.montages[M];
+		const int32 CellWeapon = MontageWeapons ? MontageWeapons[M] : INDEX_NONE;
+		UAnimMontage* Montage = ClipSets.IsValidIndex(CellWeapon) && View.kind < kMontageKindCount ? ClipSets[CellWeapon].Montages[View.kind] : nullptr;
+		if (!Montage)
+		{
+			++Out.MontageMisses;
+			continue;
+		}
+		FMontageCell& Cell = MontageCells[MontageCellCount++];
+		Cell.Montage = Montage;
+		Cell.Position = View.position;
+		Cell.Weight = View.weight;
+	}
+	Out.MontageCells = MontageCellCount;
 	for (int32 I = 0; I < kClips; ++I)
 	{
 		Weights[I] = Input.weights[I];
@@ -372,6 +545,114 @@ void FMOBSimpleAnimProxy::SetServerFrame(const mo::AnimPoseInput& Input, const m
 		const mo::BoneTransform& B = Local[I];
 		ServerLocal[I] = FTransform(FQuat(B.q[0], B.q[1], B.q[2], B.q[3]), FVector(B.p[0], B.p[1], B.p[2]));
 	}
+}
+
+// 지난 구간은 앞 상태 칸과 같은 자산 · 앞서지 않은 시각끼리 짝지어 구한다(같은 자산이 둘이면 시각이 가장 가까운 것). 짝이 없으면 새 칸.
+// 이어진 칸은 틱 차이만큼 나가 있어야 한다 — 서버 칸은 끝에 닿을 때만 멈춘다(CAnimState::AdvanceMontage, 빼는 중에도 나간다).
+// 앞 상태와 틱이 벌어지면(보관한 상태를 넘는 멈춤) 옛 칸이 빠지고 같은 자산의 새 칸이 옛 시각보다 뒤에 서 있을 수 있어, 시각 순서만으론 새 칸을 이어진 칸으로 잘못 짝짓는다.
+// 가장 느린 재생 = 0.9(Generic_Unequip 자산 0.9 × 사건 1.0, 쏘기 · 재장전은 무기 값 1.0 ~ 2.2). 0.8 은 그보다 낮춰 잡은 제 판단. 여유 0.001초 = 시각 칸(1/6000초)으로 줄인 두 값의 차이 오차(1/6000초 안)보다 넉넉히 잡은 제 판단
+void FMOBSimpleAnimProxy::StepMontages(const mo::AnimPoseInput& Input, uint32 StateTick, const int32* MontageWeapons, bool bContinue, FMOBServerAnimResult& Out,
+	TArray<FMontageStep, TInlineAllocator<kMontageCells>>& OutSteps)
+{
+	constexpr float kMinMontageRate = 0.8f;
+	constexpr float kMontagePositionSlack = 0.001f;
+	const int32 PreviousCount = bContinue ? NotifyCellCount : 0;
+	const int32 TickDelta = PreviousCount > 0 ? (int32)(StateTick - NotifyTick) : 0;
+	const float MinAdvance = TickDelta > 0 ? TickDelta * kMinMontageRate / mo::wire::kTickRate - kMontagePositionSlack : 0.f;
+	NotifyTick = StateTick;
+	FMontageCell Previous[kMontageCells];
+	for (int32 I = 0; I < PreviousCount; ++I) Previous[I] = NotifyCells[I];
+	bool bPreviousUsed[kMontageCells] = {};
+	NotifyCellCount = 0;
+	OutSteps.Reset();
+	for (int32 M = 0; M < Input.montageCount && M < mo::kAnimMontageMax; ++M)
+	{
+		const mo::AnimMontageSlot& View = Input.montages[M];
+		const int32 CellWeapon = MontageWeapons ? MontageWeapons[M] : INDEX_NONE;
+		UAnimMontage* Montage = ClipSets.IsValidIndex(CellWeapon) && View.kind < kMontageKindCount ? ClipSets[CellWeapon].Montages[View.kind] : nullptr;
+		if (!Montage) continue;		// 못 넣은 칸은 보여 줄 상태에서 SetServerFrame 이 센다
+		FMontageCell& Cell = NotifyCells[NotifyCellCount++];
+		Cell.Montage = Montage;
+		Cell.Position = View.position;
+		Cell.Weight = View.weight;
+
+		int32 Match = INDEX_NONE;
+		bool bRestart = false;
+		const bool bAtEnd = View.position >= Montage->GetPlayLength() - kMontagePositionSlack;		// 끝에 닿아 멈춘 칸은 덜 나간다
+		for (int32 P = 0; P < PreviousCount; ++P)
+		{
+			if (bPreviousUsed[P] || Previous[P].Montage != Montage || Previous[P].Position > View.position) continue;
+			if (!bAtEnd && View.position - Previous[P].Position < MinAdvance)
+			{
+				bRestart = true;
+				continue;
+			}
+			if (Match == INDEX_NONE || Previous[P].Position > Previous[Match].Position) Match = P;
+		}
+		if (Match == INDEX_NONE && bRestart) ++Out.MontageRestarts;
+		FMontageStep& Passed = OutSteps.AddDefaulted_GetRef();
+		Passed.Montage = Montage;
+		Passed.To = View.position;
+		if (Match != INDEX_NONE)
+		{
+			bPreviousUsed[Match] = true;
+			Passed.From = Previous[Match].Position;
+		}
+	}
+}
+
+namespace
+{
+	template <typename T, int32 N>
+	void CopyItems(T (&To)[N], const T (&From)[N])
+	{
+		for (int32 I = 0; I < N; ++I) To[I] = From[I];
+	}
+}
+
+void FMOBSimpleAnimProxy::SaveSet(FClipSet& Out) const
+{
+	Out.bLoaded = true;
+	CopyItems(Out.Clips, Clips);
+	CopyItems(Out.Lengths, Lengths);
+	CopyItems(Out.RootSpeeds, RootSpeeds);
+	CopyItems(Out.StepTimes, StepTimes);
+	Out.StepCycle = StepCycle;
+	CopyItems(Out.AimClips, AimClips);
+	CopyItems(Out.AimPitches, AimPitches);
+	Out.AimAdditiveType = AimAdditiveType;
+	CopyItems(Out.JumpClips, JumpClips);
+	CopyItems(Out.JumpLengths, JumpLengths);
+	Out.LandDistances = LandDistances;
+	CopyItems(Out.TransitionDistances, TransitionDistances);
+	CopyItems(Out.TransitionMarkers, TransitionMarkers);
+	Out.RecoveryClip = RecoveryClip;
+	Out.RecoveryLength = RecoveryLength;
+	Out.RecoveryAdditiveType = RecoveryAdditiveType;
+	Out.FidgetClip = FidgetClip;
+	Out.FidgetLength = FidgetLength;
+}
+
+void FMOBSimpleAnimProxy::UseSet(const FClipSet& In)
+{
+	CopyItems(Clips, In.Clips);
+	CopyItems(Lengths, In.Lengths);
+	CopyItems(RootSpeeds, In.RootSpeeds);
+	CopyItems(StepTimes, In.StepTimes);
+	StepCycle = In.StepCycle;
+	CopyItems(AimClips, In.AimClips);
+	CopyItems(AimPitches, In.AimPitches);
+	AimAdditiveType = In.AimAdditiveType;
+	CopyItems(JumpClips, In.JumpClips);
+	CopyItems(JumpLengths, In.JumpLengths);
+	LandDistances = In.LandDistances;
+	CopyItems(TransitionDistances, In.TransitionDistances);
+	CopyItems(TransitionMarkers, In.TransitionMarkers);
+	RecoveryClip = In.RecoveryClip;
+	RecoveryLength = In.RecoveryLength;
+	RecoveryAdditiveType = In.RecoveryAdditiveType;
+	FidgetClip = In.FidgetClip;
+	FidgetLength = In.FidgetLength;
 }
 
 // 클립 파일의 뼈를 Shared 결과로 덮는다. 크기는 언리얼 경로 값을 둔다 — Shared 는 크기를 안 다룬다
@@ -911,7 +1192,7 @@ void FMOBSimpleAnimProxy::AppendPlayers(FString& Out) const
 	}
 }
 
-void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones) const
+void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones, const TArray<const UAnimMontage*>& Montages, const UAnimSequence* OverridePose) const
 {
 	// 자세를 읽는 길은 Evaluate 와 같다(GetAnimationPose, 뿌리 이동 안 뽑음, 반복 재생)
 	const FBoneContainer& Bones = GetRequiredBones();
@@ -947,6 +1228,66 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 		Add(RecoveryClip, false);
 		Add(FidgetClip, false);
 		Out += FString::Printf(TEXT("AIMPITCH,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n"), AimPitches[AIM_UP], AimPitches[AIM_CENTER], AimPitches[AIM_DOWN], ReadyAimPitches[AIM_UP], ReadyAimPitches[AIM_CENTER], ReadyAimPitches[AIM_DOWN]);
+	}
+	const int32 BaseClipCount = All.Num();
+
+	// 몽타주(9단계 3-a) — 줄(끼움 자리)마다 든 클립을 30개 뒤에 붙인다. 이미 있는 클립(같은 자산)이면 그 번호를 쓴다 — 빼기 몽타주는 권총 꺼내기 클립의 한 구간이고,
+	// 소총 덮기 자세는 서기 클립 그 자체다. 몽타주 클립은 몽타주 안에서 한 번만 돌므로(기록 x1) 반복하지 않고 읽는다
+	const auto ClipIndex = [&All](const UAnimSequence* Clip) -> int32
+	{
+		if (!Clip) return INDEX_NONE;
+		for (int32 I = 0; I < All.Num(); ++I)
+		{
+			if (All[I].Clip == Clip) return I;
+		}
+		All.Add({ Clip, FMath::Max(Clip->GetPlayLength(), 0.01f), false, 0.f });
+		return All.Num() - 1;
+	};
+	FString MontageLines;
+	const bool bMontages = bAimJump && bTransitions;
+	for (int32 M = 0; bMontages && M < Montages.Num(); ++M)
+	{
+		const UAnimMontage* Montage = Montages[M];
+		if (!Montage)
+		{
+			MontageLines += FString::Printf(TEXT("MONTAGEFAIL,%d\n"), M);
+			continue;
+		}
+		FString Sections;
+		for (const FCompositeSection& S : Montage->CompositeSections) Sections += FString::Printf(TEXT("%s@%.4f>%s;"), *S.SectionName.ToString(), S.GetTime(), *S.NextSectionName.ToString());
+		// 칸 차례 = 1-a 기록 도구의 몽타주 기록(animcmp_ev_<무기>_montages.csv)과 같다 — 3-a 대조가 칸끼리 맞춘다
+		MontageLines += FString::Printf(TEXT("MONTAGE,%d,%s,%s,%.9g,%.9g,%.9g,%d,%.9g,%d,%.9g,%d,%d,%d,%s,%s,%s\n"), M, *Montage->GetName(), *Montage->GetGroupName().ToString(),
+			Montage->GetPlayLength(), Montage->RateScale, Montage->BlendIn.GetBlendTime(), (int32)Montage->BlendIn.GetBlendOption(), Montage->BlendOut.GetBlendTime(), (int32)Montage->BlendOut.GetBlendOption(),
+			Montage->BlendOutTriggerTime, Montage->bEnableAutoBlendOut ? 1 : 0, (int32)Montage->BlendModeIn, (int32)Montage->BlendModeOut,
+			*GetNameSafe(Montage->BlendProfileIn.Get()), *GetNameSafe(Montage->BlendProfileOut.Get()), *Sections.Replace(TEXT(","), TEXT(" ")));
+		// 몽타주 자체 곡선 — 몽타주 시각 기준(꺼내기의 DisableLHandIK 등, 1-c)
+		for (const FFloatCurve& Curve : Montage->GetCurveData().FloatCurves)
+		{
+			const int32 N = FMath::CeilToInt32(Montage->GetPlayLength() * MONTAGE_CURVE_HZ) + 1;
+			MontageLines += FString::Printf(TEXT("MCURVE,%d,%s,%d,%d"), M, *Curve.GetName().ToString(), MONTAGE_CURVE_HZ, N);
+			for (int32 S = 0; S < N; ++S) MontageLines += FString::Printf(TEXT(",%.6f"), Curve.Evaluate(FMath::Min((float)S / MONTAGE_CURVE_HZ, Montage->GetPlayLength())));
+			MontageLines += TEXT("\n");
+		}
+		for (const FSlotAnimationTrack& Track : Montage->SlotAnimTracks)
+		{
+			for (const FAnimSegment& Segment : Track.AnimTrack.AnimSegments)
+			{
+				const UAnimSequence* Clip = Cast<UAnimSequence>(Segment.GetAnimReference().Get());
+				const int32 Index = ClipIndex(Clip);
+				if (Index == INDEX_NONE)
+				{
+					MontageLines += FString::Printf(TEXT("TRACKFAIL,%d,%s,%s\n"), M, *Track.SlotName.ToString(), *GetNameSafe(Segment.GetAnimReference().Get()));
+					continue;
+				}
+				MontageLines += FString::Printf(TEXT("TRACK,%d,%s,%d,%.9g,%.9g,%.9g,%.9g,%d\n"), M, *Track.SlotName.ToString(), Index, Segment.StartPos, Segment.AnimStartTime, Segment.AnimEndTime, Segment.AnimPlayRate, Segment.LoopingCount);
+			}
+		}
+	}
+	if (bMontages)
+	{
+		const int32 Override = ClipIndex(OverridePose);
+		if (Override == INDEX_NONE) MontageLines += TEXT("OVERRIDEFAIL\n");
+		else MontageLines += FString::Printf(TEXT("OVERRIDE,%d\n"), Override);
 	}
 
 	for (int32 I = 0; I < All.Num(); ++I)
@@ -991,6 +1332,140 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 		for (int32 T = 0; T < kTransitions; ++T) CurveLine(FIRST_JUMP_INDEX + kJump + T, TEXT("Distance"), TRANSITION_TABLE_HZ, TransitionDistances[T]);
 		CurveLine(FIRST_JUMP_INDEX + JUMP_LAND, TEXT("GroundDistance"), LAND_TABLE_HZ, LandDistances);
 	}
+
+	// 몽타주 표 줄과, 30개 뒤에 붙인 클립의 곡선 전부(클립 시각 기준 — 소총 재장전의 DisableLHandIK 는 몽타주가 아니라 클립에 있다, 1-c)
+	Out += MontageLines;
+	for (int32 I = BaseClipCount; I < All.Num(); ++I)
+	{
+		const UAnimSequence* Clip = All[I].Clip;
+		for (const FFloatCurve& Curve : Clip->GetCurveData().FloatCurves)
+		{
+			TArray<float> Values;
+			const int32 N = FMath::CeilToInt32(All[I].Length * MONTAGE_CURVE_HZ) + 1;
+			for (int32 S = 0; S < N; ++S) Values.Add(Clip->EvaluateCurveData(Curve.GetName(), FAnimExtractContext(FMath::Min((double)S / MONTAGE_CURVE_HZ, (double)All[I].Length))));
+			Out += FString::Printf(TEXT("SCURVE,%d,%s,%d,%d"), I, *Curve.GetName().ToString(), MONTAGE_CURVE_HZ, Values.Num());
+			for (const float V : Values) Out += FString::Printf(TEXT(",%.6f"), V);
+			Out += TEXT("\n");
+		}
+	}
+}
+
+// 읽은 한 벌을 재생 멤버에 묶는다. 서버 구동이면 무기마다 한 번씩 불러 사본을 뜬다(로그도 한 벌마다 한 번)
+void FMOBSimpleAnimProxy::BindSet(const UMOBSimpleAnimInstance& Instance, int32 SetIndex)
+{
+	const FMOBLoadedClipSet& Set = Instance.LoadedSets[SetIndex];
+	for (int32 I = 0; I < kClips; ++I)
+	{
+		const UAnimSequence* Clip = Set.Clips.IsValidIndex(I) ? Set.Clips[I].Get() : nullptr;
+		Clips[I] = Clip;
+		if (!Clip) continue;
+		Lengths[I] = FMath::Max(Clip->GetPlayLength(), 0.01f);
+		RootSpeeds[I] = (float)Clip->ExtractRootMotionFromRange(0.0, Lengths[I], FAnimExtractContext()).GetTranslation().Size() / Lengths[I];
+
+		// 발 표시를 왼발부터 줄 세운다. 왼발·오른발이 번갈아 있고 개수가 짝수여야 한 바퀴 돌아도 발 순서가 안 깨진다
+		const TArray<FAnimSyncMarker>& Markers = Clip->AuthoredSyncMarkers;
+		int32 FirstLeft = 0;
+		while (FirstLeft < Markers.Num() && Markers[FirstLeft].MarkerName != TEXT("L")) ++FirstLeft;
+		FString MarkerList;
+		StepTimes[I].Reset();
+		for (int32 M = 0; M < Markers.Num() && FirstLeft < Markers.Num(); ++M)
+		{
+			const int32 Index = (FirstLeft + M) % Markers.Num();
+			StepTimes[I].Add(Markers[Index].Time + (Index < FirstLeft ? Lengths[I] : 0.f));
+			MarkerList += FString::Printf(TEXT("%s@%.3f "), *Markers[Index].MarkerName.ToString(), Markers[Index].Time);
+		}
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_CLIP name=%s length=%.3f rootSpeed=%.1f steps=%d markers=[%s]"), *GetNameSafe(Clip), Lengths[I], RootSpeeds[I], StepTimes[I].Num(), *MarkerList);
+		if (I != CLIP_IDLE && (StepTimes[I].Num() == 0 || StepTimes[I].Num() % 2 != 0))
+		{
+			UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL steps name=%s count=%d"), *GetNameSafe(Clip), StepTimes[I].Num());
+			Clips[I] = nullptr;		// 발을 못 맞추는 클립은 쓰지 않는다
+		}
+	}
+	StepCycle = 1;
+	for (int32 I = CLIP_FWD; I <= CLIP_RIGHT; ++I)
+	{
+		if (Clips[I]) StepCycle = FMath::LeastCommonMultiplier(StepCycle, StepTimes[I].Num());
+	}
+
+	const auto Additive = [](const UAnimSequence* Clip) { return Clip ? (int32)Clip->GetAdditiveAnimType() : (int32)AAT_None; };
+	for (int32 I = 0; I < kAim && bAimJump; ++I)
+	{
+		AimClips[I] = Set.Aim.IsValidIndex(I) ? Set.Aim[I].Get() : nullptr;
+		AimPitches[I] = Set.AimPitches[I];
+		ReadyAimClips[I] = Instance.LoadedReadyAim.IsValidIndex(I) ? Instance.LoadedReadyAim[I].Get() : nullptr;
+		ReadyAimPitches[I] = Instance.ReadyAimPitches[I];
+	}
+	AimAdditiveType = Additive(AimClips[AIM_CENTER]);
+	ReadyAimAdditiveType = Additive(ReadyAimClips[AIM_CENTER]);
+	for (int32 I = 0; I < kStackClips && bAimJump; ++I)
+	{
+		JumpClips[I] = Set.Jump.IsValidIndex(I) ? Set.Jump[I].Get() : nullptr;
+		JumpLengths[I] = JumpClips[I] ? FMath::Max(JumpClips[I]->GetPlayLength(), 0.01f) : 0.f;
+	}
+	// 전환 클립의 거리 곡선과 발 표시를 뽑아 둔다. 표시 이름까지 로그에 남겨 넘어가는 때의 근거를 대조한다
+	for (int32 T = 0; T < kTransitions && bTransitions; ++T)
+	{
+		const UAnimSequence* Clip = JumpClips[kJump + T];
+		TransitionDistances[T].Reset();
+		TransitionMarkers[T].Reset();
+		if (!Clip) continue;
+		const float Length = JumpLengths[kJump + T];
+		const int32 Samples = FMath::CeilToInt32(Length * TRANSITION_TABLE_HZ) + 1;
+		for (int32 S = 0; S < Samples; ++S)
+		{
+			TransitionDistances[T].Add(Clip->EvaluateCurveData(TRANSITION_DISTANCE_CURVE, FAnimExtractContext(FMath::Min((double)S / TRANSITION_TABLE_HZ, (double)Length))));
+		}
+		FString Steps;
+		for (const FAnimSyncMarker& Marker : Clip->AuthoredSyncMarkers)
+		{
+			FStepMarker& Added = TransitionMarkers[T].AddDefaulted_GetRef();
+			Added.Time = Marker.Time;
+			Added.bLeft = Marker.MarkerName == TEXT("L");
+			Steps += FString::Printf(TEXT("%s@%.3f "), *Marker.MarkerName.ToString(), Marker.Time);
+		}
+		FString Notifies;
+		for (const FAnimNotifyEvent& Notify : Clip->Notifies)
+		{
+			if (Notify.NotifyStateClass) Notifies += FString::Printf(TEXT("%s@%.3f+%.3f "), *Notify.NotifyStateClass->GetClass()->GetName(), Notify.GetTriggerTime(), Notify.GetDuration());
+		}
+		int32 Rises = 0;	// 시간이 가며 거리가 다시 작아지는 칸 수 — 0 이어야 거리로 시각을 하나로 찾는다
+		for (int32 K = 1; K < TransitionDistances[T].Num(); ++K) Rises += TransitionDistances[T][K] < TransitionDistances[T][K - 1] - 0.01f ? 1 : 0;
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_TCLIP name=%s length=%.3f dist=%.1f..%.1f falls=%d markers=[%s] states=[%s]"), *Clip->GetName(), Length, TransitionDistances[T][0], TransitionDistances[T].Last(), Rises, *Steps, *Notifies);
+	}
+	RecoveryClip = bAimJump ? Set.Recovery.Get() : nullptr;
+	RecoveryLength = RecoveryClip ? FMath::Max(RecoveryClip->GetPlayLength(), 0.01f) : 0.f;
+	RecoveryAdditiveType = Additive(RecoveryClip);
+	FidgetClip = bAimJump ? Set.Fidget.Get() : nullptr;
+	FidgetLength = FidgetClip ? FMath::Max(FidgetClip->GetPlayLength(), 0.01f) : 0.f;
+
+	// 착지 클립의 땅까지 거리 곡선을 표로 뽑아 둔다 — 공중에서 지금 거리에 맞는 시각을 찾는 데 쓴다
+	LandDistances.Reset();
+	const UAnimSequence* Land = JumpClips[JUMP_LAND];
+	bool bLandCurve = false;
+	if (Land)
+	{
+		for (const FFloatCurve& Curve : Land->GetCurveData().FloatCurves) bLandCurve |= Curve.GetName() == LAND_DISTANCE_CURVE;
+	}
+	if (bLandCurve)
+	{
+		const int32 Samples = FMath::CeilToInt32(JumpLengths[JUMP_LAND] * LAND_TABLE_HZ) + 1;
+		for (int32 S = 0; S < Samples; ++S)
+		{
+			const double Time = FMath::Min((double)S / LAND_TABLE_HZ, (double)JumpLengths[JUMP_LAND]);
+			LandDistances.Add(-Land->EvaluateCurveData(LAND_DISTANCE_CURVE, FAnimExtractContext(Time)));	// 곡선은 땅 위를 음수로 담는다(시작 -203 → 끝 0)
+		}
+	}
+	if (bAimJump)
+	{
+		int32 Rises = 0;	// 시간이 가며 거리가 다시 커지는 칸 수 — 0 이어야 거리로 시각을 하나로 찾는다
+		for (int32 K = 1; K < LandDistances.Num(); ++K) Rises += LandDistances[K] > LandDistances[K - 1] + 0.01f ? 1 : 0;
+		const auto LandAt = [this](float Time) { return LandDistances.Num() > 0 ? LandDistances[FMath::Clamp(FMath::RoundToInt32(Time * LAND_TABLE_HZ), 0, LandDistances.Num() - 1)] : -1.f; };
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_AIMJUMP pitches=%.1f/%.1f/%.1f ready=%.1f/%.1f/%.1f additive=%d/%d stepCycle=%d"),
+			AimPitches[AIM_UP], AimPitches[AIM_CENTER], AimPitches[AIM_DOWN], ReadyAimPitches[AIM_UP], ReadyAimPitches[AIM_CENTER], ReadyAimPitches[AIM_DOWN], AimAdditiveType, ReadyAimAdditiveType, StepCycle);
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_LAND curve=%d samples=%d rises=%d at0=%.1f at0.264=%.1f at0.335=%.1f end=%.1f recovery=%.3f/%d fidget=%.3f"),
+			bLandCurve ? 1 : 0, LandDistances.Num(), Rises, LandAt(0.f), LandAt(0.264f), LandAt(0.335f), LandAt(JumpLengths[JUMP_LAND]), RecoveryLength, RecoveryAdditiveType, FidgetLength);
+		if (!bLandCurve) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL land curve=%s — 착지 클립을 거리로 못 맞춰 떨어지는 중에서 바로 땅에 닿는다"), *LAND_DISTANCE_CURVE.ToString());
+	}
 }
 
 void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSeconds)
@@ -1004,118 +1479,18 @@ void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 		bAimJump = Instance->bAimJump;
 		bTransitions = Instance->bTransitions;
 
-		for (int32 I = 0; I < kClips; ++I)
+		// 한 벌씩 묶어 사본을 떠 두고 처음 쓸 한 벌을 넣는다 — 서버 무기를 이미 받았으면 그 한 벌, 아니면 명령줄 무기
+		ClipSets.SetNum(Instance->LoadedSets.Num());
+		for (int32 S = 0; S < ClipSets.Num(); ++S)
 		{
-			const UAnimSequence* Clip = Instance->LoadedClips.IsValidIndex(I) ? Instance->LoadedClips[I].Get() : nullptr;
-			Clips[I] = Clip;
-			if (!Clip) continue;
-			Lengths[I] = FMath::Max(Clip->GetPlayLength(), 0.01f);
-			RootSpeeds[I] = (float)Clip->ExtractRootMotionFromRange(0.0, Lengths[I], FAnimExtractContext()).GetTranslation().Size() / Lengths[I];
-
-			// 발 표시를 왼발부터 줄 세운다. 왼발·오른발이 번갈아 있고 개수가 짝수여야 한 바퀴 돌아도 발 순서가 안 깨진다
-			const TArray<FAnimSyncMarker>& Markers = Clip->AuthoredSyncMarkers;
-			int32 FirstLeft = 0;
-			while (FirstLeft < Markers.Num() && Markers[FirstLeft].MarkerName != TEXT("L")) ++FirstLeft;
-			FString MarkerList;
-			StepTimes[I].Reset();
-			for (int32 M = 0; M < Markers.Num() && FirstLeft < Markers.Num(); ++M)
-			{
-				const int32 Index = (FirstLeft + M) % Markers.Num();
-				StepTimes[I].Add(Markers[Index].Time + (Index < FirstLeft ? Lengths[I] : 0.f));
-				MarkerList += FString::Printf(TEXT("%s@%.3f "), *Markers[Index].MarkerName.ToString(), Markers[Index].Time);
-			}
-			UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_CLIP name=%s length=%.3f rootSpeed=%.1f steps=%d markers=[%s]"), ClipName(bAimJump, I), Lengths[I], RootSpeeds[I], StepTimes[I].Num(), *MarkerList);
-			if (I != CLIP_IDLE && (StepTimes[I].Num() == 0 || StepTimes[I].Num() % 2 != 0))
-			{
-				UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL steps name=%s count=%d"), ClipName(bAimJump, I), StepTimes[I].Num());
-				Clips[I] = nullptr;		// 발을 못 맞추는 클립은 쓰지 않는다
-			}
+			if (!Instance->LoadedSets[S].Key) continue;
+			BindSet(*Instance, S);
+			SaveSet(ClipSets[S]);
+			const TArray<TObjectPtr<UAnimMontage>>& Montages = Instance->LoadedSets[S].Montages;
+			for (int32 K = 0; K < kMontageKindCount; ++K) ClipSets[S].Montages[K] = Montages.IsValidIndex(K) ? Montages[K].Get() : nullptr;
 		}
-		StepCycle = 1;
-		for (int32 I = CLIP_FWD; I <= CLIP_RIGHT; ++I)
-		{
-			if (Clips[I]) StepCycle = FMath::LeastCommonMultiplier(StepCycle, StepTimes[I].Num());
-		}
-
-		const auto Additive = [](const UAnimSequence* Clip) { return Clip ? (int32)Clip->GetAdditiveAnimType() : (int32)AAT_None; };
-		for (int32 I = 0; I < kAim && bAimJump; ++I)
-		{
-			AimClips[I] = Instance->LoadedAim.IsValidIndex(I) ? Instance->LoadedAim[I].Get() : nullptr;
-			AimPitches[I] = Instance->AimPitches[I];
-			ReadyAimClips[I] = Instance->LoadedReadyAim.IsValidIndex(I) ? Instance->LoadedReadyAim[I].Get() : nullptr;
-			ReadyAimPitches[I] = Instance->ReadyAimPitches[I];
-		}
-		AimAdditiveType = Additive(AimClips[AIM_CENTER]);
-		ReadyAimAdditiveType = Additive(ReadyAimClips[AIM_CENTER]);
-		for (int32 I = 0; I < kStackClips && bAimJump; ++I)
-		{
-			JumpClips[I] = Instance->LoadedJump.IsValidIndex(I) ? Instance->LoadedJump[I].Get() : nullptr;
-			JumpLengths[I] = JumpClips[I] ? FMath::Max(JumpClips[I]->GetPlayLength(), 0.01f) : 0.f;
-		}
-		// 전환 클립의 거리 곡선과 발 표시를 뽑아 둔다. 표시 이름까지 로그에 남겨 넘어가는 때의 근거를 대조한다
-		for (int32 T = 0; T < kTransitions && bTransitions; ++T)
-		{
-			const UAnimSequence* Clip = JumpClips[kJump + T];
-			TransitionDistances[T].Reset();
-			TransitionMarkers[T].Reset();
-			if (!Clip) continue;
-			const float Length = JumpLengths[kJump + T];
-			const int32 Samples = FMath::CeilToInt32(Length * TRANSITION_TABLE_HZ) + 1;
-			for (int32 S = 0; S < Samples; ++S)
-			{
-				TransitionDistances[T].Add(Clip->EvaluateCurveData(TRANSITION_DISTANCE_CURVE, FAnimExtractContext(FMath::Min((double)S / TRANSITION_TABLE_HZ, (double)Length))));
-			}
-			FString Steps;
-			for (const FAnimSyncMarker& Marker : Clip->AuthoredSyncMarkers)
-			{
-				FStepMarker& Added = TransitionMarkers[T].AddDefaulted_GetRef();
-				Added.Time = Marker.Time;
-				Added.bLeft = Marker.MarkerName == TEXT("L");
-				Steps += FString::Printf(TEXT("%s@%.3f "), *Marker.MarkerName.ToString(), Marker.Time);
-			}
-			FString Notifies;
-			for (const FAnimNotifyEvent& Notify : Clip->Notifies)
-			{
-				if (Notify.NotifyStateClass) Notifies += FString::Printf(TEXT("%s@%.3f+%.3f "), *Notify.NotifyStateClass->GetClass()->GetName(), Notify.GetTriggerTime(), Notify.GetDuration());
-			}
-			int32 Rises = 0;	// 시간이 가며 거리가 다시 작아지는 칸 수 — 0 이어야 거리로 시각을 하나로 찾는다
-			for (int32 K = 1; K < TransitionDistances[T].Num(); ++K) Rises += TransitionDistances[T][K] < TransitionDistances[T][K - 1] - 0.01f ? 1 : 0;
-			UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_TCLIP name=%s length=%.3f dist=%.1f..%.1f falls=%d markers=[%s] states=[%s]"), *Clip->GetName(), Length, TransitionDistances[T][0], TransitionDistances[T].Last(), Rises, *Steps, *Notifies);
-		}
-		RecoveryClip = bAimJump ? Instance->LoadedRecovery.Get() : nullptr;
-		RecoveryLength = RecoveryClip ? FMath::Max(RecoveryClip->GetPlayLength(), 0.01f) : 0.f;
-		RecoveryAdditiveType = Additive(RecoveryClip);
-		FidgetClip = bAimJump ? Instance->LoadedFidget.Get() : nullptr;
-		FidgetLength = FidgetClip ? FMath::Max(FidgetClip->GetPlayLength(), 0.01f) : 0.f;
-
-		// 착지 클립의 땅까지 거리 곡선을 표로 뽑아 둔다 — 공중에서 지금 거리에 맞는 시각을 찾는 데 쓴다
-		LandDistances.Reset();
-		const UAnimSequence* Land = JumpClips[JUMP_LAND];
-		bool bLandCurve = false;
-		if (Land)
-		{
-			for (const FFloatCurve& Curve : Land->GetCurveData().FloatCurves) bLandCurve |= Curve.GetName() == LAND_DISTANCE_CURVE;
-		}
-		if (bLandCurve)
-		{
-			const int32 Samples = FMath::CeilToInt32(JumpLengths[JUMP_LAND] * LAND_TABLE_HZ) + 1;
-			for (int32 S = 0; S < Samples; ++S)
-			{
-				const double Time = FMath::Min((double)S / LAND_TABLE_HZ, (double)JumpLengths[JUMP_LAND]);
-				LandDistances.Add(-Land->EvaluateCurveData(LAND_DISTANCE_CURVE, FAnimExtractContext(Time)));	// 곡선은 땅 위를 음수로 담는다(시작 -203 → 끝 0)
-			}
-		}
-		if (bAimJump)
-		{
-			int32 Rises = 0;	// 시간이 가며 거리가 다시 커지는 칸 수 — 0 이어야 거리로 시각을 하나로 찾는다
-			for (int32 K = 1; K < LandDistances.Num(); ++K) Rises += LandDistances[K] > LandDistances[K - 1] + 0.01f ? 1 : 0;
-			const auto LandAt = [this](float Time) { return LandDistances.Num() > 0 ? LandDistances[FMath::Clamp(FMath::RoundToInt32(Time * LAND_TABLE_HZ), 0, LandDistances.Num() - 1)] : -1.f; };
-			UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_AIMJUMP pitches=%.1f/%.1f/%.1f ready=%.1f/%.1f/%.1f additive=%d/%d stepCycle=%d"),
-				AimPitches[AIM_UP], AimPitches[AIM_CENTER], AimPitches[AIM_DOWN], ReadyAimPitches[AIM_UP], ReadyAimPitches[AIM_CENTER], ReadyAimPitches[AIM_DOWN], AimAdditiveType, ReadyAimAdditiveType, StepCycle);
-			UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_LAND curve=%d samples=%d rises=%d at0=%.1f at0.264=%.1f at0.335=%.1f end=%.1f recovery=%.3f/%d fidget=%.3f"),
-				bLandCurve ? 1 : 0, LandDistances.Num(), Rises, LandAt(0.f), LandAt(0.264f), LandAt(0.335f), LandAt(JumpLengths[JUMP_LAND]), RecoveryLength, RecoveryAdditiveType, FidgetLength);
-			if (!bLandCurve) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL land curve=%s — 착지 클립을 거리로 못 맞춰 떨어지는 중에서 바로 땅에 닿는다"), *LAND_DISTANCE_CURVE.ToString());
-		}
+		ActiveSet = ClipSets.IsValidIndex(WantedSet) && ClipSets[WantedSet].bLoaded ? WantedSet : Instance->PrimarySet;
+		if (ClipSets.IsValidIndex(ActiveSet) && ClipSets[ActiveSet].bLoaded) UseSet(ClipSets[ActiveSet]);
 	}
 
 	if (bServerDriven) return;	// 재생 상태는 SetServerFrame 이 넣는다 — 여기서 시간을 쌓지 않는다
@@ -1269,6 +1644,107 @@ void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 	}
 }
 
+// 받은 몽타주 칸을 끼움 자리 넷에 얹는다(9단계 5-a, 손가락 · 꼬임 뼈 몫 — 판정 뼈는 끝에서 서버 자세가 덮는다).
+// 칸은 엔진 몽타주 평가 자료(MontageEvaluationData)로 넣는다. 엔진은 갱신마다 재생 중인 몽타주로 이 자료를 다시 채우는데(UAnimInstance::UpdateMontageEvaluationData)
+// 이 인스턴스는 몽타주를 틀지 않아 빈 채로 온다 → 평가 안에서 채워 이번 평가가 쓰고, 다음 갱신이 다시 비운다.
+// 자리 차례 · 뼈 가림은 서버 자세 계산과 같다(Shared/AnimPose.cpp kSlotOrder · ApplySlot — 자리마다 SlotEvaluatePose 뒤, 비중 표가 있으면 아래 자세와 뼈별로 섞는다 · 메시 기준 회전)
+void FMOBSimpleAnimProxy::ApplyMontages(FPoseContext& Output)
+{
+	static_assert(kMontageCells == mo::kAnimMontageMax, "몽타주 칸 수 = Shared kAnimMontageMax");
+	static_assert(kMontageKindCount == mo::MONTAGE_KIND_COUNT && kMontageKinds == mo::MONTAGE_KIND_COUNT, "몽타주 종류 수 = Shared MONTAGE_KIND_COUNT");
+	static const FName UPPER_BODY_MASK(TEXT("UpperBodyMask"));		// 클립 파일을 뽑을 때 윗몸 두 자리에 붙인 비중 표(make_clip_pack.py SLOTS)
+	struct FSlot
+	{
+		FName Name;
+		bool bMasked;
+	};
+	static const FSlot SLOTS[] = {
+		{ FName(TEXT("FullBody")), false },
+		{ FName(TEXT("FullBodyAdditivePreAim")), false },
+		{ FName(TEXT("UpperBody")), true },
+		{ FName(TEXT("UpperBodyAdditive")), true },
+	};
+
+	SlotPasses = 0;
+	TArray<FMontageEvaluationState>& Data = GetMontageEvaluationData();
+	Data.Reset();
+	for (int32 I = 0; I < MontageCellCount; ++I)
+	{
+		const FMontageCell& Cell = MontageCells[I];
+		// 엔진이 쓰는 비중 = BlendInfo.GetBlendedValue(). 시작 0 · 목표 = 받은 비중 · 진행 1 이면 꼭 받은 비중이다(FAlphaBlend::SetAlpha, 기본 직선)
+		FAlphaBlend Blend;
+		Blend.SetValueRange(0.f, Cell.Weight);
+		Blend.SetAlpha(1.f);
+		Data.Emplace(Cell.Montage, Cell.Position, FDeltaTimeRecord(), true, true, Blend, nullptr, 1.f);
+	}
+	if (Data.Num() == 0) return;
+
+	// 윗몸 뼈 가림 — 엔진 FAnimNode_LayeredBoneBlend::UpdateCachedBoneData 와 같은 차례로 만든다(뼈대 차례 → 압축 뼈 차례, 층 비중 1)
+	const FBoneContainer& Bones = Output.Pose.GetBoneContainer();
+	if (UpperMaskSerial != Bones.GetSerialNumber() || UpperMaskWeights.Num() != Output.Pose.GetNumBones())
+	{
+		UpperMaskSerial = Bones.GetSerialNumber();
+		UpperMaskWeights.Reset();
+		USkeleton* MaskSkeleton = GetSkeleton();
+		UBlendProfile* Mask = MaskSkeleton ? MaskSkeleton->GetBlendProfile(UPPER_BODY_MASK) : nullptr;
+		bUpperMaskMissing = !Mask || Mask->Mode != EBlendProfileMode::BlendMask;
+		if (!bUpperMaskMissing)
+		{
+			TArray<FPerBoneBlendWeight> BySkeleton;
+			const TArray<UBlendProfile*> Masks = { Mask };
+			FAnimationRuntime::CreateMaskWeights(BySkeleton, Masks, MaskSkeleton);
+			const TArray<FBoneIndexType>& Required = Bones.GetBoneIndicesArray();
+			TArray<FPerBoneBlendWeight> Desired;
+			Desired.SetNumZeroed(Required.Num());
+			for (int32 R = 0; R < Required.Num(); ++R)
+			{
+				const int32 SkeletonBone = Bones.GetSkeletonIndex(FCompactPoseBoneIndex(R));
+				if (BySkeleton.IsValidIndex(SkeletonBone)) Desired[R] = BySkeleton[SkeletonBone];
+			}
+			UpperMaskWeights.SetNumZeroed(Required.Num());
+			float LayerWeights[1] = { 1.f };
+			FAnimationRuntime::UpdateDesiredBoneWeight(Desired, UpperMaskWeights, TArrayView<float>(LayerWeights, 1));
+		}
+	}
+
+	for (const FSlot& Slot : SLOTS)
+	{
+		float SlotWeight = 0.f, SourceWeight = 0.f, TotalWeight = 0.f;
+		GetSlotWeight(Slot.Name, SlotWeight, SourceWeight, TotalWeight);
+		if (SlotWeight <= ZERO_ANIMWEIGHT_THRESH) continue;
+		++SlotPasses;
+
+		FPoseContext Source(Output);
+		Source = Output;
+		if (!Slot.bMasked || bUpperMaskMissing)
+		{
+			// 비중 표가 없는 자리(또는 표를 못 찾음) — 엔진 끼움 노드(FAnimNode_Slot::Evaluate_AnyThread)처럼 아래 자세 위에 바로 얹는다
+			FAnimationPoseData SourceData(Source);
+			FAnimationPoseData OutputData(Output);
+			SlotEvaluatePose(Slot.Name, SourceData, SourceWeight, OutputData, SlotWeight, TotalWeight);
+			continue;
+		}
+		FPoseContext Slotted(Output);
+		{
+			FAnimationPoseData SourceData(Source);
+			FAnimationPoseData SlottedData(Slotted);
+			SlotEvaluatePose(Slot.Name, SourceData, SourceWeight, SlottedData, SlotWeight, TotalWeight);
+		}
+		TArray<FCompactPose, TInlineAllocator<1>> Targets;
+		TArray<FBlendedCurve, TInlineAllocator<1>> TargetCurves;
+		TArray<UE::Anim::FStackAttributeContainer, TInlineAllocator<1>> TargetAttributes;
+		Targets.SetNum(1);
+		TargetCurves.SetNum(1);
+		TargetAttributes.SetNum(1);
+		Targets[0].MoveBonesFrom(Slotted.Pose);
+		TargetCurves[0].MoveFrom(Slotted.Curve);
+		TargetAttributes[0].MoveFrom(Slotted.CustomAttributes);
+		FAnimationPoseData OutputData(Output);
+		FAnimationRuntime::BlendPosesPerBoneFilter(Source.Pose, Targets, Source.Curve, TargetCurves, Source.CustomAttributes, TargetAttributes, OutputData, UpperMaskWeights,
+			FAnimationRuntime::EBlendPosesPerBoneFilterFlags::MeshSpaceRotation, ECurveBlendOption::Override);
+	}
+}
+
 bool FMOBSimpleAnimProxy::Evaluate(FPoseContext& Output)
 {
 	// 서기 자리는 대기 몸짓이 있으면 그 몫만큼 나눠 준다(FIDGET_SLOT)
@@ -1322,8 +1798,10 @@ bool FMOBSimpleAnimProxy::Evaluate(FPoseContext& Output)
 	if (bAimJump)
 	{
 		// 차례 = 걸음 · 점프 → 착지 충격 덧붙임 → 조준 보정. Lyra 그래프의 차례는 열어 보지 않았다(둘 다 덧붙임이라 바뀌어도 차이는 작다)
+		// 서버 구동이면 착지 충격과 조준 사이에 몽타주 자리 넷을 얹는다 — 서버 자세 계산과 같은 차례(Shared/AnimPose.cpp EvaluateLocal, D50)
 		ApplyJump(Output);
 		ApplyRecovery(Output);
+		if (bServerDriven) ApplyMontages(Output);
 		ApplyAim(Output);
 		ApplyHandIK(Output);	// 실행값: 손은 IK 총 뼈에 붙고(공중 거리 0.0), 그 뒤 발 디딤 내림이 손까지 함께 내린다(땅 거리 4.0)
 	}
@@ -1415,9 +1893,65 @@ bool MOBGetSimpleAimJump(const ACharacter* Character, float& OutPitch, int32& Ou
 	return true;
 }
 
-void UMOBSimpleAnimInstance::SetServerFrame(const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames)
+void UMOBSimpleAnimInstance::SetServerFrame(const mo::AnimPoseInput& Input, int32 Weapon, const int32* MontageWeapons, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames, FMOBServerAnimResult& Out)
 {
-	GetProxyOnGameThread<FMOBSimpleAnimProxy>().SetServerFrame(Input, Local, Count, BoneNames);
+	GetProxyOnGameThread<FMOBSimpleAnimProxy>().SetServerFrame(Input, Weapon, MontageWeapons, Local, Count, BoneNames, Out);
+}
+
+void UMOBSimpleAnimInstance::StepServerMontages(const mo::AnimPoseInput& Input, uint32 StateTick, const int32* MontageWeapons, bool bContinue, FMOBServerAnimResult& Out)
+{
+	TArray<FMOBSimpleAnimProxy::FMontageStep, TInlineAllocator<FMOBSimpleAnimProxy::kMontageCells>> Steps;
+	GetProxyOnGameThread<FMOBSimpleAnimProxy>().StepMontages(Input, StateTick, MontageWeapons, bContinue, Out, Steps);
+	++Out.StepStates;
+
+	// 몽타주 알림 — 칸마다 앞 상태에서 지난 구간(앞 시각 < 알림 시각 ≤ 지금 시각, 새 칸은 0 부터)에 든 것만 튼다.
+	// 트는 것 = 무기 메시 몽타주(Lyra 기록의 AN_PlayWeaponMontage — 총의 노리쇠 · 탄창 움직임) · 소리(AnimNotify_PlaySound — 재장전 · 꺼내기 소리).
+	// 나머지(SaveAttack · ResetCombo 같은 이름만 있는 알림, 알림 구간)는 안 튼다 — 게임 사건으로 남의 캐릭터 능력이 켜질 수 있다
+	USkeletalMeshComponent* Mesh = GetSkelMeshComponent();
+	for (const FMOBSimpleAnimProxy::FMontageStep& Step : Steps)
+	{
+		if (!Mesh || !Step.Montage || Step.To <= Step.From) continue;
+		for (const FAnimNotifyEvent& Event : Step.Montage->Notifies)
+		{
+			UAnimNotify* Notify = Event.Notify;
+			if (!Notify) continue;
+			const float At = Event.GetTriggerTime();
+			const bool bInside = (Step.From < 0.f ? At >= 0.f : At > Step.From) && At <= Step.To;
+			if (!bInside) continue;
+			const bool bWeaponMontage = Notify->GetClass()->GetName().Contains(TEXT("PlayWeaponMontage"));
+			if (!bWeaponMontage && !Notify->IsA<UAnimNotify_PlaySound>()) continue;
+			Notify->Notify(Mesh, Step.Montage, FAnimNotifyEventReference(&Event, Step.Montage));
+			if (!bWeaponMontage)
+			{
+				++Out.SoundNotifies;
+				continue;
+			}
+			++Out.WeaponNotifies;
+			// 알림이 무기를 실제로 움직였나 — 붙은 액터 중 몸과 뼈대가 다른 메시(무기)에 몽타주가 돌고 있으면 센다
+			const USkeleton* BodySkeleton = Mesh->GetSkeletalMeshAsset() ? Mesh->GetSkeletalMeshAsset()->GetSkeleton() : nullptr;
+			TArray<AActor*> Attached;
+			if (AActor* Owner = Mesh->GetOwner()) Owner->GetAttachedActors(Attached, true, true);
+			bool bPlaying = false;
+			for (const AActor* Actor : Attached)
+			{
+				TInlineComponentArray<USkeletalMeshComponent*> Meshes(Actor);
+				for (const USkeletalMeshComponent* Other : Meshes)
+				{
+					const USkeletalMesh* OtherAsset = Other->GetSkeletalMeshAsset();
+					const UAnimInstance* OtherAnim = Other->GetAnimInstance();
+					if (OtherAsset && OtherAsset->GetSkeleton() != BodySkeleton && OtherAnim && OtherAnim->IsAnyMontagePlaying()) bPlaying = true;
+				}
+			}
+			Out.WeaponPlaying += bPlaying ? 1 : 0;
+		}
+	}
+}
+
+void UMOBSimpleAnimInstance::ReadEvaluateResult(FMOBServerAnimResult& Out)
+{
+	const FMOBSimpleAnimProxy& Proxy = GetProxyOnGameThread<FMOBSimpleAnimProxy>();
+	Out.SlotPasses = Proxy.GetSlotPasses();
+	Out.bMaskMissing = Proxy.IsMaskMissing();
 }
 
 void UMOBSimpleAnimInstance::GetAimJump(float& OutPitch, int32& OutJumpClip, float& OutJumpWeight)
@@ -1524,19 +2058,45 @@ bool UMOBSimpleAnimInstance::DumpClips(int32 SampleHz, FString& Out)
 		Out += FString::Printf(TEXT("MOVE,groundFriction,%.6f,brakingFriction,%.6f,brakingFrictionFactor,%.6f,separateBraking,%d,brakingDecelerationWalking,%.6f,gravityZ,%.6f,maxWalkSpeed,%.6f\n"),
 			Move->GroundFriction, Move->BrakingFriction, Move->BrakingFrictionFactor, Move->bUseSeparateBrakingFriction ? 1 : 0, Move->BrakingDecelerationWalking, Move->GetGravityZ(), Move->MaxWalkSpeed);
 	}
-	Proxy.AppendClipDump(Out, SampleHz, Keep);
+	Out += FString::Printf(TEXT("WEAPON,%s\n"), WeaponKey);
+
+	// 몽타주(9단계 3-a) — 뽑을 때만 읽는다. 재생(단순 재생 · 서버 구동)은 몽타주를 안 쓴다
+	TArray<const UAnimMontage*> Montages;
+	const UAnimSequence* OverridePose = nullptr;
+	const FWeaponMontageNames* MontageNames = nullptr;
+	for (const FWeaponMontageNames& Names : WEAPON_MONTAGES)
+	{
+		if (FCString::Strcmp(Names.Key, WeaponKey) == 0) MontageNames = &Names;
+	}
+	if (!MontageNames) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL montages weapon=%s — 몽타주 이름 표에 없다"), WeaponKey);
+	for (int32 K = 0; MontageNames && K < kMontageKinds; ++K)
+	{
+		const UAnimMontage* Montage = LoadObject<UAnimMontage>(nullptr, MontageNames->Montages[K]);
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_MONTAGE kind=%d path=%s ok=%d"), K, MontageNames->Montages[K], Montage ? 1 : 0);
+		if (!Montage) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL montage=%s"), MontageNames->Montages[K]);
+		Montages.Add(Montage);
+	}
+	if (MontageNames)
+	{
+		OverridePose = LoadObject<UAnimSequence>(nullptr, MontageNames->OverridePose);
+		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_MONTAGE override=%s ok=%d"), MontageNames->OverridePose, OverridePose ? 1 : 0);
+		if (!OverridePose) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL override=%s"), MontageNames->OverridePose);
+	}
+	Proxy.AppendClipDump(Out, SampleHz, Keep, Montages, OverridePose);
 	return true;
 }
 
-bool MOBSetServerAnim(ACharacter* Character, const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames)
+bool MOBSetServerAnim(ACharacter* Character, const mo::AnimPoseInput& Input, int32 Weapon, const int32* MontageWeapons, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames, FMOBServerAnimResult& OutResult)
 {
+	OutResult = FMOBServerAnimResult();
 	USkeletalMeshComponent* Mesh = Character ? Character->GetMesh() : nullptr;
 	UMOBSimpleAnimInstance* Instance = Mesh ? Cast<UMOBSimpleAnimInstance>(Mesh->GetAnimInstance()) : nullptr;
 	if (!Instance) return false;
-	Instance->SetServerFrame(Input, Local, Count, BoneNames);
+	Instance->SetServerFrame(Input, Weapon, MontageWeapons, Local, Count, BoneNames, OutResult);
 
 	// 다리는 액터 틱이 다 끝난 뒤에 돈다. 여기서 안 당기면 이번 프레임에 그려지는 자세가 위치보다 한 프레임 늦다(쏠 때 보고하는 시점과 어긋난다)
 	Mesh->RefreshBoneTransforms();
+	Instance->ReadEvaluateResult(OutResult);
 	const USkeletalMesh* Asset = Mesh->GetSkeletalMeshAsset();
 	const USkeleton* Skeleton = Asset ? Asset->GetSkeleton() : nullptr;
 	TArray<AActor*> Attached;
@@ -1552,6 +2112,15 @@ bool MOBSetServerAnim(ACharacter* Character, const mo::AnimPoseInput& Input, con
 			Body->RefreshBoneTransforms();
 		}
 	}
+	return true;
+}
+
+bool MOBStepServerMontages(ACharacter* Character, const mo::AnimPoseInput& Input, uint32 StateTick, const int32* MontageWeapons, bool bContinue, FMOBServerAnimResult& InOutResult)
+{
+	USkeletalMeshComponent* Mesh = Character ? Character->GetMesh() : nullptr;
+	UMOBSimpleAnimInstance* Instance = Mesh ? Cast<UMOBSimpleAnimInstance>(Mesh->GetAnimInstance()) : nullptr;
+	if (!Instance) return false;
+	Instance->StepServerMontages(Input, StateTick, MontageWeapons, bContinue, InOutResult);
 	return true;
 }
 

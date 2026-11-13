@@ -368,6 +368,10 @@ int main(int argc, char** argv)
 		const double reloadDiff = std::fabs(reloadExpected - d.reloadSeconds);
 		std::printf("MONTAGE %-8s fire %.6f / %.2f = %.6f (표 %.6f) | reload %.6f / %.2f = %.6f (표 %.6f)\n", d.name, mi.fireLength, mi.fireRate, fireExpected, d.fireMontageSeconds, mi.reloadNotify, mi.reloadRate, reloadExpected, d.reloadSeconds);
 		if (missing || fireDiff > 0.00001 || reloadDiff > 0.00001) failed = true;
+		// 서버 애니 상태가 몽타주를 트는 속도(9단계 조각 4) — 표의 속도 칸이 기록의 재생 속도와 같아야 한다
+		const double rateDiff = std::max(std::fabs(mi.fireRate - d.autoRate), std::fabs(mi.reloadRate - d.reloadRate));
+		std::printf("MONTAGERATE %-8s fire 기록 %.4f 표 %.4f | reload 기록 %.4f 표 %.4f\n", d.name, mi.fireRate, d.autoRate, mi.reloadRate, d.reloadRate);
+		if (rateDiff > 0.00001) failed = true;
 	}
 
 	// ─── 3. 발사 순환 ──────────────────────────────────────

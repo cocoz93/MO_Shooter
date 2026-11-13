@@ -39,9 +39,15 @@ namespace mo
 		bool log = false;							// 대조 전용 — 쏠 때마다 되감은 자리를 찍는다
 		bool bulletLog = false;						// 측정 전용 — 탄마다 결과 한 줄(BULLET). 봇 판정과 (쏜 사람, 입력 번호, 탄 번호)로 잇는다
 		bool noSpread = false;		// 측정 전용 — 무기 퍼짐을 빼고 조준점 그대로 쏜다. 퍼짐(3~14도)이 21m 교전 거리의 몸 크기(약 2도)보다 커서 되감기 효과를 가리는지 가르려고
+		uint32_t montageShiftTicks = 0;	// 일부러 틀림 전용 --rewindMontageShift=틱 — 판정이 되감기 기록을 풀 때 몽타주 시각만 민다(Room.cpp JudgeAnim).
+										// 기록 · 보내는 상태는 그대로라 화면 대조(VIEWPOSE) · 봇 오탈이 몽타주 중 쏨에서만 벌어져야 한다(9단계 플랜 9-5 · 9-6)
 	};
 
-	inline constexpr const char* kAnimBundleName = "rifle";		// 지금은 소총 묶음 하나다. 권총 · 샷건은 소총 합격 뒤(D37)
+	// 무기마다 자세 묶음이 하나 — 묶음 이름 = 무기 이름(9단계). 샷건 묶음은 소총 클립 그대로다(D45)
+	inline const char* AnimBundleOf(uint8_t weapon) { return GetWeaponDef((EWeapon)weapon).name; }
+
+	// 서버가 애니 상태에 넘기는 사건(9단계 조각 4). 틱 안에서 생긴 차례대로 쌓아 그 틱 애니 갱신 앞에 몽타주로 튼다
+	enum class EAnimEvent : uint8_t { Spawn, Swap, Fire, Reload, Count };
 
 	// 클립을 주면 몸 판정이 서 있는 자세 대신 그 시점의 애니 자세를 쓴다(D32). 비어 있으면 지금까지와 같다
 	struct AnimOptions
@@ -121,6 +127,17 @@ namespace mo
 		uint64_t poseReused = 0;				// 같은 틱에 같은 대상 · 같은 시점을 구해 둔 것을 씀
 		uint64_t poseSkipped = 0;				// 탄이 몸 근처에도 안 와 자세를 안 구함
 		uint64_t animUpdates = 0;				// 애니 상태 갱신 — 살아 있는 사람 × 틱. 입력이 몇 개 왔든 틱당 1회
+		uint64_t poseEvalsByWeapon[(size_t)EWeapon::Count] = {};	// poseEvals 를 그 틱 자세 묶음(무기)별로. 합 = poseEvals
+		uint64_t weaponChanges = 0;				// 입력이 든 무기를 바꿈
+		uint64_t animBundleChanges = 0;			// 자세 묶음을 바꿈 — 틱마다 한 번이라 한 틱에 두 번 바꾸면 weaponChanges 보다 적다
+		uint64_t animBundleFails = 0;			// 묶음 바꾸기 실패 — 시작할 때 세 묶음을 다 확인하므로 0 이어야 한다
+		// 몽타주(9단계 조각 4) — 종류마다 사건 수 = 튼 수 + 버린 사건 몫. 교체 한 번은 빼기 · 꺼내기 둘을 튼다(9-1 기록)
+		uint64_t animEvents[(size_t)EAnimEvent::Count] = {};		// 쌓은 사건(EAnimEvent 차례)
+		uint64_t animEventsDropped[(size_t)EAnimEvent::Count] = {};	// 틀기 전에 버린 사건 — 같은 틱에 죽었거나 시험용 자리 옮기기 · 칸 넘침
+		uint64_t montageStarts[(size_t)MONTAGE_KIND_COUNT] = {};	// 튼 몽타주(EMontageKind 차례)
+		uint64_t montageFails = 0;				// 묶음에 그 종류가 없어 못 틈 — 시작할 때 세 묶음을 다 읽으므로 0 이어야 한다
+		uint64_t reloadCancels = 0;				// 쏘기가 재장전 칸을 먼저 끔
+		uint64_t montageDrops = 0;				// 칸이 차서 버린 몽타주(플랜 montageDropped). 0 이 아니면 칸 수를 다시 본다
 		uint64_t stateBytesMax = 0;				// S2C_STATE 의 가장 큰 크기. 합치지 않고 최대를 남긴다(AddRoomStats)
 
 		// 틱 안에서 쓴 시간 — 어느 구간이 가장 오래 걸렸나
@@ -160,6 +177,7 @@ namespace mo
 		static constexpr int kInputQueueSize = 32;		// 0.53초치
 		static constexpr int kMaxInputTokens = 8;		// 입력이 밀렸을 때 한 틱에 더 꺼낼 수 있는 한도
 		static constexpr int kIdleMoveAfterTicks = 15;	// 입력이 이만큼 안 오면 빈 입력으로 움직임
+		static constexpr int kAnimEventsPerTick = 1 + 3 * kMaxInputTokens;	// 부활 하나 + 입력마다 교체 · 쏘기 · 재장전. 넘치면 버리고 센다
 
 		struct QueuedInput
 		{
@@ -177,6 +195,7 @@ namespace mo
 			float pitch = 0;
 			bool alive = false;
 			wire::AnimStateWire anim{};
+			uint8_t animWeapon = 0;			// anim 을 만든 자세 묶음(무기 번호) — 판정은 이 묶음으로 푼다
 		};
 
 		struct Player
@@ -208,6 +227,14 @@ namespace mo
 			int queueCount = 0;
 			std::array<RewindSample, kRewindLimitTicks + 1> rewindHistory;	// 틱 % 크기 자리. 한도 18틱 + 보간용 1칸
 			CAnimState anim;
+			uint8_t animWeapon = 0;			// anim 이 쓰는 자세 묶음. 무기를 바꾼 틱의 UpdateAnimStates 에서 weapon 을 따라간다
+			struct AnimEvent
+			{
+				EAnimEvent kind;
+				uint8_t weapon;				// 몽타주를 찾을 묶음(그 사건의 무기)
+			};
+			std::array<AnimEvent, kAnimEventsPerTick> animEvents;		// 이번 틱 사건 — 입력 · 부활에서 쌓고 UpdateAnimStates 가 비운다
+			int animEventCount = 0;
 		};
 
 		// 몸 하나를 어느 시점 자세로 판정하나 — _bodies 와 같은 차례
@@ -266,6 +293,9 @@ namespace mo
 		void RecordRewindSamples();
 		bool GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out, float& outAlpha) const;
 		void UpdateAnimStates();
+		void PushAnimEvent(Player& player, EAnimEvent kind, uint8_t weapon);
+		void DropAnimEvents(Player& player);
+		void PlayAnimEvents(Player& player);
 		void MakeMoveInput(const Player& player, AnimMoveInput& out) const;
 		void PrepareBodyPoses(std::vector<BodyPlacement>& bodies, const std::vector<BodyPoseRef>& refs, const Vec3& start, const Vec3& end, double sweepRadius);
 		const BodyPose* GetPoseAt(const Player& owner, uint32_t tick, float alpha, bool countStats = true);
@@ -303,8 +333,9 @@ namespace mo
 		std::vector<BodyPlacement> _bodiesNow;	// --rewindShadow 일 때만 — 같은 탄을 현재 자리로 계산
 		std::vector<Player*> _bodyOwners;
 		bool _animReady = false;
-		CAnimPoseEvaluator _poseEvaluator;
-		CAnimState _animCodec;					// 받은 상태를 자세 입력으로 푸는 데만 쓴다 — 재생 상태는 안 쓴다
+		std::array<CAnimPoseEvaluator, (size_t)EWeapon::Count> _poseEvaluators;	// 무기 번호 차례 — 묶음마다 하나
+		std::array<CAnimState, (size_t)EWeapon::Count> _animCodecs;			// 받은 상태를 자세 입력으로 푸는 데만 쓴다 — 재생 상태는 안 쓴다
+		std::array<int, (size_t)EWeapon::Count> _animBundleIndex{};			// 무기 번호 → 클립 파일의 묶음 차례(몽타주를 그 묶음에서 찾는다)
 		std::vector<BodyPoseRef> _bodyPoseRefs;
 		std::vector<BodyPoseRef> _bodyNowRefs;
 		std::vector<CachedPose> _poseCache;

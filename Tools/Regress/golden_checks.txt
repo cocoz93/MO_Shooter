@@ -29,8 +29,11 @@ weapon DAMAGE  pistol   samples=116 nonZero=87 allySamples=29 allyNonZero=0 maxD
 weapon DAMAGE  rifle    samples=116 nonZero=87 allySamples=29 allyNonZero=0 maxDiff=0.0000 over0.01=0
 weapon DAMAGE  shotgun  samples=116 nonZero=87 allySamples=29 allyNonZero=0 maxDiff=0.0008 over0.01=0
 weapon MONTAGE pistol   fire 0.666667 / 1.00 = 0.666667 (표 0.666667) | reload 1.631531 / 1.50 = 1.087687 (표 1.087687)
+weapon MONTAGERATE pistol   fire 기록 1.0000 표 1.0000 | reload 기록 1.5000 표 1.5000
 weapon MONTAGE rifle    fire 0.533000 / 1.00 = 0.533000 (표 0.533000) | reload 1.746580 / 1.00 = 1.746580 (표 1.746580)
+weapon MONTAGERATE rifle    fire 기록 1.0000 표 1.0000 | reload 기록 1.0000 표 1.0000
 weapon MONTAGE shotgun  fire 0.666667 / 2.20 = 0.303030 (표 0.303030) | reload 2.243124 / 1.00 = 2.243124 (표 2.243124)
+weapon MONTAGERATE shotgun  fire 기록 2.2000 표 2.2000 | reload 기록 1.0000 표 1.0000
 weapon CYCLE   pistol   frames=7196 shots lyra=199 sim=199 | magDiff=0 spareDiff=0 firstBad=seg-1:f-1 | reloads lyra=13 sim=13 | heatMax=0.0000 spreadMax=0.0000 multMax=0.0002 firstShotDiff=0
 weapon         gaps lyra: 9:176 71:1 79:2 87:1 92:1 107:1 109:2 111:2 112:1 116:1 121:1 152:1 164:1 171:1 175:1 220:1 248:1 | sim: 9:176 71:1 79:2 87:1 92:1 107:1 109:2 111:2 112:1 116:1 121:1 152:1 164:1 171:1 175:1 220:1 248:1 | reload frames lyra: 57:1 65:1 132:1 149:1 174:1 188:1
 weapon CYCLE   rifle    frames=7137 shots lyra=288 sim=288 | magDiff=0 spareDiff=0 firstBad=seg-1:f-1 | reloads lyra=7 sim=7 | heatMax=0.0000 spreadMax=0.0000 multMax=0.0000 firstShotDiff=0

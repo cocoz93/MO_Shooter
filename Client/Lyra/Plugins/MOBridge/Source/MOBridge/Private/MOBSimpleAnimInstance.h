@@ -7,8 +7,24 @@
 
 class ACharacter;
 class UAnimSequence;
+class UAnimMontage;
 
 namespace mo { struct AnimPoseInput; struct BoneTransform; }
+
+// 서버 구동 한 프레임의 결과 — 다리가 센다(9단계 5-a)
+struct FMOBServerAnimResult
+{
+	int32 SetChange = 0;		// 0 그대로 · 1 클립 한 벌을 갈아 넣음 · -1 그 무기 한 벌이 없음
+	int32 MontageCells = 0;		// 언리얼 경로(손가락 · 꼬임 뼈)에 넣은 몽타주 칸 수
+	int32 MontageMisses = 0;	// 무기 번호 · 몽타주 자산이 없어 못 넣은 칸 수
+	int32 SlotPasses = 0;		// 이번 갱신에서 엔진 SlotEvaluatePose 를 부른 끼움 자리 수(넣은 칸이 실제로 자세에 들어갔나)
+	bool bMaskMissing = false;	// 윗몸 자리 뼈 가림(UpperBodyMask)을 못 찾았다 — 윗몸 자리를 통째로 얹는다
+	int32 WeaponNotifies = 0;	// 이번에 튼 무기 메시 몽타주 알림 수
+	int32 WeaponPlaying = 0;	// 그중 튼 직후 붙은 무기 메시에 몽타주가 돌고 있던 수(알림이 실제로 무기를 움직였나)
+	int32 SoundNotifies = 0;	// 이번에 튼 소리 알림 수
+	int32 MontageRestarts = 0;	// 같은 자산 · 앞서지 않은 시각의 앞 칸이 있었지만, 틱 차이만큼 못 나가 새 칸으로 본 수(앞 상태와 틱이 벌어져 옛 칸이 빠지고 새 칸이 같은 자산으로 선 때)
+	int32 StepStates = 0;		// 알림을 훑은 받은 상태 수(지난 프레임 뒤로 받은 상태 전부)
+};
 
 /**
  * 화면 시험용 — 상대 캐릭터를 Lyra 애니 구성 대신 소총 클립 5개를 섞는 단순 재생으로 움직인다.
@@ -34,6 +50,7 @@ namespace mo { struct AnimPoseInput; struct BoneTransform; }
  *   점프 쌓기(JumpStack)와 거리 곡선 표를 같이 쓴다. 보폭 보정 · 방향 틀기 · 달리며 몸 기울이기는 이 판에도 없다
  * -MOBServerAnim 이면(후보 1, D32) 남의 캐릭터는 프레임마다 시간을 쌓지 않고 서버가 보낸 상태를 그대로 쓴다.
  *   자세는 서버와 같은 Shared/AnimPose 한 벌로 계산해, 클립 파일의 27뼈(판정 뼈 · 그 조상 · 손 뼈)를 Evaluate 끝에서 덮는다. 손가락 · 꼬임 뼈는 아래 언리얼 경로가 맡는다
+ *   언리얼 경로도 무기마다 클립 한 벌을 읽어 두고, 받은 무기 번호로 갈아 넣는다(9단계) — 안 그러면 권총을 든 몸에 소총 손가락이 붙는다
  */
 USTRUCT()
 struct FMOBSimpleAnimProxy : public FAnimInstanceProxy
@@ -46,6 +63,16 @@ struct FMOBSimpleAnimProxy : public FAnimInstanceProxy
 	static constexpr int32 kJumpStack = 4;	// 점프 전환이 겹칠 때 함께 섞이는 상태 수의 상한(Lyra 실행값에서 많아야 셋)
 	static constexpr int32 kTransitions = 12;	// 네 방향 × 출발 · 멈춤 · 돌아서기(-MOBSimpleTransitions)
 	static constexpr int32 kStackClips = kJump + kTransitions;	// 쌓기가 틀 수 있는 클립 수. 번호 = 점프 5개 뒤에 종류 × 4 + 방향
+	static constexpr int32 kMontageKindCount = 5;	// 몽타주 종류 수(Shared/AnimClips.h MONTAGE_KIND_COUNT — cpp 에서 같은지 본다)
+	static constexpr int32 kMontageCells = 3;		// 함께 도는 몽타주 칸 수의 상한(Shared/AnimPose.h kAnimMontageMax — cpp 에서 같은지 본다)
+
+	// 몽타주 칸 하나가 앞 상태에서 이 상태까지 지나간 구간 — 알림을 틀 때 쓴다. From < 0 = 새로 생긴 칸(시각 0 부터 본다)
+	struct FMontageStep
+	{
+		UAnimMontage* Montage = nullptr;
+		float From = -1.f;
+		float To = 0.f;
+	};
 
 	FMOBSimpleAnimProxy() {}
 	FMOBSimpleAnimProxy(UAnimInstance* InAnimInstance) : FAnimInstanceProxy(InAnimInstance) {}
@@ -53,12 +80,22 @@ struct FMOBSimpleAnimProxy : public FAnimInstanceProxy
 	void ResetPlayback();
 
 	// 서버 구동(-MOBServerAnim) — 받은 상태와 계산해 둔 자세를 넣는다. 게임 스레드에서만 부른다. Local 은 BoneNames 차례의 뼈별 변환(부모 뼈 기준)
-	void SetServerFrame(const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames);
+	// Weapon = 서버 무기 번호(EWeapon) — 지금 클립 한 벌과 다르면 그 무기 한 벌로 갈아 넣는다(Out.SetChange 0 = 그대로 · 1 = 갈아 넣음 · -1 = 그 무기 한 벌이 없음)
+	// MontageWeapons = Input.montages 칸마다의 서버 무기 번호(-1 = 모름) — 언리얼 경로 몽타주는 그 무기 한 벌의 자산을 쓴다
+	void SetServerFrame(const mo::AnimPoseInput& Input, int32 Weapon, const int32* MontageWeapons, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames, FMOBServerAnimResult& Out);
+	// 알림용 — 받은 상태 하나의 몽타주 칸마다 앞 상태에서 지난 구간을 OutSteps 에 낸다. 받은 상태를 틱 차례로 하나씩 넣는다.
+	// StateTick = 그 상태의 서버 틱(앞 상태와의 틱 차이로 칸이 이어졌나를 가른다). bContinue = false 면 앞 칸을 버리고 모두 새 칸으로 본다
+	void StepMontages(const mo::AnimPoseInput& Input, uint32 StateTick, const int32* MontageWeapons, bool bContinue, FMOBServerAnimResult& Out, TArray<FMontageStep, TInlineAllocator<kMontageCells>>& OutSteps);
+	// 마지막 Evaluate 가 SlotEvaluatePose 를 부른 자리 수 · 뼈 가림을 못 찾았나. 게임 스레드에서 자세 갱신을 마친 뒤에만 읽는다
+	int32 GetSlotPasses() const { return SlotPasses; }
+	bool IsMaskMissing() const { return bUpperMaskMissing; }
 
 	// 대조 기록용 — 이번 프레임 자세에 쓴 가중치와 클립 시각을 그대로 내준다(언리얼 밖 계산의 입력)
 	void GetState(float OutWeights[kClips], float OutTimes[kClips]) const;
 	// 대조 기록용 — 클립 5개의 뼈별 변환(부모 뼈 기준)을 초당 SampleHz 개로 뽑아 BONE·CLIP·KEY 줄로 붙인다. KeepBones 에 든 뼈만 KEY 줄을 낸다
-	void AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones) const;
+	// Montages(9단계 3-a) = 종류 차례(Shared/AnimClips.h EMontageKind)의 몽타주 — 줄마다 클립을 30개 뒤에 붙여 뽑고 MONTAGE · TRACK · MCURVE · SCURVE 줄을 낸다.
+	// OverridePose = 쏜 뒤 윗몸 덮기 자세의 클립(OVERRIDE 줄). 둘 다 30개 판(-MOBSimpleAimJump -MOBSimpleTransitions)에서만 쓴다
+	void AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones, const TArray<const UAnimMontage*>& Montages, const UAnimSequence* OverridePose) const;
 	// 촬영 기록용 — 위아래 조준 · 점프에 쓴 입력과 상태
 	void GetAimJump(float& OutPitch, int32& OutJumpClip, float& OutJumpWeight) const;
 	// 대조 기록용 — 지금 재생 중인 클립을 Lyra 기록(-MOBACProbe)과 같은 「클립@시각*가중치;」 꼴로 붙인다
@@ -170,6 +207,38 @@ private:
 	bool bFidgetLeaving = false;	// 움직이기 시작했다 — 서기 몫이 다 빠지면 끝낸다
 	bool bWasAccelerating = false;	// 지난 프레임에 이동 입력이 있었나 — 놓는 순간 서기 클립 시각을 옮긴다
 
+	// 무기별 클립 한 벌 — 위 멤버 중 읽은 클립에서 나오는 것의 사본(느슨한 조준은 무기와 상관없이 하나라 뺀다).
+	// 서버 구동이면 무기마다 한 벌을 묶어 두고 무기가 바뀌면 통째로 갈아 넣는다. 아니면 한 벌뿐이다
+	struct FClipSet
+	{
+		bool bLoaded = false;
+		const UAnimSequence* Clips[kClips] = {};
+		float Lengths[kClips] = {};
+		float RootSpeeds[kClips] = {};
+		TArray<float, TInlineAllocator<8>> StepTimes[kClips];
+		int32 StepCycle = 1;
+		const UAnimSequence* AimClips[kAim] = {};
+		float AimPitches[kAim] = {};
+		int32 AimAdditiveType = 0;
+		const UAnimSequence* JumpClips[kStackClips] = {};
+		float JumpLengths[kStackClips] = {};
+		TArray<float> LandDistances;
+		TArray<float> TransitionDistances[kTransitions];
+		TArray<FStepMarker, TInlineAllocator<8>> TransitionMarkers[kTransitions];
+		const UAnimSequence* RecoveryClip = nullptr;
+		float RecoveryLength = 0.f;
+		int32 RecoveryAdditiveType = 0;
+		const UAnimSequence* FidgetClip = nullptr;
+		float FidgetLength = 0.f;
+		UAnimMontage* Montages[kMontageKindCount] = {};	// 종류 차례(EMontageKind). 서버 구동일 때만 있다
+	};
+	void BindSet(const class UMOBSimpleAnimInstance& Instance, int32 SetIndex);	// 읽은 한 벌을 위 멤버에 묶는다(로그 포함)
+	void SaveSet(FClipSet& Out) const;
+	void UseSet(const FClipSet& In);
+	TArray<FClipSet> ClipSets;		// 차례 = 인스턴스의 LoadedSets
+	int32 ActiveSet = INDEX_NONE;	// 지금 위 멤버에 든 한 벌
+	int32 WantedSet = INDEX_NONE;	// 묶기 전에 받은 서버 무기 — 처음 묶을 때 이 한 벌부터 넣는다
+
 	// 서버 구동(-MOBServerAnim)
 	void ApplyServerBones(FPoseContext& Output);
 	bool bServerDriven = false;
@@ -177,6 +246,25 @@ private:
 	TArray<FTransform> ServerLocal;		// 이번에 덮을 뼈별 변환(부모 뼈 기준)
 	TArray<int32, TInlineAllocator<32>> ServerBoneMap;	// 뼈 차례 → 압축 뼈 번호. -1 = 이 메시에 없음
 	uint16 ServerBoneSerial = 0;		// ServerBoneMap 을 만들 때의 뼈 목록 번호 — LOD 가 바뀌면 다시 만든다
+
+	// 몽타주(9단계 5-a) — 받은 칸을 엔진 몽타주 평가 자료로 넣고 끼움 자리 넷을 엔진 SlotEvaluatePose 로 얹는다(손가락 · 꼬임 뼈 몫).
+	// 쏜 뒤 윗몸 덮기는 안 넣는다(제 판단, 재개점 설계) — 판정 뼈는 어차피 서버 자세가 덮고, 빠지는 것은 덮기 동안의 손가락 · 꼬임 뼈 몫뿐이다
+	void ApplyMontages(FPoseContext& Output);
+	struct FMontageCell
+	{
+		UAnimMontage* Montage = nullptr;
+		float Position = 0.f;
+		float Weight = 0.f;
+	};
+	FMontageCell MontageCells[kMontageCells];
+	int32 MontageCellCount = 0;
+	FMontageCell NotifyCells[kMontageCells];	// 알림을 마지막으로 훑은 상태의 칸(MontageCells 는 보여 줄 상태의 칸이라 따로 둔다)
+	int32 NotifyCellCount = 0;
+	uint32 NotifyTick = 0;			// NotifyCells 를 받은 상태의 서버 틱
+	TArray<FPerBoneBlendWeight> UpperMaskWeights;	// 윗몸 자리 뼈 가림(UpperBodyMask) — 압축 뼈 차례
+	uint16 UpperMaskSerial = 0;		// UpperMaskWeights 를 만들 때의 뼈 목록 번호
+	bool bUpperMaskMissing = false;
+	int32 SlotPasses = 0;			// 마지막 Evaluate 가 SlotEvaluatePose 를 부른 자리 수
 
 	// 손 붙이기 · 발 디딤 내림(-MOBSimpleAimJump)
 	void ApplyHandIK(FPoseContext& Output) const;
@@ -186,6 +274,28 @@ private:
 	float GroundTime = 0.f;		// 땅에 닿은 뒤 지난 시간
 	float AirTime = 0.f;		// 땅을 떠난 뒤 지난 시간
 	bool bPlantLogged = false;	// 이번 착지에서 잰 거리를 기록에 남겼나
+};
+
+// 무기 한 벌의 읽은 클립. 프록시는 맨 포인터로 읽으므로 인스턴스가 잡아 둔다(가비지 수거 방지)
+USTRUCT()
+struct FMOBLoadedClipSet
+{
+	GENERATED_BODY()
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UAnimSequence>> Clips;
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UAnimSequence>> Aim;
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UAnimSequence>> Jump;
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimSequence> Recovery;
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimSequence> Fidget;
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UAnimMontage>> Montages;	// 종류 차례(EMontageKind) — 서버 구동일 때만 읽는다(9단계 5-a)
+	float AimPitches[FMOBSimpleAnimProxy::kAim] = { 90.f, 0.f, -90.f };
+	const TCHAR* Key = nullptr;		// 클립 이름 표의 무기(= 클립 파일 묶음 이름). nullptr = 이 무기의 이름 표가 없어 못 읽음
 };
 
 UCLASS(Transient, NotBlueprintable)
@@ -205,7 +315,12 @@ public:
 	void GetPlayers(FString& Out);
 	void GetPoseState(FString& Out);
 	void GetMoveLog(FString& Out);
-	void SetServerFrame(const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames);
+	// 받은 칸으로 자세 입력을 넣는다
+	void SetServerFrame(const mo::AnimPoseInput& Input, int32 Weapon, const int32* MontageWeapons, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames, FMOBServerAnimResult& Out);
+	// 받은 상태 하나의 몽타주 칸이 지난 구간에서 무기 몽타주 · 소리 알림을 튼다(다른 알림은 안 튼다 — 게임 사건이 남의 캐릭터 능력을 켤 수 있다)
+	void StepServerMontages(const mo::AnimPoseInput& Input, uint32 StateTick, const int32* MontageWeapons, bool bContinue, FMOBServerAnimResult& Out);
+	// 자세 갱신을 마친 뒤 마지막 Evaluate 의 결과를 Out 에 옮긴다
+	void ReadEvaluateResult(FMOBServerAnimResult& Out);
 
 protected:
 	virtual FAnimInstanceProxy* CreateAnimInstanceProxy() override;
@@ -214,24 +329,18 @@ private:
 	void LoadClips();
 
 	// 프록시는 맨 포인터로 읽으므로 여기서 잡아 둔다(가비지 수거 방지)
+	// 무기별 한 벌 — 서버 구동(-MOBServerAnim)이면 서버 무기 번호(EWeapon) 차례로 무기마다 한 벌, 아니면 명령줄 무기 한 벌뿐
 	UPROPERTY(Transient)
-	TArray<TObjectPtr<UAnimSequence>> LoadedClips;
+	TArray<FMOBLoadedClipSet> LoadedSets;
+	int32 PrimarySet = 0;			// 처음 묶을 한 벌 = 명령줄 무기(-MOBACWeapon, 없으면 소총)
 	UPROPERTY(Transient)
-	TArray<TObjectPtr<UAnimSequence>> LoadedAim;
-	UPROPERTY(Transient)
-	TArray<TObjectPtr<UAnimSequence>> LoadedReadyAim;
-	UPROPERTY(Transient)
-	TArray<TObjectPtr<UAnimSequence>> LoadedJump;
-	UPROPERTY(Transient)
-	TObjectPtr<UAnimSequence> LoadedRecovery;
-	UPROPERTY(Transient)
-	TObjectPtr<UAnimSequence> LoadedFidget;
-	float AimPitches[FMOBSimpleAnimProxy::kAim] = { 90.f, 0.f, -90.f };
+	TArray<TObjectPtr<UAnimSequence>> LoadedReadyAim;	// 느슨한 조준 — 무기와 상관없이 하나
 	float ReadyAimPitches[FMOBSimpleAnimProxy::kAim] = { 90.f, 0.f, -90.f };
 
 	bool bClipsLoaded = false;
 	bool bAimJump = false;
 	bool bTransitions = false;
+	const TCHAR* WeaponKey = TEXT("rifle");	// 읽은 클립의 무기(-MOBACWeapon). 클립 자료 뽑기의 WEAPON 줄 = 클립 파일 묶음 이름
 };
 
 // 캐릭터의 본체 메시를 단순 재생으로 바꾼다. 눈에 보이는 몸(SKM_Quinn)이 본체(SKM_Quinn_Invis) 자세를 따라가는 것은 촬영 화면으로 확인했다
@@ -257,7 +366,12 @@ void MOBAppendSimplePoseState(const ACharacter* Character, FString& Out);
 bool MOBGetSimpleMoveLog(const ACharacter* Character, FString& Out);
 
 // 서버 구동(-MOBServerAnim) — 받은 상태와 계산해 둔 자세를 넣고, 이번 프레임 화면에 바로 반영한다. 단순 재생이 아니면 false
-bool MOBSetServerAnim(ACharacter* Character, const mo::AnimPoseInput& Input, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames);
+// Weapon = 서버 무기 번호(EWeapon). MontageWeapons = Input.montages 칸마다의 서버 무기 번호(-1 = 모름). OutResult = 한 벌 갈아 넣기 · 몽타주 칸 · 끼움 자리 평가 수(처음부터 다시 센다, 알림 수는 MOBStepServerMontages 가 더한다)
+bool MOBSetServerAnim(ACharacter* Character, const mo::AnimPoseInput& Input, int32 Weapon, const int32* MontageWeapons, const mo::BoneTransform* Local, int32 Count, const TArray<FName>& BoneNames, FMOBServerAnimResult& OutResult);
+
+// 서버 구동 — 받은 상태 하나로 몽타주 알림을 튼다. 지난 프레임 뒤로 받은 상태를 틱 차례로 하나씩 넣는다(멈칫한 프레임 사이에 생겼다 진 칸도 튼다).
+// bContinue = false 면 앞 상태를 버린다(처음 · 죽었다 살아남). InOutResult 의 알림 수에 더한다. 단순 재생이 아니면 false
+bool MOBStepServerMontages(ACharacter* Character, const mo::AnimPoseInput& Input, uint32 StateTick, const int32* MontageWeapons, bool bContinue, FMOBServerAnimResult& InOutResult);
 
 // 몸 부품을 바꾼다. PartClassPath = 부품 블루프린트 클래스 경로. 컴포넌트나 부품을 못 찾으면 false
 bool MOBSetBodyPart(ACharacter* Character, const TCHAR* PartClassPath);

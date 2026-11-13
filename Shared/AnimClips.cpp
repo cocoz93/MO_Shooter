@@ -61,6 +61,8 @@ namespace mo
 		_bones.clear();
 		_bodies.clear();
 		_mesh = BoneKey{};
+		_profiles.clear();
+		_slots.clear();
 		_bundles.clear();
 	}
 
@@ -114,6 +116,41 @@ namespace mo
 			if (!reader.Ok()) return EClipLoad::Truncated;
 			body.bone = FindBone(boneName.c_str());
 			if (body.bone < 0) return EClipLoad::BadBody;
+		}
+
+		// 뼈별 비중 표 — 표마다 남긴 뼈 수만큼
+		const uint32_t profileCount = reader.Read<uint32_t>();
+		if (!reader.Ok()) return EClipLoad::Truncated;
+		if (profileCount > 64) return EClipLoad::BadSlot;
+		_profiles.resize(profileCount);
+		for (ClipProfile& profile : _profiles)
+		{
+			reader.Name(profile.name);
+			profile.mode = reader.Read<uint8_t>();
+			if (!reader.Ok() || (uint64_t)boneCount * sizeof(float) > reader.Left()) return EClipLoad::Truncated;
+			if (profile.mode > 2) return EClipLoad::BadSlot;		// 엔진 EBlendProfileMode 는 셋(TimeFactor · WeightFactor · BlendMask)
+			profile.weights.resize(boneCount);
+			reader.Bytes(profile.weights.data(), boneCount * sizeof(float));
+		}
+
+		// 끼움 자리 표
+		const uint32_t slotCount = reader.Read<uint32_t>();
+		if (!reader.Ok()) return EClipLoad::Truncated;
+		if (slotCount > 255) return EClipLoad::BadSlot;
+		_slots.resize(slotCount);
+		for (size_t s = 0; s < _slots.size(); ++s)
+		{
+			ClipSlot& slot = _slots[s];
+			reader.Name(slot.name);
+			const uint8_t mode = reader.Read<uint8_t>();
+			slot.profile = reader.Read<int16_t>();
+			if (!reader.Ok()) return EClipLoad::Truncated;
+			if (mode >= (uint8_t)ESlotMode::Count || slot.profile < -1 || slot.profile >= (int)profileCount) return EClipLoad::BadSlot;
+			slot.mode = (ESlotMode)mode;
+			for (size_t other = 0; other < s; ++other)
+			{
+				if (_slots[other].name == slot.name) return EClipLoad::BadSlot;
+			}
 		}
 
 		const uint32_t bundleCount = reader.Read<uint32_t>();
@@ -175,6 +212,69 @@ namespace mo
 				clip.keys.resize((size_t)clip.samples * boneCount);
 				reader.Bytes(clip.keys.data(), (size_t)keyBytes);
 			}
+
+			// 몽타주 표 — 줄은 있는 끼움 자리 · 클립만 가리키고, 클립 구간은 그 클립 안이어야 한다
+			const uint32_t montageCount = reader.Read<uint32_t>();
+			if (!reader.Ok()) return EClipLoad::Truncated;
+			if (montageCount > MONTAGE_KIND_COUNT) return EClipLoad::BadMontage;
+			bundle.montages.resize(montageCount);
+			for (ClipMontage& montage : bundle.montages)
+			{
+				reader.Name(montage.name);
+				montage.kind = reader.Read<uint8_t>();
+				reader.Name(montage.group);
+				montage.length = reader.Read<float>();
+				montage.rate = reader.Read<float>();
+				montage.blendIn = reader.Read<float>();
+				montage.blendInOption = reader.Read<uint8_t>();
+				montage.blendOut = reader.Read<float>();
+				montage.blendOutOption = reader.Read<uint8_t>();
+				montage.blendOutTrigger = reader.Read<float>();
+				montage.autoBlendOut = reader.Read<uint8_t>() != 0;
+				const uint8_t trackCount = reader.Read<uint8_t>();
+				if (!reader.Ok()) return EClipLoad::Truncated;
+				if (montage.kind >= MONTAGE_KIND_COUNT || bundle.FindMontage(montage.kind) != &montage) return EClipLoad::BadMontage;
+				if (!(montage.length > 0.f) || !(montage.rate > 0.f) || !(montage.blendIn >= 0.f) || !(montage.blendOut >= 0.f) || trackCount == 0) return EClipLoad::BadMontage;
+				if (montage.blendInOption > kBlendOptionMax || montage.blendOutOption > kBlendOptionMax) return EClipLoad::BadMontage;
+
+				montage.tracks.resize(trackCount);
+				for (MontageTrack& track : montage.tracks)
+				{
+					track.slot = reader.Read<uint8_t>();
+					track.clip = reader.Read<uint16_t>();
+					track.startPos = reader.Read<float>();
+					track.clipStart = reader.Read<float>();
+					track.clipEnd = reader.Read<float>();
+					track.playRate = reader.Read<float>();
+					if (!reader.Ok()) return EClipLoad::Truncated;
+					if (track.slot >= slotCount || track.clip >= clipCount || !(track.playRate > 0.f)) return EClipLoad::BadMontage;
+					const float clipLength = bundle.clips[track.clip].length;
+					if (!(track.clipStart >= 0.f) || !(track.clipEnd > track.clipStart) || track.clipEnd > clipLength || !(track.startPos >= 0.f)) return EClipLoad::BadMontage;
+				}
+
+				const uint8_t curveCount = reader.Read<uint8_t>();
+				if (!reader.Ok()) return EClipLoad::Truncated;
+				montage.curves.resize(curveCount);
+				for (MontageCurve& curve : montage.curves)
+				{
+					reader.Name(curve.name);
+					curve.owner = reader.Read<int8_t>();
+					curve.hz = reader.Read<uint32_t>();
+					const uint32_t valueCount = reader.Read<uint32_t>();
+					if (!reader.Ok() || valueCount > reader.Left() / sizeof(float)) return EClipLoad::Truncated;
+					if (curve.owner < -1 || curve.owner >= (int)trackCount || curve.hz == 0 || valueCount == 0) return EClipLoad::BadMontage;
+					curve.values.resize(valueCount);
+					reader.Bytes(curve.values.data(), valueCount * sizeof(float));
+				}
+			}
+
+			// 쏜 뒤 윗몸 덮기 자세
+			bundle.overrideClip = reader.Read<int16_t>();
+			bundle.overrideSlot = reader.Read<uint8_t>();
+			if (!reader.Ok()) return EClipLoad::Truncated;
+			if (bundle.overrideClip < -1 || bundle.overrideClip >= (int)clipCount) return EClipLoad::BadMontage;
+			if (bundle.overrideClip >= 0 && bundle.overrideSlot >= (int)slotCount) return EClipLoad::BadMontage;
+			if (bundle.overrideClip < 0) bundle.overrideSlot = -1;
 		}
 
 		char tail[4];
@@ -189,6 +289,15 @@ namespace mo
 		for (size_t b = 0; b < _bones.size(); ++b)
 		{
 			if (_bones[b].name == name) return (int)b;
+		}
+		return -1;
+	}
+
+	int CAnimClips::FindSlot(const char* name) const
+	{
+		for (size_t s = 0; s < _slots.size(); ++s)
+		{
+			if (_slots[s].name == name) return (int)s;
 		}
 		return -1;
 	}

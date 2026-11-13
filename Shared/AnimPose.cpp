@@ -16,6 +16,10 @@ namespace mo
 		constexpr double kKindaSmall = 1.e-4;			// 엔진 UE_KINDA_SMALL_NUMBER / DOUBLE_KINDA_SMALL_NUMBER
 		constexpr uint8_t kAdditiveNone = 0;			// AAT_None
 		constexpr uint8_t kAdditiveMeshRotation = 2;	// AAT_RotationOffsetMeshSpace
+		constexpr uint8_t kProfileBlendMask = 2;		// 엔진 EBlendProfileMode::BlendMask
+
+		// 끼움 자리 평가 차례 — 플랜 「구조」의 차례(이름이 가리키는 차례, 제 판단 · D43). 쏜 뒤 덮기는 이보다 앞(착지 충격 바로 뒤)이다
+		constexpr const char* kSlotOrder[] = { "FullBody", "FullBodyAdditivePreAim", "UpperBody", "UpperBodyAdditive" };
 
 		float Smooth(float x)
 		{
@@ -153,6 +157,22 @@ namespace mo
 		void NormalizeRotations(BoneTransform* pose, size_t count)
 		{
 			for (size_t i = 0; i < count; ++i) QuatNormalize(pose[i].q);
+		}
+
+		// 엔진 FTransform::BlendWith(TransformVectorized.h:463) — base 를 target 쪽으로 alpha 만큼. 이동은 직선, 회전은 VectorLerpQuat(가까운 쪽 부호를 base 에 붙임) + 정규화
+		void BlendWith(BoneTransform& base, const BoneTransform& target, float alpha)
+		{
+			if (alpha <= kZeroWeight) return;
+			if (alpha >= 1.f - kZeroWeight)
+			{
+				base = target;
+				return;
+			}
+			for (int c = 0; c < 3; ++c) base.p[c] = base.p[c] + (target.p[c] - base.p[c]) * alpha;
+			const double dot = base.q[0] * target.q[0] + base.q[1] * target.q[1] + base.q[2] * target.q[2] + base.q[3] * target.q[3];
+			const double bias = dot >= 0 ? 1.0 : -1.0;
+			for (int c = 0; c < 4; ++c) base.q[c] = target.q[c] * alpha + base.q[c] * bias * (1.0 - alpha);
+			QuatNormalize(base.q);
 		}
 
 		// A * B (A 를 먼저, 그다음 B. 크기는 항상 1 이다)
@@ -299,7 +319,7 @@ namespace mo
 	{
 		_clips = nullptr;
 		_bundle = clips.FindBundle(bundleName);
-		if (!_bundle || _bundle->clips.size() != ACLIP_COUNT) return false;
+		if (!_bundle || _bundle->clips.size() < ACLIP_COUNT) return false;		// 30개 뒤는 몽타주 · 덮기 자세 클립(9단계 3-a)
 
 		_handR = clips.FindBone("hand_r");
 		_gun = clips.FindBone("ik_hand_gun");
@@ -310,11 +330,24 @@ namespace mo
 		_pelvis = clips.FindBone("pelvis");
 		if (_handR < 0 || _gun < 0 || _ikLeft < 0 || _upper < 0 || _lower < 0 || _hand < 0 || _pelvis < 0) return false;
 
+		static_assert(sizeof(kSlotOrder) / sizeof(kSlotOrder[0]) == kSlotOrderCount, "kSlotOrder 와 칸 수가 같아야 한다");
+		const std::vector<ClipSlot>& slots = clips.Slots();
+		for (int n = 0; n < kSlotOrderCount; ++n) _slotOrder[n] = clips.FindSlot(kSlotOrder[n]);
+		for (int s = 0; s < (int)slots.size(); ++s)
+		{
+			bool known = s == _bundle->overrideSlot;
+			for (int n = 0; n < kSlotOrderCount; ++n) known = known || _slotOrder[n] == s;
+			if (!known) return false;
+			if (slots[(size_t)s].profile >= 0 && clips.Profiles()[(size_t)slots[(size_t)s].profile].mode != kProfileBlendMask) return false;
+		}
+
 		_clips = &clips;
 		_boneCount = clips.Bones().size();
 		_a.resize(_boneCount);
 		_b.resize(_boneCount);
+		_base.resize(_boneCount);
 		_component.resize(_boneCount);
+		_meshRotations.resize(_boneCount * 12);
 		return true;
 	}
 
@@ -452,6 +485,188 @@ namespace mo
 		AccumulateAdditive(pose, _a.data(), weight, clip.additive);
 	}
 
+	const float* CAnimPoseEvaluator::SlotMask(int slot) const
+	{
+		const int profile = _clips->Slots()[(size_t)slot].profile;
+		if (profile < 0) return nullptr;
+		const int test = slot == _bundle->overrideSlot ? _overrideProfileTest : _slotProfileTest;
+		return _clips->Profiles()[(size_t)(test >= 0 ? test : profile)].weights.data();
+	}
+
+	// 엔진 BlendPosesPerBoneFilter(AnimationRuntime.cpp:1870) 섞을 자세 하나 — 뼈 비중 = 층 비중 × 뼈 가림 값(UpdateDesiredBoneWeight, :1821), 0~1 로 자른다.
+	// 실제 경로는 메시 기준 회전 갈래(:2213~2257) — 이동 · 크기는 국소로 섞고 회전만 부모까지 곱한 메시 기준으로 섞는다. 국소 갈래(:2362~2388)보다 Lyra 기록에 가깝다(D50).
+	// 시험 깃발 kPoseTestLocalBlend 이면 국소 갈래. out 은 base · target 과 같은 곳이어도 된다
+	void CAnimPoseEvaluator::BlendPerBone(const BoneTransform* base, const BoneTransform* target, float layerWeight, const float* mask, BoneTransform* out)
+	{
+		const bool meshRotation = (_poseTest & kPoseTestLocalBlend) == 0;
+		const std::vector<ClipBone>& bones = _clips->Bones();
+		double* sourceRot = _meshRotations.data();
+		double* targetRot = sourceRot + _boneCount * 4;
+		double* blendRot = targetRot + _boneCount * 4;
+		for (size_t b = 0; b < _boneCount; ++b)
+		{
+			const float weight = std::max(0.f, std::min(layerWeight * (mask ? mask[b] : 1.f), 1.f));
+			const BoneTransform baseAtom = base[b];
+			const BoneTransform targetAtom = target[b];
+			BoneTransform blendAtom = baseAtom;
+			if (weight >= 1.f - kZeroWeight) blendAtom = targetAtom;
+			else if (weight > kZeroWeight) BlendWith(blendAtom, targetAtom, weight);
+			if (meshRotation)
+			{
+				const int parent = bones[b].parent;
+				double* s = sourceRot + b * 4;
+				double* t = targetRot + b * 4;
+				double* m = blendRot + b * 4;
+				if (parent >= 0)
+				{
+					QuatMul(sourceRot + (size_t)parent * 4, baseAtom.q, s);
+					QuatMul(targetRot + (size_t)parent * 4, targetAtom.q, t);
+				}
+				else
+				{
+					std::memcpy(s, baseAtom.q, sizeof(double) * 4);
+					std::memcpy(t, targetAtom.q, sizeof(double) * 4);
+				}
+				if (weight <= kZeroWeight) std::memcpy(m, s, sizeof(double) * 4);
+				else if (weight >= 1.f - kZeroWeight) std::memcpy(m, t, sizeof(double) * 4);
+				else
+				{
+					// FQuat::FastLerp + Normalize
+					const double dot = s[0] * t[0] + s[1] * t[1] + s[2] * t[2] + s[3] * t[3];
+					const double bias = dot >= 0 ? 1.0 : -1.0;
+					for (int c = 0; c < 4; ++c) m[c] = t[c] * weight + s[c] * bias * (1.0 - weight);
+					QuatNormalize(m);
+				}
+				if (parent >= 0)
+				{
+					double inverse[4];
+					QuatInverse(blendRot + (size_t)parent * 4, inverse);
+					QuatMul(inverse, m, blendAtom.q);
+					QuatNormalize(blendAtom.q);
+				}
+			}
+			out[b] = blendAtom;
+		}
+	}
+
+	// 쏜 뒤 윗몸 덮기 — 덮는 자세(그 클립 시각 0)를 비중 × 자리 비중 표로 뼈마다 섞는다
+	void CAnimPoseEvaluator::ApplyOverride(const AnimPoseInput& input, BoneTransform* pose)
+	{
+		if (input.overrideWeight <= kZeroWeight || _bundle->overrideClip < 0 || _bundle->overrideSlot < 0) return;
+		_clips->Sample(*_bundle, _bundle->clips[(size_t)_bundle->overrideClip], 0.0, _a.data());
+		BlendPerBone(pose, _a.data(), input.overrideWeight, SlotMask(_bundle->overrideSlot), pose);
+	}
+
+	// 끼움 자리 하나. 엔진 GetSlotWeight(AnimInstanceProxy.cpp:2103) · SlotEvaluatePose(:1885) 를 옮겼다 —
+	// 그 자리에 줄이 있는 몽타주의 비중 합이 1 을 넘으면 나누고, 일반 줄은 비중대로 섞은 뒤 남은 몫(1 − 일반 비중 합)을 아래 자세로 채우고, 덧붙임 줄은 그 위에 비중만큼 얹는다.
+	// 자리에 비중 표가 있으면 그 결과를 아래 자세와 뼈별로 섞는다(뼈별 섞기 노드의 층 비중은 1 로 둔다 — 그래프를 안 읽어 모름, 제 판단)
+	void CAnimPoseEvaluator::ApplySlot(const AnimPoseInput& input, int slot, BoneTransform* pose, bool perBone)
+	{
+		if (slot < 0) return;
+
+		struct Entry
+		{
+			const ClipBundle* bundle;
+			const AnimClip* clip;
+			double time;		// 줄 클립 시각. 음수 = 줄 구간 밖(엔진은 기준 자세)
+			float weight;
+		};
+		Entry entries[kAnimMontageMax];
+		int count = 0;
+		float total = 0.f;
+		float nonAdditive = 0.f;
+		const std::vector<ClipBundle>& bundles = _clips->Bundles();
+		for (int m = 0; m < input.montageCount && m < kAnimMontageMax; ++m)
+		{
+			const AnimMontageSlot& view = input.montages[m];
+			const ClipMontage* montage = view.bundle >= 0 && view.bundle < (int)bundles.size() ? bundles[(size_t)view.bundle].FindMontage(view.kind) : nullptr;
+			if (!montage)
+			{
+				if (slot == _slotOrder[0]) ++_montageMisses;		// 자리마다 세면 한 칸이 넷으로 불어난다 — 첫 자리에서만 센다
+				continue;
+			}
+			const MontageTrack* track = nullptr;
+			for (const MontageTrack& candidate : montage->tracks)
+			{
+				if (candidate.slot == slot)
+				{
+					track = &candidate;
+					break;
+				}
+			}
+			if (!track) continue;
+
+			// 엔진 FAnimTrack::GetAnimationPose(AnimCompositeBase.cpp:535) — 몽타주 시각을 줄 길이로 자르고, 줄 구간 안이면 클립 시각 = 시작 + (시각 − 줄 시작) × 재생 속도(:37).
+			// 클립 자체 재생 배율은 1 로 본다 — 15개 몽타주 길이가 전부 「(클립 끝 − 시작) ÷ 줄 재생 속도」와 같다(3-a 덤프, 계산값)
+			const ClipBundle& bundle = bundles[(size_t)view.bundle];
+			const AnimClip& clip = bundle.clips[track->clip];
+			const float rate = std::abs(track->playRate) < 1.e-8f ? 1.f : track->playRate;
+			const float trackLength = (track->clipEnd - track->clipStart) / std::abs(rate);
+			const float clamped = std::max(0.f, std::min(view.position, track->startPos + trackLength));
+			double time = -1.0;
+			if (clamped >= track->startPos && clamped <= track->startPos + trackLength)
+			{
+				const float delta = clamped - track->startPos;
+				time = rate > 0.f ? track->clipStart + delta * rate : track->clipEnd + delta * rate;
+			}
+			else
+			{
+				++_trackOutside;
+			}
+			entries[count++] = { &bundle, &clip, time, view.weight };
+			total += view.weight;
+			if (clip.additive == kAdditiveNone) nonAdditive += view.weight;
+		}
+		if (count == 0) return;
+
+		float slotWeight = total;
+		if (slotWeight > 1.f)
+		{
+			nonAdditive /= slotWeight;
+			slotWeight = 1.f;
+		}
+		if (slotWeight <= kZeroWeight) return;
+		const float sourceWeight = std::max(0.f, std::min(1.f - nonAdditive, 1.f));
+		const bool normalize = total > 1.f + kZeroWeight;
+
+		const auto sample = [this](const Entry& entry, BoneTransform* out)
+		{
+			if (entry.time >= 0.0) _clips->Sample(*entry.bundle, *entry.clip, entry.time, out);
+			else for (size_t b = 0; b < _boneCount; ++b) FromKey(_clips->Bones()[b].ref, out[b]);
+		};
+
+		std::memcpy(_base.data(), pose, sizeof(BoneTransform) * _boneCount);
+		int blended = 0;
+		for (int e = 0; e < count; ++e)
+		{
+			if (entries[e].clip->additive != kAdditiveNone) continue;
+			const float weight = normalize ? entries[e].weight / total : entries[e].weight;
+			sample(entries[e], _a.data());
+			if (blended == 0) BlendOverwrite(pose, _a.data(), weight, _boneCount);
+			else BlendAccumulate(pose, _a.data(), weight, _boneCount);
+			++blended;
+		}
+		if (blended > 0)
+		{
+			if (sourceWeight > kZeroWeight)
+			{
+				BlendAccumulate(pose, _base.data(), sourceWeight, _boneCount);
+				++blended;
+			}
+			if (blended > 1) NormalizeRotations(pose, _boneCount);
+		}
+		for (int e = 0; e < count; ++e)
+		{
+			if (entries[e].clip->additive == kAdditiveNone) continue;
+			const float weight = normalize ? entries[e].weight / total : entries[e].weight;
+			sample(entries[e], _a.data());
+			AccumulateAdditive(pose, _a.data(), weight, entries[e].clip->additive);
+		}
+
+		const float* mask = SlotMask(slot);
+		if (perBone && mask) BlendPerBone(_base.data(), pose, 1.f, mask, pose);
+	}
+
 	void CAnimPoseEvaluator::AccumulateAim(BoneTransform* pose, uint32_t firstClip, const float pitches[3], float pitch, float weight)
 	{
 		const AnimClip& center = _bundle->clips[firstClip + 1];
@@ -476,7 +691,9 @@ namespace mo
 		for (size_t b = 1; b < _boneCount; ++b) Multiply(local[b], component[(size_t)bones[b].parent], component[b]);
 	}
 
-	void CAnimPoseEvaluator::ApplyHandIK(BoneTransform* pose)
+	// 총 뼈는 늘 오른손 자리로 옮기고, 왼팔은 leftAlpha 만큼만 당긴다(몽타주 곡선 DisableLHandIK, D45).
+	// 비중은 엔진 FCSPose::LocalBlendCSBoneTransforms(BonePose.h:769) — 문턱 아래면 손대지 않고, 1 이면 그대로 두고, 그 사이면 고친 뼈의 부모 기준값을 옛 값 쪽으로 1 − 비중만큼 섞는다
+	void CAnimPoseEvaluator::ApplyHandIK(BoneTransform* pose, float leftAlpha)
 	{
 		BoneTransform* cs = _component.data();
 		ComponentFromLocal(pose, cs);
@@ -520,10 +737,20 @@ namespace mo
 		std::memcpy(hand.p, outEnd, sizeof(outEnd));
 
 		// 고친 뼈의 부모 기준값만 다시 구한다. 자식은 부모 기준값이 그대로라 따라온다(엔진 SafeSetCSBoneTransforms)
+		// 총 뼈와 왼팔은 서로의 조상이 아니라(총 뼈는 뿌리 쪽 IK 뼈 아래) 따로 넣어도 비중 1 의 결과는 한 번에 넣은 것과 같다
 		RelativeTo(newGun, cs[bones[(size_t)_gun].parent], pose[_gun]);
+		if (leftAlpha < kZeroWeight) return;
+		const BoneTransform oldUpper = pose[_upper];
+		const BoneTransform oldLower = pose[_lower];
+		const BoneTransform oldHand = pose[_hand];
 		RelativeTo(upper, cs[bones[(size_t)_upper].parent], pose[_upper]);
 		RelativeTo(lower, upper, pose[_lower]);
 		RelativeTo(hand, lower, pose[_hand]);
+		if (leftAlpha >= 1.f - kZeroWeight) return;
+		const float back = 1.f - leftAlpha;
+		BlendWith(pose[_upper], oldUpper, back);
+		BlendWith(pose[_lower], oldLower, back);
+		BlendWith(pose[_hand], oldHand, back);
 	}
 
 	void CAnimPoseEvaluator::ApplyPlant(const AnimPoseInput& input, BoneTransform* pose) const
@@ -543,9 +770,33 @@ namespace mo
 		BlendWalk(input, outLocal);
 		ApplyJump(input, outLocal);
 		ApplyRecovery(input, outLocal);
+		// 차례 = 끼움 자리 넷 → 쏜 뒤 덮기 → 조준(D50). 시험 깃발은 후보 판을 다시 만들 때만
+		const bool overrideOn = (_poseTest & kPoseTestNoOverride) == 0;
+		const bool overrideEarly = (_poseTest & kPoseTestOverrideEarly) != 0;
+		const bool upperAfterAim = (_poseTest & kPoseTestUpperAfterAim) != 0;
+		if (overrideOn && overrideEarly) ApplyOverride(input, outLocal);
+		ApplySlot(input, _slotOrder[0], outLocal);		// 통째(FullBody)
+		ApplySlot(input, _slotOrder[1], outLocal);		// 사격 덧붙임(FullBodyAdditivePreAim)
+		const auto applyUpper = [&]()
+		{
+			if ((_poseTest & kPoseTestChainUpper) == 0 || _slotOrder[2] < 0)
+			{
+				ApplySlot(input, _slotOrder[2], outLocal);		// 윗몸(UpperBody)
+				ApplySlot(input, _slotOrder[3], outLocal);		// 윗몸 덧붙임(UpperBodyAdditive)
+				return;
+			}
+			std::memcpy(_b.data(), outLocal, sizeof(BoneTransform) * _boneCount);
+			ApplySlot(input, _slotOrder[2], outLocal, false);
+			ApplySlot(input, _slotOrder[3], outLocal, false);
+			const float* mask = SlotMask(_slotOrder[2]);
+			if (mask) BlendPerBone(_b.data(), outLocal, 1.f, mask, outLocal);
+		};
+		if (!upperAfterAim) applyUpper();
+		if (overrideOn && !overrideEarly) ApplyOverride(input, outLocal);
 		AccumulateAim(outLocal, ACLIP_AIM_UP, _bundle->aimPitch, input.pitch, input.aimBlend);
 		AccumulateAim(outLocal, ACLIP_READY_UP, _bundle->aimPitch + 3, input.pitch, 1.f - input.aimBlend);
-		if (_handIK) ApplyHandIK(outLocal);
+		if (upperAfterAim) applyUpper();
+		if (_handIK) ApplyHandIK(outLocal, (_poseTest & kPoseTestNoHandAlpha) != 0 ? 1.f : input.handLeftAlpha);
 		FromKey(_clips->Bones()[0].ref, outLocal[0]);
 		ApplyPlant(input, outLocal);
 	}
@@ -629,6 +880,34 @@ namespace mo
 			AnimPoseInput input;
 			input.fidgetTime = sampleTime(clips[ACLIP_FIDGET], s);
 			measure(input);
+		}
+		// 몽타주(9단계 3-b) — 서기 위에 몽타주 하나를 비중 1 로, 시각은 표본 간격마다. 덮기 · 왼손 비중은 끝값 0 · 1 을 다 본다.
+		// 모든 묶음의 몽타주 전부(조각 4) — 무기를 바꾸면 서버는 그 틱에 묶음을 바꾸고(D46), 앞 무기의 쏘기 · 재장전은 새 묶음 평가기 위에서 빠지는 중으로 남는다
+		const std::vector<ClipBundle>& bundles = _clips->Bundles();
+		for (size_t m = 0; m < bundles.size(); ++m)
+		{
+			for (const ClipMontage& montage : bundles[m].montages)
+			{
+				const uint32_t samples = (uint32_t)std::ceil((double)montage.length * _bundle->sampleHz) + 1;
+				for (uint32_t s = 0; s < samples; ++s)
+				{
+					for (const float overrideWeight : { 0.f, 1.f })
+					{
+						for (const float handLeftAlpha : { 0.f, 1.f })
+						{
+							AnimPoseInput input;
+							input.montageCount = 1;
+							input.montages[0].bundle = (int8_t)m;
+							input.montages[0].kind = montage.kind;
+							input.montages[0].position = std::min((float)((double)s / _bundle->sampleHz), montage.length);
+							input.montages[0].weight = 1.f;
+							input.overrideWeight = overrideWeight;
+							input.handLeftAlpha = handLeftAlpha;
+							measure(input);
+						}
+					}
+				}
+			}
 		}
 		return reach + kBoundMargin;
 	}

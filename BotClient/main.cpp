@@ -4,7 +4,9 @@
 //   BotClient --map=<파일.mocl> --seconds=초 [--measureFrom=초 --measureSeconds=초] ... = 부하 시험. 경기 끝을 기다리지 않고 시간이 되면 끊고 LOADBOT 줄을 낸다.
 //   봇이 많으면 서버가 방을 나눠 앉힌다 — 기록은 같은 방 봇끼리만 맞춰 본다. 방 2부터는 기록 이름 뒤에 .room<번호>
 //   --measureView = 되감기 측정. Lyra 처럼 상태를 쌓아 0.1초 뒤 보간한 자리를 오차 없이 조준하고, 그 시점을 입력에 실어 보낸다. 기본 꺼짐
-//   --script=startstop [--scriptHold=초] = 화면 판정 촬영. 서버 --debug 로 애니 비교 촬영의 시작 자리에 서서, 그 촬영과 같은 경로를 달린다. 쏘지 않는다
+//   --script=startstop [--scriptHold=초] [--scriptWeapon=pistol|rifle|shotgun] = 화면 판정 촬영. 서버 --debug 로 애니 비교 촬영의 시작 자리에 서서, 그 촬영과 같은 경로를 달린다. 쏘지 않는다
+//   --script=events [--scriptHold=초] [--scriptWeapon=...] = 9단계 사건 경로(쏘기 · 당겨 쏘기 · 위아래 겨눠 쏘기 · 재장전 · 재장전 중 쏘기 · 무기 바꾸기). 애니 비교 사건 경로와 같은 조각 · 사건 프레임. 부활은 없다.
+//     경로 모드는 받은 자기 몽타주 칸을 상태마다 SCRIPTANIM 줄로 찍는다(Tools/LyraPilot/check_script_anim.py 가 Lyra 기록과 견준다)
 //
 // 판정은 하지 않는다 — 입력을 보내고 받은 것을 적어 맞춰 볼 뿐이다.
 // 1. 봇마다 같은 공용 코드(Shared)로 자기 입력을 여기서도 돌려, 돌아온 상태와 위치·속도·탄창까지 비교한다.
@@ -94,16 +96,29 @@ namespace
 		bool judgeNoSpread = false;		// 서버 --rewindNoSpread 와 같이 쓴다 — 자세만 본다
 		bool judgeFireAlways = false;	// 비용 측정 — 적이 보이든 말든 방아쇠를 놓지 않는다(10명 전원 연사)
 		std::string script;				// 주면 두뇌 대신 정해진 경로를 달린다
-		double scriptHoldSeconds = 4.5;	// 자리에 선 뒤 경로 시작까지 — 촬영 쪽 대기 4초보다 길고, 첫 서 있기 2초를 더해도 제자리 장난 동작(서 있은 지 7.35초)이 나오기 전에 출발해야 합격 영상과 같다
+		double scriptHoldSeconds = 4.5;	// 자리에 선 뒤 경로 시작까지 — 촬영 쪽 대기 4초보다 길고, 첫 서 있기 2초를 더해도 제자리 장난 동작(서 있은 지 7.35초)이 나오기 전에 출발해야 합격 영상과 같다. 권총은 6.35초라 촬영 스크립트(record_remote_shot.ps1)가 4.25초를 준다
+		uint8_t scriptWeapon = (uint8_t)EWeapon::Rifle;	// --scriptWeapon=pistol|rifle|shotgun — 경로 중 드는 무기(무기별 자세 촬영, 9단계)
 	};
 
-	// 화면 판정 촬영의 경로 — MOBAnimCompareSubsystem.cpp STARTSTOP_SCRIPT 와 같은 값. 합격 영상과 나란히 놓으려면 동작이 같아야 한다
+	// 경로 안의 사건 — MOBAnimCompareSubsystem.cpp EACEvent 와 같은 뜻. Fire = 방아쇠를 kScriptFireTapTicks 동안 · Hold/Release = 당긴 채 두기/놓기
+	// Swap = 경로 무기가 권총이면 소총, 아니면 권총으로 · Back = 경로 무기로. 부활은 봇이 입력으로 낼 길이 없어 없다(그쪽은 부활 효과 능력만 다시 튼다)
+	enum class EScriptEvent : uint8_t { None, Fire, Hold, Release, Reload, Swap, Back };
+	constexpr uint32_t kScriptFireTapTicks = 3;	// 그쪽 FIRE_TAP_SECONDS 0.05초 = 3프레임
+
+	// 화면 판정 촬영의 경로 — MOBAnimCompareSubsystem.cpp STARTSTOP_SCRIPT · EVENTS_SCRIPT 와 같은 값. 합격 영상과 나란히 놓으려면 동작이 같아야 한다
 	struct ScriptStep
 	{
 		const char* name;
 		uint32_t ticks;	// 합격 영상이 실제로 돈 프레임 수(animcmp_ssp_v_simple.csv) — 그쪽은 시간 합이 조금 모자라 조각마다 1프레임 더 돈다(0.4초 조각만 딱 맞는다)
 		bool moving;
 		double angle;	// 몸 방향 기준 이동 각도
+		float pitchFrom = 0.f;	// 조각 동안 시선 위아래 각(+ 위) — 그쪽처럼 seconds 에 걸쳐 선형으로
+		float pitchTo = 0.f;
+		float seconds = 0.f;	// 그쪽 조각 길이(초) — 시선 각 보간에만 쓴다. 0 = 처음부터 pitchTo
+		EScriptEvent ev0 = EScriptEvent::None;
+		uint32_t at0 = 0;		// 조각 시작에서 사건까지 프레임 — Lyra 기록이 실제로 일으킨 프레임(animcmp_ev_<무기>_probe.csv events 칸)
+		EScriptEvent ev1 = EScriptEvent::None;
+		uint32_t at1 = 0;
 	};
 	constexpr ScriptStep kStartStopScript[] = {
 		{ "idle", 121, false, 0 },
@@ -120,22 +135,49 @@ namespace
 		{ "ad4", 24, true, 90 }, { "ad5", 24, true, -90 }, { "ad6", 24, true, 90 },
 		{ "stop_ad", 121, false, 0 },
 	};
+	// 9단계 사건 경로 — MOBAnimCompareSubsystem.cpp EVENTS_SCRIPT. 틱 수 · 사건 프레임은 Lyra 기록 animcmp_ev_<무기>_probe.csv pass 0 이 실제로 돈 값(세 무기 같음, 11-12 실측).
+	// 그쪽 초 → 프레임은 시간 합이 조금 모자라 대개 1프레임 더 돌고(2.0초 = 121), 0.3초 사건은 17프레임에 났다
+	using SE = EScriptEvent;
+	constexpr ScriptStep kEventsScript[] = {
+		{ "idle", 121, false, 0 },
+		{ "fire_stand", 91, false, 0, 0.f, 0.f, 1.5f, SE::Fire, 0 },
+		{ "fire_hold", 121, false, 0, 0.f, 0.f, 2.0f, SE::Hold, 0, SE::Release, 29 },
+		{ "run_fire", 109, true, 0, 0.f, 0.f, 1.8f, SE::Fire, 17, SE::Fire, 60 },
+		{ "stop_f", 61, false, 0 },
+		{ "up_fire", 91, false, 0, 0.f, 45.f, 1.5f, SE::Fire, 60 },
+		{ "down_fire", 91, false, 0, 45.f, -45.f, 1.5f, SE::Fire, 60 },
+		{ "mid", 61, false, 0, -45.f, 0.f, 1.0f },
+		{ "reload", 211, false, 0, 0.f, 0.f, 3.5f, SE::Reload, 0 },
+		{ "fire_b", 61, false, 0, 0.f, 0.f, 1.0f, SE::Fire, 0 },
+		{ "reload_cancel", 121, false, 0, 0.f, 0.f, 2.0f, SE::Reload, 0, SE::Fire, 35 },
+		{ "settle_c", 91, false, 0 },
+		{ "run_reload", 151, true, 90, 0.f, 0.f, 2.5f, SE::Reload, 12 },
+		{ "stop_r", 91, false, 0 },
+		{ "swap_out", 121, false, 0, 0.f, 0.f, 2.0f, SE::Swap, 0 },
+		{ "swap_back", 121, false, 0, 0.f, 0.f, 2.0f, SE::Back, 0 },
+		{ "swap_fire", 91, false, 0, 0.f, 0.f, 1.5f, SE::Swap, 0, SE::Fire, 15 },
+		{ "swap_back2", 121, false, 0, 0.f, 0.f, 2.0f, SE::Back, 0 },
+		{ "run_swap", 151, true, -90, 0.f, 0.f, 2.5f, SE::Swap, 23, SE::Back, 84 },
+		{ "stop_s", 91, false, 0 },
+		{ "spawn", 211, false, 0 },		// 그쪽은 여기서 부활 효과를 다시 튼다 — 봇은 서 있기만 한다
+		{ "idle_end", 91, false, 0 },
+	};
 	const Vec3 kScriptHome(-1020.0, -1070.0, 142.0);	// MOBAnimCompareSubsystem.cpp FIXED_HOME
 	constexpr float kScriptYaw = 180.f;					// MOBAnimCompareSubsystem.cpp FIXED_YAW
 
-	// 봇이 화면 역할로 쓰는 자세 계산. 봇들이 한 스레드에서 번갈아 쓰므로 한 벌만 둔다
+	// 봇이 화면 역할로 쓰는 자세 계산. 봇들이 한 스레드에서 번갈아 쓰므로 한 벌만 둔다.
+	// 묶음은 무기마다 하나(서버 Room.h AnimBundleOf 와 같은 이름 = GetWeaponDef(무기).name) — 받은 상태는 같은 PlayerState 의 weapon 묶음으로 푼다
 	struct JudgeShared
 	{
 		CAnimClips clips;
-		CAnimState codec;
-		CAnimPoseEvaluator evaluator;
+		std::array<CAnimState, (size_t)EWeapon::Count> codecs;
+		std::array<CAnimPoseEvaluator, (size_t)EWeapon::Count> evaluators;
 		std::vector<BoneTransform> localFrom, localTo, localBlend;
+		uint64_t bodiesByWeapon[(size_t)EWeapon::Count] = {};	// 판정에 넣은 몸을 그 틱 묶음별로
 		FILE* log = nullptr;
 		bool noSpread = false;
 		bool fireAlways = false;
 	};
-
-	constexpr const char* kJudgeBundle = "rifle";	// 서버 kAnimBundleName 과 같은 값
 
 	// 서버 Room.cpp NormalizeAxis 와 같은 식
 	float NormalizeAxis(float degrees)
@@ -146,24 +188,16 @@ namespace
 		return d;
 	}
 
-	// 받은 상태의 꼬리에서 한 사람치를 읽는다(Lyra 다리 ReadAnimTail 과 같은 식). false = 꼬리가 없거나 잘렸다
+	// 받은 상태의 꼬리에서 한 사람치를 읽는다(형식은 GameProtocol.h wire::ReadAnimTail 한 벌 — Lyra 다리도 같은 것을 부른다). false = 꼬리가 없거나 잘렸다
 	bool ReadAnimTail(const char* data, int size, int& at, wire::AnimStateWire& out)
 	{
-		const int head = (int)wire::kAnimStateHeadSize;
-		if (at + head > size)
+		size_t used = 0;
+		if (at >= size || !wire::ReadAnimTail(data + at, (size_t)(size - at), out, used))
 		{
 			at = size;
 			return false;
 		}
-		std::memcpy(&out, data + at, head);
-		const int layerBytes = (int)sizeof(wire::AnimLayerWire) * out.layerCount;
-		if (out.layerCount > wire::kAnimLayersOnWire || at + head + layerBytes > size)
-		{
-			at = size;
-			return false;
-		}
-		std::memcpy(out.layers, data + at + head, layerBytes);
-		at += head + layerBytes;
+		at += (int)used;
 		return true;
 	}
 
@@ -227,6 +261,17 @@ namespace
 			if (!_hasSpawn || !_net.IsOpen() || _hasResult) return;
 			if (_scripted && !_scriptPlaced)
 			{
+				if (!_scriptArmed)
+				{
+					// 경로 무기를 먼저 든다 — 서버는 자리 옮기기에서 자세를 든 무기 묶음으로 처음부터 시작하므로, 교체가 서기 시계를 바꾸지 않는다
+					wire::Input arm = wire::Input();
+					arm.yaw = kScriptYaw;
+					arm.weapon = _scriptWeapon;
+					_self.AddInput(arm);
+					if (!_net.SendPacket(arm, wire::Msg::C2S_INPUT)) _net.Close();
+					_scriptArmed = true;
+					return;
+				}
 				PlaceForScript();
 				return;
 			}
@@ -235,6 +280,11 @@ namespace
 			else Think(input);
 			_self.SetDebugMoveScale(breakMirror ? 0.999 : 1.0);
 			_self.AddInput(input);
+			if (_scriptStartPending)
+			{
+				_scriptStartPending = false;
+				std::printf("SCRIPT start seq=%u\n", input.seq);	// 경로 첫 틱의 입력 번호 — SCRIPTANIM 의 seq 에서 빼면 경로 몇 번째 틱인지 나온다
+			}
 			if (_judge && _self.GetLastWeaponEvents().fired) JudgeShot(input, _self.GetLastWeaponEvents());
 			if (!_net.SendPacket(input, wire::Msg::C2S_INPUT)) _net.Close();
 		}
@@ -242,11 +292,15 @@ namespace
 		void Close() { _net.Close(); }
 
 		void SetMeasureView(bool on) { _measureView = on; }
-		bool IsScriptDone() const { return _scriptStep == (int)(sizeof(kStartStopScript) / sizeof(kStartStopScript[0])); }
-		void SetScript(double holdSeconds)
+		bool IsScriptDone() const { return _scriptStep == (int)_scriptStepCount; }
+		void SetScript(double holdSeconds, uint8_t weapon, bool events)
 		{
 			_scripted = true;
 			_scriptHoldTicks = (uint32_t)std::lround(holdSeconds * wire::kTickRate);
+			_scriptWeapon = weapon;
+			_scriptCurWeapon = weapon;
+			_scriptSteps = events ? kEventsScript : kStartStopScript;
+			_scriptStepCount = events ? sizeof(kEventsScript) / sizeof(kEventsScript[0]) : sizeof(kStartStopScript) / sizeof(kStartStopScript[0]);
 		}
 		void SetJudge(JudgeShared* judge)
 		{
@@ -254,7 +308,7 @@ namespace
 			if (!judge) return;
 			_judgeBodies.reserve(wire::kMaxPlayersInRoom);
 			_judgePoses.resize(wire::kMaxPlayersInRoom);
-			for (std::vector<BodyPose>& pose : _judgePoses) pose.resize(judge->evaluator.BodyCount());
+			for (std::vector<BodyPose>& pose : _judgePoses) pose.resize(judge->evaluators[0].BodyCount());	// 몸 개수는 클립 파일 하나에 하나 — 묶음마다 같다
 		}
 		uint64_t GetJudgeShots() const { return _judgeShots; }
 		uint64_t GetJudgeBullets() const { return _judgeBullets; }
@@ -369,6 +423,7 @@ namespace
 			_stuckTicks = 0;
 			_detourLeft = 0;
 			_scriptPlaced = false;	// 경기 시작이 시작 자리로 돌려놓으면 다시 옮기고 처음부터
+			_scriptArmed = false;	// 부활은 권총으로 돌려놓는다 — 경로 무기를 다시 든다
 		}
 
 		void OnKill(const wire::Kill& kill)
@@ -428,8 +483,15 @@ namespace
 				wire::PlayerState p;
 				std::memcpy(&p, data + offsetof(wire::State, players) + sizeof(wire::PlayerState) * i, sizeof(p));
 				_players[p.id] = p;
-				wire::AnimStateWire anim;
-				const bool hasAnim = _judge && ReadAnimTail(data, size, tailAt, anim);
+				wire::AnimStateWire anim{};
+				const bool hasAnim = (_judge || _scripted) && ReadAnimTail(data, size, tailAt, anim);
+				if (_scripted && hasAnim && _scriptPlaced && p.id == _welcome.playerId)
+				{
+					// 경로 모드 — 받은 자기 몽타주 칸(칸 번호 = 묶음 << 4 | 종류, 시각 1/6000초, 비중 0~255). 서버 무기 · 마지막 적용 입력 번호와 함께
+					std::printf("SCRIPTANIM tick=%u seq=%u weapon=%u n=%u", stateTick, p.lastSeq, (unsigned)p.weapon, (unsigned)anim.montageCount);
+					for (int m = 0; m < (int)anim.montageCount; ++m) std::printf(" %u:%u:%u", (unsigned)anim.montages[m].montage, (unsigned)anim.montages[m].time, (unsigned)anim.montages[m].weight);
+					std::printf("\n");
+				}
 				if (_measureView) _viewHistory[p.id].Add(p, stateTick, hasAnim ? &anim : nullptr);
 				if (p.id == _welcome.playerId)
 				{
@@ -556,6 +618,8 @@ namespace
 			++_judgeShots;
 			_judgeBodies.clear();
 			_judgeSpeeds.clear();
+			_judgeTargetWeapons.clear();
+			_judgeMontages.clear();
 			for (const auto& entry : _viewHistory)
 			{
 				if (entry.first == _welcome.playerId || _judgeBodies.size() >= _judgePoses.size()) continue;
@@ -566,7 +630,7 @@ namespace
 					continue;
 				}
 				if (from->flags & wire::STATE_DEAD) continue;
-				if (!from->hasAnim)
+				if (!from->hasAnim || from->weapon >= (uint8_t)EWeapon::Count)
 				{
 					++_judgeNoAnim;
 					continue;
@@ -577,32 +641,40 @@ namespace
 				body.id = entry.first;
 				const ViewHistory::Snap* to = input.viewAlpha > 0.f ? entry.second.Find(input.viewTick + 1) : nullptr;
 				float poseAlpha = 0.f;
-				if (to && to->hasAnim && Length(to->at - from->at) <= wire::kRemoteTeleportDistance)
+				if (to && to->hasAnim && to->weapon < (uint8_t)EWeapon::Count && Length(to->at - from->at) <= wire::kRemoteTeleportDistance)
 				{
 					body.center = from->at + (to->at - from->at) * (double)input.viewAlpha;
 					body.yawDegrees = from->yaw + input.viewAlpha * NormalizeAxis(to->yaw - from->yaw);
 					poseAlpha = input.viewAlpha;
 				}
 
+				// 서버 GetPoseAt 과 같은 차례 — 틱마다 그 틱 묶음으로 풀고, 섞기 · 부위는 앞 틱 평가기로(뼈대가 같다)
+				CAnimPoseEvaluator& evaluator = js.evaluators[from->weapon];
 				AnimPoseInput pose;
-				js.codec.FromWire(from->anim, from->pitch, pose);
-				js.evaluator.EvaluateLocal(pose, js.localFrom.data());
+				js.codecs[from->weapon].FromWire(from->anim, from->pitch, pose);
+				evaluator.EvaluateLocal(pose, js.localFrom.data());
 				const BoneTransform* local = js.localFrom.data();
 				if (poseAlpha > 0.f)
 				{
 					AnimPoseInput nextPose;
-					js.codec.FromWire(to->anim, to->pitch, nextPose);
-					js.evaluator.EvaluateLocal(nextPose, js.localTo.data());
-					js.evaluator.BlendLocal(js.localFrom.data(), js.localTo.data(), poseAlpha, js.localBlend.data());
+					js.codecs[to->weapon].FromWire(to->anim, to->pitch, nextPose);
+					js.evaluators[to->weapon].EvaluateLocal(nextPose, js.localTo.data());
+					evaluator.BlendLocal(js.localFrom.data(), js.localTo.data(), poseAlpha, js.localBlend.data());
 					local = js.localBlend.data();
 				}
 				std::vector<BodyPose>& out = _judgePoses[_judgeBodies.size()];
-				js.evaluator.BodiesFromLocal(local, out.data());
+				evaluator.BodiesFromLocal(local, out.data());
+				++js.bodiesByWeapon[from->weapon];
 				body.pose = out.data();
 				body.shapes = js.clips.Bodies().data();
 				body.shapeCount = (uint32_t)js.clips.Bodies().size();
 				_judgeBodies.push_back(body);
 				_judgeSpeeds.push_back(from->speed);
+				// 9-6 「상대가 몽타주 중」 — 서버 REWIND 줄 montages= 와 같은 정의(그 틱 칸 수, 다음 틱과 섞으면 둘 중 큰 쪽)
+				uint8_t montages = from->anim.montageCount;
+				if (poseAlpha > 0.f) montages = std::max(montages, to->anim.montageCount);
+				_judgeTargetWeapons.push_back(from->weapon);
+				_judgeMontages.push_back(montages);
 			}
 
 			const uint8_t weapon = _self.GetWeaponIndex();
@@ -620,8 +692,10 @@ namespace
 				++_judgeBullets;
 				if (!js.log) continue;
 				const bool hitBody = result.kind == EBulletHit::Body;
-				std::fprintf(js.log, "BOTSHOT seq=%u shooter=%u i=%d weapon=%u kind=%d target=%u weak=%d viewTick=%u alpha=%.4f speed=%.1f\n", input.seq, _welcome.playerId, i, (unsigned)weapon, (int)result.kind,
-					hitBody ? _judgeBodies[result.bodyIndex].id : 0u, hitBody && result.weakSpot ? 1 : 0, input.viewTick, input.viewAlpha, hitBody ? _judgeSpeeds[result.bodyIndex] : 0.f);
+				// targetWeapon · montages = 맞힌 상대의 자세 묶음 · 몽타주 칸 수(못 맞히면 0). check_bot_hits.py 가 무기별 · 몽타주 중을 따로 센다
+				std::fprintf(js.log, "BOTSHOT seq=%u shooter=%u i=%d weapon=%u kind=%d target=%u weak=%d viewTick=%u alpha=%.4f speed=%.1f targetWeapon=%u montages=%u\n", input.seq, _welcome.playerId, i, (unsigned)weapon, (int)result.kind,
+					hitBody ? _judgeBodies[result.bodyIndex].id : 0u, hitBody && result.weakSpot ? 1 : 0, input.viewTick, input.viewAlpha, hitBody ? _judgeSpeeds[result.bodyIndex] : 0.f,
+					hitBody ? (unsigned)_judgeTargetWeapons[result.bodyIndex] : 0u, hitBody ? (unsigned)_judgeMontages[result.bodyIndex] : 0u);
 			}
 		}
 
@@ -651,45 +725,87 @@ namespace
 			_scriptPlaced = true;
 			_scriptTick = 0;
 			_scriptStep = -1;
+			_scriptCurWeapon = _scriptWeapon;
+			_scriptFireTapLeft = 0;
+			_scriptFireHeld = false;
+			_scriptPitch = 0.f;
 			std::printf("SCRIPT placed seq=%u\n", place.seq);
 		}
 
-		// 정해진 경로 — 틱을 세어 조각을 고른다. 자리에 선 뒤 몇 초는 소총을 들고 서 있기만 한다
+		// 정해진 경로 — 틱을 세어 조각을 고른다. 자리에 선 뒤 몇 초는 고른 무기(기본 소총)를 들고 서 있기만 한다.
+		// 사건 · 시선은 Lyra 기록의 프레임보다 한 틱 늦게 넣는다 — Lyra 는 사건 프레임의 갱신 뒤에 몽타주를 틀고 다음 갱신부터 무기 층을 바꾸며(대조 도구 AnimCheck 가 그 차례로 튼다, D46),
+		// 애니가 읽는 시선 각도 한 프레임 앞 조종 각이다(animcmp_ev_rifle_probe.csv AimPitch, 실측). 서버는 입력 틱의 애니 갱신 앞에 사건을 튼다(Room.cpp PlayAnimEvents)
 		void ThinkScript(wire::Input& input)
 		{
 			input.yaw = kScriptYaw;
-			input.weapon = (uint8_t)EWeapon::Rifle;
+			input.pitch = _scriptPitch;
 			const uint32_t tick = _scriptTick++;
-			if (tick < _scriptHoldTicks) return;
-			uint32_t at = tick - _scriptHoldTicks;
-			int step = 0;
-			for (const ScriptStep& item : kStartStopScript)
+			float nextPitch = _scriptPitch;
+			if (tick == _scriptHoldTicks) _scriptStartPending = true;
+			if (tick >= _scriptHoldTicks)
 			{
-				if (at < item.ticks)
+				uint32_t at = tick - _scriptHoldTicks;
+				int step = 0;
+				const ScriptStep* item = nullptr;
+				for (size_t i = 0; i < _scriptStepCount; ++i)
+				{
+					if (at < _scriptSteps[i].ticks)
+					{
+						item = &_scriptSteps[i];
+						break;
+					}
+					at -= _scriptSteps[i].ticks;
+					++step;
+				}
+				if (item)
 				{
 					if (step != _scriptStep)
 					{
 						_scriptStep = step;
 						const auto server = _players.find(_welcome.playerId);
-						std::printf("SCRIPT step=%s tick=%u server=%.2f,%.2f,%.2f\n", item.name, tick,
+						std::printf("SCRIPT step=%s tick=%u server=%.2f,%.2f,%.2f\n", item->name, tick,
 							server != _players.end() ? server->second.x : 0.f, server != _players.end() ? server->second.y : 0.f, server != _players.end() ? server->second.z : 0.f);
 					}
-					if (item.moving)
+					if (item->moving)
 					{
-						const double radians = ((double)kScriptYaw + item.angle) * 3.14159265358979323846 / 180.0;
+						const double radians = ((double)kScriptYaw + item->angle) * 3.14159265358979323846 / 180.0;
 						input.moveX = (float)std::cos(radians);
 						input.moveY = (float)std::sin(radians);
 					}
-					return;
+					if (item->ev0 != EScriptEvent::None && at == item->at0 + 1) DoScriptEvent(item->ev0, input);
+					if (item->ev1 != EScriptEvent::None && at == item->at1 + 1) DoScriptEvent(item->ev1, input);
+					const float alpha = item->seconds > 0.f ? std::min(std::max((float)at / (float)wire::kTickRate / item->seconds, 0.f), 1.f) : 1.f;
+					nextPitch = item->pitchFrom + (item->pitchTo - item->pitchFrom) * alpha;	// FMath::Lerp
 				}
-				at -= item.ticks;
-				++step;
+				else if (_scriptStep != step)
+				{
+					_scriptStep = step;
+					std::printf("SCRIPT end tick=%u\n", tick);
+				}
 			}
-			if (_scriptStep != step)
+			if (_scriptFireTapLeft > 0)
 			{
-				_scriptStep = step;
-				std::printf("SCRIPT end tick=%u\n", tick);
+				input.buttons |= wire::BUTTON_FIRE;
+				--_scriptFireTapLeft;
 			}
+			if (_scriptFireHeld) input.buttons |= wire::BUTTON_FIRE;
+			input.weapon = _scriptCurWeapon;
+			_scriptPitch = nextPitch;
+		}
+
+		void DoScriptEvent(EScriptEvent ev, wire::Input& input)
+		{
+			switch (ev)
+			{
+			case EScriptEvent::Fire: _scriptFireTapLeft = kScriptFireTapTicks; break;
+			case EScriptEvent::Hold: _scriptFireHeld = true; break;
+			case EScriptEvent::Release: _scriptFireHeld = false; break;
+			case EScriptEvent::Reload: input.buttons |= wire::BUTTON_RELOAD; break;
+			case EScriptEvent::Swap: _scriptCurWeapon = _scriptWeapon == (uint8_t)EWeapon::Pistol ? (uint8_t)EWeapon::Rifle : (uint8_t)EWeapon::Pistol; break;
+			case EScriptEvent::Back: _scriptCurWeapon = _scriptWeapon; break;
+			case EScriptEvent::None: break;
+			}
+			std::printf("SCRIPT event=%d tick=%u weapon=%u\n", (int)ev, _scriptTick - 1, (unsigned)_scriptCurWeapon);
 		}
 
 		// 두뇌 — 가장 가까운 산 적을 보고 쏘며 다가간다. 길찾기가 없어 막히면 무작위로 돌아간다
@@ -834,9 +950,18 @@ namespace
 
 		bool _scripted = false;
 		bool _scriptPlaced = false;
+		bool _scriptArmed = false;
 		uint32_t _scriptHoldTicks = 0;
+		uint8_t _scriptWeapon = (uint8_t)EWeapon::Rifle;
 		uint32_t _scriptTick = 0;
 		int _scriptStep = -1;
+		const ScriptStep* _scriptSteps = kStartStopScript;
+		size_t _scriptStepCount = sizeof(kStartStopScript) / sizeof(kStartStopScript[0]);
+		uint8_t _scriptCurWeapon = (uint8_t)EWeapon::Rifle;	// 사건 경로에서 지금 든 무기(Swap · Back)
+		uint32_t _scriptFireTapLeft = 0;	// 한 발 사건의 방아쇠가 남은 틱
+		bool _scriptFireHeld = false;
+		float _scriptPitch = 0.f;			// 앞 틱의 조종 시선 각 — 이번 입력에 싣는다(한 틱 늦게)
+		bool _scriptStartPending = false;
 
 		float _lastYaw = 0;
 		int _sightWait = 0;
@@ -859,6 +984,7 @@ namespace
 				Vec3 at;
 				uint8_t flags = 0;
 				float yaw = 0, pitch = 0, speed = 0;
+				uint8_t weapon = 0;			// 이 틱 상태를 만든 자세 묶음 — 서버는 무기를 바꾼 틱에 묶음도 바꿔 보낸다
 				bool hasAnim = false;
 				wire::AnimStateWire anim;
 			};
@@ -873,6 +999,7 @@ namespace
 				s.yaw = p.yaw;
 				s.pitch = p.pitch;
 				s.speed = (float)std::sqrt(p.vx * p.vx + p.vy * p.vy);
+				s.weapon = p.weapon;
 				s.hasAnim = anim != nullptr;
 				if (anim) s.anim = *anim;
 				++count;
@@ -902,6 +1029,7 @@ namespace
 		Vec3 _judgeAimOffset;
 		std::vector<BodyPlacement> _judgeBodies;
 		std::vector<float> _judgeSpeeds;
+		std::vector<uint8_t> _judgeTargetWeapons, _judgeMontages;	// _judgeBodies 와 같은 차례
 		std::vector<std::vector<BodyPose>> _judgePoses;
 		uint64_t _judgeShots = 0, _judgeBullets = 0, _judgeNoView = 0, _judgeNoSnap = 0, _judgeNoAnim = 0, _judgeClamped = 0, _recvBytes = 0;
 		uint64_t _ackLagSum = 0, _ackLagSamples = 0;
@@ -941,6 +1069,19 @@ namespace
 			else if (value("--judgeLog=", v)) out.judgeLog = v;
 			else if (value("--script=", v)) out.script = v;
 			else if (value("--scriptHold=", v)) out.scriptHoldSeconds = std::atof(v.c_str());
+			else if (value("--scriptWeapon=", v))
+			{
+				out.scriptWeapon = (uint8_t)EWeapon::Count;
+				for (uint8_t weapon = 0; weapon < (uint8_t)EWeapon::Count; ++weapon)
+				{
+					if (v == GetWeaponDef((EWeapon)weapon).name) out.scriptWeapon = weapon;
+				}
+				if (out.scriptWeapon == (uint8_t)EWeapon::Count)
+				{
+					std::printf("모르는 무기 %s\n", v.c_str());
+					return false;
+				}
+			}
 			else if (s == "--judgeNoSpread") out.judgeNoSpread = true;
 			else if (s == "--judgeFireAlways") out.judgeFireAlways = true;
 			else if (s == "--measureView") out.measureView = true;
@@ -952,7 +1093,7 @@ namespace
 				return false;
 			}
 		}
-		if (!out.script.empty() && out.script != "startstop")
+		if (!out.script.empty() && out.script != "startstop" && out.script != "events")
 		{
 			std::printf("모르는 경로 %s\n", out.script.c_str());
 			return false;
@@ -994,14 +1135,20 @@ int main(int argc, char** argv)
 			if (std::fread(data.data(), 1, data.size(), file) != data.size()) data.clear();
 			std::fclose(file);
 		}
-		if (data.empty() || judge.clips.LoadFromMemory(data.data(), data.size()) != EClipLoad::Ok || !judge.evaluator.Init(judge.clips, kJudgeBundle) || !judge.codec.Init(judge.clips, kJudgeBundle))
+		bool loaded = !data.empty() && judge.clips.LoadFromMemory(data.data(), data.size()) == EClipLoad::Ok;
+		for (size_t weapon = 0; loaded && weapon < (size_t)EWeapon::Count; ++weapon)
+		{
+			const char* bundle = GetWeaponDef((EWeapon)weapon).name;
+			loaded = judge.evaluators[weapon].Init(judge.clips, bundle) && judge.codecs[weapon].Init(judge.clips, bundle);
+		}
+		if (!loaded)
 		{
 			std::printf("클립 파일을 읽지 못함 %s\n", args.judgeClips.c_str());
 			return 2;
 		}
-		judge.localFrom.resize(judge.evaluator.BoneCount());
-		judge.localTo.resize(judge.evaluator.BoneCount());
-		judge.localBlend.resize(judge.evaluator.BoneCount());
+		judge.localFrom.resize(judge.evaluators[0].BoneCount());
+		judge.localTo.resize(judge.evaluators[0].BoneCount());
+		judge.localBlend.resize(judge.evaluators[0].BoneCount());
 		judge.noSpread = args.judgeNoSpread;
 		judge.fireAlways = args.judgeFireAlways;
 		if (!args.judgeLog.empty()) judge.log = std::fopen(args.judgeLog.c_str(), "w");
@@ -1013,7 +1160,7 @@ int main(int argc, char** argv)
 		bots.emplace_back(new CBot(map, sim, rules, args.seed + 100 + (uint32_t)i));
 		bots.back()->SetMeasureView(args.measureView);
 		bots.back()->SetJudge(judging ? &judge : nullptr);
-		if (!args.script.empty()) bots.back()->SetScript(args.scriptHoldSeconds);
+		if (!args.script.empty()) bots.back()->SetScript(args.scriptHoldSeconds, args.scriptWeapon, args.script == "events");
 		if (!bots.back()->Connect(args.port))
 		{
 			std::printf("BOT %d 접속 실패\n", i);
@@ -1121,6 +1268,7 @@ int main(int argc, char** argv)
 			}
 			if (judge.log) std::fclose(judge.log);
 			std::printf("JUDGE shots=%llu bullets=%llu noView=%llu noSnap=%llu noAnim=%llu clampedThinks=%llu recvBytesPerBotPerSec=%.0f\n", (unsigned long long)shots, (unsigned long long)bullets, (unsigned long long)noView, (unsigned long long)noSnap, (unsigned long long)noAnim, (unsigned long long)clamped, (double)recvBytes / (double)bots.size() / args.seconds);
+			std::printf("JUDGE bodies %s=%llu %s=%llu %s=%llu\n", GetWeaponDef((EWeapon)0).name, (unsigned long long)judge.bodiesByWeapon[0], GetWeaponDef((EWeapon)1).name, (unsigned long long)judge.bodiesByWeapon[1], GetWeaponDef((EWeapon)2).name, (unsigned long long)judge.bodiesByWeapon[2]);
 		}
 		uint64_t ackLagSum = 0, ackLagSamples = 0;
 		uint32_t ackLagMax = 0;

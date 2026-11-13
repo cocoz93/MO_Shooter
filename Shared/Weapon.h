@@ -36,11 +36,12 @@ namespace mo
 
 	struct WeaponDef
 	{
-		const char* name;
+		const char* name;				// 클립 파일의 묶음 이름과 같다 — 서버 · 화면 · 봇이 이 이름으로 무기별 자세 묶음을 고른다
 		float baseDamage;
 		float weakSpotMultiplier;
 		float fireDelay;				// GA_Weapon_Fire 의 FireDelayTimeSecs
-		float autoRate;					// 발사 몽타주 재생 속도 — 판정엔 안 쓰이고 대조 표에만 있다
+		float autoRate;					// 발사 몽타주 재생 속도 — 서버 애니 상태가 쏘기 몽타주를 이 속도로 튼다(9단계 조각 4, 9-1 기록이 준 속도와 같음)
+		float reloadRate;				// 재장전 몽타주 재생 속도 — 서버 애니 상태가 재장전 몽타주를 이 속도로 튼다. 9-1 기록 권총 1.5 · 소총 · 샷건 1.0(실측)
 		int32_t magazineSize;
 		int32_t startSpareAmmo;
 		int32_t bulletsPerCartridge;

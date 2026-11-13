@@ -14,19 +14,28 @@
 //   u32 뼈 수, 뼈마다 { u8 이름 길이, 이름(ascii), i16 부모(남긴 뼈 기준, 뿌리 -1), 기준 자세 7f (px py pz qx qy qz qw) }
 //   메시 자리 7f (px py pz qx qy qz qw) — 캐릭터 몸 기준에서 본 메시 뿌리
 //   u32 부위 수, 부위마다 { u8 이름 길이, 뼈 이름, u8 모양(EBodyShape 값), u8 약점, 뼈 기준 자리 3f, 뼈 기준 회전 4f, 크기 a b c 3f }
+//   u32 뼈별 비중 표 수(버전 2 — 골격의 블렌드 프로파일), 표마다 { u8 이름 길이, 이름, u8 방식(엔진 EBlendProfileMode 값), f[뼈 수] 비중(남긴 뼈 차례) }
+//   u32 끼움 자리 수(버전 2 — 몽타주 줄이 들어가는 자리), 자리마다 { u8 이름 길이, 이름, u8 방식(ESlotMode), i16 뼈별 비중 표(-1 = 모든 뼈 1) }
 //   u32 묶음 수, 묶음마다 {
 //     u8 이름 길이, 이름, u32 표본 Hz, 6f 조준 각도(위 · 가운데 · 아래 · 느슨한 위 · 가운데 · 아래),
 //     5f (groundFriction, brakingFriction, brakingFrictionFactor, brakingDecelerationWalking, gravityZ), u8 separateBraking,
-//     u32 클립 수, 클립마다 {
+//     u32 클립 수(앞 ACLIP_COUNT 개는 EAnimClip 차례, 그 뒤는 몽타주 · 덮기 자세 클립), 클립마다 {
 //       u8 이름 길이, 이름, f 길이(초), u8 덧붙임 종류(0 = 일반), u8 반복, f rootSpeed, u32 표본 수,
 //       u16 발 표시 수, 표시마다 { f 시각, u8 왼발 },
 //       u8 곡선 유무, 있으면 { u32 hz, u32 값 수, f[값 수] },
-//       키 = 표본 수 × 뼈 수 × 7f (px py pz qx qy qz qw) } }
+//       키 = 표본 수 × 뼈 수 × 7f (px py pz qx qy qz qw) },
+//     u32 몽타주 수(버전 2), 몽타주마다 {
+//       u8 이름 길이, 이름, u8 종류(EMontageKind), u8 무리 이름 길이, 무리 이름, f 길이(초), f 재생 속도,
+//       f 넣기 시간, u8 넣기 곡선(엔진 EAlphaBlendOption 값), f 빼기 시간, u8 빼기 곡선, f 빼기 시작(음수 = 끝에서 빼기 시간만큼 앞), u8 자동 빼기,
+//       u8 줄 수, 줄마다 { u8 끼움 자리, u16 클립, f 몽타주 시각, f 클립 시작, f 클립 끝, f 클립 재생 속도 },
+//       u8 곡선 수, 곡선마다 { u8 이름 길이, 이름, i8 자리(-1 = 몽타주 시각 기준, 0 이상 = 그 줄 클립의 시각 기준), u32 hz, u32 값 수, f[값 수] } },
+//     i16 쏜 뒤 윗몸 덮기 클립(그 클립 시각 0 의 자세를 쓴다. -1 = 없음), u8 그 끼움 자리 }
 //   'MOAE'
 // 크기 칸은 넣지 않는다. 일반 클립은 1, 덧붙임 클립은 0 으로 항상 같고, 다르면 도구가 파일을 만들지 않는다.
 namespace mo
 {
-	inline constexpr uint32_t kClipPackVersion = 1;
+	inline constexpr uint32_t kClipPackVersion = 2;	// 2 = 무기별 묶음 셋 + 뼈별 비중 표 · 끼움 자리 · 몽타주 표(9단계). 1 은 거부한다 — 소총까지 다시 만든다.
+														// 2-a 에서 잠시 만든 「몽타주 칸이 빈」 판은 비중 표 칸이 없어 뒤 칸이 밀려 거부된다(BadSlot — 3-a 에서 그 파일로 확인)
 
 	enum class EClipLoad
 	{
@@ -40,6 +49,28 @@ namespace mo
 		BadBundle,		// 묶음이 없거나 표본 Hz 가 0 이다
 		BadClip,		// 길이가 0 이하거나 표본 수가 길이 × Hz 와 맞지 않는다
 		BadTail,		// 끝 표시가 다르거나 뒤에 남는 바이트가 있다
+		BadSlot,		// 뼈별 비중 표 · 끼움 자리 표가 어긋난다(방식 · 표 번호가 범위 밖, 이름이 겹침)
+		BadMontage,		// 몽타주 표가 어긋난다(종류가 범위 밖이거나 겹침, 줄이 없는 자리 · 클립을 가리킴, 클립 구간이 클립 밖, 덮기 자세가 없는 클립, 섞기 곡선이 kBlendOptionMax 밖)
+	};
+
+	// 끼움 자리가 아래 자세에 몽타주 자세를 넣는 방식
+	enum class ESlotMode : uint8_t
+	{
+		Replace,		// 통째로 바꾼다(부활 FullBody)
+		Additive,		// 덧붙인다(사격 FullBodyAdditivePreAim · 윗몸 덧붙임 UpperBodyAdditive)
+		PerBone,		// 뼈별 비중으로 섞는다(윗몸 UpperBody)
+		Count,
+	};
+
+	// 묶음의 몽타주 종류. 뽑는 쪽(MOBSimpleAnimInstance.cpp WEAPON_MONTAGES)과 같은 차례
+	enum EMontageKind : uint8_t
+	{
+		MONTAGE_FIRE,
+		MONTAGE_RELOAD,
+		MONTAGE_EQUIP,		// 이 무기를 꺼낼 때
+		MONTAGE_UNEQUIP,	// 앞 무기를 넣을 때(세 무기 같은 자산)
+		MONTAGE_SPAWN,		// 부활(세 무기 같은 자산)
+		MONTAGE_KIND_COUNT,
 	};
 
 	// 묶음 안의 클립 차례. 뽑는 쪽(MOBSimpleAnimInstance.cpp AppendClipDump)과 같다
@@ -123,6 +154,59 @@ namespace mo
 		const BoneKey* Keys(uint32_t sample, uint32_t boneCount) const { return keys.data() + (size_t)sample * boneCount; }
 	};
 
+	// 골격의 뼈별 비중 표 하나. 표에 없는 뼈는 엔진 기본값(뼈 가림 방식 0, 그 밖 1 — BlendProfile.h GetDefaultBlendScale)으로 이미 채워 둔다
+	struct ClipProfile
+	{
+		std::string name;
+		uint8_t mode = 0;				// 엔진 EBlendProfileMode 값 그대로(2 = 뼈 가림)
+		std::vector<float> weights;		// 남긴 뼈 차례, 뼈 수만큼
+	};
+
+	struct ClipSlot
+	{
+		std::string name;				// 언리얼 슬롯 이름. MOB_ 로 시작하면 엔진 슬롯이 아니라 이 프로젝트가 붙인 자리다
+		ESlotMode mode = ESlotMode::Replace;
+		int profile = -1;				// ClipProfile 번호, -1 = 모든 뼈 1
+	};
+
+	struct MontageTrack
+	{
+		uint8_t slot = 0;
+		uint16_t clip = 0;
+		float startPos = 0;				// 이 줄이 몽타주 시각 몇 초에 시작하나
+		float clipStart = 0;			// 클립에서 읽는 구간
+		float clipEnd = 0;
+		float playRate = 1;
+	};
+
+	struct MontageCurve
+	{
+		std::string name;
+		int owner = -1;					// -1 = 몽타주 시각 기준, 0 이상 = 그 줄 클립의 시각 기준
+		uint32_t hz = 0;
+		std::vector<float> values;
+	};
+
+	// 몽타주 넣기 · 빼기 곡선으로 옮긴 엔진 EAlphaBlendOption 값의 끝 — 0 = 선형 · 1 = Cubic · 2 = HermiteCubic. 15개 몽타주가 쓰는 셋이다(3-a 덤프, 실측). 더 큰 값은 읽기에서 거부한다
+	inline constexpr uint8_t kBlendOptionMax = 2;
+
+	struct ClipMontage
+	{
+		std::string name;
+		uint8_t kind = 0;				// EMontageKind
+		std::string group;				// 같은 무리의 몽타주를 새로 틀면 앞 것을 끈다(엔진 규칙)
+		float length = 0;
+		float rate = 1;					// 자산 재생 배율(엔진 RateScale). 실제 속도 = 트는 쪽이 준 속도 × 이 값
+		float blendIn = 0;
+		uint8_t blendInOption = 0;		// 엔진 EAlphaBlendOption 값 그대로(kBlendOptionMax 까지)
+		float blendOut = 0;
+		uint8_t blendOutOption = 0;
+		float blendOutTrigger = -1;
+		bool autoBlendOut = true;
+		std::vector<MontageTrack> tracks;
+		std::vector<MontageCurve> curves;
+	};
+
 	struct ClipBundle
 	{
 		std::string name;
@@ -135,6 +219,18 @@ namespace mo
 		float gravityZ = 0;
 		bool separateBraking = false;
 		std::vector<AnimClip> clips;
+		std::vector<ClipMontage> montages;
+		int overrideClip = -1;			// 쏜 뒤 윗몸 덮기 자세의 클립(시각 0), -1 = 없음
+		int overrideSlot = -1;			// 그 자세를 넣는 끼움 자리
+
+		const ClipMontage* FindMontage(uint8_t kind) const
+		{
+			for (const ClipMontage& montage : montages)
+			{
+				if (montage.kind == kind) return &montage;
+			}
+			return nullptr;
+		}
 	};
 
 	class CAnimClips
@@ -148,7 +244,10 @@ namespace mo
 		const std::vector<ClipBody>& Bodies() const { return _bodies; }
 		const BoneKey& MeshPlacement() const { return _mesh; }
 		const std::vector<ClipBundle>& Bundles() const { return _bundles; }
+		const std::vector<ClipProfile>& Profiles() const { return _profiles; }
+		const std::vector<ClipSlot>& Slots() const { return _slots; }
 		int FindBone(const char* name) const;
+		int FindSlot(const char* name) const;
 		const ClipBundle* FindBundle(const char* name) const;
 		size_t KeyBytes() const;		// 키가 차지하는 메모리
 
@@ -161,6 +260,8 @@ namespace mo
 		std::vector<ClipBone> _bones;
 		std::vector<ClipBody> _bodies;
 		BoneKey _mesh{};
+		std::vector<ClipProfile> _profiles;
+		std::vector<ClipSlot> _slots;
 		std::vector<ClipBundle> _bundles;
 	};
 }

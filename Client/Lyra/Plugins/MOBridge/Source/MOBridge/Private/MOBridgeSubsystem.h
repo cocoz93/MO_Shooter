@@ -12,6 +12,7 @@ class APawn;
 class APlayerState;
 class ULyraEquipmentInstance;
 struct FMOBCore;
+struct FGameplayAbilityActorInfo;
 
 namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; } }
 
@@ -71,6 +72,8 @@ struct FMOBRemote
  *   -MOBShotAt=10,15            준비된 뒤 N초에 캡처(Saved/MOB/<tag>_<N>.png)
  *   -MOBRecord=start,dur,fps    프레임 연속 캡처(사람 확인 영상용)
  *   -MOBQuitAt=N                준비된 뒤 N초에 끝냄(서버 경기 결과가 먼저 오면 그쪽)
+ *   -MOBMaxFPS=N                시험 옵션. 화면 프레임 상한을 매 프레임 건다(Lyra 설정이 t.MaxFPS 를 덮어쓴다). 낮추면 한 프레임에 서버 틱이 여럿 지나 멈칫한 프레임을 흉내 낸다
+ *   -MOBAbilityOwnTimer         시험 옵션. 내 사격 능력이 Lyra 자기 타이머 · 원본 난수로 쏜다(고치기 전 동작과 견줄 때만). 평소에는 예측이 쏜 입력에서 다리가 능력을 켜서 화면 탄이 서버 탄과 같은 번호 · 방향이다(D53)
  *   -MOBNoViewClamp             시험 옵션. 화면 시점 묶기를 끈다(고치기 전 동작과 견줄 때만). 평소에는 상태가 늦게 와 상대를 마지막 자리에 세워 둔 프레임에 그 상태의 틱을 화면 시점으로 보고한다(candidate1-pilot-plan.md 파일럿 2)
  *   -MOBTag=name                산출물 파일 이름 앞부분
  *   -MOBBreakPredictAt=N        일부러 틀리기 — 준비된 뒤 N초에 내 예측 위치를 1m 민다(보정이 잡는지 보려고)
@@ -91,8 +94,10 @@ public:
 	virtual TStatId GetStatId() const override;
 	virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Always; }
 
-	// Lyra 능력이 탄을 쏠 때 — 서버와 같은 식으로 방향을 구한다(D15)
-	bool ComputeBulletDirection(const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir);
+	// Lyra 능력이 탄을 쏠 때 — 서버와 같은 식으로 방향을 구한다(D15). 입력 번호 · 조준 · 퍼짐은 다리가 켠 사격의 것이다(D53)
+	bool ComputeBulletDirection(const FVector& StartTrace, const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir);
+	// 내 사격 능력의 문지기 — 다리가 켜는 중일 때만 연다(D53). 탄창이 비었으면 원래 검사로 넘긴다(빈총 동작)
+	bool AllowAbilityActivation();
 
 private:
 	void ParseCommandLine();
@@ -126,6 +131,7 @@ private:
 	APlayerState* FindPlayerState(uint32 Id) const;
 	void QueuePacket(const void* Pkt, int32 Size);
 	void TickInput(double Now);
+	void TickAbilityFire();
 	void TickAutoInput(double T);
 	void TickCapture(double T);
 	void TickPickups(double Now);
@@ -141,6 +147,7 @@ private:
 	TArray<float> ShotAt;
 	float RecStart = -1, RecDur = 0, RecFps = 30;
 	float QuitAt = -1;
+	float MaxFpsTest = 0;		// -MOBMaxFPS
 	FString Tag = TEXT("mob");
 	bool bBlockDamage = true;
 	bool bAutoInput = false;
@@ -153,7 +160,7 @@ private:
 	bool bSimpleAnim = false;
 	bool bServerAnim = false;		// -MOBServerAnim — 남의 캐릭터 자세를 서버가 보낸 상태로 정한다(후보 1, D32)
 	bool bAnimBonesChecked = false;
-	bool bAbilitySpread = false;	// -MOBAbilitySpread — Lyra 능력의 탄에 입력 번호 짐작을 넣어 서버와 견준다(측정 전용. 능력의 발사 간격이 서버와 달라 아직 기본값이 아니다)
+	bool bAbilityOwnTimer = false;	// -MOBAbilityOwnTimer — 내 사격 능력을 Lyra 자기 타이머 · 원본 난수로 둔다(고치기 전 동작과 견줄 때만, D53)
 	bool bRayCheck = false;			// -MOBRayCheck — 같은 자세에 엔진 광선과 TraceBody 를 쏴 견준다(5단계)
 	FString RayBreak;				// -MOBRayBreak=yaw|nothick — 이 대조가 틀림을 잡는지 볼 때만
 	FRandomStream RayRng{ 7 };
@@ -197,8 +204,6 @@ private:
 
 	// 자동 입력이 고른 값 — 키보드 대신
 	bool bAutoFire = false;
-	double LastBulletAt = 0;		// 능력이 마지막으로 탄을 쏜 시각(FPlatformTime) — 자동 시험의 다시 누르기용
-	double LastAutoRepressAt = 0;
 	bool bAutoSeesEnemy = false;
 	bool bNamedSelf = false;
 	double NextPickupCheckAt = 0;
@@ -209,6 +214,28 @@ private:
 	int64 InputsDiagonal = 0;
 	int64 BulletsLyra = 0, BulletsServer = 0, BulletsLyraImmune = 0, BulletsServerImmune = 0, BulletsLyraOther = 0, BulletsServerOther = 0;
 	int32 LastSyncMag = -1;
+
+	// 내 사격 능력 구동(D53) — 예측이 쏜 입력을 쌓아 두고, 능력이 쉬고 있으면 쌓인 것 중 가장 오래된 하나로 켠다
+	struct FMOBPendingFire
+	{
+		uint32 Seq = 0;
+		uint8 Weapon = 0;
+		float SpreadAngle = 0, SpreadMultiplier = 0;
+		FVector AimDir = FVector::ZeroVector;	// 입력의 요 · 피치로 구한 조준(서버와 같은 식)
+		FVector AimFrom = FVector::ZeroVector;	// 입력에 실은 조준 시작점 = 서버 탄의 시작점
+		uint64 Frame = 0;						// 쌓은 화면 프레임(GFrameCounter)
+	};
+	TArray<FMOBPendingFire> PendingFires;
+	FMOBPendingFire ActiveFire;					// 마지막으로 켠 사격 — 탄 방향 훅이 읽는다
+	bool bActiveFireValid = false;
+	bool bAbilityActivating = false;			// 다리가 능력을 켜는 중(이때만 문지기가 연다)
+	// queued = 예측이 쏜 발, driven = 그 발로 능력이 켜진 수, activateFail = 켜기 실패, noSpec = 사격 능력이 없어 버린 발, dropped = 너무 밀려 버린 발,
+	// waitFrames = 능력이 아직 켜져 있어 기다린 프레임, weaponMismatch = 켤 때 Lyra 무기(서버 상태로 맞춘 무기)가 그 발의 무기와 다른 수, gateBlocks = 문지기가 막은 수(Lyra 입력이 프레임마다 켜 본다),
+	// gateDryFire = 탄창이 비어 문지기가 원래 검사로 넘긴 수(탄 부족으로 막히며 빈총 몽타주 · 문구가 난다),
+	// bullets = 훅이 방향을 정한 탄, bulletsOutside = 그중 다리가 켜는 자리 밖에서 쏜 탄, lag = 쌓은 프레임에서 켠 프레임까지 0 · 1 · 2 · 3 이상
+	int64 FireQueued = 0, FireDriven = 0, FireActivateFail = 0, FireNoSpec = 0, FireDropped = 0, FireWaitFrames = 0, FireWeaponMismatch = 0, FireGateBlocks = 0, FireGateDryFire = 0, FireBullets = 0, FireBulletsOutside = 0;
+	int64 FireLagFrames[4] = {};
+	double FireLyraAimMaxDeg = 0, FireStartDiffMax = 0;	// 능력이 잰 조준 · 시작점과 그 발 입력의 차이 최대(그림에는 입력 쪽을 쓴다)
 	uint8 LastSyncWeapon = 0xFF;
 	int32 AimFarLinesLeft = 8;
 	int64 AimFarLocal = 0;
@@ -246,6 +273,9 @@ private:
 	int32 RemoteSpawned = 0, RemoteSpawnFail = 0;
 	int64 RemoteFrames = 0, RemoteUnderrun = 0, RemoteTeleports = 0, RemoteDriftOver1cm = 0;
 	int64 AnimTailPlayers = 0, AnimTailBad = 0, AnimNoState = 0, AnimPoseEvals = 0, AnimPoseFrames = 0, AnimPoseFail = 0;
+	int64 AnimPoseEvalsByWeapon[3] = {};	// 무기 번호(EWeapon) 차례 권총 · 소총 · 샷건 — 무기 수와 같은지 .cpp 에서 정적 검사
+	int64 AnimSetChanges = 0, AnimSetMisses = 0, AnimBadWeapon = 0;
+	int64 AnimMontageCellsIn = 0, AnimMontageCells = 0, AnimMontageMisses = 0, AnimMontageFrames = 0, AnimSlotPasses = 0, AnimMontageNoSlot = 0, AnimMaskMissing = 0, AnimWeaponNotifies = 0, AnimWeaponPlaying = 0, AnimSoundNotifies = 0, AnimMontageRestarts = 0, AnimStepStates = 0;	// 몽타주(9단계 5-a)
 	struct FMOBRayStats { int64 Rays = 0, Map = 0, EngHit = 0, Same = 0, EngOnly = 0, MineOnly = 0, Both = 0, BoneSame = 0, EngWeak = 0, WeakLost = 0, WeakGain = 0; };
 	FMOBRayStats RayStats[2][2];		// [선 · 구 5.5][몸 쪽 · 머리 쪽 겨눔]
 	int64 RayNoBody = 0, RayDiffLogged = 0;

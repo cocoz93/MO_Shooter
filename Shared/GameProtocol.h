@@ -2,15 +2,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 // 서버와 클라(봇·Lyra)가 주고받는 와이어 형식. 리틀 엔디언, 1바이트 정렬, 좌표는 언리얼 그대로 cm.
 // - 왜: 메시지마다 잃어도 되는지를 처음부터 적어 둔다. 지금은 TCP 라 잃지 않지만 5단계 UDP 비교 때 이 구분을 그대로 쓴다.
-// - 소켓은 모른다. 구조체 정의뿐이라 언리얼 안에서도 컴파일된다.
+// - 소켓은 모른다. 구조체 정의와 애니 꼬리 쓰기 · 읽기 식뿐이라 언리얼 안에서도 컴파일된다.
 namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 4;
+		constexpr uint32_t kProtocolVersion = 5;		// 5 = 애니 꼬리에 몽타주 칸 · 덮기 · 왼손 비중(9단계 조각 4, D51)과 대기 몸짓 칸 눈금 1/3000초(D47)
 		constexpr int kTickRate = 60;
 		constexpr int kMaxPlayersInRoom = 10;
 		constexpr int kMaxBulletsInShot = 9;	// 샷건 한 발의 탄 수
@@ -122,9 +123,12 @@ namespace mo
 		};
 
 		// 애니 상태 한 사람치. S2C_STATE 의 players[count] 바로 뒤에 같은 차례로 붙는다(꼬리, 클립 파일을 준 서버만).
-		// - 겹침 칸은 layerCount 개만 싣는다 — 사람마다 18 + 4 × layerCount 바이트, 최대 34(D35).
+		// - 머리 뒤에 겹침 칸 layerCount 개, 그 뒤에 몽타주 칸 montageCount 개만 싣는다 — 사람마다 21 + 4 × layerCount + 4 × montageCount 바이트, 최대 49(D35 · D51).
+		//   쓰고 읽는 식은 아래 WriteAnimTail · ReadAnimTail 한 벌이다(서버가 쓰고 봇 · 다리가 읽는다)
 		// - 앞부분(State)만 읽는 쪽은 count 로 끝을 정하므로 꼬리를 무시해도 깨지지 않는다
 		inline constexpr int kAnimLayersOnWire = 4;
+		inline constexpr int kAnimMontagesOnWire = 3;			// 몽타주 칸 최대 = Lyra 기록 세 무기의 동시 최대(D45). CAnimState 의 kAnimMontageMax 와 같다
+		inline constexpr int kAnimMontageKindBits = 4;			// 몽타주 칸 번호 = 묶음 번호 << 4 | 종류 — 묶음 16개 · 종류 16개까지
 		inline constexpr uint16_t kAnimTimeNone = 0xFFFF;		// 대기 몸짓 · 착지 충격을 안 하는 중
 
 		struct AnimLayerWire
@@ -134,6 +138,14 @@ namespace mo
 			uint8_t fade;			// 아래 칸을 덮은 정도 0~255
 		};
 
+		// 자세에 들어가는 몽타주 한 칸(서버가 사건 앞 목록을 그 차례 그대로 싣는다)
+		struct AnimMontageWire
+		{
+			uint8_t montage;		// 묶음 번호(클립 파일 차례) << 4 | 종류(EMontageKind)
+			uint16_t time;			// 몽타주 시각, 1/6000초 칸
+			uint8_t weight;			// 몽타주 비중 0~255. 0 으로 반올림되는 칸은 안 싣는다
+		};
+
 		struct AnimStateWire
 		{
 			uint8_t weights[5];		// 서기 · 앞 · 뒤 · 왼 · 오른 비중 0~255. 받는 쪽이 합을 1 로 맞춘다
@@ -141,11 +153,15 @@ namespace mo
 			uint16_t stepFrac;		// 그 걸음의 진행 0~65535
 			uint16_t idleTime;		// 서기 클립 시각, 1/6000초 칸
 			uint8_t aimBlend;		// 255 = 허리 사격 조준만, 0 = 느슨한 조준만
-			uint16_t fidgetTime;	// 대기 몸짓 시각. kAnimTimeNone = 안 함
+			uint16_t fidgetTime;	// 대기 몸짓 시각, 1/3000초 칸(권총 몸짓 13.8초가 1/6000초 칸 최대 10.92초를 넘어서 — D47). kAnimTimeNone = 안 함
 			uint16_t recoveryTime;	// 착지 충격 시각. kAnimTimeNone = 안 함
 			int16_t plantDrop;		// 발 디딤 내림 0.01cm 칸
+			uint8_t overrideWeight;	// 쏜 뒤 윗몸 덮기 비중 0~255(D45). 받는 쪽은 쏜 뒤 시간을 세지 않고 이 값을 쓴다(D51)
+			uint8_t handLeftAlpha;	// 왼손 붙이기 비중 0~255 — 앞 자세의 몽타주 곡선에서 나와 받는 쪽이 셀 수 없다(D51)
+			uint8_t montageCount;	// 뒤에 실린 몽타주 칸 수
 			uint8_t layerCount;		// 뒤에 실린 겹침 칸 수
 			AnimLayerWire layers[kAnimLayersOnWire];
+			AnimMontageWire montages[kAnimMontagesOnWire];		// 겹침 칸 layerCount 개 바로 뒤에 붙는다
 		};
 
 		// 보낼 때는 count 만큼만 잘라 보낸다
@@ -248,10 +264,44 @@ namespace mo
 
 		static_assert(sizeof(Header) == 4, "ServerCore MsgHeader 와 같아야 한다");
 		static_assert(sizeof(State) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
-		static_assert(sizeof(AnimStateWire) == 34, "패킷 크기 어림(D35)과 같아야 한다");
-		inline constexpr size_t kAnimStateHeadSize = sizeof(AnimStateWire) - sizeof(AnimLayerWire) * kAnimLayersOnWire;
+		static_assert(sizeof(AnimStateWire) == 49, "패킷 크기 어림(D35 · D51)과 같아야 한다");
+		inline constexpr size_t kAnimStateHeadSize = offsetof(AnimStateWire, layers);
+		static_assert(kAnimStateHeadSize == 21, "머리 = 18 + 덮기 · 왼손 · 몽타주 칸 수(D51)");
 		inline constexpr size_t kMaxStatePacketSize = sizeof(State) + sizeof(AnimStateWire) * kMaxPlayersInRoom;		// 꼬리까지 넣은 최대
 		static_assert(kMaxStatePacketSize <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
+
+		// 꼬리 한 사람치의 바이트 수
+		inline size_t AnimTailSize(const AnimStateWire& anim)
+		{
+			return kAnimStateHeadSize + sizeof(AnimLayerWire) * anim.layerCount + sizeof(AnimMontageWire) * anim.montageCount;
+		}
+
+		// 꼬리 한 사람치를 out 에 쓴다 — 머리 · 겹침 칸 · 몽타주 칸 차례. 쓴 바이트 수(AnimTailSize)를 돌려준다
+		inline size_t WriteAnimTail(const AnimStateWire& anim, void* out)
+		{
+			uint8_t* at = static_cast<uint8_t*>(out);
+			const size_t layerBytes = sizeof(AnimLayerWire) * anim.layerCount;
+			std::memcpy(at, &anim, kAnimStateHeadSize);
+			std::memcpy(at + kAnimStateHeadSize, anim.layers, layerBytes);
+			std::memcpy(at + kAnimStateHeadSize + layerBytes, anim.montages, sizeof(AnimMontageWire) * anim.montageCount);
+			return AnimTailSize(anim);
+		}
+
+		// 받은 바이트에서 꼬리 한 사람치를 읽는다. false = 머리나 칸이 잘렸거나 칸 수가 상한 밖(그때 out · used 는 뜻이 없다)
+		inline bool ReadAnimTail(const void* data, size_t size, AnimStateWire& out, size_t& used)
+		{
+			const uint8_t* at = static_cast<const uint8_t*>(data);
+			if (size < kAnimStateHeadSize) return false;
+			std::memcpy(&out, at, kAnimStateHeadSize);
+			if (out.layerCount > kAnimLayersOnWire || out.montageCount > kAnimMontagesOnWire) return false;
+			const size_t layerBytes = sizeof(AnimLayerWire) * out.layerCount;
+			const size_t montageBytes = sizeof(AnimMontageWire) * out.montageCount;
+			if (size < kAnimStateHeadSize + layerBytes + montageBytes) return false;
+			std::memcpy(out.layers, at + kAnimStateHeadSize, layerBytes);
+			std::memcpy(out.montages, at + kAnimStateHeadSize + layerBytes, montageBytes);
+			used = kAnimStateHeadSize + layerBytes + montageBytes;
+			return true;
+		}
 		static_assert(sizeof(Shot) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 		static_assert(sizeof(Result) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 	}

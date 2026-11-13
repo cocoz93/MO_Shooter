@@ -124,10 +124,20 @@ namespace
 	// Lyra 능력(다른 모듈)은 이 다리를 모른다 — 함수 포인터로 부른다
 	UMOBridgeSubsystem* GBulletBridge = nullptr;
 
-	bool BulletDirectionHook(const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir)
+	bool BulletDirectionHook(const FVector& StartTrace, const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir)
 	{
-		return GBulletBridge && GBulletBridge->ComputeBulletDirection(AimDir, SpreadAngle, SpreadMultiplier, SpreadExponent, BulletIndex, OutDir);
+		return GBulletBridge && GBulletBridge->ComputeBulletDirection(StartTrace, AimDir, SpreadAngle, SpreadMultiplier, SpreadExponent, BulletIndex, OutDir);
 	}
+
+	// 문지기 — 내 사격 능력은 다리가 켤 때만 켜진다. Lyra 입력은 누르고 있는 동안 프레임마다 켜 보는데(WhileInputActive) 그것을 여기서 막는다
+	bool AbilityGateHook(const ULyraGameplayAbility_RangedWeapon&, const FGameplayAbilityActorInfo*)
+	{
+		return !GBulletBridge || GBulletBridge->AllowAbilityActivation();
+	}
+
+	// 능력은 한 번 켜지면 FireDelay(블루프린트 타이머) 동안 켜져 있어 한 프레임에 한 발만 쏜다. 화면 프레임이 서버 연사보다 드물면 발이 쌓인다.
+	// 셋 = 그림이 세 발 넘게 밀리지 않게 자른 제 판단(넘는 오래된 발은 그리지 않는다)
+	constexpr int32 kMaxPendingFires = 3;
 
 	// 위치는 서버(·내 예측) 값을 입히므로 언리얼 이동 계산은 쉰다. 입력 소비와 가속 계산은 그대로 돈다 — 애니가 읽는 값
 	void NoLyraMove(ULyraCharacterMovementComponent*, float)
@@ -144,27 +154,19 @@ namespace
 	}
 }
 
-// S2C_STATE 꼬리에서 한 사람치를 읽는다. 머리 뒤에 겹침 칸 × layerCount. 틀린 꼬리면 false 를 돌려주고 At 을 끝으로 옮겨 뒤 사람들도 안 읽는다
+// S2C_STATE 꼬리에서 한 사람치를 읽는다. 머리 뒤에 겹침 칸 × layerCount, 그 뒤 몽타주 칸 × montageCount(형식은 GameProtocol.h wire::ReadAnimTail 한 벌 — 봇도 같은 것을 부른다).
+// 틀린 꼬리면 false 를 돌려주고 At 을 끝으로 옮겨 뒤 사람들도 안 읽는다
 static bool ReadAnimTail(const uint8* Data, int32 Size, int32& At, wire::AnimStateWire& Out, int64& BadCount)
 {
 	if (At >= Size) return false;
-	const int32 Head = (int32)wire::kAnimStateHeadSize;
-	if (At + Head > Size)
+	size_t Used = 0;
+	if (!wire::ReadAnimTail(Data + At, (size_t)(Size - At), Out, Used))
 	{
 		++BadCount;
 		At = Size;
 		return false;
 	}
-	FMemory::Memcpy(&Out, Data + At, Head);
-	const int32 LayerBytes = (int32)sizeof(wire::AnimLayerWire) * Out.layerCount;
-	if (Out.layerCount > wire::kAnimLayersOnWire || At + Head + LayerBytes > Size)
-	{
-		++BadCount;
-		At = Size;
-		return false;
-	}
-	FMemory::Memcpy(Out.layers, Data + At + Head, LayerBytes);
-	At += Head + LayerBytes;
+	At += (int32)Used;
 	return true;
 }
 
@@ -173,10 +175,14 @@ struct FMOBRemoteAnim
 {
 	wire::AnimStateWire States[FMOBRemote::kSnapshots];
 	bool bHas[FMOBRemote::kSnapshots] = {};
+	uint8 Weapons[FMOBRemote::kSnapshots] = {};	// 그 칸의 무기 번호(EWeapon) — 상태를 그 무기 묶음으로 푼다(서버 CRoom::GetPoseAt 이 틱 기록의 animWeapon 으로 푸는 것과 같다)
 	// 최근 두 틱의 자세 — 틱마다 한 번만 계산하고 프레임마다 섞는다
 	uint32 PoseTick[2] = {};
 	bool bPoseValid[2] = {};
 	std::vector<mo::BoneTransform> PoseLocal[2];
+	// 몽타주 알림을 마지막으로 훑은 상태의 틱. false = 처음이거나 죽었다 살아났다(앞 상태를 버리고 보여 줄 상태 하나만 훑는다)
+	uint32 NotifyTick = 0;
+	bool bNotifyValid = false;
 };
 
 // 공용 코드 묶음 — 헤더에 Shared 를 드러내지 않으려고 여기에 둔다
@@ -190,10 +196,12 @@ struct FMOBCore
 
 	// 서버 애니(-MOBServerAnim) — 게임 스레드에서만 쓴다
 	mo::CAnimClips AnimClips;
-	mo::CAnimState AnimCodec;			// 받은 상태를 자세 입력으로 푸는 데만 쓴다
-	mo::CAnimPoseEvaluator AnimEvaluator;
+	// 무기별 묶음(9단계) — 차례 = 서버 무기 번호(EWeapon), 묶음 이름 = WeaponDef::name. 서버 CRoom 과 같은 짜임
+	mo::CAnimState AnimCodecs[(size_t)mo::EWeapon::Count];			// 받은 상태를 자세 입력으로 푸는 데만 쓴다
+	mo::CAnimPoseEvaluator AnimEvaluators[(size_t)mo::EWeapon::Count];
 	std::vector<mo::BoneTransform> AnimBlend;
 	TArray<FName> AnimBoneNames;
+	TArray<int32> BundleWeapon;		// 클립 파일 묶음 차례 → 서버 무기 번호(-1 = 무기 묶음 아님). 몽타주 칸의 묶음 번호로 언리얼 경로 자산을 고른다(9단계 5-a)
 	TMap<uint32, FMOBRemoteAnim> RemoteAnims;
 
 	FMOBCore()
@@ -204,7 +212,6 @@ struct FMOBCore
 
 	bool LoadAnim(const FString& Path, FString& OutWhy)
 	{
-		static const char* const BUNDLE = "rifle";	// 서버 Room.h 의 kAnimBundleName 과 같은 묶음
 		TArray<uint8> Bytes;
 		if (!FFileHelper::LoadFileToArray(Bytes, *Path))
 		{
@@ -216,18 +223,30 @@ struct FMOBCore
 			OutWhy = TEXT("parse");
 			return false;
 		}
-		if (!AnimEvaluator.Init(AnimClips, BUNDLE) || !AnimCodec.Init(AnimClips, BUNDLE))
+		for (int32 W = 0; W < (int32)mo::EWeapon::Count; ++W)
 		{
-			OutWhy = TEXT("bundle");
-			return false;
+			const char* const Bundle = mo::GetWeaponDef((mo::EWeapon)W).name;	// 서버 Room.h AnimBundleOf 와 같은 묶음
+			if (!AnimEvaluators[W].Init(AnimClips, Bundle) || !AnimCodecs[W].Init(AnimClips, Bundle))
+			{
+				OutWhy = FString::Printf(TEXT("bundle=%s"), UTF8_TO_TCHAR(Bundle));
+				return false;
+			}
 		}
-		AnimBlend.resize(AnimEvaluator.BoneCount());
+		AnimBlend.resize(AnimEvaluators[0].BoneCount());	// 뼈 수는 클립 파일 하나에 하나 — 묶음마다 같다
 		for (const mo::ClipBone& Bone : AnimClips.Bones()) AnimBoneNames.Add(FName(UTF8_TO_TCHAR(Bone.name.c_str())));
+		BundleWeapon.Init(INDEX_NONE, (int32)AnimClips.Bundles().size());
+		for (int32 B = 0; B < BundleWeapon.Num(); ++B)
+		{
+			for (int32 W = 0; W < (int32)mo::EWeapon::Count; ++W)
+			{
+				if (AnimClips.Bundles()[(size_t)B].name == mo::GetWeaponDef((mo::EWeapon)W).name) BundleWeapon[B] = W;
+			}
+		}
 		return true;
 	}
 
 	// 이 칸의 틱 자세가 든 칸(0·1)을 돌려준다. 없으면 계산해 넣는다. Keep 칸은 덮지 않는다 — 두 틱을 섞을 때 앞 틱 결과를 지키려고
-	int32 PoseSlot(FMOBRemoteAnim& Anim, int32 SnapIndex, uint32 Tick, float Pitch, int32 Keep, int64& Evals)
+	int32 PoseSlot(FMOBRemoteAnim& Anim, int32 SnapIndex, uint32 Tick, float Pitch, int32 Keep, int64& Evals, int64* EvalsByWeapon)
 	{
 		for (int32 I = 0; I < 2; ++I)
 		{
@@ -239,13 +258,16 @@ struct FMOBCore
 		else if (!Anim.bPoseValid[1]) Slot = 1;
 		else Slot = Anim.PoseTick[0] <= Anim.PoseTick[1] ? 0 : 1;
 
-		if (Anim.PoseLocal[Slot].size() != AnimEvaluator.BoneCount()) Anim.PoseLocal[Slot].resize(AnimEvaluator.BoneCount());
+		const uint8 Weapon = Anim.Weapons[SnapIndex];	// 받을 때 범위를 봤다(AddRemoteSnapshot)
+		mo::CAnimPoseEvaluator& Evaluator = AnimEvaluators[Weapon];
+		if (Anim.PoseLocal[Slot].size() != Evaluator.BoneCount()) Anim.PoseLocal[Slot].resize(Evaluator.BoneCount());
 		mo::AnimPoseInput Input;
-		AnimCodec.FromWire(Anim.States[SnapIndex], Pitch, Input);
-		AnimEvaluator.EvaluateLocal(Input, Anim.PoseLocal[Slot].data());
+		AnimCodecs[Weapon].FromWire(Anim.States[SnapIndex], Pitch, Input);
+		Evaluator.EvaluateLocal(Input, Anim.PoseLocal[Slot].data());
 		Anim.PoseTick[Slot] = Tick;
 		Anim.bPoseValid[Slot] = true;
 		++Evals;
+		++EvalsByWeapon[Weapon];
 		return Slot;
 	}
 };
@@ -284,6 +306,7 @@ void UMOBridgeSubsystem::Deinitialize()
 	{
 		ULyraCharacterMovementComponent::MOBMoveHook = nullptr;
 		ULyraGameplayAbility_RangedWeapon::MOBBulletDirectionHook = nullptr;
+		ULyraGameplayAbility_RangedWeapon::MOBCanActivateHook = nullptr;
 		GBulletBridge = nullptr;
 		delete Core;
 		Core = nullptr;
@@ -310,6 +333,7 @@ void UMOBridgeSubsystem::ParseCommandLine()
 		if (V.Num() >= 3) RecFps = V[2];
 	}
 	FParse::Value(Cmd, TEXT("MOBQuitAt="), QuitAt);
+	FParse::Value(Cmd, TEXT("MOBMaxFPS="), MaxFpsTest);
 	FParse::Value(Cmd, TEXT("MOBTag="), Tag);
 	FParse::Value(Cmd, TEXT("MOBBreakPredictAt="), BreakPredictAt);
 	bAutoInput = FParse::Param(Cmd, TEXT("MOBAutoInput"));
@@ -331,7 +355,7 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bAnimLog = FParse::Param(Cmd, TEXT("MOBAnimLog"));
 	bViewLog = FParse::Param(Cmd, TEXT("MOBViewLog"));
 	bRayCheck = FParse::Param(Cmd, TEXT("MOBRayCheck"));
-	bAbilitySpread = FParse::Param(Cmd, TEXT("MOBAbilitySpread"));
+	bAbilityOwnTimer = FParse::Param(Cmd, TEXT("MOBAbilityOwnTimer"));
 	FParse::Value(Cmd, TEXT("MOBRayBreak="), RayBreak);
 	bViewClamp = !FParse::Param(Cmd, TEXT("MOBNoViewClamp"));
 	FParse::Value(Cmd, TEXT("MOBBreakAt="), BreakAt);
@@ -373,6 +397,7 @@ bool UMOBridgeSubsystem::TryBecomeReady()
 void UMOBridgeSubsystem::Tick(float DeltaTime)
 {
 	if (bQuitting) return;
+	if (MaxFpsTest > 0.f && GEngine && GEngine->GetMaxFPS() != MaxFpsTest) GEngine->SetMaxFPS(MaxFpsTest);
 	if (ReadyAt < 0 && !TryBecomeReady()) return;
 
 	const double Now = FPlatformTime::Seconds();
@@ -383,6 +408,7 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 	if (bQuitting) return;
 	if (bAutoInput) TickAutoInput(T);
 	TickInput(Now);
+	TickAbilityFire();
 	if (Core && BreakPredictAt > 0 && T >= BreakPredictAt)
 	{
 		BreakPredictAt = -1;
@@ -461,15 +487,16 @@ void UMOBridgeSubsystem::Connect()
 		return;
 	}
 	ULyraCharacterMovementComponent::MOBMoveHook = &NoLyraMove;
-	if (bAbilitySpread)
+	if (!bAbilityOwnTimer)
 	{
 		GBulletBridge = this;
 		ULyraGameplayAbility_RangedWeapon::MOBBulletDirectionHook = &BulletDirectionHook;
+		ULyraGameplayAbility_RangedWeapon::MOBCanActivateHook = &AbilityGateHook;
 	}
 
 	if (bServerAnim)
 	{
-		const FString ClipPath = FPaths::ProjectSavedDir() / TEXT("MOB") / TEXT("clips_rifle.bin");
+		const FString ClipPath = FPaths::ProjectSavedDir() / TEXT("MOB") / TEXT("clips.bin");	// 버전 2 = 세 무기 묶음(9단계). 옛 clips_rifle.bin 은 버전 1 이라 못 읽는다
 		FString Why;
 		if (Core->LoadAnim(ClipPath, Why))
 		{
@@ -789,7 +816,10 @@ void UMOBridgeSubsystem::AddRemoteSnapshot(const wire::PlayerState& P, uint32 Se
 	{
 		FMOBRemoteAnim& Stored = Core->RemoteAnims.FindOrAdd(P.id);
 		const int32 Index = (int32)(R.SnapCount % FMOBRemote::kSnapshots);
-		Stored.bHas[Index] = Anim != nullptr;
+		const bool bWeaponOk = P.weapon < (uint8)mo::EWeapon::Count;	// 모르는 무기면 풀 묶음이 없다 — 상태 없음으로 둔다
+		if (Anim && !bWeaponOk) ++AnimBadWeapon;
+		Stored.bHas[Index] = Anim != nullptr && bWeaponOk;
+		Stored.Weapons[Index] = bWeaponOk ? P.weapon : 0;
 		if (Anim) Stored.States[Index] = *Anim;
 	}
 	S.Tick = ServerTick;
@@ -936,6 +966,8 @@ void UMOBridgeSubsystem::TickRemotes(double Now)
 			R.bKilled = false;
 			R.bRespawnPending = false;
 			R.bHasSet = false;
+			// 죽어 있던 동안의 상태(서버가 자세를 안 넘긴다)로 알림을 훑지 않게 앞 상태를 버린다
+			if (FMOBRemoteAnim* DeadAnim = bServerAnim && Core ? Core->RemoteAnims.Find(R.Id) : nullptr) DeadAnim->bNotifyValid = false;
 		}
 		if (!R.Pawn.IsValid())
 		{
@@ -1053,19 +1085,66 @@ void UMOBridgeSubsystem::ApplyServerAnim(FMOBRemote& R, ACharacter* Ch, const FM
 		++AnimNoState;
 		return;
 	}
-	const int32 FromSlot = Core->PoseSlot(*Anim, FromIndex, From.Tick, From.Pitch, INDEX_NONE, AnimPoseEvals);
+	static_assert(UE_ARRAY_COUNT(AnimPoseEvalsByWeapon) == (size_t)mo::EWeapon::Count, "무기별 자세 계산 수 칸 = 무기 수");
+	const uint8 PoseWeapon = Anim->Weapons[FromIndex];	// 앞 틱의 무기 — 섞기와 언리얼 경로(손가락 · 꼬임 뼈) 클립 한 벌을 이 무기로 고른다(서버 GetPoseAt 도 앞 틱 묶음으로 섞는다)
+	const int32 FromSlot = Core->PoseSlot(*Anim, FromIndex, From.Tick, From.Pitch, INDEX_NONE, AnimPoseEvals, AnimPoseEvalsByWeapon);
 	const mo::BoneTransform* Local = Anim->PoseLocal[FromSlot].data();
 	const int32 ToIndex = To ? (int32)(To - R.Snaps) : INDEX_NONE;
 	if (To && Alpha > 0.f && Anim->bHas[ToIndex])
 	{
-		const int32 ToSlot = Core->PoseSlot(*Anim, ToIndex, To->Tick, To->Pitch, FromSlot, AnimPoseEvals);
-		Core->AnimEvaluator.BlendLocal(Anim->PoseLocal[FromSlot].data(), Anim->PoseLocal[ToSlot].data(), Alpha, Core->AnimBlend.data());
+		const int32 ToSlot = Core->PoseSlot(*Anim, ToIndex, To->Tick, To->Pitch, FromSlot, AnimPoseEvals, AnimPoseEvalsByWeapon);
+		Core->AnimEvaluators[PoseWeapon].BlendLocal(Anim->PoseLocal[FromSlot].data(), Anim->PoseLocal[ToSlot].data(), Alpha, Core->AnimBlend.data());
 		Local = Core->AnimBlend.data();
 	}
 	mo::AnimPoseInput Input;
-	Core->AnimCodec.FromWire(Anim->States[FromIndex], From.Pitch, Input);
-	if (MOBSetServerAnim(Ch, Input, Local, Core->AnimBoneNames.Num(), Core->AnimBoneNames)) ++AnimPoseFrames;
+	Core->AnimCodecs[PoseWeapon].FromWire(Anim->States[FromIndex], From.Pitch, Input);
+	// 몽타주 칸마다 무기 번호 — 칸의 묶음은 그 칸을 튼 무기의 것이다(무기를 바꾸는 틱엔 앞 무기 「빼기」와 새 무기 「꺼내기」가 함께 돈다, D51)
+	const auto FillMontageWeapons = [this](const mo::AnimPoseInput& In, int32 (&Out)[mo::kAnimMontageMax])
+	{
+		for (int32 M = 0; M < mo::kAnimMontageMax; ++M)
+		{
+			const int32 Bundle = M < In.montageCount ? In.montages[M].bundle : INDEX_NONE;
+			Out[M] = Core->BundleWeapon.IsValidIndex(Bundle) ? Core->BundleWeapon[Bundle] : INDEX_NONE;
+		}
+	};
+	int32 MontageWeapons[mo::kAnimMontageMax];
+	FillMontageWeapons(Input, MontageWeapons);
+	FMOBServerAnimResult Result;
+	if (MOBSetServerAnim(Ch, Input, PoseWeapon, MontageWeapons, Local, Core->AnimBoneNames.Num(), Core->AnimBoneNames, Result)) ++AnimPoseFrames;
 	else ++AnimPoseFail;
+
+	// 몽타주 알림 — 지난 프레임 뒤로 받은 상태를 틱 차례로 다 훑는다. 화면 프레임이 서버 틱보다 드물면(멈칫한 프레임) 그 사이에 생겼다 진 칸이 있고,
+	// Lyra 는 긴 프레임에도 지난 구간의 알림을 다 튼다. 처음 · 죽었다 살아난 뒤(bNotifyValid = false)는 보여 줄 상태 하나만 새 칸으로 본다
+	const uint32 Available = FMath::Min<uint32>(R.SnapCount, FMOBRemote::kSnapshots);
+	for (uint32 Back = Available; Back-- > 0;)
+	{
+		const int32 Index = (int32)((R.SnapCount - 1 - Back) % FMOBRemote::kSnapshots);
+		const FMOBSnapshot& S = R.Snaps[Index];
+		if (S.Tick > From.Tick) break;
+		if (Anim->bNotifyValid ? S.Tick <= Anim->NotifyTick : S.Tick != From.Tick) continue;
+		if (!Anim->bHas[Index]) continue;
+		mo::AnimPoseInput StepInput;
+		Core->AnimCodecs[Anim->Weapons[Index]].FromWire(Anim->States[Index], S.Pitch, StepInput);
+		int32 StepWeapons[mo::kAnimMontageMax];
+		FillMontageWeapons(StepInput, StepWeapons);
+		MOBStepServerMontages(Ch, StepInput, S.Tick, StepWeapons, Anim->bNotifyValid, Result);
+		Anim->NotifyTick = S.Tick;
+		Anim->bNotifyValid = true;
+	}
+	if (Result.SetChange > 0) ++AnimSetChanges;
+	else if (Result.SetChange < 0) ++AnimSetMisses;
+	AnimMontageCellsIn += Input.montageCount;
+	AnimMontageCells += Result.MontageCells;
+	AnimMontageMisses += Result.MontageMisses;
+	AnimSlotPasses += Result.SlotPasses;
+	AnimMaskMissing += Result.bMaskMissing ? 1 : 0;
+	AnimWeaponNotifies += Result.WeaponNotifies;
+	AnimWeaponPlaying += Result.WeaponPlaying;
+	AnimSoundNotifies += Result.SoundNotifies;
+	AnimMontageRestarts += Result.MontageRestarts;
+	AnimStepStates += Result.StepStates;
+	if (Result.MontageCells > 0) ++AnimMontageFrames;
+	if (Result.MontageCells > 0 && Result.SlotPasses == 0) ++AnimMontageNoSlot;
 }
 
 // 남의 캐릭터 몸을 전부 Quinn 으로 맞춘다(D33). Lyra 가 컨트롤러마다 몸을 무작위로 고르는데, 그 시점이 캐릭터 생성보다 늦을 수 있어 맞을 때까지 다시 건다
@@ -1277,6 +1356,19 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		Core->Prediction.AddInput(In);
 		Seq = In.seq;
 		const mo::WeaponEvents& PredictedFire = Core->Prediction.GetLastWeaponEvents();
+		if (PredictedFire.fired && !bAbilityOwnTimer)
+		{
+			// 내 화면 사격 = 이 입력(D53). 능력은 TickAbilityFire 가 켠다
+			FMOBPendingFire& Fire = PendingFires.AddDefaulted_GetRef();
+			Fire.Seq = In.seq;
+			Fire.Weapon = (uint8)Core->Prediction.GetWeaponIndex();
+			Fire.SpreadAngle = PredictedFire.spreadAngle;
+			Fire.SpreadMultiplier = PredictedFire.spreadMultiplier;
+			Fire.AimDir = ToFVector(mo::AimDirection(In.yaw, In.pitch));
+			Fire.AimFrom = FVector(In.aimX, In.aimY, In.aimZ);
+			Fire.Frame = GFrameCounter;
+			++FireQueued;
+		}
 		if (bViewLog && PredictedFire.fired)
 		{
 			// 서버 SPREAD 줄과 (입력 번호, 탄 번호) 로 잇는다 — 같은 입력이면 같은 방향이어야 한다(D15)
@@ -1317,19 +1409,98 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	}
 }
 
-// 화면의 탄 방향 = 서버와 같은 식(D15). 능력은 이번 프레임의 입력을 만들기 전에 돌아서, 다음 입력 번호를 이 사격의 번호로 본다
-bool UMOBridgeSubsystem::ComputeBulletDirection(const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir)
+// 내 사격 능력을 예측이 쏜 입력에서 켠다(D53). 능력이 쉬고 있으면 쌓인 발 중 가장 오래된 하나로 켠다.
+// 능력이 켜진 자리에서 블루프린트가 바로 조준하므로(StartRangedWeaponTargeting) 탄 방향 훅은 이 안에서 ActiveFire 를 읽는다
+void UMOBridgeSubsystem::TickAbilityFire()
 {
-	if (!Core || Core->Prediction.IsWaitingSpawn()) return false;
-	const uint32 ShotSeq = Core->Prediction.GetSeq() + 1;
-	mo::CSpreadRng BulletRng(mo::SpreadSeed(ShotSeq, (uint32)BulletIndex));
-	const mo::Vec3 Dir = mo::SpreadDirection(mo::Vec3(AimDir.X, AimDir.Y, AimDir.Z), SpreadAngle, SpreadMultiplier, SpreadExponent, BulletRng);
+	if (PendingFires.Num() == 0) return;
+	while (PendingFires.Num() > kMaxPendingFires)
+	{
+		PendingFires.RemoveAt(0);
+		++FireDropped;
+	}
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(PC ? PC->GetPawn() : nullptr));
+	// 권총 능력은 Fire, 소총 · 샷건 능력은 FireAuto 입력에 묶여 있다(MOBWeaponRecordSubsystem 과 같은 두 표식)
+	static const FGameplayTag FireTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Fire"));
+	static const FGameplayTag FireAutoTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.FireAuto"));
+	FGameplayAbilitySpecHandle Handle;
+	bool bActive = false;
+	if (LASC)
+	{
+		for (const FGameplayAbilitySpec& Spec : LASC->GetActivatableAbilities())
+		{
+			if (Spec.Ability && Spec.Ability->IsA<ULyraGameplayAbility_RangedWeapon>() && (Spec.GetDynamicSpecSourceTags().HasTagExact(FireTag) || Spec.GetDynamicSpecSourceTags().HasTagExact(FireAutoTag)))
+			{
+				Handle = Spec.Handle;
+				bActive = Spec.IsActive();
+				break;
+			}
+		}
+	}
+	if (!Handle.IsValid())
+	{
+		// 사격 능력이 없다(캐릭터가 없거나 무기를 갈아 끼우는 중) — 이 발은 그리지 못한다
+		PendingFires.RemoveAt(0);
+		++FireNoSpec;
+		return;
+	}
+	if (bActive)
+	{
+		++FireWaitFrames;
+		return;
+	}
+	ActiveFire = PendingFires[0];
+	PendingFires.RemoveAt(0);
+	bActiveFireValid = true;
+	if (ActiveFire.Weapon != LastSyncWeapon) ++FireWeaponMismatch;
+	++FireLagFrames[(int32)FMath::Min<uint64>(GFrameCounter - ActiveFire.Frame, 3)];
+	bAbilityActivating = true;
+	const bool bActivated = LASC->TryActivateAbility(Handle);
+	bAbilityActivating = false;
+	if (bActivated) ++FireDriven;
+	else ++FireActivateFail;
+}
+
+bool UMOBridgeSubsystem::AllowAbilityActivation()
+{
+	if (bAbilityActivating) return true;
+	// 탄창이 비었으면 원래 검사로 넘긴다 — 세 사격 능력의 비용이 탄창이라(LyraAbilityCost_ItemTagStack · MagazineAmmo, 에셋 문자열 기준) 0이면 반드시 막히고,
+	// Lyra 가 탄 부족 표식(Ability.ActivateFail.Cost)에 건 빈총 몽타주 · 문구가 난다. 막기만 하면 빈총 동작이 사라진다
+	static const FGameplayTag MagTag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.MagazineAmmo"));
+	// 탄창은 든 무기(빠른 슬롯의 지금 칸)에서 읽는다 — 사격 능력은 그 무기가 준 것이다. 능력의 GetAssociatedItem 은 Lyra 모듈 밖에 안 열려 있다
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	const ULyraInventoryItemInstance* Item = Bar ? Bar->GetActiveSlotItem() : nullptr;
+	if (Item && Item->GetStatTagStackCount(MagTag) <= 0)
+	{
+		++FireGateDryFire;
+		return true;
+	}
+	++FireGateBlocks;
+	return false;
+}
+
+// 화면의 탄 방향 = 서버와 같은 식(D15). 입력 번호 · 조준 · 퍼짐은 다리가 켠 사격(ActiveFire)의 것을 쓴다(D53) — 능력이 잰 조준 · 시작점 · 퍼짐은 견주기로만 남긴다
+bool UMOBridgeSubsystem::ComputeBulletDirection(const FVector& StartTrace, const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir)
+{
+	if (!Core || !bActiveFireValid) return false;
+	++FireBullets;
+	if (!bAbilityActivating) ++FireBulletsOutside;
+	const mo::WeaponDef& FiredDef = mo::GetWeaponDef((mo::EWeapon)ActiveFire.Weapon);
+	const mo::Vec3 Aim(ActiveFire.AimDir.X, ActiveFire.AimDir.Y, ActiveFire.AimDir.Z);
+	mo::CSpreadRng BulletRng(mo::SpreadSeed(ActiveFire.Seq, (uint32)BulletIndex));
+	const mo::Vec3 Dir = mo::SpreadDirection(Aim, ActiveFire.SpreadAngle, ActiveFire.SpreadMultiplier, FiredDef.spreadExponent, BulletRng);
 	OutDir = ToFVector(Dir);
-	LastBulletAt = FPlatformTime::Seconds();
+	const double LyraAimDeg = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(AimDir.GetSafeNormal(), ActiveFire.AimDir.GetSafeNormal()), -1.0, 1.0)));
+	const double StartDiff = FVector::Dist(StartTrace, ActiveFire.AimFrom);
+	FireLyraAimMaxDeg = FMath::Max(FireLyraAimMaxDeg, LyraAimDeg);
+	FireStartDiffMax = FMath::Max(FireStartDiffMax, StartDiff);
 	if (bViewLog)
 	{
-		UE_LOG(LogMOB, Log, TEXT("MOB_SHOTDIR seq=%u i=%d frame=%llu spread=%.6f mult=%.6f aim=%.7f,%.7f,%.7f dir=%.7f,%.7f,%.7f"),
-			ShotSeq, BulletIndex, (unsigned long long)GFrameCounter, SpreadAngle, SpreadMultiplier, AimDir.X, AimDir.Y, AimDir.Z, Dir.x, Dir.y, Dir.z);
+		// check_spread.py 가 읽는 앞부분(seq ~ dir)은 MOB_PREDSHOT 과 같은 꼴 — 뒤는 능력이 잰 값과의 차이 · 능력의 퍼짐
+		UE_LOG(LogMOB, Log, TEXT("MOB_SHOTDIR seq=%u i=%d frame=%llu spread=%.6f mult=%.6f aim=%.7f,%.7f,%.7f dir=%.7f,%.7f,%.7f lyraAimDeg=%.4f startDiff=%.2f lyraSpread=%.6f lyraMult=%.6f"),
+			ActiveFire.Seq, BulletIndex, (unsigned long long)GFrameCounter, ActiveFire.SpreadAngle, ActiveFire.SpreadMultiplier, Aim.x, Aim.y, Aim.z, Dir.x, Dir.y, Dir.z, LyraAimDeg, StartDiff, SpreadAngle, SpreadMultiplier);
 	}
 	return true;
 }
@@ -1559,18 +1730,6 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 			else LASC->AbilityInputTagReleased(FireTag);
 		}
 	}
-	// 자동 시험 전용 — 무기를 바꾸거나 되살아나면 새 능력은 눌린 줄 모른다. 누르고 있는데 안 쏘면 다시 누른다
-	const double RepressNow = FPlatformTime::Seconds();
-	if (bAbilitySpread && bFireNow && bAutoFire && RepressNow - LastBulletAt > 0.5 && RepressNow - LastAutoRepressAt > 0.5)
-	{
-		static const FGameplayTag RepressTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Fire"));
-		if (ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch)))
-		{
-			LASC->AbilityInputTagReleased(RepressTag);
-			LASC->AbilityInputTagPressed(RepressTag);
-		}
-		LastAutoRepressAt = RepressNow;
-	}
 	bAutoFire = bFireNow;
 	bAutoReload = FMath::Fmod(S, 20.0) >= 19.0 || (bAutoAim && ServerMagazine == 0);
 	if (bAutoReload != bAutoReloadPressed)
@@ -1699,6 +1858,14 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	if (bServerAnim)
 	{
 		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_SUMMARY tailPlayers=%lld tailBad=%lld noState=%lld poseEvals=%lld poseFrames=%lld poseFail=%lld"), AnimTailPlayers, AnimTailBad, AnimNoState, AnimPoseEvals, AnimPoseFrames, AnimPoseFail);
+		// 무기별(9단계) — 무기별 자세 계산 수의 합 = poseEvals. setChanges = 언리얼 경로 클립 한 벌을 갈아 넣은 수, setMisses = 그 무기 한 벌이 없던 프레임, badWeapon = 모르는 무기 번호로 받은 칸
+		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_WEAPON poseEvals pistol=%lld rifle=%lld shotgun=%lld setChanges=%lld setMisses=%lld badWeapon=%lld"),
+			AnimPoseEvalsByWeapon[0], AnimPoseEvalsByWeapon[1], AnimPoseEvalsByWeapon[2], AnimSetChanges, AnimSetMisses, AnimBadWeapon);
+		// 몽타주(9단계 5-a) — cellsIn = 받은 칸 수의 합(프레임마다), cells = 언리얼 경로에 넣은 칸, misses = 무기 · 자산이 없어 못 넣은 칸(cellsIn = cells + misses).
+		// frames = 칸이 하나라도 든 프레임, noSlot = 칸을 넣었는데 끼움 자리를 하나도 안 거친 프레임, maskMissing = 윗몸 뼈 가림을 못 찾은 프레임.
+		// weaponNotifies = 튼 무기 메시 몽타주 알림(남의 사격 · 재장전 시작마다 하나), weaponPlaying = 그중 튼 직후 무기 메시에 몽타주가 돌던 수, soundNotifies = 튼 소리 알림
+		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_MONTAGE cellsIn=%lld cells=%lld misses=%lld frames=%lld slotPasses=%lld noSlot=%lld maskMissing=%lld weaponNotifies=%lld weaponPlaying=%lld soundNotifies=%lld restarts=%lld stepStates=%lld"),
+			AnimMontageCellsIn, AnimMontageCells, AnimMontageMisses, AnimMontageFrames, AnimSlotPasses, AnimMontageNoSlot, AnimMaskMissing, AnimWeaponNotifies, AnimWeaponPlaying, AnimSoundNotifies, AnimMontageRestarts, AnimStepStates);
 		if (bRayCheck)
 		{
 			UE_LOG(LogMOB, Log, TEXT("MOB_RAYCHECK_NOBODY count=%lld"), RayNoBody);
@@ -1713,6 +1880,13 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 		}
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_PICKUPS hidden=%d hpFixes=%lld"), PickupsHidden, HpFixes);
+	if (!bAbilityOwnTimer)
+	{
+		// 내 사격 능력 구동(D53) — 칸 뜻은 MOBridgeSubsystem.h 의 FireQueued 주석. pending = 끝날 때 아직 쌓여 있던 발
+		UE_LOG(LogMOB, Log, TEXT("MOB_ABILITYFIRE queued=%lld driven=%lld activateFail=%lld noSpec=%lld dropped=%lld pending=%d waitFrames=%lld weaponMismatch=%lld gateBlocks=%lld gateDryFire=%lld bullets=%lld bulletsOutside=%lld lag=%lld,%lld,%lld,%lld lyraAimMaxDeg=%.4f startDiffMax=%.2f"),
+			FireQueued, FireDriven, FireActivateFail, FireNoSpec, FireDropped, PendingFires.Num(), FireWaitFrames, FireWeaponMismatch, FireGateBlocks, FireGateDryFire, FireBullets, FireBulletsOutside,
+			FireLagFrames[0], FireLagFrames[1], FireLagFrames[2], FireLagFrames[3], FireLyraAimMaxDeg, FireStartDiffMax);
+	}
 	if (bAnimLog)
 	{
 		FString States;
