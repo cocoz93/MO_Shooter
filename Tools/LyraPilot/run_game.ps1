@@ -2,6 +2,7 @@ param(
     [string]$Tag = 'game',
     [string]$ServerArgs = '--warmup=2 --matchSeconds=40',
     [int]$Bots = 0,
+    [string]$BotArgs = '',   # extra BotClient arguments, e.g. '--ads' so remote bodies aim on screen (content C-5)
     [string]$LyraArgs = '-MOBAutoInput -MOBQuitAt=60',
     [int]$Port = 7791,
     [int]$TimeoutSec = 300,
@@ -38,7 +39,7 @@ if ($Bots -gt 0) {
         if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'MOB_WELCOME' -Quiet)) { break }
         Start-Sleep -Milliseconds 500
     }
-    $bot = Start-Process -FilePath $botExe -ArgumentList @("--map=`"$map`"", "--port=$Port", "--bots=$Bots") -RedirectStandardOutput $botOut -PassThru -WindowStyle Hidden
+    $bot = Start-Process -FilePath $botExe -ArgumentList (@("--map=`"$map`"", "--port=$Port", "--bots=$Bots") + ($BotArgs -split ' ' | Where-Object { $_ })) -RedirectStandardOutput $botOut -PassThru -WindowStyle Hidden
 }
 
 if (-not $lyra.WaitForExit($TimeoutSec * 1000)) { "TIMEOUT after $TimeoutSec s - killing Lyra"; Stop-Process -Id $lyra.Id -Force }

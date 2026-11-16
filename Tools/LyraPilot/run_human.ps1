@@ -2,6 +2,7 @@ param(
     [string]$Tag = 'h1',
     [string]$ServerArgs = '--warmup=10 --matchSeconds=300',
     [int]$Bots = 9,
+    [string]$BotArgs = '',   # extra BotClient arguments, e.g. '--ads' so remote bodies aim on screen (content C-5)
     [int]$Port = 7791,
     [string]$Res = '1280x720',
     [string]$LyraExtra = ''
@@ -17,6 +18,9 @@ $map    = "$outDir\map_expanse.mocl"
 $base   = "$outDir\game_$Tag"
 $log    = "${base}_lyra.log"
 
+# An old log of the same tag already holds MOB_WELCOME, so the wait below would start bots before this Lyra joins (M-10). Move it aside first.
+if (Test-Path -LiteralPath $log) { Move-Item -LiteralPath $log -Destination "${base}_lyra-old-$(Get-Date -Format 'yyyyMMdd-HHmmss').log" -Force }
+
 $srvArgList = @("--map=`"$map`"", "--port=$Port", '--exitWhenEmpty') + ($ServerArgs -split ' ' | Where-Object { $_ })
 $srv = Start-Process -FilePath "$repo\build\Server\Release\Server.exe" -ArgumentList $srvArgList -RedirectStandardOutput "${base}_server.txt" -RedirectStandardError "${base}_server_err.txt" -PassThru -WindowStyle Hidden
 Start-Sleep -Milliseconds 800
@@ -30,7 +34,7 @@ $bot = $null
 while (-not $lyra.HasExited) {
     if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'MOB_WELCOME' -Quiet)) {
         "welcomed at $(Get-Date -Format 'HH:mm:ss')"
-        $bot = Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", "--bots=$Bots") -RedirectStandardOutput "${base}_bots.txt" -PassThru -WindowStyle Hidden
+        $bot = Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList (@("--map=`"$map`"", "--port=$Port", "--bots=$Bots") + ($BotArgs -split ' ' | Where-Object { $_ })) -RedirectStandardOutput "${base}_bots.txt" -PassThru -WindowStyle Hidden
         break
     }
     Start-Sleep -Milliseconds 500

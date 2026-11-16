@@ -3,6 +3,7 @@
 #   python measure_pose.py <출력폴더> <클립 파일> pilot   = 왕복 100 + 흔들림 33, 퍼짐 끔 1판
 #   python measure_pose.py <출력폴더> <클립 파일> full    = 합격 5조건 + 값만 2조건, 퍼짐 끔 · 켬 각 1판
 #   python measure_pose.py <출력폴더> <클립 파일> extra <조건,조건,...> = 분모가 모자란 조건(퍼짐 켬)만 더 (MEASURE_SEED_BASE 를 바꿔 준다)
+#     조건 이름에 _nospread 를 붙이면 퍼짐 끔 판을 더한다(C-5). 그냥 이름 · _spread 는 퍼짐 켬
 #   python measure_pose.py <출력폴더> <클립 파일> cost    = 로그 없이 지연 없이 10명 연사 1판 (workUs · 바이트). PC 가 조용할 때
 #
 # 수치 근거
@@ -32,6 +33,7 @@ LEAD = os.environ.get('MEASURE_LEAD', '3')
 GAMES = int(os.environ.get('MEASURE_GAMES', '5'))
 SEED_BASE = int(os.environ.get('MEASURE_SEED_BASE', '20261102'))		# 분모가 모자란 조건을 더 돌릴 때 앞 판과 다른 시드를 준다
 SERVER_EXTRA = os.environ.get('MEASURE_SERVER_EXTRA', '').split()
+BOT_EXTRA = os.environ.get('MEASURE_BOT_EXTRA', '').split()		# 봇에 더 줄 인자 — C-5 조준 측정은 --ads
 
 
 def num(text, key):
@@ -45,7 +47,7 @@ def run_one(out_dir, clips, label, port, rtt, jitter, no_spread, logs=True, seed
     bot_path = os.path.join(out_dir, f'{label}_bot.txt')
     judge_path = os.path.join(out_dir, f'{label}_judge.txt')
     srv_args = [SERVER, f'--map={MAP}', f'--port={port}', '--exitWhenEmpty', '--warmup=0', '--matchSeconds=100000', '--targetScore=100000', f'--clips={clips}', f'--seed={seed}'] + SERVER_EXTRA
-    bot_args = [BOT, f'--map={MAP}', f'--port={port + 1 if rtt or jitter else port}', f'--bots={BOTS}', f'--seconds={seconds}', f'--lead={LEAD}', f'--judgeClips={clips}', f'--seed={seed}']
+    bot_args = [BOT, f'--map={MAP}', f'--port={port + 1 if rtt or jitter else port}', f'--bots={BOTS}', f'--seconds={seconds}', f'--lead={LEAD}', f'--judgeClips={clips}', f'--seed={seed}'] + BOT_EXTRA
     if fire_always:
         bot_args.append('--judgeFireAlways')
     if logs:
@@ -57,6 +59,13 @@ def run_one(out_dir, clips, label, port, rtt, jitter, no_spread, logs=True, seed
     relay = None
     with open(srv_path, 'wb') as srv_out, open(bot_path, 'wb') as bot_out, open(os.devnull, 'wb') as null:
         srv = subprocess.Popen(srv_args, stdout=srv_out, stderr=subprocess.STDOUT)
+        # 서버가 듣기 시작할 때까지 기다린다 — 클립 묶음 v3(29.6MB)를 읽느라 5판 동시면 7.75초 걸렸다(C-5 실측). 듣기 전에 중계가 서버로 이으려 하면
+        # 중계는 그 봇 연결을 말없이 닫고(LagRelay main.cpp connect 실패 갈래) 봇은 붙었다고 믿어 한 명이 빠진다(9단계 M-9, C-5 파일럿 10판 모두)
+        deadline = time.time() + 60
+        while time.time() < deadline and srv.poll() is None:
+            if 'Server started' in open(srv_path, encoding='utf-8', errors='replace').read():
+                break
+            time.sleep(0.1)
         time.sleep(0.5)
         if rtt or jitter:
             relay = subprocess.Popen([RELAY, f'--listen={port + 1}', f'--target={port}', f'--delayMs={rtt // 2}', f'--jitterMs={jitter}'], stdout=null, stderr=subprocess.STDOUT)
@@ -88,7 +97,8 @@ def run_one(out_dir, clips, label, port, rtt, jitter, no_spread, logs=True, seed
         open(os.path.join(out_dir, f'{label}_hits.txt'), 'w', encoding='utf-8').write(res.stdout + res.stderr)
         row['hitsPass'] = res.returncode == 0
         for name, rx in (('head', r'^머리: 분모 (\d+), 오탈 (\d+)'), ('body', r'^몸: 분모 (\d+), 오탈 (\d+)'), ('headRun', r'^달리는 상대 머리: 분모 (\d+), 오탈 (\d+)'), ('bodyRun', r'^달리는 상대 몸: 분모 (\d+), 오탈 (\d+)'),
-                         ('montHead', r'^몽타주 중 머리: 분모 (\d+), 오탈 (\d+)'), ('montBody', r'^몽타주 중 몸: 분모 (\d+), 오탈 (\d+)')):
+                         ('montHead', r'^몽타주 중 머리: 분모 (\d+), 오탈 (\d+)'), ('montBody', r'^몽타주 중 몸: 분모 (\d+), 오탈 (\d+)'),
+                         ('adsHead', r'^조준 중 상대 머리: 분모 (\d+), 오탈 (\d+)'), ('adsBody', r'^조준 중 상대 몸: 분모 (\d+), 오탈 (\d+)')):
             mm = re.search(rx, res.stdout, re.M)
             row[name + 'N'], row[name + 'Lost'] = (int(mm.group(1)), int(mm.group(2))) if mm else (None, None)
             n = row[name + 'N']
@@ -99,6 +109,9 @@ def run_one(out_dir, clips, label, port, rtt, jitter, no_spread, logs=True, seed
         mm = re.search(r'이미 죽은 상대라 뺀 탄: (\d+)', res.stdout)
         if mm:
             row['deadExcluded'] = int(mm.group(1))
+        mm = re.search(r'이미 나간 상대라 뺀 탄: (\d+)', res.stdout)
+        if mm:
+            row['leftExcluded'] = int(mm.group(1))
     return row
 
 
@@ -114,10 +127,11 @@ def fmt(v):
 
 COLUMNS = ['label', 'rtt', 'jitter', 'spread', 'hitsPass', 'headN', 'headLost', 'headRate', 'bodyN', 'bodyLost', 'bodyRate', 'headRunN', 'headRunLost', 'headRunRate', 'bodyRunN', 'bodyRunLost', 'bodyRunRate',
            'montHeadN', 'montHeadLost', 'montHeadRate', 'montBodyN', 'montBodyLost', 'montBodyRate',
-           'botOnly', 'serverOnly', 'deadExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks', 'rewindClamped', 'rewindOk', 'rewindFuture', 'rewindNoView', 'idleMoves', 'kills',
+           'adsHeadN', 'adsHeadLost', 'adsHeadRate', 'adsBodyN', 'adsBodyLost', 'adsBodyRate',
+           'botOnly', 'serverOnly', 'deadExcluded', 'leftExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks', 'rewindClamped', 'rewindOk', 'rewindFuture', 'rewindNoView', 'idleMoves', 'kills',
            'workP50', 'workP99', 'workMax', 'recvBytesPerBotPerSec', 'stateBytesMax', 'poseEvals', 'poseReused', 'poseSkipped', 'botPass', 'botRc', 'serverRc']
 
-SUMMED = ['headN', 'headLost', 'bodyN', 'bodyLost', 'headRunN', 'headRunLost', 'bodyRunN', 'bodyRunLost', 'montHeadN', 'montHeadLost', 'montBodyN', 'montBodyLost', 'botOnly', 'serverOnly', 'deadExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks',
+SUMMED = ['headN', 'headLost', 'bodyN', 'bodyLost', 'headRunN', 'headRunLost', 'bodyRunN', 'bodyRunLost', 'montHeadN', 'montHeadLost', 'montBodyN', 'montBodyLost', 'adsHeadN', 'adsHeadLost', 'adsBodyN', 'adsBodyLost', 'botOnly', 'serverOnly', 'deadExcluded', 'leftExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks',
           'rewindClamped', 'rewindOk', 'rewindFuture', 'rewindNoView', 'idleMoves', 'kills', 'poseEvals', 'poseReused', 'poseSkipped']
 
 
@@ -133,7 +147,7 @@ def combine(rows, label, limit=0.5):
         out[key] = max(values) if values else None
     values = [r['workP50'] for r in rows if r.get('workP50') is not None]
     out['workP50'] = sum(values) / len(values) if values else None
-    for name in ('head', 'body', 'headRun', 'bodyRun', 'montHead', 'montBody'):
+    for name in ('head', 'body', 'headRun', 'bodyRun', 'montHead', 'montBody', 'adsHead', 'adsBody'):
         n, lost = out.get(name + 'N'), out.get(name + 'Lost')
         out[name + 'Rate'] = 100.0 * lost / n if n else None
     out['hitsPass'] = bool(out.get('headN')) and bool(out.get('bodyN')) and out['headRate'] <= limit and out['bodyRate'] <= limit
@@ -164,7 +178,12 @@ def main():
         plan = [('pilot_nospread', 100, 33, True, True), ('pilot_spread', 100, 33, False, True)]
     elif mode == 'extra':
         names = sys.argv[4].split(',')
-        plan = [(name + '_spread', rtt, jitter, False, True) for name, rtt, jitter in COND_PASS + COND_VALUE if name in names]
+        plan = []
+        for name, rtt, jitter in COND_PASS + COND_VALUE:
+            if name + '_nospread' in names:
+                plan.append((name + '_nospread', rtt, jitter, True, True))
+            if name in names or name + '_spread' in names:
+                plan.append((name + '_spread', rtt, jitter, False, True))
     elif mode == 'cost':
         plan = [('cost', 0, 0, False, False)]
         games = 1

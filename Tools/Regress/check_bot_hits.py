@@ -6,9 +6,11 @@
 # - 몸 = 봇이 어디든 맞힌 탄 기준, 서버에서 같은 상대를 안 맞혔으면 오탈(check_view_pose.py 와 같은 정의)
 # - 덤 = 봇은 못 맞혔는데 서버가 맞힌 탄. 합격선에는 안 넣고 값만 낸다
 # - 서버가 쏠 때 이미 죽어 있던 상대(DEADSKIP)를 봇이 맞힌 탄은 경기 규칙이라 빼고 따로 센다. 0단계 계산기에도 없는 사건이다
+# - 서버가 쏠 때 이미 나간 상대(그 탄보다 앞선 LEAVE 줄)도 같은 까닭으로 빼고 따로 센다(C-5: 측정 판에서는 판 끝에 봇이 한꺼번에 끊을 때 생긴다)
 # - 달리는 상대 = 봇이 본 수평 속도가 --run 이상(check_dedi_baseline.py RUN_SPEED 와 같은 500cm/s)
 # - 상대 무기별 · 「상대가 몽타주 중」(9-6) = 봇이 맞힌 상대의 자세 묶음 · 몽타주 칸 수(BOTSHOT targetWeapon= montages=, 서버 REWIND montages= 와 같은 정의).
 #   몽타주 중 쏨도 같은 기준으로 따로 판정한다(BOTHITS_MONTAGE). 옛 봇 기록에는 두 칸이 없어 이 줄들이 빈다
+# - 「상대가 조준 중」(C-5) = 봇이 맞힌 상대 자세의 조준 묶음 비중 > 0(BOTSHOT targetAds=). 값만 낸다(BOTHITS_ADS). 옛 기록에는 칸이 없어 빈다
 # rc=0 기준 안 · rc=1 기준 밖이거나 분모가 0 (0 은 「맞다」가 아니라 「못 읽었다」)
 import collections
 import re
@@ -21,9 +23,10 @@ RUN = float(opt.get('run', 500))
 LIMIT = float(opt.get('limit', 0.5))
 KIND_BODY = 2   # Shared/Weapon.h EBulletHit::Body
 
-bot_re = re.compile(r'^BOTSHOT seq=(\d+) shooter=(\d+) i=(\d+) weapon=(\d+) kind=(\d+) target=(\d+) weak=(\d+) viewTick=(\d+) alpha=([\d.]+) speed=([\d.]+)(?: targetWeapon=(\d+) montages=(\d+))?')
+bot_re = re.compile(r'^BOTSHOT seq=(\d+) shooter=(\d+) i=(\d+) weapon=(\d+) kind=(\d+) target=(\d+) weak=(\d+) viewTick=(\d+) alpha=([\d.]+) speed=([\d.]+)(?: targetWeapon=(\d+) montages=(\d+))?(?: targetAds=([\d.]+))?')
 srv_re = re.compile(r'^BULLET seq=(\d+) shooter=(\d+) i=(\d+) kind=(\d+) target=(\d+) weak=(\d+) rewind=(\d+)')
 dead_re = re.compile(r'^DEADSKIP seq=(\d+) shooter=(\d+) target=(\d+)')
+leave_re = re.compile(r'^LEAVE id=(\d+)')
 
 bots = {}
 for line in open(args[0], encoding='utf-8', errors='replace'):
@@ -31,19 +34,24 @@ for line in open(args[0], encoding='utf-8', errors='replace'):
     if m:
         g = m.groups()
         bots[(int(g[1]), int(g[0]), int(g[2]))] = dict(weapon=int(g[3]), kind=int(g[4]), target=int(g[5]), weak=int(g[6]), speed=float(g[9]),
-                                                       target_weapon=int(g[10]) if g[10] is not None else None, montages=int(g[11]) if g[11] is not None else None)
+                                                       target_weapon=int(g[10]) if g[10] is not None else None, montages=int(g[11]) if g[11] is not None else None,
+                                                       target_ads=float(g[12]) if g[12] is not None else None)
 
-server, dead = {}, set()
+server, dead, left = {}, set(), set()
 for line in open(args[1], encoding='utf-8', errors='replace'):
     m = srv_re.match(line)
     if m:
         g = m.groups()
-        server[(int(g[1]), int(g[0]), int(g[2]))] = dict(kind=int(g[3]), target=int(g[4]), weak=int(g[5]), rewind=int(g[6]))
+        server[(int(g[1]), int(g[0]), int(g[2]))] = dict(kind=int(g[3]), target=int(g[4]), weak=int(g[5]), rewind=int(g[6]), left=frozenset(left))
         continue
     m = dead_re.match(line)
     if m:
         g = m.groups()
         dead.add((int(g[1]), int(g[0]), int(g[2])))
+        continue
+    m = leave_re.match(line)
+    if m:
+        left.add(int(m.group(1)))
 
 both = [k for k in bots if k in server]
 print(f'봇 탄 {len(bots)}, 서버 탄 {len(server)}, 이은 탄 {len(both)}, 봇만 {len(bots) - len(both)}, 서버만 {len(server) - len(both)}')
@@ -55,7 +63,8 @@ head, body, head_run, body_run = zero(), zero(), zero(), zero()
 per_weapon = collections.defaultdict(lambda: [0, 0, 0, 0])
 per_target_weapon = collections.defaultdict(lambda: [0, 0, 0, 0])		# 머리 분모 · 오탈 · 몸 분모 · 오탈
 head_mont, body_mont, head_nomont, body_nomont = zero(), zero(), zero(), zero()
-head_gain = body_gain = dead_excluded = 0
+head_ads, body_ads, head_hip, body_hip = zero(), zero(), zero(), zero()
+head_gain = body_gain = dead_excluded = left_excluded = 0
 samples = []
 for k in both:
     b, s = bots[k], server[k]
@@ -63,6 +72,9 @@ for k in both:
     s_hit = s['kind'] == KIND_BODY
     if b_hit and (k[0], k[1], b['target']) in dead:
         dead_excluded += 1
+        continue
+    if b_hit and b['target'] in s['left']:
+        left_excluded += 1
         continue
     if not b_hit:
         if s_hit:
@@ -75,6 +87,16 @@ for k in both:
     has_tag = b['montages'] is not None
     mont_body, mont_head = (body_mont, head_mont) if has_tag and b['montages'] > 0 else (body_nomont, head_nomont)
     tw = per_target_weapon[b['target_weapon']] if has_tag else None
+    has_ads = b['target_ads'] is not None
+    ads_body, ads_head = (body_ads, head_ads) if has_ads and b['target_ads'] > 0 else (body_hip, head_hip)
+    if has_ads:
+        ads_body['n'] += 1
+        if not same_target:
+            ads_body['lost'] += 1
+        if b['weak']:
+            ads_head['n'] += 1
+            if not (same_target and s['weak']):
+                ads_head['lost'] += 1
     body['n'] += 1
     per_weapon[b['weapon']][2] += 1
     if running:
@@ -124,6 +146,7 @@ show('달리는 상대 머리', head_run)
 show('달리는 상대 몸', body_run)
 print(f'덤(봇 못 맞힘 · 서버 맞힘): 몸 {body_gain}, 그중 머리 {head_gain}')
 print(f'서버가 쏠 때 이미 죽은 상대라 뺀 탄: {dead_excluded}')
+print(f'서버가 쏠 때 이미 나간 상대라 뺀 탄: {left_excluded}')
 WEAPONS = {0: '권총', 1: '소총', 2: '샷건'}
 for w, (hn, hl, bn, bl) in sorted(per_weapon.items()):
     print(f'  {WEAPONS.get(w, w)}: 머리 {hl}/{hn}, 몸 {bl}/{bn}')
@@ -133,6 +156,10 @@ show('몽타주 없음 머리', head_nomont)
 show('몽타주 없음 몸', body_nomont)
 for w, (hn, hl, bn, bl) in sorted(per_target_weapon.items()):
     print(f'  상대 {WEAPONS.get(w, w)}: 머리 {hl}/{hn}, 몸 {bl}/{bn}')
+show('조준 중 상대 머리', head_ads)
+show('조준 중 상대 몸', body_ads)
+show('조준 안 한 상대 머리', head_hip)
+show('조준 안 한 상대 몸', body_hip)
 for k, b, s in samples:
     print(f'  오탈 보기 {k}: 봇 {b} 서버 {s}')
 
@@ -141,4 +168,7 @@ print(f'BOTHITS {"PASS" if ok else "FAIL"} 머리={rate(head):.3f} 몸={rate(bod
 # 몽타주 중 판정은 값만 낸다(rc 에는 안 넣는다) — 분모가 600 에 차는지는 measure_pose.py 가 조건마다 합쳐 본다
 mont_ok = head_mont['n'] > 0 and body_mont['n'] > 0 and rate(head_mont) <= LIMIT and rate(body_mont) <= LIMIT
 print(f'BOTHITS_MONTAGE {"PASS" if mont_ok else "FAIL"} 머리={rate(head_mont):.3f}({head_mont["lost"]}/{head_mont["n"]}) 몸={rate(body_mont):.3f}({body_mont["lost"]}/{body_mont["n"]}) 기준={LIMIT}')
+# 조준 중 상대(C-5)도 값만 — 봇에 --ads 를 줘야 분모가 생긴다
+ads_ok = head_ads['n'] > 0 and body_ads['n'] > 0 and rate(head_ads) <= LIMIT and rate(body_ads) <= LIMIT
+print(f'BOTHITS_ADS {"PASS" if ads_ok else "FAIL"} 머리={rate(head_ads):.3f}({head_ads["lost"]}/{head_ads["n"]}) 몸={rate(body_ads):.3f}({body_ads["lost"]}/{body_ads["n"]}) 기준={LIMIT}')
 sys.exit(0 if ok else 1)

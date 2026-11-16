@@ -7,6 +7,7 @@
 # 클립 자료는 Epic 샘플에서 나온 것이라 리포에 넣지 않는다. 이 도구와 읽는 코드만 리포에 있고, 파일은 Saved/MOB/ 에 둔다.
 # 형식은 Shared/AnimClips.h 의 주석과 짝이다. 고치면 kClipPackVersion 을 같이 올린다.
 # 버전 2 = 뼈별 비중 표 · 끼움 자리 표(부위 뒤)와 묶음마다 몽타주 표 · 쏜 뒤 윗몸 덮기 자세(클립 뒤). 몽타주 클립과 덮기 자세 클립은 묶음 클립 30개 뒤에 붙는다(9단계 3-a).
+# 버전 3 = 묶음 클립이 47개 — 30~46 이 조준 서기 · 걸음 넷 · 전환 12(컨텐츠 C-3, D60). 몽타주 · 덮기 자세 클립은 그 뒤.
 #   뼈별 비중 표 = 골격의 블렌드 프로파일(1-a 기록 animcmp_ev_<무기>_blendprofiles.csv, 세 무기가 같은 골격). 표에 없는 뼈는 엔진 기본값(뼈 가림 0, 그 밖 1)으로 채운다.
 #   몽타주 곡선은 PACK_CURVES 이름만 넣는다 — 나머지 이름은 화면이 엔진 몽타주로 직접 트는 쪽 몫이라 버리고, 버린 이름을 찍는다.
 #
@@ -16,10 +17,11 @@ import struct
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
-VERSION = 2
+VERSION = 3                                     # 3 = 묶음 클립 30개 뒤에 조준 클립 17개(컨텐츠 C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
 KINDS = {'sphere': 0, 'sphyl': 1, 'box': 2}     # Shared/Weapon.h EBodyShape 값
 SCALE_LIMIT = 1e-4
-CLIPS_PER_BUNDLE = 30                           # Shared/AnimClips.h ACLIP_COUNT — 앞 30개. 그 뒤는 몽타주 · 덮기 자세 클립
+CLIPS_PER_BUNDLE = 47                           # Shared/AnimClips.h ACLIP_COUNT — 앞 47개(조준 17개 포함). 그 뒤는 몽타주 · 덮기 자세 클립
+ADS_IDLE_INDEX = 30                             # Shared/AnimClips.h ACLIP_ADS_IDLE
 MONTAGE_KINDS = ('fire', 'reload', 'equip', 'unequip', 'spawn')    # Shared/AnimClips.h EMontageKind 차례 = 뽑는 쪽 WEAPON_MONTAGES 차례
 SLOT_MODES = {'replace': 0, 'additive': 1, 'perbone': 2}           # Shared/AnimClips.h ESlotMode
 BLEND_OPTION_MAX = 2                            # Shared/AnimClips.h kBlendOptionMax — 몽타주 넣기 · 빼기 곡선은 선형 · Cubic · HermiteCubic 만 옮긴다
@@ -114,6 +116,9 @@ def parse(name, src):
         fail(f'bundle={name} montages={sorted(d["montages"])} override={d["override"]} fails={d["mfails"]} — 몽타주 종류 {len(MONTAGE_KINDS)}개와 덮기 자세가 다 있어야 한다')
     if d['weapon'] != name:
         fail(f'bundle={name} 인데 csv 의 WEAPON 줄 = {d["weapon"]} ({src})')
+    # 버전 2 때 뽑은 자료(조준 클립 없음)는 30번부터 몽타주 클립이라 클립 수만으로는 못 가른다 — 조준 서기 자리 이름으로 본다
+    if not d['clips'][ADS_IDLE_INDEX]['name'].endswith('_Idle_ADS'):
+        fail(f'bundle={name} 클립 {ADS_IDLE_INDEX} = {d["clips"][ADS_IDLE_INDEX]["name"]} — 조준 서기(*_Idle_ADS)가 아니다. 조준 클립 전에 뽑은 자료다({src})')
     d['hz'] = int(d['info']['hz'])
     return d
 

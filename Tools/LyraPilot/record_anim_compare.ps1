@@ -24,6 +24,7 @@ param(
 # -Weapon pistol|rifle|shotgun gives the opponent that weapon (default rifle). -Script events fires, reloads, swaps and replays the spawn effect along the path (step 9-1);
 #   -EventDelay <s> shifts every event of that script (tool check). -VideoPass <n> records only that pass to video.
 #   with -Probe it also writes animcmp_<Tag>_montages.csv (montage asset values) and _blendprofiles.csv (per-bone blend tables of the skeleton).
+# -Script ads presses/releases aim-down-sights along the path: standing toggles, aimed starts/stops/pivots in four directions, an aimed jump, and toggles mid-run/start/stop/pivot (content-add C-3).
 # -Probe also writes animcmp_<Tag>_probe.csv: per frame anim blueprint variables, state machine states, curves and body-space bone positions.
 $proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
 $ue   = 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe'
