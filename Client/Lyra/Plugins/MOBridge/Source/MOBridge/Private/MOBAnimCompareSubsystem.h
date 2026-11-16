@@ -31,7 +31,7 @@ class UPhysicalMaterial;
  * 판정에 쓰는 줄은 전부 「MOB_ACOMP」 로 시작한다.
  * 데디 서버(-server)에 주면 서버의 봇을 같은 경로로 움직인다. 카메라와 촬영은 건너뛴다(candidate1-impl-plan.md 0단계)
  */
-enum class EMOBACScript : uint8 { Run, AimJump, StartStop, Events };
+enum class EMOBACScript : uint8 { Run, AimJump, StartStop, Events, Ads };
 
 UCLASS()
 class UMOBAnimCompareSubsystem : public UTickableWorldSubsystem
@@ -160,6 +160,10 @@ private:
 	// 사건 종류마다 일으킨 수 · 실패 수 — 세는 자리를 종류마다 둔다(종류 하나만 세면 나머지의 0 이 거짓말이 된다)
 	int32 EvFire = 0, EvHold = 0, EvRelease = 0, EvReload = 0, EvSwap = 0, EvSpawn = 0;
 	int32 EvSwapFail = 0, EvSpawnFail = 0, EvNoAsc = 0;
+	// 조준(-MOBACScript=ads). 누르는 동안 매 프레임 「눌림」을 보낸다 — 사람 입력과 같다(MOBMoveRecordSubsystem 조준 주석)
+	bool bFoeAdsHeld = false;
+	void SetFoeAdsReleased();		// 누른 채면 뗀다(이미 뗐으면 아무것도 안 한다)
+	int32 EvAdsOn = 0, EvAdsOff = 0;
 	int32 MaxLiveMontages = 0;		// 한 프레임에 살아 있던 몽타주 최대 수(패킷 칸 수를 정한다)
 	TSet<FName> SeenMontages;
 	FString MontageCsv;

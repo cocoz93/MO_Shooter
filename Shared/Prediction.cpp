@@ -46,6 +46,8 @@ namespace mo
 		_sim.RefreshFloor(_move);
 		_jumpHeld = false;
 		_lockInputs = SpawnMoveLockInputs(_rules);
+		_ads.Reset();
+		_aimCamera.Reset();
 		_weapon = 0;
 		for (size_t i = 0; i < _weapons.size(); ++i) _weapons[i].Init((EWeapon)i);
 		_fireGate = CWeaponFireGate();
@@ -98,6 +100,7 @@ namespace mo
 		_move.mode = serverFalling ? EMoveMode::Falling : EMoveMode::Walking;
 		_jumpHeld = slot.jumpHeld;
 		_lockInputs = slot.lockInputs;
+		_ads = slot.ads;
 		_sim.RefreshFloor(_move);
 		slot.move = _move;
 		for (uint32_t seq = server.lastSeq + 1; seq <= _seq; ++seq)
@@ -137,7 +140,8 @@ namespace mo
 			moveInput = Vec3();
 		}
 		if (_debugMoveScale != 1.0) moveInput = moveInput * _debugMoveScale;
-		_move.maxSpeed = _maxWalkSpeed;
+		_ads.Apply((input.buttons & wire::BUTTON_ADS) != 0);
+		_move.maxSpeed = AdsWalkSpeed(_maxWalkSpeed, _ads.active);
 		_sim.Tick(_move, moveInput, kTick);
 	}
 
@@ -146,6 +150,7 @@ namespace mo
 		WeaponMotion motion;
 		motion.speed = (float)Length(_move.velocity);
 		motion.falling = _move.mode == EMoveMode::Falling;
+		motion.aimingAlpha = _aimCamera.GetAimingAlpha();
 		WeaponInput weaponInput;
 		weaponInput.fireHeld = (input.buttons & wire::BUTTON_FIRE) != 0;
 		weaponInput.reloadPressed = (input.buttons & wire::BUTTON_RELOAD) != 0;
@@ -153,6 +158,7 @@ namespace mo
 		_fireGate.NextInput();
 		if (weaponInput.fireHeld && _fireGate.IsBlocked((EWeapon)_weapon, _weapons[_weapon].IsFireActive())) weaponInput.fireHeld = false;
 		_lastWeaponEvents = _weapons[_weapon].Tick(kTick, weaponInput, motion);
+		_aimCamera.Tick(_ads.active, kTick);
 		if (_lastWeaponEvents.fired) _fireGate.OnFired((EWeapon)_weapon, _weapons[_weapon].GetDef(), kTick);
 	}
 
@@ -161,6 +167,7 @@ namespace mo
 		slot.move = _move;
 		slot.jumpHeld = _jumpHeld;
 		slot.lockInputs = _lockInputs;
+		slot.ads = _ads;
 	}
 
 	void CSelfPrediction::RememberWeapon(Slot& slot) const

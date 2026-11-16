@@ -338,6 +338,7 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	FParse::Value(Cmd, TEXT("MOBBreakPredictAt="), BreakPredictAt);
 	bAutoInput = FParse::Param(Cmd, TEXT("MOBAutoInput"));
 	bAutoAim = FParse::Param(Cmd, TEXT("MOBAutoAim"));
+	bAutoPitchSweep = FParse::Param(Cmd, TEXT("MOBAutoPitchSweep"));
 	FParse::Value(Cmd, TEXT("MOBAutoWeapon="), AutoWeaponFixed);
 	bEventShots = FParse::Param(Cmd, TEXT("MOBEventShots"));
 	bKeepPickups = FParse::Param(Cmd, TEXT("MOBKeepPickups"));
@@ -629,6 +630,7 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 				SelfPrev = SelfCur;
 				VisualError = FVector::ZeroVector;
 			}
+			InputsSinceSpawn = 0;
 			UE_LOG(LogMOB, Log, TEXT("MOB_SPAWN me tick=%u lastSeq=%u at=(%.1f,%.1f,%.1f) yaw=%.1f start=%u"), M.tick, M.lastSeq, M.x, M.y, M.z, M.yaw, M.startIndex);
 		}
 		break;
@@ -735,6 +737,13 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 				S->move.location.x, S->move.location.y, S->move.location.z, S->move.velocity.x, S->move.velocity.y, S->move.velocity.z, (int32)S->move.mode,
 				S->input.moveX, S->input.moveY, S->input.buttons, S->lockInputs);
 		}
+	}
+	// 조준 — 서버 STATE_ADS ↔ 같은 번호 입력의 내 예측(봇 비교와 같은 식). 켜진 줄 수를 같이 세 비교가 돌았는지 본다
+	if (const mo::CSelfPrediction::Slot* S = Core->Prediction.FindComparable(P))
+	{
+		const bool bServerAds = (P.flags & wire::STATE_ADS) != 0;
+		if (bServerAds) ++AdsComparedOn;
+		if (bServerAds != S->ads.active) ++AdsFlagDiff;
 	}
 	const mo::CSelfPrediction::ReconcileResult R = Core->Prediction.Reconcile(P, kCorrectTolerance);
 	if (R.compared)
@@ -1136,6 +1145,8 @@ void UMOBridgeSubsystem::ApplyServerAnim(FMOBRemote& R, ACharacter* Ch, const FM
 	AnimMontageCellsIn += Input.montageCount;
 	AnimMontageCells += Result.MontageCells;
 	AnimMontageMisses += Result.MontageMisses;
+	AnimAdsLayers += Result.AdsLayers;
+	AnimBadLayers += Result.BadLayers;
 	AnimSlotPasses += Result.SlotPasses;
 	AnimMaskMissing += Result.bMaskMissing ? 1 : 0;
 	AnimWeaponNotifies += Result.WeaponNotifies;
@@ -1289,6 +1300,29 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	const FVector Location = Ch->GetActorLocation();
 	const FVector Aim = TargetingStart(PC, Location);
 
+	// 시작점 거리 훑기 — 서버가 부활 뒤 낡은 값으로 따로 세는 첫 30입력(Room.cpp kAimStaleInputs)과 죽은 동안은 뺀다.
+	// 조준 칸은 누름 기준이라 카메라가 섞이는 0.22초는 누른 쪽 칸에 든다 — 허용 거리는 두 칸을 합친 최대로 본다
+	++InputsSinceSpawn;
+	if (InputsSinceSpawn > 30 && !(ServerFlags & wire::STATE_DEAD))
+	{
+		FVector CamLoc;
+		FRotator CamRot;
+		PC->GetPlayerViewPoint(CamLoc, CamRot);
+		const double CamPitch = FRotator::NormalizeAxis(CamRot.Pitch);
+		const int32 Bin = FMath::Clamp(FMath::FloorToInt((CamPitch + 90.0) / 10.0), 0, 17);
+		const int32 AdsSlot = (bAutoInput ? bAutoAds : PC->IsInputKeyDown(EKeys::RightMouseButton)) ? 1 : 0;
+		const FVector D = Aim - Location;
+		++AimSweepInputs[AdsSlot][Bin];
+		AimSweepDistMax[AdsSlot][Bin] = FMath::Max(AimSweepDistMax[AdsSlot][Bin], D.Size());
+		AimSweepHorizMax[AdsSlot][Bin] = FMath::Max(AimSweepHorizMax[AdsSlot][Bin], D.Size2D());
+		AimSweepPitchMin = FMath::Min(AimSweepPitchMin, CamPitch);
+		AimSweepPitchMax = FMath::Max(AimSweepPitchMax, CamPitch);
+	}
+	else
+	{
+		++AimSweepSkipped;
+	}
+
 	const bool bFire = bAutoInput ? bAutoFire : PC->IsInputKeyDown(EKeys::LeftMouseButton);
 	if (bFire)
 	{
@@ -1312,6 +1346,37 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	}
 	const bool bJump = bAutoInput ? bAutoJump : PC->IsInputKeyDown(EKeys::SpaceBar);
 	const bool bReloadDown = bAutoInput ? bAutoReload : PC->IsInputKeyDown(EKeys::R);
+	// 조준 = 오른쪽 단추(IA_ADS, 0-1). Lyra 도 같은 키로 제 조준 능력을 그 프레임에 켜 내 카메라 · 조준점 · 시선 감도가 바뀐다 — 서버도 이 입력부터 조준이라 막지 않는다(D61)
+	const bool bAds = bAutoInput ? bAutoAds : PC->IsInputKeyDown(EKeys::RightMouseButton);
+	// D61 확인 — 서버는 이 입력부터 조준이다. Lyra 도 같은 프레임에 최대 속도를 바꾸나(0 = 같은 프레임). 이 함수는 그 프레임 Lyra 입력 처리 뒤에 돈다
+	if (const UCharacterMovementComponent* AdsMove = Ch->GetCharacterMovement())
+	{
+		const float MaxSpeed = AdsMove->GetMaxSpeed();
+		if (bAds != bPrevAdsKey)
+		{
+			if (AdsKeyWatchFrame >= 0) ++AdsKeyLag[bAdsKeyWantOn ? 1 : 0][3];	// 앞 바뀜이 따라 바뀌기 전에 다시 바뀜
+			bAdsKeyWantOn = bAds;
+			AdsKeyBaseSpeed = PrevMaxSpeed;
+			AdsKeyWatchFrame = 0;
+		}
+		if (AdsKeyWatchFrame >= 0)
+		{
+			const bool bFollowed = bAdsKeyWantOn ? MaxSpeed < AdsKeyBaseSpeed - 1.f : MaxSpeed > AdsKeyBaseSpeed + 1.f;
+			if (bFollowed || AdsKeyWatchFrame >= 2)
+			{
+				const int32 Lag = bFollowed ? AdsKeyWatchFrame : 3;
+				++AdsKeyLag[bAdsKeyWantOn ? 1 : 0][Lag];
+				UE_LOG(LogMOB, Log, TEXT("MOB_ADSKEY down=%d lag=%d base=%.1f now=%.1f frame=%llu seq=%u"), bAdsKeyWantOn ? 1 : 0, Lag, AdsKeyBaseSpeed, MaxSpeed, (unsigned long long)GFrameCounter, Seq);
+				AdsKeyWatchFrame = -1;
+			}
+			else
+			{
+				++AdsKeyWatchFrame;
+			}
+		}
+		PrevMaxSpeed = MaxSpeed;
+		bPrevAdsKey = bAds;
+	}
 
 	uint8 Wanted = Weapon;
 	if (bAutoInput) Wanted = AutoWeapon;
@@ -1351,6 +1416,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		if (bFire) In.buttons |= wire::BUTTON_FIRE;
 		if (bReloadDown && !bReloadWasDown) { In.buttons |= wire::BUTTON_RELOAD; ++InputsReload; }
 		bReloadWasDown = bReloadDown;
+		if (bAds) { In.buttons |= wire::BUTTON_ADS; ++InputsAds; }
 
 		// 번호를 붙이고 여기서도 돌린다 — 서버 답을 기다리지 않고 바로 움직이려고
 		Core->Prediction.AddInput(In);
@@ -1670,6 +1736,9 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 	static const FVector Dirs[8] = { FVector(1, 0, 0), FVector(1, -1, 0), FVector(0, -1, 0), FVector(-1, -1, 0), FVector(-1, 0, 0), FVector(-1, 1, 0), FVector(0, 1, 0), FVector(1, 1, 0) };
 	FVector AutoMove = Dirs[(int32)(S / kAutoLeg) % 8];
 	FRotator AutoRot(-5.f, (float)FMath::Fmod(S * 20.0, 360.0), 0.f);
+	// 시작점 거리 훑기(C-5) — 시선을 위아래 끝까지 9초 주기로 흔든다. 조준(7초) · 사격(5초) 주기와 엇갈려 각도마다 조준한 입력 · 안 한 입력이 다 나온다.
+	// Lyra 카메라가 높낮이를 ±89 로 자른다(LYRA_CAMERA_DEFAULT_PITCH_MIN/MAX)
+	if (bAutoPitchSweep) AutoRot.Pitch = (float)(89.0 * FMath::Sin(2.0 * UE_DOUBLE_PI * S / 9.0));
 	if (bAutoAim)
 	{
 		const FVector From = Ch->GetActorLocation();
@@ -1731,6 +1800,19 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 		}
 	}
 	bAutoFire = bFireNow;
+	// 조준 — 자동 조준 판은 적이 보이는 동안, 아니면 7초마다 3초. 사격 창(5초마다 2초)과 주기를 엇갈려 조준한 발 · 안 한 발 · 쏘는 중 켜고 끄기가 다 나오게 한다.
+	// 사람 키처럼 Lyra 능력에도 누름을 넣어 내 카메라가 같이 바뀐다 — 눌린 동안 매 프레임(IA_ADS 트리거 없음 → Triggered 마다 Pressed, 원본 기준)
+	const bool bAdsNow = bAutoAim ? bAutoSeesEnemy : FMath::Fmod(S, 7.0) >= 1.0 && FMath::Fmod(S, 7.0) < 4.0;
+	{
+		static const FGameplayTag AdsTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.ADS"), false);
+		ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch));
+		if (LASC && AdsTag.IsValid())
+		{
+			if (bAdsNow) LASC->AbilityInputTagPressed(AdsTag);
+			else if (bAutoAds) LASC->AbilityInputTagReleased(AdsTag);
+		}
+	}
+	bAutoAds = bAdsNow;
 	bAutoReload = FMath::Fmod(S, 20.0) >= 19.0 || (bAutoAim && ServerMagazine == 0);
 	if (bAutoReload != bAutoReloadPressed)
 	{
@@ -1845,8 +1927,8 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	if (bQuitting) return;
 	bQuitting = true;
 
-	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY why=%s player=%u team=%u spawns=%lld sent=%lld skipped=%lld fire=%lld jump=%lld reload=%lld weaponChange=%lld ack=%u maxAckLag=%d sendShort=%lld"),
-		Why, PlayerId, Team, SpawnsRecv, InputsSent, InputsSkipped, InputsFire, InputsJump, InputsReload, InputsWeaponChange, AckSeq, MaxAckLag, SendShort);
+	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY why=%s player=%u team=%u spawns=%lld sent=%lld skipped=%lld fire=%lld jump=%lld reload=%lld weaponChange=%lld ack=%u maxAckLag=%d sendShort=%lld ads=%lld adsComparedOn=%lld adsFlagDiff=%lld"),
+		Why, PlayerId, Team, SpawnsRecv, InputsSent, InputsSkipped, InputsFire, InputsJump, InputsReload, InputsWeaponChange, AckSeq, MaxAckLag, SendShort, InputsAds, AdsComparedOn, AdsFlagDiff);
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY2 states=%lld statesWithoutMe=%lld shots=%lld damages=%lld matches=%lld kills=%lld unknown=%lld hp=%.0f mag=%d spare=%d phase=%u score=%u:%u posDiff n=%lld avg=%.1f max=%.1f"),
 		StatesRecv, StatesWithoutMe, ShotsRecv, DamagesRecv, MatchesRecv, KillsRecv, UnknownPackets, ServerHp, ServerMagazine, ServerSpare, MatchPhase, ScoreA, ScoreB,
 		PosDiffCount, PosDiffCount ? PosDiffSum / PosDiffCount : 0.0, PosDiffMax);
@@ -1859,8 +1941,9 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	{
 		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_SUMMARY tailPlayers=%lld tailBad=%lld noState=%lld poseEvals=%lld poseFrames=%lld poseFail=%lld"), AnimTailPlayers, AnimTailBad, AnimNoState, AnimPoseEvals, AnimPoseFrames, AnimPoseFail);
 		// 무기별(9단계) — 무기별 자세 계산 수의 합 = poseEvals. setChanges = 언리얼 경로 클립 한 벌을 갈아 넣은 수, setMisses = 그 무기 한 벌이 없던 프레임, badWeapon = 모르는 무기 번호로 받은 칸
-		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_WEAPON poseEvals pistol=%lld rifle=%lld shotgun=%lld setChanges=%lld setMisses=%lld badWeapon=%lld"),
-			AnimPoseEvalsByWeapon[0], AnimPoseEvalsByWeapon[1], AnimPoseEvalsByWeapon[2], AnimSetChanges, AnimSetMisses, AnimBadWeapon);
+		// adsLayers = 언리얼 경로에서 조준 전환 층을 허리 전환으로 바꿔 튼 수, badLayers = 칸 밖이라 버린 층(0 이어야 함, C-5)
+		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_WEAPON poseEvals pistol=%lld rifle=%lld shotgun=%lld setChanges=%lld setMisses=%lld badWeapon=%lld adsLayers=%lld badLayers=%lld"),
+			AnimPoseEvalsByWeapon[0], AnimPoseEvalsByWeapon[1], AnimPoseEvalsByWeapon[2], AnimSetChanges, AnimSetMisses, AnimBadWeapon, AnimAdsLayers, AnimBadLayers);
 		// 몽타주(9단계 5-a) — cellsIn = 받은 칸 수의 합(프레임마다), cells = 언리얼 경로에 넣은 칸, misses = 무기 · 자산이 없어 못 넣은 칸(cellsIn = cells + misses).
 		// frames = 칸이 하나라도 든 프레임, noSlot = 칸을 넣었는데 끼움 자리를 하나도 안 거친 프레임, maskMissing = 윗몸 뼈 가림을 못 찾은 프레임.
 		// weaponNotifies = 튼 무기 메시 몽타주 알림(남의 사격 · 재장전 시작마다 하나), weaponPlaying = 그중 튼 직후 무기 메시에 몽타주가 돌던 수, soundNotifies = 튼 소리 알림
@@ -1895,6 +1978,24 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY6 inputRawMax=%.3f inputSentMax=%.6f diagonal=%lld bulletsLyra=%lld bulletsServer=%lld bulletsLyraImmune=%lld bulletsServerImmune=%lld bulletsLyraOther=%lld bulletsServerOther=%lld magDiffMax=%d myShots=%lld,%lld,%lld reloadStart=%lld,%lld,%lld reloadDone=%lld,%lld,%lld aimFarLocal=%lld aimDistMax=%.1f aimHorizMax=%.1f"),
 		InputRawMax, InputSentMax, InputsDiagonal, BulletsLyra, BulletsServer, BulletsLyraImmune, BulletsServerImmune, BulletsLyraOther, BulletsServerOther, MagDiffMax, MyShots[0], MyShots[1], MyShots[2], ReloadStarts[0], ReloadStarts[1], ReloadStarts[2], ReloadDones[0], ReloadDones[1], ReloadDones[2], AimFarLocal, AimDistMax, AimHorizMax);
+	for (int32 AdsSlot = 0; AdsSlot < 2; ++AdsSlot)
+	{
+		int64 Inputs = 0;
+		double DistMax = 0, HorizMax = 0;
+		FString Bins;
+		for (int32 B = 0; B < 18; ++B)
+		{
+			if (AimSweepInputs[AdsSlot][B] == 0) continue;
+			Inputs += AimSweepInputs[AdsSlot][B];
+			DistMax = FMath::Max(DistMax, AimSweepDistMax[AdsSlot][B]);
+			HorizMax = FMath::Max(HorizMax, AimSweepHorizMax[AdsSlot][B]);
+			Bins += FString::Printf(TEXT("%d:%lld:%.1f/%.1f "), B * 10 - 90, AimSweepInputs[AdsSlot][B], AimSweepDistMax[AdsSlot][B], AimSweepHorizMax[AdsSlot][B]);
+		}
+		UE_LOG(LogMOB, Log, TEXT("MOB_AIMSWEEP ads=%d inputs=%lld skipped=%lld pitch=%.1f~%.1f distMax=%.1f horizMax=%.1f bins(pitch:n:dist/horiz)=[%s]"), AdsSlot, Inputs, AimSweepSkipped, AimSweepPitchMin, AimSweepPitchMax, DistMax, HorizMax, *Bins);
+	}
+	// 조준 키 → Lyra 최대 속도 늦음(D61). lag0 = 같은 프레임 · none = 3프레임 안에 안 바뀜
+	UE_LOG(LogMOB, Log, TEXT("MOB_ADSKEY_SUMMARY press lag0=%lld lag1=%lld lag2=%lld none=%lld | release lag0=%lld lag1=%lld lag2=%lld none=%lld"),
+		AdsKeyLag[1][0], AdsKeyLag[1][1], AdsKeyLag[1][2], AdsKeyLag[1][3], AdsKeyLag[0][0], AdsKeyLag[0][1], AdsKeyLag[0][2], AdsKeyLag[0][3]);
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY5 damageApplied=%lld damageMismatch=%lld damageNoTarget=%lld hpCompared=%lld hpDiffCount=%lld hpDiffMax=%.3f selfRespawns=%lld remoteRespawns=%lld scoreFixes=%lld scoreServer=%u:%u scoreLyra=%d:%d ammoFixes=%lld weaponSwaps=%lld remoteEquips=%lld phaseChanges=%lld shotCues=%lld hitMarkers=%lld countDownSets=%lld countDownLast=%d"),
 		DamageApplied, DamageMismatch, DamageNoTarget, HpCompared, HpDiffCount, HpDiffMax, SelfRespawns, RemoteRespawns, ScoreFixes, ScoreA, ScoreB,
 		LyraScoreA, LyraScoreB,

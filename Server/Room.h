@@ -81,6 +81,8 @@ namespace mo
 		uint64_t statesSent = 0;
 		uint64_t shots = 0;
 		uint64_t firesBlockedPostGame = 0;	// 경기 끝 단계의 발사 입력 — GE_BlockAbilityInput
+		uint64_t adsInputs = 0;				// 조준이 켜진 채 적용한 입력(C-4)
+		uint64_t shotsAimed = 0;			// 조준 비율 1 로 쏜 발 — 퍼짐이 조준 배수를 탄 발(C-4)
 		uint64_t bullets = 0;
 		uint64_t bulletsHitMap = 0;
 		uint64_t bulletsHitBody = 0;
@@ -211,6 +213,8 @@ namespace mo
 			float yaw = 0, pitch = 0;
 			int8_t moveX = 0, moveY = 0;	// 마지막 누름 방향 — 상태 패킷에 실어 보낸다
 			bool jumpHeld = false;
+			AdsAbility ads;					// 조준 능력(C-4) — 걸음 속도 · 카메라 · 애니 · STATE_ADS
+			CAimCamera aimCamera;			// 사격 퍼짐이 읽는 조준 비율의 출처(C-1)
 			bool dead = false;
 			uint32_t respawnTick = 0;		// dead 일 때
 			uint32_t immuneUntilTick = 0;

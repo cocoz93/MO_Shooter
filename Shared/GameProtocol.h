@@ -11,7 +11,8 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 5;		// 5 = 애니 꼬리에 몽타주 칸 · 덮기 · 왼손 비중(9단계 조각 4, D51)과 대기 몸짓 칸 눈금 1/3000초(D47)
+		constexpr uint32_t kProtocolVersion = 6;		// 6 = 애니 꼬리에 조준 묶음 비중 · 겹침 칸 번호에 조준 전환 12개(컨텐츠 C-3, D60) · 조준 버튼 BUTTON_ADS · 상태 STATE_ADS(C-4, D61)
+														// 5 = 애니 꼬리에 몽타주 칸 · 덮기 · 왼손 비중(9단계 조각 4, D51)과 대기 몸짓 칸 눈금 1/3000초(D47)
 		constexpr int kTickRate = 60;
 		constexpr int kMaxPlayersInRoom = 10;
 		constexpr int kMaxBulletsInShot = 9;	// 샷건 한 발의 탄 수
@@ -40,6 +41,7 @@ namespace mo
 			BUTTON_JUMP = 1 << 0,	// 누르는 동안 켠다
 			BUTTON_FIRE = 1 << 1,	// 누르는 동안 켠다
 			BUTTON_RELOAD = 1 << 2,	// 누른 입력 하나에만 켠다
+			BUTTON_ADS = 1 << 3,	// 누르는 동안 켠다 — 그 입력부터 조준(C-4, D61)
 		};
 
 		enum EStateFlag : uint8_t
@@ -49,6 +51,7 @@ namespace mo
 			STATE_DEAD = 1 << 2,
 			STATE_IMMUNE = 1 << 3,		// 경기 전 대기·부활 직후·경기 끝 — 맞아도 피해 없음
 			STATE_MOVE_LOCKED = 1 << 4,	// 부활 직후 — 이동 입력을 안 받는다
+			STATE_ADS = 1 << 5,			// 조준 능력이 켜져 있다(GA_ADS) — 걸음 속도 · 퍼짐 · 조준 자세가 이 값을 따른다
 		};
 
 		enum class EMatchPhase : uint8_t { Waiting, Warmup, Playing, PostGame, Finished };
@@ -123,7 +126,7 @@ namespace mo
 		};
 
 		// 애니 상태 한 사람치. S2C_STATE 의 players[count] 바로 뒤에 같은 차례로 붙는다(꼬리, 클립 파일을 준 서버만).
-		// - 머리 뒤에 겹침 칸 layerCount 개, 그 뒤에 몽타주 칸 montageCount 개만 싣는다 — 사람마다 21 + 4 × layerCount + 4 × montageCount 바이트, 최대 49(D35 · D51).
+		// - 머리 뒤에 겹침 칸 layerCount 개, 그 뒤에 몽타주 칸 montageCount 개만 싣는다 — 사람마다 22 + 4 × layerCount + 4 × montageCount 바이트, 최대 50(D35 · D51 · D60).
 		//   쓰고 읽는 식은 아래 WriteAnimTail · ReadAnimTail 한 벌이다(서버가 쓰고 봇 · 다리가 읽는다)
 		// - 앞부분(State)만 읽는 쪽은 count 로 끝을 정하므로 꼬리를 무시해도 깨지지 않는다
 		inline constexpr int kAnimLayersOnWire = 4;
@@ -133,7 +136,7 @@ namespace mo
 
 		struct AnimLayerWire
 		{
-			int8_t clip;			// 점프 5개 + 전환 12개의 번호(ACLIP_JUMP_START 기준), -1 = 걷기 · 서기 자리
+			int8_t clip;			// 쌓기 칸 번호 0~28 = 점프 5 · 허리 전환 12 · 조준 전환 12(AnimClips.h StackClipIndex), -1 = 걷기 · 서기 자리
 			uint16_t time;			// 1/6000초 칸
 			uint8_t fade;			// 아래 칸을 덮은 정도 0~255
 		};
@@ -153,6 +156,7 @@ namespace mo
 			uint16_t stepFrac;		// 그 걸음의 진행 0~65535
 			uint16_t idleTime;		// 서기 클립 시각, 1/6000초 칸
 			uint8_t aimBlend;		// 255 = 허리 사격 조준만, 0 = 느슨한 조준만
+			uint8_t adsBlend;		// 조준 묶음 비중 0~255(D60) — 0 = 허리 서기 · 걸음 클립만, 255 = 조준 클립만. 걸음 번호 · 진행률 · 서기 시각은 두 묶음이 같이 쓴다
 			uint16_t fidgetTime;	// 대기 몸짓 시각, 1/3000초 칸(권총 몸짓 13.8초가 1/6000초 칸 최대 10.92초를 넘어서 — D47). kAnimTimeNone = 안 함
 			uint16_t recoveryTime;	// 착지 충격 시각. kAnimTimeNone = 안 함
 			int16_t plantDrop;		// 발 디딤 내림 0.01cm 칸
@@ -264,9 +268,9 @@ namespace mo
 
 		static_assert(sizeof(Header) == 4, "ServerCore MsgHeader 와 같아야 한다");
 		static_assert(sizeof(State) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
-		static_assert(sizeof(AnimStateWire) == 49, "패킷 크기 어림(D35 · D51)과 같아야 한다");
+		static_assert(sizeof(AnimStateWire) == 50, "패킷 크기 어림(D35 · D51 · D60)과 같아야 한다");
 		inline constexpr size_t kAnimStateHeadSize = offsetof(AnimStateWire, layers);
-		static_assert(kAnimStateHeadSize == 21, "머리 = 18 + 덮기 · 왼손 · 몽타주 칸 수(D51)");
+		static_assert(kAnimStateHeadSize == 22, "머리 = 18 + 덮기 · 왼손 · 몽타주 칸 수(D51) + 조준 묶음 비중(D60)");
 		inline constexpr size_t kMaxStatePacketSize = sizeof(State) + sizeof(AnimStateWire) * kMaxPlayersInRoom;		// 꼬리까지 넣은 최대
 		static_assert(kMaxStatePacketSize <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 

@@ -319,7 +319,7 @@ namespace mo
 	{
 		_clips = nullptr;
 		_bundle = clips.FindBundle(bundleName);
-		if (!_bundle || _bundle->clips.size() < ACLIP_COUNT) return false;		// 30개 뒤는 몽타주 · 덮기 자세 클립(9단계 3-a)
+		if (!_bundle || _bundle->clips.size() < ACLIP_COUNT) return false;		// 47개 뒤는 몽타주 · 덮기 자세 클립(9단계 3-a, 조준 17개는 C-3)
 
 		_handR = clips.FindBone("hand_r");
 		_gun = clips.FindBone("ik_hand_gun");
@@ -366,12 +366,20 @@ namespace mo
 			first = false;
 			++active;
 		};
+		// 허리 묶음 → 대기 몸짓 → 조준 묶음 차례. 조준 묶음 비중이 0 이면 조준 전과 같은 덧셈 차례 · 같은 수다(D60)
+		const float ads = std::max(0.f, std::min(input.adsBlend, 1.f));
+		const float hip = 1.f - ads;
 		for (int i = 0; i < kAnimWalkClips; ++i)
 		{
-			const float weight = i == 0 ? input.weights[i] * (1.f - fidget) : input.weights[i];
+			const float weight = i == 0 ? input.weights[i] * hip * (1.f - fidget) : input.weights[i] * hip;
 			if (weight > kZeroWeight) add(_bundle->clips[(size_t)ACLIP_IDLE + i], input.times[i], weight);
 		}
-		if (input.weights[0] * fidget > kZeroWeight) add(fidgetClip, std::min(input.fidgetTime, fidgetClip.length), input.weights[0] * fidget);
+		if (input.weights[0] * hip * fidget > kZeroWeight) add(fidgetClip, std::min(input.fidgetTime, fidgetClip.length), input.weights[0] * hip * fidget);
+		for (int i = 0; i < kAnimWalkClips; ++i)
+		{
+			const float weight = input.weights[i] * ads;
+			if (weight > kZeroWeight) add(_bundle->clips[(size_t)ACLIP_ADS_IDLE + i], input.adsTimes[i], weight);
+		}
 
 		if (active == 0)
 		{
@@ -416,7 +424,7 @@ namespace mo
 		for (int n = 0; n < usedCount; ++n)
 		{
 			const AnimLayer& layer = input.layers[used[n]];
-			const uint32_t index = ACLIP_JUMP_START + (uint32_t)layer.clip;
+			const uint32_t index = StackClipIndex(layer.clip);
 			const AnimClip& clip = _bundle->clips[index];
 			const float length = std::max(clip.length, 0.01f);
 			const float time = clip.loop ? std::fmod(layer.time, length) : std::min(layer.time, length);
@@ -857,14 +865,30 @@ namespace mo
 				measure(input);
 			}
 		}
-		for (uint32_t c = ACLIP_JUMP_START; c < ACLIP_RECOVERY; ++c)
+		// 조준 서기 · 걸음 넷(D60)
+		for (uint32_t c = 0; c < (uint32_t)kAnimWalkClips; ++c)
 		{
-			for (uint32_t s = 0; s < clips[c].samples; ++s)
+			const AnimClip& clip = clips[ACLIP_ADS_IDLE + c];
+			for (uint32_t s = 0; s < clip.samples; ++s)
+			{
+				AnimPoseInput input;
+				for (float& weight : input.weights) weight = 0.f;
+				input.weights[c] = 1.f;
+				input.adsBlend = 1.f;
+				input.adsTimes[c] = sampleTime(clip, s);
+				measure(input);
+			}
+		}
+		// 쌓기 칸 전부 — 점프 · 허리 전환 · 조준 전환
+		for (int stack = 0; stack < kStackClipCount; ++stack)
+		{
+			const AnimClip& clip = clips[StackClipIndex(stack)];
+			for (uint32_t s = 0; s < clip.samples; ++s)
 			{
 				AnimPoseInput input;
 				input.layerCount = 1;
-				input.layers[0].clip = (int16_t)(c - ACLIP_JUMP_START);
-				input.layers[0].time = sampleTime(clips[c], s);
+				input.layers[0].clip = (int16_t)stack;
+				input.layers[0].time = sampleTime(clip, s);
 				input.layers[0].fade = 1.f;
 				measure(input);
 			}
@@ -882,7 +906,8 @@ namespace mo
 			measure(input);
 		}
 		// 몽타주(9단계 3-b) — 서기 위에 몽타주 하나를 비중 1 로, 시각은 표본 간격마다. 덮기 · 왼손 비중은 끝값 0 · 1 을 다 본다.
-		// 모든 묶음의 몽타주 전부(조각 4) — 무기를 바꾸면 서버는 그 틱에 묶음을 바꾸고(D46), 앞 무기의 쏘기 · 재장전은 새 묶음 평가기 위에서 빠지는 중으로 남는다
+		// 모든 묶음의 몽타주 전부(조각 4) — 무기를 바꾸면 서버는 그 틱에 묶음을 바꾸고(D46), 앞 무기의 쏘기 · 재장전은 새 묶음 평가기 위에서 빠지는 중으로 남는다.
+		// 아래 서기는 허리 · 조준 둘 다(D60 — 조준한 채 쏜다)
 		const std::vector<ClipBundle>& bundles = _clips->Bundles();
 		for (size_t m = 0; m < bundles.size(); ++m)
 		{
@@ -891,19 +916,23 @@ namespace mo
 				const uint32_t samples = (uint32_t)std::ceil((double)montage.length * _bundle->sampleHz) + 1;
 				for (uint32_t s = 0; s < samples; ++s)
 				{
-					for (const float overrideWeight : { 0.f, 1.f })
+					for (const float adsBlend : { 0.f, 1.f })
 					{
-						for (const float handLeftAlpha : { 0.f, 1.f })
+						for (const float overrideWeight : { 0.f, 1.f })
 						{
-							AnimPoseInput input;
-							input.montageCount = 1;
-							input.montages[0].bundle = (int8_t)m;
-							input.montages[0].kind = montage.kind;
-							input.montages[0].position = std::min((float)((double)s / _bundle->sampleHz), montage.length);
-							input.montages[0].weight = 1.f;
-							input.overrideWeight = overrideWeight;
-							input.handLeftAlpha = handLeftAlpha;
-							measure(input);
+							for (const float handLeftAlpha : { 0.f, 1.f })
+							{
+								AnimPoseInput input;
+								input.adsBlend = adsBlend;
+								input.montageCount = 1;
+								input.montages[0].bundle = (int8_t)m;
+								input.montages[0].kind = montage.kind;
+								input.montages[0].position = std::min((float)((double)s / _bundle->sampleHz), montage.length);
+								input.montages[0].weight = 1.f;
+								input.overrideWeight = overrideWeight;
+								input.handLeftAlpha = handLeftAlpha;
+								measure(input);
+							}
 						}
 					}
 				}

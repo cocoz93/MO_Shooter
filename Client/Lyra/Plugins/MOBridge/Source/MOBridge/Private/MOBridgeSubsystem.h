@@ -204,6 +204,7 @@ private:
 
 	// 자동 입력이 고른 값 — 키보드 대신
 	bool bAutoFire = false;
+	bool bAutoAds = false;
 	bool bAutoSeesEnemy = false;
 	bool bNamedSelf = false;
 	double NextPickupCheckAt = 0;
@@ -240,6 +241,20 @@ private:
 	int32 AimFarLinesLeft = 8;
 	int64 AimFarLocal = 0;
 	double AimDistMax = 0, AimHorizMax = 0;
+	// 시작점 거리 훑기(C-5, 서버 허용 거리 다시 재기) — 안 쏜 입력도 「이 입력에 쐈다면」의 시작점으로 센다. [0] = 조준 안 누름 · [1] = 누름, 칸 = 카메라 시선 높낮이 10도씩(−90~90)
+	bool bAutoPitchSweep = false;
+	int32 InputsSinceSpawn = 0;
+	int64 AimSweepSkipped = 0;
+	int64 AimSweepInputs[2][18] = {};
+	double AimSweepDistMax[2][18] = {}, AimSweepHorizMax[2][18] = {};
+	double AimSweepPitchMin = 0, AimSweepPitchMax = 0;
+	// 조준 키 → Lyra 최대 속도(C-5 사람 판, D61 미검증 닫기) — 키가 바뀐 프레임부터 Lyra 이동 최대 속도가 따라 바뀌기까지 몇 프레임인가.
+	// [0] = 뗌 · [1] = 누름, 칸 = 0 · 1 · 2 프레임 늦음 · 3 = 3프레임 안에 안 바뀜(죽음 · 능력 막힘 등)
+	bool bPrevAdsKey = false;
+	bool bAdsKeyWantOn = false;
+	int32 AdsKeyWatchFrame = -1;		// -1 = 안 지켜봄
+	float AdsKeyBaseSpeed = 0.f, PrevMaxSpeed = 0.f;
+	int64 AdsKeyLag[2][4] = {};
 	bool bAutoReloadPressed = false;
 	bool bJustReloaded = false;
 	int32 MagDiffMax = 0;
@@ -260,6 +275,7 @@ private:
 	// 관측값
 	int64 InputsSent = 0, InputsSkipped = 0;
 	int64 InputsFire = 0, InputsJump = 0, InputsReload = 0, InputsWeaponChange = 0;
+	int64 InputsAds = 0, AdsComparedOn = 0, AdsFlagDiff = 0;	// 조준을 누른 입력 · 서버가 조준 켜짐으로 보낸 비교 줄 · 그중 내 예측과 어긋남(C-4)
 	int64 StatesRecv = 0, StatesWithoutMe = 0, ShotsRecv = 0, DamagesRecv = 0, MatchesRecv = 0, KillsRecv = 0, SpawnsRecv = 0;
 	int64 UnknownPackets = 0, SendShort = 0;
 	int32 MaxAckLag = 0;
@@ -275,6 +291,7 @@ private:
 	int64 AnimTailPlayers = 0, AnimTailBad = 0, AnimNoState = 0, AnimPoseEvals = 0, AnimPoseFrames = 0, AnimPoseFail = 0;
 	int64 AnimPoseEvalsByWeapon[3] = {};	// 무기 번호(EWeapon) 차례 권총 · 소총 · 샷건 — 무기 수와 같은지 .cpp 에서 정적 검사
 	int64 AnimSetChanges = 0, AnimSetMisses = 0, AnimBadWeapon = 0;
+	int64 AnimAdsLayers = 0, AnimBadLayers = 0;	// 언리얼 경로에서 조준 전환 층을 허리 전환으로 바꿔 튼 수 · 칸 밖이라 버린 층 수(C-5)
 	int64 AnimMontageCellsIn = 0, AnimMontageCells = 0, AnimMontageMisses = 0, AnimMontageFrames = 0, AnimSlotPasses = 0, AnimMontageNoSlot = 0, AnimMaskMissing = 0, AnimWeaponNotifies = 0, AnimWeaponPlaying = 0, AnimSoundNotifies = 0, AnimMontageRestarts = 0, AnimStepStates = 0;	// 몽타주(9단계 5-a)
 	struct FMOBRayStats { int64 Rays = 0, Map = 0, EngHit = 0, Same = 0, EngOnly = 0, MineOnly = 0, Both = 0, BoneSame = 0, EngWeak = 0, WeakLost = 0, WeakGain = 0; };
 	FMOBRayStats RayStats[2][2];		// [선 · 구 5.5][몸 쪽 · 머리 쪽 겨눔]

@@ -4,6 +4,7 @@
 //   BotClient --map=<파일.mocl> --seconds=초 [--measureFrom=초 --measureSeconds=초] ... = 부하 시험. 경기 끝을 기다리지 않고 시간이 되면 끊고 LOADBOT 줄을 낸다.
 //   봇이 많으면 서버가 방을 나눠 앉힌다 — 기록은 같은 방 봇끼리만 맞춰 본다. 방 2부터는 기록 이름 뒤에 .room<번호>
 //   --measureView = 되감기 측정. Lyra 처럼 상태를 쌓아 0.1초 뒤 보간한 자리를 오차 없이 조준하고, 그 시점을 입력에 실어 보낸다. 기본 꺼짐
+//   --ads = 적이 보이면 조준을 누른다(C-4). 서버 조준 상태 ↔ 같은 코드 비교는 이 판에서만 켜진 줄이 생긴다. 기본 꺼짐
 //   --script=startstop [--scriptHold=초] [--scriptWeapon=pistol|rifle|shotgun] = 화면 판정 촬영. 서버 --debug 로 애니 비교 촬영의 시작 자리에 서서, 그 촬영과 같은 경로를 달린다. 쏘지 않는다
 //   --script=events [--scriptHold=초] [--scriptWeapon=...] = 9단계 사건 경로(쏘기 · 당겨 쏘기 · 위아래 겨눠 쏘기 · 재장전 · 재장전 중 쏘기 · 무기 바꾸기). 애니 비교 사건 경로와 같은 조각 · 사건 프레임. 부활은 없다.
 //     경로 모드는 받은 자기 몽타주 칸을 상태마다 SCRIPTANIM 줄로 찍는다(Tools/LyraPilot/check_script_anim.py 가 Lyra 기록과 견준다)
@@ -91,6 +92,7 @@ namespace
 		double measureFromSeconds = 0;
 		double measureSeconds = 0;
 		bool measureView = false;		// 되감기 측정 모드 — 꺼져 있으면 기존 시험과 같은 입력을 보낸다
+		bool adsWhenShooting = false;	// --ads — 적이 보이면 조준을 누른다(C-4). 꺼져 있으면 기존 시험과 같은 입력
 		std::string judgeClips;			// 주면 봇이 화면 역할로 탄마다 자기 판정을 남긴다(후보 1, 7단계). measureView 를 함께 켠다
 		std::string judgeLog;
 		bool judgeNoSpread = false;		// 서버 --rewindNoSpread 와 같이 쓴다 — 자세만 본다
@@ -292,6 +294,7 @@ namespace
 		void Close() { _net.Close(); }
 
 		void SetMeasureView(bool on) { _measureView = on; }
+		void SetAdsWhenShooting(bool on) { _adsWhenShooting = on; }
 		bool IsScriptDone() const { return _scriptStep == (int)_scriptStepCount; }
 		void SetScript(double holdSeconds, uint8_t weapon, bool events)
 		{
@@ -337,6 +340,9 @@ namespace
 		uint64_t GetVelDiff() const { return _velDiff; }
 		uint64_t GetAmmoDiff() const { return _ammoDiff; }
 		uint64_t GetFlagDiff() const { return _flagDiff; }
+		uint64_t GetAdsCompared() const { return _adsCompared; }
+		uint64_t GetAdsDiff() const { return _adsDiff; }
+		uint64_t GetAdsInputs() const { return _adsInputs; }
 		double GetPosMax() const { return _posMax; }
 		uint32_t GetFirstBadSeq() const { return _firstBadSeq; }
 		uint32_t GetSeq() const { return _self.GetSeq(); }
@@ -529,6 +535,9 @@ namespace
 				if (((p.flags & wire::STATE_RELOADING) != 0) != slot.reloading) { ++_flagDiff; bad = true; }
 			}
 			if (((p.flags & wire::STATE_FALLING) != 0) != (slot.move.mode == EMoveMode::Falling) || ((p.flags & wire::STATE_MOVE_LOCKED) != 0) != (slot.lockInputs > 0)) { ++_flagDiff; bad = true; }
+			// 조준 — 경기 끝에도 버튼을 따르므로(D61) 단계와 상관없이 본다. 켜진 줄 수를 같이 세 이 비교가 실제로 돌았는지 본다
+			if ((p.flags & wire::STATE_ADS) != 0) ++_adsCompared;
+			if (((p.flags & wire::STATE_ADS) != 0) != slot.ads.active) { ++_flagDiff; ++_adsDiff; bad = true; }
 			if (bad && _firstBadSeq == 0) _firstBadSeq = p.lastSeq;
 		}
 
@@ -620,6 +629,7 @@ namespace
 			_judgeSpeeds.clear();
 			_judgeTargetWeapons.clear();
 			_judgeMontages.clear();
+			_judgeAds.clear();
 			for (const auto& entry : _viewHistory)
 			{
 				if (entry.first == _welcome.playerId || _judgeBodies.size() >= _judgePoses.size()) continue;
@@ -654,10 +664,12 @@ namespace
 				js.codecs[from->weapon].FromWire(from->anim, from->pitch, pose);
 				evaluator.EvaluateLocal(pose, js.localFrom.data());
 				const BoneTransform* local = js.localFrom.data();
+				float targetAds = pose.adsBlend;
 				if (poseAlpha > 0.f)
 				{
 					AnimPoseInput nextPose;
 					js.codecs[to->weapon].FromWire(to->anim, to->pitch, nextPose);
+					targetAds = std::max(targetAds, nextPose.adsBlend);
 					js.evaluators[to->weapon].EvaluateLocal(nextPose, js.localTo.data());
 					evaluator.BlendLocal(js.localFrom.data(), js.localTo.data(), poseAlpha, js.localBlend.data());
 					local = js.localBlend.data();
@@ -675,6 +687,7 @@ namespace
 				if (poseAlpha > 0.f) montages = std::max(montages, to->anim.montageCount);
 				_judgeTargetWeapons.push_back(from->weapon);
 				_judgeMontages.push_back(montages);
+				_judgeAds.push_back(targetAds);
 			}
 
 			const uint8_t weapon = _self.GetWeaponIndex();
@@ -693,9 +706,10 @@ namespace
 				if (!js.log) continue;
 				const bool hitBody = result.kind == EBulletHit::Body;
 				// targetWeapon · montages = 맞힌 상대의 자세 묶음 · 몽타주 칸 수(못 맞히면 0). check_bot_hits.py 가 무기별 · 몽타주 중을 따로 센다
-				std::fprintf(js.log, "BOTSHOT seq=%u shooter=%u i=%d weapon=%u kind=%d target=%u weak=%d viewTick=%u alpha=%.4f speed=%.1f targetWeapon=%u montages=%u\n", input.seq, _welcome.playerId, i, (unsigned)weapon, (int)result.kind,
+				// targetAds = 맞힌 상대 자세의 조준 묶음 비중(C-5, 못 맞히면 0) — 조준 중인 상대를 맞힌 탄을 따로 센다
+				std::fprintf(js.log, "BOTSHOT seq=%u shooter=%u i=%d weapon=%u kind=%d target=%u weak=%d viewTick=%u alpha=%.4f speed=%.1f targetWeapon=%u montages=%u targetAds=%.3f\n", input.seq, _welcome.playerId, i, (unsigned)weapon, (int)result.kind,
 					hitBody ? _judgeBodies[result.bodyIndex].id : 0u, hitBody && result.weakSpot ? 1 : 0, input.viewTick, input.viewAlpha, hitBody ? _judgeSpeeds[result.bodyIndex] : 0.f,
-					hitBody ? (unsigned)_judgeTargetWeapons[result.bodyIndex] : 0u, hitBody ? (unsigned)_judgeMontages[result.bodyIndex] : 0u);
+					hitBody ? (unsigned)_judgeTargetWeapons[result.bodyIndex] : 0u, hitBody ? (unsigned)_judgeMontages[result.bodyIndex] : 0u, hitBody ? _judgeAds[result.bodyIndex] : 0.f);
 			}
 		}
 
@@ -923,6 +937,12 @@ namespace
 			}
 			// 죽어 있어도 방아쇠를 놓지 않는다 — 서버가 거절하는지 보려고. 대기 중에도 쏜다 — 피해 0 인지 보려고
 			if (canShoot || _self.IsWaitingSpawn() || (_judge && _judge->fireAlways)) input.buttons |= wire::BUTTON_FIRE;
+			// --ads — 적이 보이면 겨눈다(사람이 쏠 때 누르는 꼴). 시선은 네 틱마다 다시 보므로 켜고 끄는 일이 잦아 덜 섞인 채 풀기까지 지난다. 난수는 안 쓴다 — 끈 판과 경로가 같다
+			if (_adsWhenShooting && canShoot)
+			{
+				input.buttons |= wire::BUTTON_ADS;
+				++_adsInputs;
+			}
 		}
 
 		const CMapCollision& _map;
@@ -1030,6 +1050,7 @@ namespace
 		std::vector<BodyPlacement> _judgeBodies;
 		std::vector<float> _judgeSpeeds;
 		std::vector<uint8_t> _judgeTargetWeapons, _judgeMontages;	// _judgeBodies 와 같은 차례
+		std::vector<float> _judgeAds;	// 같은 차례 — 상대 자세의 조준 묶음 비중(C-5, 다음 틱과 섞으면 둘 중 큰 쪽)
 		std::vector<std::vector<BodyPose>> _judgePoses;
 		uint64_t _judgeShots = 0, _judgeBullets = 0, _judgeNoView = 0, _judgeNoSnap = 0, _judgeNoAnim = 0, _judgeClamped = 0, _recvBytes = 0;
 		uint64_t _ackLagSum = 0, _ackLagSamples = 0;
@@ -1039,6 +1060,8 @@ namespace
 		Clock::time_point _stateTime;
 		bool _hasStateTime = false;
 		uint64_t _compared = 0, _posDiff = 0, _velDiff = 0, _ammoDiff = 0, _flagDiff = 0;
+		uint64_t _adsCompared = 0, _adsDiff = 0, _adsInputs = 0;	// 서버가 조준 켜짐으로 보낸 비교 줄 · 그중 어긋남 · 조준을 누른 입력
+		bool _adsWhenShooting = false;		// --ads
 		double _posMax = 0;
 		uint32_t _firstBadSeq = 0;
 	};
@@ -1085,6 +1108,7 @@ namespace
 			else if (s == "--judgeNoSpread") out.judgeNoSpread = true;
 			else if (s == "--judgeFireAlways") out.judgeFireAlways = true;
 			else if (s == "--measureView") out.measureView = true;
+			else if (s == "--ads") out.adsWhenShooting = true;
 			else if (s == "--breakRecord") out.breakRecord = true;
 			else if (s == "--breakMirror") out.breakMirror = true;
 			else
@@ -1159,6 +1183,7 @@ int main(int argc, char** argv)
 	{
 		bots.emplace_back(new CBot(map, sim, rules, args.seed + 100 + (uint32_t)i));
 		bots.back()->SetMeasureView(args.measureView);
+		bots.back()->SetAdsWhenShooting(args.adsWhenShooting);
 		bots.back()->SetJudge(judging ? &judge : nullptr);
 		if (!args.script.empty()) bots.back()->SetScript(args.scriptHoldSeconds, args.scriptWeapon, args.script == "events");
 		if (!bots.back()->Connect(args.port))
@@ -1315,6 +1340,7 @@ int main(int argc, char** argv)
 	}
 
 	uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, detours = 0;
+	uint64_t adsCompared = 0, adsDiff = 0, adsInputs = 0;
 	uint64_t shotsWhileDead = 0, damageOutside = 0, damageImmune = 0, recordDiff = 0, tallyDiff = 0, noResult = 0, immuneHits = 0;
 	double posMax = 0;
 	uint32_t firstBad = 0;
@@ -1327,6 +1353,9 @@ int main(int argc, char** argv)
 		velDiff += bot.GetVelDiff();
 		ammoDiff += bot.GetAmmoDiff();
 		flagDiff += bot.GetFlagDiff();
+		adsCompared += bot.GetAdsCompared();
+		adsDiff += bot.GetAdsDiff();
+		adsInputs += bot.GetAdsInputs();
 		states += bot.GetStates();
 		detours += bot.GetDetours();
 		posMax = std::max(posMax, bot.GetPosMax());
@@ -1363,6 +1392,7 @@ int main(int argc, char** argv)
 	for (const wire::Match& match : first.GetPhaseChanges()) std::printf(" [%u 틱=%u 남은초=%.2f 목표=%u]", match.phase, match.tick, match.secondsLeft, match.targetScore);
 	std::printf("\n");
 	std::printf("BOT 서버 ↔ 같은 코드: compared=%llu posDiff=%llu posMax=%.5f velDiff=%llu ammoDiff=%llu flagDiff=%llu 처음 어긋난 봇=%d 번호=%u\n", (unsigned long long)compared, (unsigned long long)posDiff, posMax, (unsigned long long)velDiff, (unsigned long long)ammoDiff, (unsigned long long)flagDiff, firstBadBot, firstBad);
+	std::printf("BOT ads inputs=%llu comparedOn=%llu diff=%llu (diff 는 flagDiff 안에도 든다)\n", (unsigned long long)adsInputs, (unsigned long long)adsCompared, (unsigned long long)adsDiff);
 	std::printf("BOT 규칙: kills=%llu damages=%llu shots=%llu spawns=%llu | 죽은 뒤 발사=%llu 대기·경기 뒤 피해=%llu 무적 중 피해=%llu | 적이 맞았는데 피해 0(무적 분모)=%llu\n",
 		(unsigned long long)first.GetChecks().kills, (unsigned long long)first.GetChecks().damages, (unsigned long long)first.GetChecks().shots, (unsigned long long)first.GetChecks().spawnsSeen,
 		(unsigned long long)shotsWhileDead, (unsigned long long)damageOutside, (unsigned long long)damageImmune, (unsigned long long)immuneHits);

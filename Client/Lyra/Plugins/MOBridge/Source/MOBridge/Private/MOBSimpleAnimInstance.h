@@ -24,6 +24,8 @@ struct FMOBServerAnimResult
 	int32 SoundNotifies = 0;	// 이번에 튼 소리 알림 수
 	int32 MontageRestarts = 0;	// 같은 자산 · 앞서지 않은 시각의 앞 칸이 있었지만, 틱 차이만큼 못 나가 새 칸으로 본 수(앞 상태와 틱이 벌어져 옛 칸이 빠지고 새 칸이 같은 자산으로 선 때)
 	int32 StepStates = 0;		// 알림을 훑은 받은 상태 수(지난 프레임 뒤로 받은 상태 전부)
+	int32 AdsLayers = 0;		// 받은 쌓기 층 중 조준 전환이라 같은 차례의 허리 전환으로 바꿔 튼 수(C-5)
+	int32 BadLayers = 0;		// 바꿔도 칸 밖이라 걷기 · 서기 자리로 돌린 층 수 — 0 이어야 한다
 };
 
 /**
@@ -95,7 +97,9 @@ struct FMOBSimpleAnimProxy : public FAnimInstanceProxy
 	// 대조 기록용 — 클립 5개의 뼈별 변환(부모 뼈 기준)을 초당 SampleHz 개로 뽑아 BONE·CLIP·KEY 줄로 붙인다. KeepBones 에 든 뼈만 KEY 줄을 낸다
 	// Montages(9단계 3-a) = 종류 차례(Shared/AnimClips.h EMontageKind)의 몽타주 — 줄마다 클립을 30개 뒤에 붙여 뽑고 MONTAGE · TRACK · MCURVE · SCURVE 줄을 낸다.
 	// OverridePose = 쏜 뒤 윗몸 덮기 자세의 클립(OVERRIDE 줄). 둘 다 30개 판(-MOBSimpleAimJump -MOBSimpleTransitions)에서만 쓴다
-	void AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones, const TArray<const UAnimMontage*>& Montages, const UAnimSequence* OverridePose) const;
+	// AdsClips(C-3, D60) = 조준 클립 17개(서기 · 걷기 넷 · 전환 12). 같은 판에서 30개 바로 뒤(30~46)에 붙인다 — 몽타주 클립은 그 뒤로 밀린다
+	void AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones, const TArray<const UAnimMontage*>& Montages, const UAnimSequence* OverridePose,
+		const TArray<const UAnimSequence*>& AdsClips) const;
 	// 촬영 기록용 — 위아래 조준 · 점프에 쓴 입력과 상태
 	void GetAimJump(float& OutPitch, int32& OutJumpClip, float& OutJumpWeight) const;
 	// 대조 기록용 — 지금 재생 중인 클립을 Lyra 기록(-MOBACProbe)과 같은 「클립@시각*가중치;」 꼴로 붙인다

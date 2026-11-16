@@ -435,6 +435,12 @@ namespace mo
 		_firstShot = false;
 	}
 
+	void CWeaponSpread::SetHeatForCheck(float heat)
+	{
+		_heat = heat;
+		_spreadAngle = _def->heatToSpread.Eval(heat);
+	}
+
 	void CWeaponSpread::Tick(float deltaTime, const WeaponMotion& motion)
 	{
 		const WeaponDef& d = *_def;
@@ -472,6 +478,135 @@ namespace mo
 		const float heatPerShot = _def->heatToHeatPerShot.Eval(_heat);
 		_heat = ClampHeat(_heat + heatPerShot);
 		_spreadAngle = _def->heatToSpread.Eval(_heat);
+	}
+
+	// ─── 조준 카메라 섞임 ─────────────────────────────────────
+
+	namespace
+	{
+		// 카메라 자산 값(원본 기준) — CM_ThirdPerson: BlendTime 0.5 · EaseOut · 지수 4 / CM_ThirdPersonADS: 0.22 · EaseOut · 4
+		constexpr float kThirdPersonBlendTime = 0.5f;
+		constexpr float kAdsBlendTime = 0.22f;
+		constexpr float kCameraBlendExponent = 4.f;
+
+		// 언리얼 FMath::InterpEaseOut(0, 1, alpha, exp) — Lerp(0, 1, x) 는 x 그대로
+		float EaseOut01(float alpha, float exponent)
+		{
+			return 1.f - std::pow(1.f - alpha, exponent);
+		}
+	}
+
+	void CAimCamera::Reset()
+	{
+		_modes[MODE_THIRD_PERSON] = Mode{ kThirdPersonBlendTime, kCameraBlendExponent, 0.f, 0.f };
+		_modes[MODE_ADS] = Mode{ kAdsBlendTime, kCameraBlendExponent, 0.f, 0.f };
+		_count = 0;
+		_init = true;
+	}
+
+	// ULyraCameraMode::SetBlendWeight — 섞기 함수의 역으로 진행률을 맞춘다(지수의 역수로 같은 EaseOut)
+	void CAimCamera::SetWeight(Mode& m, float weight) const
+	{
+		m.weight = std::clamp(weight, 0.f, 1.f);
+		const float invExponent = m.exponent > 0.f ? 1.f / m.exponent : 1.f;
+		m.alpha = EaseOut01(m.weight, invExponent);
+	}
+
+	// ULyraCameraMode::UpdateBlending
+	void CAimCamera::UpdateBlending(Mode& m, float deltaTime) const
+	{
+		if (m.blendTime > 0.f)
+		{
+			m.alpha += deltaTime / m.blendTime;
+			m.alpha = std::min(m.alpha, 1.f);
+		}
+		else
+		{
+			m.alpha = 1.f;
+		}
+		const float exponent = m.exponent > 0.f ? m.exponent : 1.f;
+		m.weight = EaseOut01(m.alpha, exponent);
+	}
+
+	// ULyraCameraModeStack::PushCameraMode
+	void CAimCamera::Push(EMode mode)
+	{
+		if (_count > 0 && _stack[0] == mode) return;
+
+		int existing = -1;
+		float contribution = 1.f;
+		for (int i = 0; i < _count; ++i)
+		{
+			if (_stack[i] == mode)
+			{
+				existing = i;
+				contribution *= _modes[mode].weight;
+				break;
+			}
+			contribution *= (1.f - _modes[_stack[i]].weight);
+		}
+		if (existing >= 0)
+		{
+			for (int i = existing; i + 1 < _count; ++i) _stack[i] = _stack[i + 1];
+			--_count;
+		}
+		else
+		{
+			contribution = 0.f;
+		}
+
+		Mode& m = _modes[mode];
+		const bool shouldBlend = m.blendTime > 0.f && _count > 0;
+		SetWeight(m, shouldBlend ? contribution : 1.f);
+
+		for (int i = _count; i > 0; --i) _stack[i] = _stack[i - 1];
+		_stack[0] = (uint8_t)mode;
+		++_count;
+
+		SetWeight(_modes[_stack[_count - 1]], 1.f);	// 맨 끝은 늘 100%
+	}
+
+	void CAimCamera::Tick(bool adsActive, float deltaTime)
+	{
+		if (!_init) Reset();
+		Push(adsActive ? MODE_ADS : MODE_THIRD_PERSON);
+
+		// ULyraCameraModeStack::UpdateStack — 다 섞인 모드 아래는 버린다
+		for (int i = 0; i < _count; ++i)
+		{
+			Mode& m = _modes[_stack[i]];
+			UpdateBlending(m, deltaTime);
+			if (m.weight >= 1.f)
+			{
+				_count = i + 1;
+				break;
+			}
+		}
+	}
+
+	void CAimCamera::SetForCheck(int count, bool topAds, float topWeight)
+	{
+		Reset();
+		if (count <= 0) return;
+		const EMode top = topAds ? MODE_ADS : MODE_THIRD_PERSON;
+		_stack[0] = (uint8_t)top;
+		_count = 1;
+		if (count >= 2)
+		{
+			const EMode bottom = topAds ? MODE_THIRD_PERSON : MODE_ADS;
+			_stack[1] = (uint8_t)bottom;
+			_count = 2;
+			SetWeight(_modes[bottom], 1.f);
+		}
+		SetWeight(_modes[top], _count >= 2 ? topWeight : 1.f);
+	}
+
+	// ULyraCameraModeStack::GetBlendInfo 의 맨 끝 → LyraRangedWeaponInstance.cpp:203
+	float CAimCamera::GetAimingAlpha() const
+	{
+		if (_count == 0) return 0.f;
+		const uint8_t bottom = _stack[_count - 1];
+		return bottom == MODE_ADS ? _modes[bottom].weight : 0.f;
 	}
 
 	// ─── 발사 순환 ─────────────────────────────────────────

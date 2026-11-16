@@ -1,5 +1,7 @@
 ﻿#include "MOBWeaponRecordSubsystem.h"
 
+#include "MOBLyraCamera.h"
+
 #include "AIController.h"
 #include "AbilitySystem/Attributes/LyraHealthSet.h"
 #include "AbilitySystem/LyraAbilitySystemComponent.h"
@@ -86,6 +88,7 @@ namespace
 	const FGameplayTag FireTag() { return FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Fire")); }
 	const FGameplayTag FireAutoTag() { return FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.FireAuto")); }
 	const FGameplayTag ReloadTag() { return FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Reload")); }
+	const FGameplayTag AdsTag() { return FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.ADS")); }
 
 	UAbilitySystemComponent* FindASC(AActor* A)
 	{
@@ -132,6 +135,7 @@ void UMOBWeaponRecordSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FParse::Value(Cmd, TEXT("MOBWeaponSegSec="), SegSeconds);
 	FParse::Value(Cmd, TEXT("MOBWeaponRaySec="), RaySeconds);
 	bPoseOnly = FParse::Param(Cmd, TEXT("MOBPoseOnly"));
+	bAds = FParse::Param(Cmd, TEXT("MOBWeaponAds"));
 	Rng.Initialize(Seed);
 }
 
@@ -559,6 +563,15 @@ void UMOBWeaponRecordSubsystem::PulseReload()
 	}
 }
 
+void UMOBWeaponRecordSubsystem::SetAds(bool bHeld)
+{
+	ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Mine.Get()));
+	if (!A || bHeld == bAdsHeld) return;
+	bAdsHeld = bHeld;
+	if (bHeld) A->AbilityInputTagPressed(AdsTag());
+	else A->AbilityInputTagReleased(AdsTag());
+}
+
 void UMOBWeaponRecordSubsystem::TickScript(float Dt)
 {
 	ACharacter* Me = Mine.Get();
@@ -588,6 +601,12 @@ void UMOBWeaponRecordSubsystem::TickScript(float Dt)
 		bJumpWanted = Rng.FRand() < 0.2f;
 		bReloadWanted = Rng.FRand() < 0.12f;
 	}
+	// 조준은 발사와 따로 끊는다 — 짧게 눌렀다 떼기(카메라가 다 섞이기 전에 풀림)까지 나오게 0.05초부터
+	if (bAds && Now >= NextAdsAt)
+	{
+		NextAdsAt = Now + Rng.FRandRange(0.05f, 1.2f);
+		SetAds(Rng.FRand() < 0.5f);
+	}
 	if (bJumpWanted) { Me->Jump(); bJumpThisFrame = true; bJumpWanted = false; }
 	else Me->StopJumping();
 	if (bReloadWanted) { PulseReload(); bPulseThisFrame = true; bReloadWanted = false; }
@@ -611,7 +630,13 @@ void UMOBWeaponRecordSubsystem::TickScript(float Dt)
 			if (Spec.IsActive() && (Spec.GetDynamicSpecSourceTags().HasTagExact(FireTag()) || Spec.GetDynamicSpecSourceTags().HasTagExact(FireAutoTag()))) FireActive = 1;
 		}
 	}
-	Csv += FString::Printf(TEXT("FRAME,%s,%d,%d,%.6f,%.6f,%d,%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d\n"), WEAPON_NAMES[WeaponIdx], SegIdx, Frame, Now, Dt, bFireHeld ? 1 : 0, bPulseThisFrame ? 1 : 0, bJumpThisFrame ? 1 : 0, Mag, Spare, ReadHeat(W), W->GetCalculatedSpreadAngle(), Mult, Speed, M && M->IsFalling() ? 1 : 0, W->HasFirstShotAccuracy() ? 1 : 0, FireActive, ReloadActive);
+	// 뒤 칸(조준) — 조준 누름(다음 프레임에 먹는다) · 사격이 읽는 조준 비율 · 조준 표식 · 카메라 스택(모드 수 · 맨 앞이 조준인가 · 맨 앞 비중)
+	MOBLyraCamera::FRead Cam;
+	MOBLyraCamera::Read(Me, Cam);
+	int32 AdsTagCount = 0;
+	if (UAbilitySystemComponent* A = FindASC(Me)) AdsTagCount = A->GetGameplayTagCount(FGameplayTag::RequestGameplayTag(TEXT("Event.Movement.ADS")));
+	Csv += FString::Printf(TEXT("FRAME,%s,%d,%d,%.6f,%.6f,%d,%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%d,%.6f,%d,%d,%d,%.6f\n"), WEAPON_NAMES[WeaponIdx], SegIdx, Frame, Now, Dt, bFireHeld ? 1 : 0, bPulseThisFrame ? 1 : 0, bJumpThisFrame ? 1 : 0, Mag, Spare, ReadHeat(W), W->GetCalculatedSpreadAngle(), Mult, Speed, M && M->IsFalling() ? 1 : 0, W->HasFirstShotAccuracy() ? 1 : 0, FireActive, ReloadActive,
+		bAdsHeld ? 1 : 0, Cam.AimingAlpha, AdsTagCount, Cam.Count, Cam.bTopAds ? 1 : 0, Cam.TopWeight);
 	++Frame;
 }
 
@@ -921,6 +946,7 @@ void UMOBWeaponRecordSubsystem::Tick(float DeltaTime)
 		if (World->GetTimeSeconds() - PhaseAt > SegSeconds)
 		{
 			SetFire(false);
+			SetAds(false);
 			MoveDir = FVector::ZeroVector;
 			++SegIdx;
 			if (SegIdx >= SegsPerWeapon)
@@ -960,6 +986,8 @@ void UMOBWeaponRecordSubsystem::Tick(float DeltaTime)
 			}
 			HitShots = 0;
 			NextShotAt = World->GetTimeSeconds() + 0.5;
+			// 조준 판은 맞힘 단계를 조준한 채 쏜다 — 사격 시작점이 조준 카메라 기준으로 바뀌는 크기를 잰다(C-4). 첫 발까지 0.5초라 카메라는 다 섞인다(0.22초)
+			SetAds(bAds);
 			Frame = 0;
 			Phase = EPhase::Hit;
 		}
@@ -970,6 +998,7 @@ void UMOBWeaponRecordSubsystem::Tick(float DeltaTime)
 		if (HitShots > SHOTS_PER_STAGE)
 		{
 			SetFire(false);
+			SetAds(false);
 			++HitStage;
 			if (HitStage >= 2)
 			{

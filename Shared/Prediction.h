@@ -30,6 +30,7 @@ namespace mo
 			MoveState move;			// 이 입력을 돌린 뒤
 			bool jumpHeld = false;
 			int lockInputs = 0;
+			AdsAbility ads;			// 조준은 걸음 속도를 바꾼다 — 다시 돌릴 때 이 입력 뒤 상태에서 잇는다
 			int16_t magazine = 0, spare = 0;
 			uint8_t weapon = 0;
 			bool reloading = false;
@@ -72,6 +73,7 @@ namespace mo
 		const WeaponEvents& GetLastWeaponEvents() const { return _lastWeaponEvents; }
 		bool IsWaitingSpawn() const { return _waitingSpawn; }
 		bool IsLocked() const { return _lockInputs > 0; }
+		bool IsAds() const { return _ads.active; }
 
 	private:
 		void ApplyMove(const wire::Input& input);
@@ -91,6 +93,8 @@ namespace mo
 		uint8_t _weapon = 0;
 		bool _jumpHeld = false;
 		int _lockInputs = 0;
+		AdsAbility _ads;
+		CAimCamera _aimCamera;		// 무기 쪽 — 다시 돌리기(Reconcile)는 걸음만 다시 하므로 건드리지 않는다
 		bool _waitingSpawn = false;
 		uint32_t _seq = 0;
 		uint32_t _compareFromSeq = 0;

@@ -19,7 +19,7 @@ namespace mo
 	inline constexpr int kAnimLayerMax = 4;			// 점프 · 전환이 겹칠 때 함께 섞이는 칸 수의 상한
 	inline constexpr int kAnimMontageMax = 3;		// 함께 도는 몽타주 수의 상한 — Lyra 기록 세 무기의 동시 최대(D45)
 
-	// 쌓기 한 칸. clip = 점프 5개 + 전환 12개의 번호(ACLIP_JUMP_START 기준), -1 = 걷기 · 서기 자리
+	// 쌓기 한 칸. clip = 쌓기 칸 번호 0~28(점프 5 · 허리 전환 12 · 조준 전환 12 — 묶음 클립 번호는 AnimClips.h StackClipIndex), -1 = 걷기 · 서기 자리
 	struct AnimLayer
 	{
 		int16_t clip = -1;
@@ -41,7 +41,10 @@ namespace mo
 	{
 		float weights[kAnimWalkClips] = { 1.f, 0.f, 0.f, 0.f, 0.f };
 		float times[kAnimWalkClips] = {};
-		float fidgetTime = -1.f;		// -1 = 대기 몸짓 안 함
+		// 조준 묶음(D60) — 서기 · 걸음 i 의 비중을 허리 클립 weights[i] × (1 − adsBlend) 와 조준 클립 weights[i] × adsBlend 로 나눈다
+		float adsBlend = 0.f;			// 0 = 허리 클립만, 1 = 조준 클립만
+		float adsTimes[kAnimWalkClips] = {};
+		float fidgetTime = -1.f;		// -1 = 대기 몸짓 안 함(대기 몸짓은 허리 서기 몫에만 든다)
 		int layerCount = 0;
 		AnimLayer layers[kAnimLayerMax];
 		float recoveryTime = -1.f;		// -1 = 착지 충격 안 얹음

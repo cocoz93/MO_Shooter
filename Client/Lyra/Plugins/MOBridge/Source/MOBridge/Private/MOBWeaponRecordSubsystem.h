@@ -70,6 +70,7 @@ private:
 	void OnAbilityEnded(class UGameplayAbility* Ability);
 	void SetFire(bool bHeld);
 	void PulseReload();
+	void SetAds(bool bHeld);
 	void SetHugeHealth(APawn* P);
 	float ReadHealth(APawn* P) const;
 	void OnEnemyEffect(UAbilitySystemComponent* Source, const struct FGameplayEffectSpec& Spec, struct FActiveGameplayEffectHandle Handle);
@@ -105,6 +106,11 @@ private:
 	FVector MoveDir = FVector::ZeroVector;
 	bool bJumpWanted = false;
 	bool bReloadWanted = false;
+
+	// -MOBWeaponAds — 각본에 조준 누르기 · 떼기를 섞는다(C 단계). 없으면 옛 각본 그대로(같은 씨앗 = 같은 기록)
+	bool bAds = false;
+	bool bAdsHeld = false;
+	double NextAdsAt = 0;
 
 	float LastEnemyHealth = 0.f;
 	FDelegateHandle EffectHandle;

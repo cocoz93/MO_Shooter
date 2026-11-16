@@ -19,6 +19,7 @@ namespace mo
 		constexpr float kMaxAbsPitchDegrees = 95.f;
 
 		// 사격 시작점 허용 범위 — Lyra 기록의 최대(내 위치에서 92.5cm, 수평 60.6cm)에 이동 한 틱(10cm)과 여유를 더한 값
+		// 조준 카메라를 넣어 시선 ±89도를 훑은 판(C-5 `c5sweep`)의 최대는 100.1cm(조준 · 시선 −10~0도) → 한 틱 더해 110.1, 그대로 둔다
 		constexpr double kAimMaxDistance = 120.0;
 		// 수평만 따로 묶지 않는다 — 72도쯤 내려다보면 정직한 값도 수평 91.8cm 까지 나온다(실측 d6). 간격이 수평으로 눕기 때문
 		constexpr double kAimFallbackHeight = 60.0;		// 범위 밖일 때 쓰는 시작점 — 내 위치에서 이만큼 위
@@ -224,6 +225,9 @@ namespace mo
 	{
 		const Player* player = Find(session);
 		if (!player) return;
+		// 측정 전용 — 나간 뒤 도착한 탄은 그 몸이 없어 뒤 벽에 맞는다. 봇 판정 대조가 이 줄 뒤의 탄을 DEADSKIP 처럼 뺀다(C-5:
+		// 판 끝에 봇이 한꺼번에 끊으면 중계가 쏜 쪽 마지막 입력을 흔들림만큼 붙든 사이 맞은 쪽이 먼저 나간다)
+		if (_rewind.bulletLog) std::printf("LEAVE id=%u tick=%u\n", player->id, _tick);
 		for (StartSlot& slot : _starts)
 		{
 			if (slot.claimedBy == player->id) slot.claimedBy = 0;
@@ -471,6 +475,8 @@ namespace mo
 		player.move.maxSpeed = _params.maxWalkSpeed;
 		_moveSim.RefreshFloor(player.move);
 		player.jumpHeld = false;
+		player.ads.Reset();
+		player.aimCamera.Reset();
 		player.yaw = slot.point.yawDegrees;
 		player.pitch = 0;
 		player.weapon = 0;
@@ -607,7 +613,10 @@ namespace mo
 		}
 		player.moveX = (int8_t)std::lround(moveInput.x * 127.0);
 		player.moveY = (int8_t)std::lround(moveInput.y * 127.0);
-		player.move.maxSpeed = _params.maxWalkSpeed;
+		// 조준 — 이 입력의 버튼이 이 입력의 걸음부터 먹는다(D61). 이동 막음 · 경기 끝에도 버튼을 따른다(예측이 단계를 몰라 맞춰 둔다, D61)
+		player.ads.Apply((input.buttons & wire::BUTTON_ADS) != 0);
+		if (player.ads.active) ++_stats.adsInputs;
+		player.move.maxSpeed = AdsWalkSpeed(_params.maxWalkSpeed, player.ads.active);
 		const Vec3 locationBeforeMove = player.move.location;
 		_moveSim.Tick(player.move, moveInput, kTickSeconds);
 
@@ -624,6 +633,7 @@ namespace mo
 		WeaponMotion motion;
 		motion.speed = (float)Length(player.move.velocity);
 		motion.falling = player.move.mode == EMoveMode::Falling;
+		motion.aimingAlpha = player.aimCamera.GetAimingAlpha();		// 앞 입력의 카메라 갱신 결과 — Lyra 무기 틱은 카메라 갱신보다 먼저 돈다(C-1 실측)
 		WeaponInput weaponInput;
 		weaponInput.fireHeld = (input.buttons & wire::BUTTON_FIRE) != 0;
 		weaponInput.reloadPressed = (input.buttons & wire::BUTTON_RELOAD) != 0;
@@ -639,6 +649,7 @@ namespace mo
 			weaponInput.fireHeld = false;
 		}
 		const WeaponEvents events = cycle.Tick(kTickSeconds, weaponInput, motion);
+		player.aimCamera.Tick(player.ads.active, kTickSeconds);		// 이 입력의 조준으로 카메라를 굴린다 — 다음 입력의 퍼짐이 읽는다
 		if (weaponInput.fireHeld && !events.fired)
 		{
 			if (cycle.GetMagazine() == 0) ++_stats.firesEmpty;
@@ -646,6 +657,7 @@ namespace mo
 		}
 		if (events.fired)
 		{
+			if (motion.aimingAlpha > 0.f) ++_stats.shotsAimed;
 			PushAnimEvent(player, EAnimEvent::Fire, player.weapon);
 			player.fireGate.OnFired((EWeapon)player.weapon, cycle.GetDef(), kTickSeconds);
 			PendingShot shot;
@@ -729,6 +741,7 @@ namespace mo
 			idle.weapon = player.weapon;
 			idle.seq = player.lastSeq;
 			if (player.jumpHeld) idle.buttons |= wire::BUTTON_JUMP;
+			if (player.ads.held) idle.buttons |= wire::BUTTON_ADS;		// 끊긴 틱에 조준이 풀렸다 다시 켜지지 않게
 			ApplyInput(player, idle);
 			--_stats.inputsApplied;
 		}
@@ -739,6 +752,7 @@ namespace mo
 	{
 		target.dead = true;
 		target.hp = 0;
+		target.ads.Reset();		// Lyra 죽음 능력이 다른 능력을 끈다 — 카메라는 새 몸에서 다시 시작한다(SpawnPlayer)
 		target.respawnTick = _tick + SecondsToTicks(_rules.respawnSeconds);
 		target.move.velocity = Vec3();
 		++target.deaths;
@@ -813,6 +827,7 @@ namespace mo
 		out.acceleration[2] = move.acceleration.z;
 		out.accelerating = move.acceleration.x * move.acceleration.x + move.acceleration.y * move.acceleration.y > kAccelerationNearlyZero;
 		out.falling = move.mode == EMoveMode::Falling;
+		out.ads = player.ads.active;		// 이 틱 입력이 켠 조준 — Lyra 애니는 능력이 바뀐 뒤 첫 갱신에 본다(D61)
 		out.pitch = std::min(std::max(NormalizeAxis(player.pitch), -90.f), 90.f);
 		if (out.falling)
 		{
@@ -1080,7 +1095,10 @@ namespace mo
 				const RewindSample& poseSample = player->rewindHistory[poseTick % historySize];
 				uint8_t poseMontages = poseSample.anim.montageCount;
 				if (poseAlpha > 0.f) poseMontages = std::max(poseMontages, player->rewindHistory[(poseTick + 1) % historySize].anim.montageCount);
-				std::printf("REWIND seq=%u shooter=%u target=%u now=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f animWeapon=%u montages=%u\n", shot.seq, shot.shooter, player->id, _tick, bodyTick, bodyAlpha, body.center.x, body.center.y, body.center.z, body.yawDegrees, (unsigned)poseSample.animWeapon, (unsigned)poseMontages);
+				// ads = 그 자세의 조준 묶음 비중 0~255(같은 식으로 다음 틱과 섞으면 큰 쪽) — 「상대가 조준 중」인 쏨을 따로 센다(C-5)
+				uint8_t poseAds = poseSample.anim.adsBlend;
+				if (poseAlpha > 0.f) poseAds = std::max(poseAds, player->rewindHistory[(poseTick + 1) % historySize].anim.adsBlend);
+				std::printf("REWIND seq=%u shooter=%u target=%u now=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f animWeapon=%u montages=%u ads=%u\n", shot.seq, shot.shooter, player->id, _tick, bodyTick, bodyAlpha, body.center.x, body.center.y, body.center.z, body.yawDegrees, (unsigned)poseSample.animWeapon, (unsigned)poseMontages, (unsigned)poseAds);
 				if (_animReady)
 				{
 					// 화면 MOB_VIEWP 줄과 (seq, 상대, 부위) 로 잇는다. 기록용이라 비용 집계에 넣지 않는다
@@ -1258,6 +1276,7 @@ namespace mo
 			if (player->dead) out.flags |= wire::STATE_DEAD;
 			if (IsImmune(*player)) out.flags |= wire::STATE_IMMUNE;
 			if (player->moveLockInputs > 0) out.flags |= wire::STATE_MOVE_LOCKED;
+			if (player->ads.active) out.flags |= wire::STATE_ADS;
 			out.weapon = player->weapon;
 			out.team = player->team;
 			out.moveX = player->dead ? (int8_t)0 : player->moveX;

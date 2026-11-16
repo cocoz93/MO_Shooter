@@ -5,7 +5,8 @@
 // 입력 파일 = MOBMoveRecordSubsystem 이 쓰는 move_<이름>.csv
 //   #param <이름> <값>      실행값(블루프린트가 덮은 뒤의 값)
 //   frame,seg,ev,dt, 입력3, 앞 위치3, 앞 속도3, 앞 모드, ext, 발사대3, pressed,was,hold,force,count,countPre, maxSpeed,
-//   뒤 위치3, 뒤 속도3, 뒤 모드, fBlock,fWalk,fLine,fDist,fLineDist, aCount
+//   뒤 위치3, 뒤 속도3, 뒤 모드, fBlock,fWalk,fLine,fDist,fLineDist, aCount [, ads]
+//   ads(-Ads 기록만) = 이번 프레임에 조준을 누른 상태. 다음 프레임 maxSpeed 가 MaxWalkSpeed × 0.5 인지 센다(GA_ADS — C 조준)
 //   ev: 0 없음 / 1 Jump / 2 StopJumping. 모드: 1 걷기 / 3 낙하. ext=1 이면 프레임 사이에 밖에서 위치가 바뀐 것
 //
 // 두 가지를 잰다
@@ -40,6 +41,7 @@ namespace
 		int pressed = 0, was = 0, count = 0, countPre = 0, aCount = 0, fBlock = 0, fWalk = 0, fLine = 0;
 		float dt = 0, hold = 0, force = 0, maxSpeed = 0, fDist = 0, fLineDist = 0;
 		Vec3 input, p, v, launch, ap, av;
+		int ads = -1;	// -1 = 칸 없음
 	};
 
 	double Dist(const Vec3& a, const Vec3& b)
@@ -84,6 +86,7 @@ namespace
 		r.ap = V(); r.av = V();
 		r.modeAfter = I();
 		r.fBlock = I(); r.fWalk = I(); r.fLine = I(); r.fDist = F(); r.fLineDist = F(); r.aCount = I();
+		if (*s >= '0' && *s <= '9') r.ads = I();
 		return *s == '\0' || *s == '\r' || *s == '\n';
 	}
 
@@ -310,6 +313,50 @@ int main(int argc, char** argv)
 		params.maxStepHeight, params.walkableFloorZ, params.maxSimulationTimeStep, params.maxSimulationIterations, params.terminalVelocity, params.capsuleRadius, params.capsuleHalfHeight);
 	std::printf("ROWS total=%zu bad=%zu\n", rows.size(), badRows);
 	if (rows.empty()) return 1;
+
+	// 조준 걸음 속도 — 규칙 = 앞 프레임까지 누른 조준이면 MaxWalkSpeed × ADSMultiplier(0.5, GA_ADS 기본 객체), 아니면 MaxWalkSpeed.
+	// 같은 프레임 누름으로 보는 셈(lag0)도 같이 세 어느 쪽이 Lyra 인지 숫자로 가린다. 개수 = 조준 속도 프레임 · 바뀐 횟수
+	// 구간 경계는 둘로 가른다 — 기록기는 시간이 다 되면 같은 몸을 순간 이동시키고(조준 능력이 이어진다),
+	// 몸이 바뀌면(죽고 다시 태어남) 구간을 일찍 끊는다. 새 몸은 조준이 꺼진 채 기본 속도로 시작하니 그 첫 프레임은 MaxWalkSpeed 가 정답이다
+	if (rows.front().ads >= 0)
+	{
+		constexpr float kAdsMultiplier = 0.5f;
+		std::vector<size_t> segFrames;
+		for (const Row& r : rows)
+		{
+			if (r.seg < 0) continue;
+			if ((size_t)r.seg >= segFrames.size()) segFrames.resize(r.seg + 1, 0);
+			++segFrames[r.seg];
+		}
+		size_t fullSeg = 0;
+		for (size_t n : segFrames) fullSeg = (std::max)(fullSeg, n);
+
+		size_t compared = 0, adsFrames = 0, changes = 0, ruleDiff = 0, lag0Diff = 0;
+		size_t seamTeleport = 0, seamRespawn = 0, seamRespawnHeld = 0;
+		int firstBad = -1;
+		for (size_t i = 1; i < rows.size(); ++i)
+		{
+			const Row& prev = rows[i - 1];
+			const Row& cur = rows[i];
+			if (cur.frame != prev.frame + 1) continue;
+			++compared;
+			const bool bRespawn = cur.seg != prev.seg && prev.seg >= 0 && (size_t)prev.seg < segFrames.size() && segFrames[prev.seg] < fullSeg;
+			if (cur.seg != prev.seg) ++(bRespawn ? seamRespawn : seamTeleport);
+			if (bRespawn && prev.ads) ++seamRespawnHeld;
+			const float expected = bRespawn ? params.maxWalkSpeed : params.maxWalkSpeed * (prev.ads ? kAdsMultiplier : 1.f);
+			const float expectedLag0 = params.maxWalkSpeed * (cur.ads ? kAdsMultiplier : 1.f);
+			if (cur.maxSpeed != params.maxWalkSpeed) ++adsFrames;
+			if (cur.maxSpeed != prev.maxSpeed) ++changes;
+			if (cur.maxSpeed != expected)
+			{
+				++ruleDiff;
+				if (firstBad < 0) firstBad = cur.frame;
+			}
+			if (cur.maxSpeed != expectedLag0) ++lag0Diff;
+		}
+		std::printf("ADS compared=%zu adsSpeedFrames=%zu changes=%zu ruleDiff=%zu (firstBad frame %d) lag0Diff=%zu | seam teleport=%zu respawn=%zu (held %zu) fullSeg=%zu\n",
+			compared, adsFrames, changes, ruleDiff, firstBad, lag0Diff, seamTeleport, seamRespawn, seamRespawnHeld, fullSeg);
+	}
 
 	// 한 프레임 — 매번 Lyra 상태에서 시작한다
 	FILE* mismatch = nullptr;

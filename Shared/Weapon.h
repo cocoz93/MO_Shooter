@@ -99,6 +99,8 @@ namespace mo
 
 		// 대조 도구용 — 기록 도중부터 시작할 때
 		void SetForCheck(const WeaponDef& def, float heat, float standingStillMultiplier);
+		// 배율 몫은 그대로 두고 열만 덮는다 — 구간 첫 줄부터 배율만 굴려 온 뒤 대조 시작 줄의 열로 맞출 때
+		void SetHeatForCheck(float heat);
 
 	private:
 		float ClampHeat(float heat) const;
@@ -112,6 +114,70 @@ namespace mo
 		float _jumpFall = 1;
 		bool _firstShot = false;
 	};
+
+	// ─── 조준 카메라 섞임 ─────────────────────────────────────
+	// 언리얼 ULyraCameraModeStack(LyraCameraMode.cpp:146-213 · :264-328 · :365-405 · :449-460)을 두 모드(기본 · 조준)로 옮겼다. 자료형(float)까지 그대로.
+	// - 왜 서버에: 사격 퍼짐이 읽는 조준 비율(WeaponMotion::aimingAlpha)이 이 스택에서 나온다(LyraRangedWeaponInstance.cpp:196-203)
+	// - 그 값은 스택 「맨 끝」 모드가 조준 카메라면 1, 아니면 0 이다(맨 끝은 늘 비중 1). 그래서 섞이는 중간값은 퍼짐에 안 쓰이고,
+	//   켤 때는 조준 모드가 다 섞여 아래 모드가 빠지는 순간 1 로, 풀 때는 기본 모드가 다 섞이는 순간 0 으로 뛴다(0-3 실행 기록 — 켠 뒤 14프레임 · 푼 뒤 30프레임)
+	// - 덜 섞인 채 풀면 기본 모드가 스택 안에서 다시 위로 올라오며 맨 끝이 조준 모드가 된다 → 그 순간 1 이 된다(PushCameraMode 의 맨 끝 비중 1)
+	class CAimCamera
+	{
+	public:
+		enum EMode : uint8_t { MODE_THIRD_PERSON, MODE_ADS, MODE_COUNT };
+
+		void Reset();								// 새 몸 — 스택이 빈 채 기본 모드가 들어온다(섞임 없이 비중 1)
+		void Tick(bool adsActive, float deltaTime);	// 한 프레임 = 원하는 모드 넣기(PushCameraMode) → 섞기(UpdateStack)
+		float GetAimingAlpha() const;				// 사격이 읽는 값
+
+		// 대조 도구용
+		// 기록한 스택(모드 수 · 맨 앞이 조준인가 · 맨 앞 비중)에서 시작한다. 모드가 둘뿐이라 둘일 때 맨 끝은 맨 앞의 반대 · 비중 1
+		void SetForCheck(int count, bool topAds, float topWeight);
+		int GetCount() const { return _count; }
+		bool IsTopAds() const { return _count > 0 && _stack[0] == MODE_ADS; }
+		float GetTopWeight() const { return _count > 0 ? _modes[_stack[0]].weight : 1.f; }
+
+	private:
+		struct Mode
+		{
+			float blendTime = 0;
+			float exponent = 0;
+			float alpha = 0;
+			float weight = 0;
+		};
+		void Push(EMode mode);
+		void SetWeight(Mode& m, float weight) const;
+		void UpdateBlending(Mode& m, float deltaTime) const;
+
+		Mode _modes[MODE_COUNT];
+		uint8_t _stack[MODE_COUNT] = {};	// 0 = 맨 앞(새로 들어온 쪽)
+		int _count = 0;
+		bool _init = false;
+	};
+
+	// ─── 조준 능력 ─────────────────────────────────────────
+	// GA_ADS 켜짐 한 사람치 — 서버 ApplyInput 과 내 예측(CSelfPrediction)이 같은 것을 쓴다(C-4, D61).
+	// - 입력 차례: Apply(그 입력의 BUTTON_ADS) → 걸음(AdsWalkSpeed) → 무기 틱(퍼짐은 앞 입력의 카메라 값) → 카메라 Tick(active) → 애니 · STATE_ADS 도 active
+	//   Lyra 는 키를 그 프레임 입력 처리에서 능력에 넘기고, 걸음 · 카메라 · 애니가 같은 프레임에 바뀐 능력을 본다(원본 기준 차례).
+	//   기록 도구들은 프레임 끝에 눌러 한 프레임 늦게 보였다(C-1 · C-2 · C-3 실측의 「한 줄 앞」이 그것, D61)
+	// - 새 몸의 첫 입력은 능력이 아직 안 붙어 누름이 버려진다(C-2 실측 — 누른 채 다시 태어나면 첫 프레임 600, 다음부터 300)
+	struct AdsAbility
+	{
+		bool held = false;		// 마지막 입력의 버튼 — 입력이 끊긴 틱에 서버가 채우는 빈 입력도 누른 채로 둔다
+		bool active = false;	// 이번 입력에 켜져 있나
+		bool granted = false;	// 새 몸에 능력이 붙었나 — 첫 입력을 받은 뒤 참
+
+		void Reset() { *this = AdsAbility(); }	// 새 몸 · 죽음(Lyra 죽음 능력이 다른 능력을 끈다)
+		void Apply(bool buttonHeld)
+		{
+			held = buttonHeld;
+			active = buttonHeld && granted;
+			granted = true;
+		}
+	};
+
+	constexpr float kAdsWalkSpeedMultiplier = 0.5f;	// GA_ADS ADSMultiplier(기본 객체) — 켤 때 MaxWalkSpeed 에 곱하고 풀면 되돌린다(C-2 실측 600 → 300)
+	inline float AdsWalkSpeed(float maxWalkSpeed, bool adsActive) { return adsActive ? maxWalkSpeed * kAdsWalkSpeedMultiplier : maxWalkSpeed; }
 
 	// ─── 발사 순환 ─────────────────────────────────────────
 

@@ -608,6 +608,9 @@ namespace
 		float aimBlend = 1.f;
 		float upperAdditive = 0.f;
 		float disableLeftHand = 0.f;
+		int ads = -1;					// 조준 변수 GameplayTag_IsADS(C-3). -1 = 이 칸이 없는 옛 기록
+		int onGround = -1;				// IsOnGround. -1 = 칸 없음
+		std::string locomotion;			// 이동 상태 기계(LocomotionSM)의 지금 상태 이름. 빈 칸 = 칸 없음
 		std::string weapon;
 		std::string events;
 		std::vector<ProbeMontage> montages;
@@ -655,6 +658,7 @@ namespace
 		size_t pos = text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
 		std::vector<std::string> header;
 		int cPass = -1, cFrame = -1, cFiring = -1, cSince = -1, cOverride = -1, cHand = -1, cAim = -1, cUpper = -1, cCurves = -1, cEvents = -1, cMontages = -1, cWeapon = -1;
+		int cAds = -1, cGround = -1, cLocomotion = -1;		// C-3 에 더한 칸 — 없어도 읽는다(9단계 기록엔 없다)
 		const auto bySuffix = [&](const char* suffix)
 		{
 			const size_t n = std::strlen(suffix);
@@ -690,6 +694,9 @@ namespace
 				cEvents = Column(header, "events");
 				cMontages = Column(header, "montages");
 				cWeapon = Column(header, "weapon");
+				cAds = bySuffix(".GameplayTag_IsADS");
+				cGround = bySuffix(".IsOnGround");
+				cLocomotion = Column(header, "sm:ABP_Mannequin_Base.LocomotionSM");
 				const int need[] = { cPass, cFrame, cFiring, cSince, cOverride, cHand, cAim, cUpper, cCurves, cEvents, cMontages, cWeapon };
 				for (int column : need)
 				{
@@ -719,6 +726,9 @@ namespace
 			row.disableLeftHand = hand == std::string::npos ? 0.f : std::strtof(curves.c_str() + hand + 15, nullptr);
 			row.weapon = cells[(size_t)cWeapon];
 			row.events = cells[(size_t)cEvents];
+			if (cAds >= 0) row.ads = std::atoi(cells[(size_t)cAds].c_str()) != 0 ? 1 : 0;
+			if (cGround >= 0) row.onGround = std::atoi(cells[(size_t)cGround].c_str()) != 0 ? 1 : 0;
+			if (cLocomotion >= 0) row.locomotion = cells[(size_t)cLocomotion];
 			if (!ParseProbeMontages(cells[(size_t)cMontages], row.montages))
 			{
 				std::printf("STATE FAIL Lyra 기록 줄 %zu 몽타주 칸을 못 읽음: %s\n", lineNumber, cells[(size_t)cMontages].c_str());
@@ -745,7 +755,7 @@ namespace
 	{
 		if (argc < 6)
 		{
-			std::printf("사용: AnimCheck state <clips.bin> <animcmp_<Tag>.csv> <animcmp_<Tag>_moves.csv> <out.csv> [--brakeScale=배율] [--groundAdd=cm] [--wire] [--wireKeepNew] [--probe=<animcmp_ev_<무기>_probe.csv>] [--montDump=<out.csv>] [--montageTest=N] [--poseTest=N] [--slotProfile=<비중 표 이름>] [--overrideProfile=<비중 표 이름>]\n");
+			std::printf("사용: AnimCheck state <clips.bin> <animcmp_<Tag>.csv> <animcmp_<Tag>_moves.csv> <out.csv> [--brakeScale=배율] [--groundAdd=cm] [--wire] [--wireKeepNew] [--probe=<animcmp_ev_<무기>_probe.csv>] [--montDump=<out.csv>] [--montageTest=N] [--poseTest=N] [--slotProfile=<비중 표 이름>] [--overrideProfile=<비중 표 이름>] [--adsLag=N] [--noAds]\n");
 			return 2;
 		}
 		float brakeScale = 1.f;
@@ -758,6 +768,9 @@ namespace
 		int poseTest = 0;							// 끼움 자리 후보 고르기(CAnimPoseEvaluator::kPoseTest*)
 		const char* slotProfileName = nullptr;		// 비중 표가 있는 끼움 자리(덮기 자리 빼고)를 이 표로
 		const char* overrideProfileName = nullptr;	// 쏜 뒤 덮기 자리를 이 표로
+		int adsLag = 1;								// 조준 입력을 몇 줄 앞 기록에서 가져오나(C-3, 1 = 실제 경로)
+		bool noAds = false;							// 조준 입력을 늘 0 으로(일부러 틀림)
+		int tracePass = -1, traceFrom = 0, traceTo = -1;		// --trace=판:처음-끝 — 그 줄들의 상태 · 쌓기 칸을 찍는다(어긋난 곳 찾기용)
 		double maxReach = 0;
 		size_t poseMontageRows = 0, poseOverrideRows = 0, poseHandRows = 0;		// 자세에 몽타주 · 덮기 · 왼팔 비중이 실제로 들어간 줄(새 길을 지났는지)
 		double poseKindSeconds[3] = {};		// 자세 한 번(EvaluateLocal + BodiesFromLocal) 시간 — 몽타주 있음 · 덮기만 · 둘 다 없음
@@ -774,6 +787,9 @@ namespace
 			else if (std::strncmp(argv[i], "--poseTest=", 11) == 0) poseTest = std::atoi(argv[i] + 11);
 			else if (std::strncmp(argv[i], "--slotProfile=", 14) == 0) slotProfileName = argv[i] + 14;
 			else if (std::strncmp(argv[i], "--overrideProfile=", 18) == 0) overrideProfileName = argv[i] + 18;
+			else if (std::strncmp(argv[i], "--adsLag=", 9) == 0) adsLag = std::atoi(argv[i] + 9);
+			else if (std::strcmp(argv[i], "--noAds") == 0) noAds = true;
+			else if (std::strncmp(argv[i], "--trace=", 8) == 0) std::sscanf(argv[i] + 8, "%d:%d-%d", &tracePass, &traceFrom, &traceTo);
 			else
 			{
 				std::printf("[오류] 모르는 인자: %s\n", argv[i]);
@@ -912,6 +928,17 @@ namespace
 		size_t reloadCancels = 0, layerRows = 0, layerSwapRows = 0;		// 재장전 중 쏘기로 재장전을 먼저 끈 수 · 층 변수를 댄 줄 · 교체 사건 줄이라 뺀 줄
 		size_t beforeFireRows = 0;		// 판에서 처음 쏘기 전이라 쏜 뒤 시간 · 덮기 비중을 안 댄 줄
 		bool firedSinceReset = false;
+		// 조준(C-3) — 갱신 f 의 조준 입력 = 기록 줄 f−adsLag 의 IsADS. Lyra 는 사건 f 에 변수가 바뀌고 갱신 f+1 에 상태 기계가 반응한다(D60 6, 실측) → 1 이 실제 경로.
+		// 0 · 2 는 일부러 틀림(한 프레임 이르게 · 늦게), noAds = 조준을 안 넣음
+		bool adsSinceReset = false;		// 조준이 들어간 뒤로는 덮기 비중이 조준 갈래 값(0 · 1)에서 시작하므로 처음 쏘기 전이라도 댄다
+		size_t adsFedRows = 0, adsBlendRows = 0, adsPartialRows = 0, adsMissingRows = 0;
+		size_t smRows = 0, smDiff = 0, smDiffAds = 0, smDiffHip = 0;
+		std::map<std::string, size_t> smPairs;			// 「Lyra 상태 > 우리 상태」 → 줄 수
+		std::vector<std::string> smFirst;				// 앞 몇 개 어긋난 줄
+		bool smWasDiff = false;
+		size_t smRuns = 0;								// 어긋남이 시작된 횟수(연속 줄은 한 번)
+		size_t smLagOne = 0;							// 한 프레임 늦게 바꾼 줄(아래 대조 주석)
+		std::string smPrevRef;							// 앞 줄 Lyra 상태(공중은 "Air")
 		bool hasCountFirst = false;
 		size_t countFirstRow = 0;
 		std::vector<int> seenIds;
@@ -974,6 +1001,9 @@ namespace
 				nextSeq = 0;
 				lastHadMontage = false;
 				firedSinceReset = false;
+				adsSinceReset = false;
+				smWasDiff = false;
+				smPrevRef.clear();
 			}
 			const auto found = byReset.find(row.reset);
 			if (found == byReset.end() || row.seq >= (int)found->second.size() || row.seq + 1 < nextSeq)
@@ -1010,14 +1040,33 @@ namespace
 				}
 				if (!newReset && row.seq != nextSeq) ++multiUpdateRows;		// 이 줄 앞 갱신이 하나가 아니다 — 그 사이 사건은 기록에 없다
 			}
+			bool adsIn = false;
+			if (lyra && !noAds)
+			{
+				const ProbeRow* source = probeAt(row.pass, row.frame - adsLag);
+				if (!source)
+				{
+					source = lyra;
+					++adsMissingRows;
+				}
+				adsIn = source->ads > 0;
+			}
 			const auto t0 = std::chrono::steady_clock::now();
 			for (; nextSeq <= row.seq; ++nextSeq)
 			{
 				AnimMoveInput input = found->second[(size_t)nextSeq]->input;
 				input.groundDistance += groundAdd;
+				input.ads = adsIn;
 				state.Update(input);
 				++fed;
 			}
+			if (adsIn)
+			{
+				++adsFedRows;
+				adsSinceReset = true;
+			}
+			if (state.AdsBlend() > 0.f) ++adsBlendRows;
+			if (state.AdsBlend() > 0.f && state.AdsBlend() < 1.f) ++adsPartialRows;
 			updateSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
 			if (lyra)
@@ -1054,6 +1103,40 @@ namespace
 					birthRates[key].push_back(m.rate);
 				}
 				state.SetFiring(lyra->firing);
+
+				// 이동 상태 대조(C-3) — 기록 줄 f 의 상태 = 갱신 f 뒤 상태. Lyra 점프 상태 다섯(JumpStart · JumpStartLoop · JumpApex · FallLoop · FallLand)은 우리 "Air" 하나다.
+				// 「한 프레임 늦음」 = Lyra 가 이 줄에서 막 바꿨고 우리는 앞 줄 Lyra 상태에 아직 있다. 빠지는 시각으로 나갈 때 늘 이렇다(9단계부터 같음 —
+				// Lyra 는 바꾼 프레임에 새 상태 비중이 0 이고 다음 프레임부터 오르며, 우리는 한 프레임 뒤에 바꾸면서 같은 갱신에 섞기를 한 칸 민다. 허리 0 4,1 기록 3278, 실측)
+				if (!lyra->locomotion.empty())
+				{
+					++smRows;
+					const std::string& raw = lyra->locomotion;
+					const bool air = raw.compare(0, 4, "Jump") == 0 || raw.compare(0, 4, "Fall") == 0;
+					const std::string ref = air ? std::string("Air") : raw;
+					const char* got = state.MoveStateName();
+					const bool same = ref == got;
+					const bool lagOne = !same && !smWasDiff && !smPrevRef.empty() && smPrevRef != ref && smPrevRef == got;
+					if (lagOne) ++smLagOne;
+					else if (!same)
+					{
+						++smDiff;
+						if (lyra->ads > 0) ++smDiffAds;
+						else ++smDiffHip;
+						++smPairs[raw + ">" + got];
+						if (!smWasDiff)
+						{
+							++smRuns;
+							if (smFirst.size() < 12)
+							{
+								char text[160];
+								std::snprintf(text, sizeof(text), "(pass=%d frame=%d lyra=%s got=%s ads=%d moveAds=%d adsBlend=%.3f)", row.pass, row.frame, raw.c_str(), got, lyra->ads, state.MoveAds() ? 1 : 0, state.AdsBlend());
+								smFirst.push_back(text);
+							}
+						}
+					}
+					smWasDiff = !same && !lagOne;
+					smPrevRef = ref;
+				}
 
 				// 사건 뒤 목록 대조 — 엔진 배열 차례 그대로
 				++montRows;
@@ -1092,7 +1175,7 @@ namespace
 				if (lyra->hasLayer && !swapRow)
 				{
 					++layerRows;
-					if (firedSinceReset) fireOverride.Add(lyra->overrideWeight, state.OverrideWeight(), i);
+					if (firedSinceReset || adsSinceReset) fireOverride.Add(lyra->overrideWeight, state.OverrideWeight(), i);
 					lyraAim.Add(lyra->aimBlend, state.AimBlend(), i);
 					handLeft.Add(lyra->handLeftAlpha, state.HandLeftAlpha(), i);
 				}
@@ -1130,6 +1213,17 @@ namespace
 
 			AnimPoseInput got;
 			state.ToPoseInput(got);
+			if (row.pass == tracePass && row.frame >= traceFrom && row.frame <= traceTo)
+			{
+				std::printf("TRACE pass=%d frame=%d state=%s ads=%d moveAds=%d adsBlend=%.4f lyra=%s layers=", row.pass, row.frame, state.MoveStateName(), adsIn ? 1 : 0, state.MoveAds() ? 1 : 0, state.AdsBlend(), lyra ? lyra->locomotion.c_str() : "-");
+				for (int k = 0; k < got.layerCount; ++k) std::printf("%d@%.4f*%.3f ", got.layers[k].clip, got.layers[k].time, got.layers[k].fade);
+				std::printf("walk=");
+				for (int k = 0; k < kAnimWalkClips; ++k)
+				{
+					if (got.weights[k] > 0.001f) std::printf("%d*%.3f@hip%.4f/ads%.4f ", k, got.weights[k], got.times[k], got.adsTimes[k]);
+				}
+				std::printf("\n");
+			}
 			if (useWire)
 			{
 				wire::AnimStateWire onWire{};
@@ -1239,6 +1333,10 @@ namespace
 			}
 			std::printf("STATEUDW rowsAfterMontage=%zu below1=%zu\n", udwRows, udwBelow);
 			std::printf("STATELAYER rows=%zu swapRowsSkipped=%zu reloadCancels=%zu beforeFireRows=%zu\n", layerRows, layerSwapRows, reloadCancels, beforeFireRows);
+			std::printf("STATEADS adsLag=%d noAds=%d fedRows=%zu blendRows=%zu partialRows=%zu missingLagRows=%zu\n", adsLag, noAds ? 1 : 0, adsFedRows, adsBlendRows, adsPartialRows, adsMissingRows);
+			std::printf("STATESM rows=%zu lagOne=%zu diff=%zu diffAds=%zu diffHip=%zu runs=%zu\n", smRows, smLagOne, smDiff, smDiffAds, smDiffHip, smRuns);
+			for (const auto& pair : smPairs) std::printf("STATESMPAIR %s rows=%zu\n", pair.first.c_str(), pair.second);
+			for (const std::string& text : smFirst) std::printf("STATESMFIRST %s\n", text.c_str());
 			const auto print = [&](const char* tag, const DiffColumn* column)
 			{
 				std::printf("%s %s max=%.6f over=%zu", tag, column->name, column->max, column->over);

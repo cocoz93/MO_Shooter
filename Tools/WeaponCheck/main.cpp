@@ -97,6 +97,10 @@ namespace
 		float heat, spread, mult, speed;
 		int falling, first;
 		int fireActive, reloadActive;
+		// 조준 칸(-Ads 기록부터) — 조준 누름(다음 프레임에 먹는다) · 사격이 읽는 조준 비율 · 조준 표식 수 · 카메라 스택(모드 수 · 맨 앞이 조준인가 · 맨 앞 비중)
+		bool hasAds = false;
+		int ads = 0, adsTag = 0, camCount = 0, topAds = 0;
+		float aimAlpha = 0, topWeight = 1;
 	};
 
 	struct EquipRow
@@ -309,6 +313,16 @@ int main(int argc, char** argv)
 			r.first = I(c[16]);
 			r.fireActive = I(c[17]);
 			r.reloadActive = I(c[18]);
+			if (c.size() >= 25)
+			{
+				r.hasAds = true;
+				r.ads = I(c[19]);
+				r.aimAlpha = (float)D(c[20]);
+				r.adsTag = I(c[21]);
+				r.camCount = I(c[22]);
+				r.topAds = I(c[23]);
+				r.topWeight = (float)D(c[24]);
+			}
 			segments.back().rows.push_back(r);
 		}
 		else if ((t == "HIT" && c.size() >= 15) || (t == "HPDELTA" && c.size() >= 4))
@@ -383,7 +397,20 @@ int main(int argc, char** argv)
 		std::map<int, int> simGaps;
 		std::map<int, int> reloadFrames;
 		int firstBadFrame = -1, firstBadSeg = -1;
+		// 조준 — 카메라 스택 이식(CAimCamera) ↔ Lyra 기록. 개수 = 조준 비율이 0 보다 큰 프레임 · 섞이는 중(모드 둘) · 다 섞이기 전에 뗀 횟수
+		int aimFrames = 0, aimPositive = 0, aimBlending = 0, aimQuickRelease = 0, aimPress = 0;
+		int aimCountDiff = 0, aimTopDiff = 0, aimTagDiff = 0;
+		double aimAlphaMax = 0, aimTopWeightMax = 0;
+		int aimFirstBadSeg = -1, aimFirstBadFrame = -1;
+		int multFirstBadSeg = -1, multFirstBadFrame = -1;	// 퍼짐 배율이 0.01 넘게 어긋난 첫 줄
 	} cycle[kWeaponCount];
+
+	// 프레임 안 차례(ads1 기록, 실측): 컨트롤러 입력(조준 능력 켜고 끄기) → 무기 틱(퍼짐) → 기록 도구 → 카메라 갱신.
+	// - 근거: 뗀 줄 다음 줄에 조준 표식이 꺼지고(tagDiff 0), 카메라 칸은 그다음 줄에야 3인칭을 넣는다 → 줄마다 적힌 카메라 값은 앞 프레임 갱신 결과다
+	// - 그래서 카메라는 앞 줄의 표식(= 앞 프레임 능력 상태)으로 한 번 갱신해 이 줄 카메라 칸과 대조하고, 이 줄 퍼짐은 그 값을 읽는다(0).
+	//   1 = 한 프레임 더 늦은 값을 읽는 셈 — 대조가 이 차례를 실제로 가리는지 보려고 남긴다
+	int aimLag = 0;
+	if (const char* lagText = std::getenv("WEAPONCHECK_AIM_LAG")) aimLag = std::atoi(lagText);
 
 	for (const Segment& s : segments)
 	{
@@ -392,11 +419,42 @@ int main(int argc, char** argv)
 		CWeaponCycle sim;
 		sim.Init(local.defs[s.weapon]);
 		// 앞 구간에서 넘어온 재장전·발사가 끝난 뒤부터 잰다 — 그 전 일은 이 구간 입력으로 설명되지 않는다
+		const bool hasAds = s.rows[0].hasAds;
 		size_t startRow = 0;
 		while (startRow + 1 < s.rows.size() && (s.rows[startRow].fireActive || s.rows[startRow].reloadActive)) ++startRow;
 		const FrameRow& r0 = s.rows[startRow];
 		sim.SetAmmoForCheck(r0.mag, r0.spare);
-		sim.SpreadForCheck().SetForCheck(local.defs[s.weapon], r0.heat, std::max(r0.mult, 0.01f));
+		// 퍼짐 배율의 몫(서 있기 · 공중 · 조준)은 발사와 무관하게 움직인다 → 구간 첫 줄(늘 땅 · 속도 0, ads1 · gym 12구간 전부)에서 몫을 맞추고
+		// 대조 시작 줄까지 배율만 굴린 뒤 열을 시작 줄 값으로 덮는다. 시작 줄에서 바로 맞추면 그 줄이 공중일 때 공중 몫을 서 있기 몫으로 넣게 된다(ads1 소총 3구간)
+		// 첫 줄 가정 = 공중 몫 1 · 앉기 몫 1(앉기 없음) — 기존과 같다
+		const FrameRow& first = s.rows[0];
+		CAimCamera cam;
+		float firstMult = first.mult;
+		if (hasAds)
+		{
+			cam.SetForCheck(first.camCount, first.topAds != 0, first.topWeight);
+			firstMult /= 1.f + (local.defs[s.weapon].aimingMultiplier - 1.f) * std::clamp(first.aimAlpha, 0.f, 1.f);
+		}
+		CWeaponSpread& warm = sim.SpreadForCheck();
+		warm.SetForCheck(local.defs[s.weapon], first.heat, std::max(firstMult, 0.01f));
+		for (size_t i = 1; i <= startRow; ++i)
+		{
+			const FrameRow& prev = s.rows[i - 1];
+			const FrameRow& cur = s.rows[i];
+			WeaponMotion motion;
+			motion.speed = cur.speed;
+			motion.falling = cur.falling != 0;
+			const float dt = std::fabs((float)cur.dt - 1.f / 60.f) < 1e-5f ? 1.f / 60.f : (float)cur.dt;
+			if (hasAds)
+			{
+				const float alphaBefore = cam.GetAimingAlpha();
+				const float camDt = std::fabs((float)prev.dt - 1.f / 60.f) < 1e-5f ? 1.f / 60.f : (float)prev.dt;
+				cam.Tick(prev.adsTag > 0, camDt);
+				motion.aimingAlpha = aimLag > 0 ? alphaBefore : cam.GetAimingAlpha();
+			}
+			warm.Tick(dt, motion);
+		}
+		warm.SetHeatForCheck(r0.heat);
 		double equipAt = -1;
 		for (const EquipRow& e : equips)
 		{
@@ -427,6 +485,35 @@ int main(int argc, char** argv)
 			motion.speed = cur.speed;
 			motion.falling = cur.falling != 0;
 			const float dt = std::fabs((float)cur.dt - 1.f / 60.f) < 1e-5f ? 1.f / 60.f : (float)cur.dt;
+			if (hasAds)
+			{
+				// 이 줄 카메라 칸 = 앞 프레임 갱신 결과. 그 갱신이 본 능력 상태 = 앞 줄 조준 표식, 시간 = 앞 줄 프레임 시간
+				const float alphaBefore = cam.GetAimingAlpha();
+				const bool quick = prev.ads && !cur.ads && cam.IsTopAds() && cam.GetCount() >= 2;
+				const float camDt = std::fabs((float)prev.dt - 1.f / 60.f) < 1e-5f ? 1.f / 60.f : (float)prev.dt;
+				cam.Tick(prev.adsTag > 0, camDt);
+				motion.aimingAlpha = aimLag > 0 ? alphaBefore : cam.GetAimingAlpha();
+
+				++cc.aimFrames;
+				if (cur.aimAlpha > 0.f) ++cc.aimPositive;
+				if (cur.camCount >= 2) ++cc.aimBlending;
+				if (quick) ++cc.aimQuickRelease;
+				if (cur.ads && !prev.ads) ++cc.aimPress;
+				const bool badCount = cam.GetCount() != cur.camCount;
+				const bool badTop = (cam.IsTopAds() ? 1 : 0) != cur.topAds;
+				const double alphaDiff = std::fabs(cam.GetAimingAlpha() - cur.aimAlpha);
+				const double topDiff = std::fabs(cam.GetTopWeight() - cur.topWeight);
+				if (badCount) ++cc.aimCountDiff;
+				if (badTop) ++cc.aimTopDiff;
+				if ((cur.adsTag > 0 ? 1 : 0) != prev.ads) ++cc.aimTagDiff;
+				cc.aimAlphaMax = std::max(cc.aimAlphaMax, alphaDiff);
+				cc.aimTopWeightMax = std::max(cc.aimTopWeightMax, topDiff);
+				if ((badCount || badTop || alphaDiff > 1e-4 || topDiff > 1e-4) && cc.aimFirstBadFrame < 0)
+				{
+					cc.aimFirstBadFrame = (int)i;
+					cc.aimFirstBadSeg = s.seg;
+				}
+			}
 			const WeaponEvents ev = sim.Tick(dt, input, motion);
 
 			++cc.frames;
@@ -465,6 +552,11 @@ int main(int argc, char** argv)
 			cc.heatMax = std::max(cc.heatMax, (double)std::fabs(sp.GetHeat() - cur.heat));
 			cc.spreadMax = std::max(cc.spreadMax, (double)std::fabs(sp.GetSpreadAngle() - cur.spread));
 			cc.multMax = std::max(cc.multMax, (double)std::fabs(sp.GetCalculatedMultiplier() - cur.mult));
+			if (std::fabs(sp.GetCalculatedMultiplier() - cur.mult) > 0.01f && cc.multFirstBadFrame < 0)
+			{
+				cc.multFirstBadFrame = (int)i;
+				cc.multFirstBadSeg = s.seg;
+			}
 			if ((sp.HasFirstShotAccuracy() ? 1 : 0) != cur.first) ++cc.firstDiff;
 		}
 	}
@@ -480,6 +572,12 @@ int main(int argc, char** argv)
 		for (const auto& g : cc.reloadFrames) std::printf(" %d:%d", g.first, g.second);
 		std::printf("\n");
 		if (cc.lyraShots == 0 || cc.magDiff != 0 || cc.spareDiff != 0 || cc.heatMax > 0.01 || cc.spreadMax > 0.01 || cc.multMax > 0.01 || cc.firstDiff != 0) failed = true;
+		if (cc.aimFrames > 0)
+		{
+			std::printf("AIM     %-8s lag=%d frames=%d alpha>0=%d blending=%d presses=%d quickRelease=%d | countDiff=%d topDiff=%d tagDiff=%d alphaMax=%.6f topWeightMax=%.6f firstBad=seg%d:f%d | multFirstBad=seg%d:f%d\n", local.defs[w].name, aimLag, cc.aimFrames, cc.aimPositive, cc.aimBlending, cc.aimPress, cc.aimQuickRelease, cc.aimCountDiff, cc.aimTopDiff, cc.aimTagDiff, cc.aimAlphaMax, cc.aimTopWeightMax, cc.aimFirstBadSeg, cc.aimFirstBadFrame, cc.multFirstBadSeg, cc.multFirstBadFrame);
+			// 개수가 0 이면 그 갈래를 안 본 것이다 — 조준 비율이 선 프레임 · 섞이는 중 · 빨리 뗌이 다 있어야 통과
+			if (cc.aimPositive == 0 || cc.aimBlending == 0 || cc.aimQuickRelease == 0 || cc.aimCountDiff != 0 || cc.aimTopDiff != 0 || cc.aimTagDiff != 0 || cc.aimAlphaMax > 1e-4 || cc.aimTopWeightMax > 1e-4) failed = true;
+		}
 	}
 
 	// ─── 4. 실제 맞힘: 표 계산 합 ↔ 체력 차 ─────────────────

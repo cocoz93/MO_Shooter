@@ -667,6 +667,8 @@ int main(int argc, char** argv)
 		(unsigned long long)room.starvedTicks, (unsigned long long)room.idleMoves, (unsigned long long)room.debugPlaces, (unsigned long long)room.statesSent);
 	std::printf("SERVER shots=%llu firesBlockedPostGame=%llu bullets=%llu hitMap=%llu hitBody=%llu hitImmune=%llu missed=%llu damageEvents=%llu\n",
 		(unsigned long long)room.shots, (unsigned long long)room.firesBlockedPostGame, (unsigned long long)room.bullets, (unsigned long long)room.bulletsHitMap, (unsigned long long)room.bulletsHitBody, (unsigned long long)room.bulletsHitImmune, (unsigned long long)room.bulletsMissed, (unsigned long long)room.damageEvents);
+	std::printf("SERVER ads inputs=%llu shotsAimed=%llu (applied=%llu shots=%llu)\n",
+		(unsigned long long)room.adsInputs, (unsigned long long)room.shotsAimed, (unsigned long long)room.inputsApplied, (unsigned long long)room.shots);
 	std::printf("REJECT badValue=%llu moveOver=%llu weaponId=%llu debugPlace=%llu aimFar=%llu swap=%llu aimWall=%llu droppedFull=%llu oldSeq=%llu badPackets=%llu | aimStale=%llu fireTooSoon=%llu fireEmpty=%llu seqGapFire=%llu\n",
 		(unsigned long long)room.inputsRejectedBadValue, (unsigned long long)room.movesOverLength, (unsigned long long)room.weaponIdRejected, (unsigned long long)room.debugPlacesRejected, (unsigned long long)room.shotsAimReplaced,
 		(unsigned long long)room.firesRejectedSwap, (unsigned long long)room.shotsAimPulledBack, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq, (unsigned long long)badPackets,

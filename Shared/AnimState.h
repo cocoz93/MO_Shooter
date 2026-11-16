@@ -12,12 +12,16 @@
 //   같은 입력에 언리얼과 같은 상태가 나오는지는 Tools/AnimCheck state + check_pose.py 로 대조한다.
 // - 몽타주(9단계 3-b) = 엔진 FAlphaBlend · FAnimMontageInstance(Play · Stop · UpdateWeight · Advance) · Montage_PlayInternal 의 무리 끄기를 옮겼다.
 //   정답지는 Lyra 기록 animcmp_ev_<무기>_probe.csv 의 몽타주 칸이다(AnimCheck state --probe).
+// - 조준(컨텐츠 C-3, D60) = 단순 재생(MOBSimpleAnimInstance)에는 없는 몫이라 Lyra 기록 animcmp_ads_<무기>_probe.csv 와 걸음 상태 기계 전환 표에서 바로 옮겼다.
 // - 언리얼 안에서도 컴파일돼야 하므로 예외·RTTI 를 쓰지 않는다. 사람 하나에 객체 하나를 쓴다.
 namespace mo
 {
 	inline constexpr int kAnimJumpClips = 5;			// 뛰어오름 · 오르는 중 · 꼭대기 · 떨어지는 중 · 내려앉음
 	inline constexpr int kAnimTransitions = 12;			// 네 방향 × 시작 · 멈춤 · 방향 꺾기
-	inline constexpr int kAnimStackClips = kAnimJumpClips + kAnimTransitions;
+	inline constexpr int kAnimTransitionClips = kAnimTransitions * 2;			// 허리 12 + 조준 12(D60). 전환 번호 = 쌓기 칸 번호 − kAnimJumpClips
+	inline constexpr int kAnimStackClips = kAnimJumpClips + kAnimTransitionClips;	// 29
+	inline constexpr int kAnimBaseClips = kAnimWalkClips * 2;					// 서기 · 걸음 넷 × 허리 · 조준. 조준 칸 = 허리 칸 + kAnimWalkClips
+	static_assert(kAnimStackClips == kStackClipCount && kAnimJumpClips + kAnimTransitions == kStackHipClips, "쌓기 칸 번호가 AnimClips.h StackClipIndex 와 같아야 한다");
 
 	// 한 프레임의 입력. 속도와 가속은 몸 기준(요 0) 값이다
 	struct AnimMoveInput
@@ -31,6 +35,7 @@ namespace mo
 		float groundDistance = 0.f;			// 떨어지는 중일 때 땅까지 거리(cm)
 		bool hasFloorGap = false;			// 땅에서 바닥을 찾았나
 		float plantGap = 0.f;				// 메시 뿌리가 바닥보다 얼마나 위인가(cm)
+		bool ads = false;					// 조준 중인가 — 이 갱신 앞에 정해진 조준 능력 상태(서버 = 이 틱 입력을 적용한 뒤 값, D61). Lyra 는 능력이 바뀐 뒤 첫 갱신이 본다(실측 — 기록 도구가 프레임 끝에 켜서 기록에선 한 줄 앞 값)
 	};
 
 	class CAnimState
@@ -85,6 +90,10 @@ namespace mo
 		float TimeSinceFired() const { return _timeSinceFired; }
 		float OverrideWeight() const { return _overrideWeight; }
 		float AimBlend() const { return _aimBlend; }
+		float AdsBlend() const { return _adsBlend; }		// 조준 묶음 비중(D60) — 0 = 허리 클립만, 1 = 조준 클립만
+		// 이동 상태 이름 — Lyra LocomotionSM 의 상태 이름과 같은 낱말(공중은 Lyra 점프 상태 다섯을 묶은 "Air"). 대조 도구가 Lyra 기록과 비교한다
+		const char* MoveStateName() const;
+		bool MoveAds() const { return _moveAds; }		// 지금 전환 클립을 고른 조준 여부(D60)
 		float HandLeftAlpha() const { return _handLeftAlpha; }
 		float DisableLeftHand() const { return _disableLeftHand; }		// 이번 자세의 DisableLHandIK 곡선(사건 앞 목록으로)
 
@@ -145,7 +154,7 @@ namespace mo
 		bool FollowStepsOfTransition(float deltaSeconds);
 		void UpdateTransitions(const AnimMoveInput& input, float deltaSeconds);
 		void UpdateJump(bool falling, bool accelerating, float velocityZ, float timeToApex, float groundDistance, float deltaSeconds);
-		void UpdateIdleBreak(bool still, float deltaSeconds);
+		void UpdateIdleBreak(bool still, bool ads, float deltaSeconds);
 		void PushJump(int clip, float fadeSeconds);
 		void EnterTransition(EMoveState state, int direction, float fadeSeconds);
 		void EnterLocomotion(EMoveState state, float fadeSeconds);
@@ -158,7 +167,7 @@ namespace mo
 		bool HasJumpLayer() const;
 		float PredictStopDistance(float speed) const;
 		float PredictPivotDistance(const double acceleration[3], const double velocity[3]) const;
-		void UpdateFiring(bool accelerating, float deltaSeconds);
+		void UpdateFiring(bool accelerating, bool falling, bool ads, float deltaSeconds);
 		void UpdateMontages(float deltaSeconds);
 		bool AdvanceMontage(MontageInstance& instance, float deltaSeconds);		// false = 다 빠졌다(엔진 Terminate)
 		void StopMontage(MontageInstance& instance, uint8_t option, float blendSeconds);
@@ -169,13 +178,13 @@ namespace mo
 		// 클립에서 읽어 둔 값
 		const CAnimClips* _clips = nullptr;
 		int _bundleIndex = -1;
-		float _lengths[kAnimWalkClips] = {};
-		float _rootSpeeds[kAnimWalkClips] = {};
-		std::vector<float> _stepTimes[kAnimWalkClips];		// 왼발 표시부터 차례로. 클립 끝을 넘어가면 길이를 더해 계속 커진다
-		int _stepCycle = 1;
+		float _lengths[kAnimBaseClips] = {};				// 허리 서기 · 걸음 넷, 조준 서기 · 걸음 넷
+		float _rootSpeeds[kAnimBaseClips] = {};
+		std::vector<float> _stepTimes[kAnimBaseClips];		// 왼발 표시부터 차례로. 클립 끝을 넘어가면 길이를 더해 계속 커진다
+		int _stepCycle = 1;									// 걸음 클립 여덟(허리 · 조준)의 발 표시 수의 최소공배수
 		float _stackLengths[kAnimStackClips] = {};
-		const std::vector<float>* _transitionDistances[kAnimTransitions] = {};
-		const std::vector<ClipMarker>* _transitionMarkers[kAnimTransitions] = {};
+		const std::vector<float>* _transitionDistances[kAnimTransitionClips] = {};
+		const std::vector<ClipMarker>* _transitionMarkers[kAnimTransitionClips] = {};
 		const std::vector<float>* _landDistances = nullptr;
 		float _recoveryLength = 0.f;
 		float _fidgetLength = 0.f;
@@ -187,11 +196,15 @@ namespace mo
 		bool _separateBraking = false;
 		// 묶음 이름으로 고른 무기별 시각(AnimState.cpp kBundleTimings)
 		float _stopClipSeconds = 0.f;
-		float _exitTimes[3][4] = {};		// [출발 · 멈춤 · 돌아서기][앞 · 뒤 · 왼 · 오른]
+		float _exitTimes[2][3][4] = {};		// [허리 · 조준][출발 · 멈춤 · 돌아서기][앞 · 뒤 · 왼 · 오른]
 
 		// 상태
 		float _weights[kAnimWalkClips] = { 1.f, 0.f, 0.f, 0.f, 0.f };
 		float _times[kAnimWalkClips] = {};
+		float _adsTimes[kAnimWalkClips] = {};		// 조준 서기 · 걸음 넷의 시각 — 걸음 번호 · 진행률 · 서기 시계를 같이 쓴다(D60 2)
+		float _adsBlend = 0.f;						// 조준 묶음 비중 — 방향 비중과 같은 따라가기
+		bool _ads = false;							// 이번 갱신이 본 조준
+		bool _moveAds = false;						// 지금 전환 클립이 조준 묶음인가 — 들어갈 때 고른다(D60 3)
 		int _step = 0;
 		float _stepFrac = 0.f;
 		float _idleTime = 0.f;

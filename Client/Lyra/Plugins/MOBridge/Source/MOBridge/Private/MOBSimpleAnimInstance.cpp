@@ -177,6 +177,35 @@ namespace
 	};
 	constexpr int32 MONTAGE_CURVE_HZ = 120;		// 몽타주 · 몽타주 클립 곡선을 뽑는 간격(클립 표본과 같은 간격, 제안값)
 
+	// 조준 클립(컨텐츠 C-3, D60) — 클립 파일 버전 3 에서 30개 뒤에 붙는 17개. 차례 = Shared/AnimClips.h ACLIP_ADS_IDLE 부터
+	// 서기 · 걷기 넷(앞 · 뒤 · 왼 · 오른) · 전환 12(출발 · 멈춤 · 돌아서기 × 같은 방향 차례). 뽑을 때만 읽는다(재생은 서버가 정한 자세를 받는다).
+	// 이름 = Lyra 여성 몸 무기 층 기본값(ABP_RifleAnimLayers_Feminine · ABP_PistolAnimLayers_Feminine CDO)에 든 자산(원본 기준). 권총은 MF · MM 이 섞여 있다.
+	// 샷건 = 소총 것(D45 — 샷건 층도 소총 몸 클립을 쓴다)
+	constexpr int32 kAdsClips = 17;
+	const TCHAR* const RIFLE_ADS_NAMES[kAdsClips] = {
+		TEXT("MF_Rifle_Idle_ADS"), TEXT("MF_Rifle_Walk_Fwd"), TEXT("MF_Rifle_Walk_Bwd"), TEXT("MF_Rifle_Walk_Left"), TEXT("MF_Rifle_Walk_Right"),
+		TEXT("MF_Rifle_Walk_Fwd_Start"), TEXT("MF_Rifle_Walk_Bwd_Start"), TEXT("MF_Rifle_Walk_Left_Start"), TEXT("MF_Rifle_Walk_Right_Start"),
+		TEXT("MF_Rifle_Walk_Fwd_Stop"), TEXT("MF_Rifle_Walk_Bwd_Stop"), TEXT("MF_Rifle_Walk_Left_Stop"), TEXT("MF_Rifle_Walk_Right_Stop"),
+		TEXT("MF_Rifle_Walk_Fwd_Pivot"), TEXT("MF_Rifle_Walk_Bwd_Pivot"), TEXT("MF_Rifle_Walk_Left_Pivot"), TEXT("MF_Rifle_Walk_Right_Pivot"),
+	};
+	const TCHAR* const PISTOL_ADS_NAMES[kAdsClips] = {
+		TEXT("MF_Pistol_Idle_ADS"), TEXT("MF_Pistol_Walk_Fwd"), TEXT("MF_Pistol_Walk_Bwd"), TEXT("MF_Pistol_Walk_Left"), TEXT("MF_Pistol_Walk_Right"),
+		TEXT("MF_Pistol_Walk_Fwd_Start"), TEXT("MF_Pistol_Walk_Bwd_Start"), TEXT("MM_Pistol_Walk_Left_Start"), TEXT("MF_Pistol_Walk_Right_Start"),
+		TEXT("MF_Pistol_Walk_Fwd_Stop"), TEXT("MF_Pistol_Walk_Bwd_Stop"), TEXT("MF_Pistol_Walk_Left_Stop"), TEXT("MF_Pistol_Walk_Right_Stop"),
+		TEXT("MM_Pistol_Walk_Fwd_Pivot"), TEXT("MM_Pistol_Walk_Bwd_Pivot"), TEXT("MM_Pistol_Walk_Left_Pivot"), TEXT("MM_Pistol_Walk_Right_Pivot"),
+	};
+	struct FWeaponAdsNames
+	{
+		const TCHAR* Key;			// FWeaponClipNames::Key 와 같다
+		const TCHAR* Folder;
+		const TCHAR* const* Names;	// kAdsClips 개
+	};
+	const FWeaponAdsNames WEAPON_ADS[] = {
+		{ TEXT("rifle"), RIFLE_FOLDER, RIFLE_ADS_NAMES },
+		{ TEXT("pistol"), PISTOL_FOLDER, PISTOL_ADS_NAMES },
+		{ TEXT("shotgun"), RIFLE_FOLDER, RIFLE_ADS_NAMES },
+	};
+
 	// 아래는 Lyra 원본 실행값에서 읽은 값이다(animcmp_probe_lyra_probe.csv, 11-06 · 60프레임 · 제자리 점프와 달리며 점프가 같은 값).
 	// 애니 블루프린트를 열어 본 값이 아니라 프레임별 클립 가중치·시각·변수에서 읽은 것 — 「확인」 옆 숫자가 그 근거다
 	constexpr float AIM_BLEND_SPEED = 10.f;		// 조준 보정 바꿈 빠르기(FInterpTo). 확인: 이동 입력이 생기고 0.1초 뒤 가중치 1 → 0.334, 멈추고 2프레임 뒤 0 → 0.305
@@ -524,10 +553,25 @@ void FMOBSimpleAnimProxy::SetServerFrame(const mo::AnimPoseInput& Input, int32 W
 		Weights[I] = Input.weights[I];
 		Times[I] = Input.times[I];
 	}
+	// 받은 쌓기 칸 17~28 은 조준 전환이다(Shared/AnimClips.h StackClipIndex, D60). 이 경로는 조준 클립을 안 묶었으니(JumpClips 는 17칸)
+	// 같은 차례의 허리 전환으로 튼다 — 이 경로가 보여 주는 것은 판정 밖 뼈(손가락 · 비틀림 뼈)뿐이고 판정 뼈는 ApplyServerBones 가 덮는다.
+	// 그대로 넣으면 JumpClips 밖을 읽는다(C-5 조준 봇 판 `c5vp1` 에서 ApplyJump 가 멈춤)
+	static_assert(kStackClips == mo::kStackHipClips && kStackClips + kTransitions == mo::kStackClipCount, "조준 전환 = 허리 전환 + kTransitions 차례여야 한다");
 	JumpCount = FMath::Min(Input.layerCount, kJumpStack);
 	for (int32 I = 0; I < JumpCount; ++I)
 	{
-		JumpStack[I].Clip = Input.layers[I].clip;
+		int32 Clip = Input.layers[I].clip;
+		if (Clip >= kStackClips)
+		{
+			Clip -= kTransitions;
+			++Out.AdsLayers;
+		}
+		if (Clip < JUMP_NONE || Clip >= kStackClips)
+		{
+			Clip = JUMP_NONE;
+			++Out.BadLayers;
+		}
+		JumpStack[I].Clip = Clip;
 		JumpStack[I].Time = Input.layers[I].time;
 		JumpStack[I].Fade = Input.layers[I].fade;
 		JumpStack[I].FadeSeconds = 0.f;
@@ -1192,7 +1236,8 @@ void FMOBSimpleAnimProxy::AppendPlayers(FString& Out) const
 	}
 }
 
-void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones, const TArray<const UAnimMontage*>& Montages, const UAnimSequence* OverridePose) const
+void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones, const TArray<const UAnimMontage*>& Montages, const UAnimSequence* OverridePose,
+	const TArray<const UAnimSequence*>& AdsClips) const
 {
 	// 자세를 읽는 길은 Evaluate 와 같다(GetAnimationPose, 뿌리 이동 안 뽑음, 반복 재생)
 	const FBoneContainer& Bones = GetRequiredBones();
@@ -1215,6 +1260,7 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 	}
 
 	// 클립 번호 = 걸음 5 · 조준 3 · 느슨한 조준 3 · 점프 5 · 전환 12 · 착지 충격 · 대기 몸짓(-MOBSimpleAimJump -MOBSimpleTransitions 일 때 30개, Shared/AnimClips.h 와 같은 차례).
+	// 같은 판에서 그 뒤에 조준 클립 17개(30~46, 클립 파일 버전 3)가 붙는다.
 	// 그 플래그가 없으면 예전처럼 앞의 5개뿐이다. 반복 여부는 Evaluate 와 같게 준다 — 표본을 끝까지 읽을 때 앞으로 감기는지가 달라진다
 	struct FDumpClip { const UAnimSequence* Clip; float Length; bool bLoop; float RootSpeed; };
 	TArray<FDumpClip, TInlineAllocator<32>> All;
@@ -1227,6 +1273,15 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 		for (int32 I = 0; I < kStackClips; ++I) Add(JumpClips[I], I == JUMP_START_LOOP || I == JUMP_FALL_LOOP);
 		Add(RecoveryClip, false);
 		Add(FidgetClip, false);
+		// 조준 클립 17개(클립 파일 버전 3, D60) — 서기 · 걷기 넷은 반복 · 원래 속도를 BindSet 과 같은 식으로, 전환 12개는 한 번 재생
+		for (int32 I = 0; I < kAdsClips; ++I)
+		{
+			const UAnimSequence* Clip = AdsClips.IsValidIndex(I) ? AdsClips[I] : nullptr;
+			const bool bBase = I < kClips;
+			const float Length = Clip ? FMath::Max(Clip->GetPlayLength(), 0.01f) : 0.f;
+			const float RootSpeed = Clip && bBase ? (float)Clip->ExtractRootMotionFromRange(0.0, Length, FAnimExtractContext()).GetTranslation().Size() / Length : 0.f;
+			All.Add({ Clip, Length, bBase, RootSpeed });
+		}
 		Out += FString::Printf(TEXT("AIMPITCH,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n"), AimPitches[AIM_UP], AimPitches[AIM_CENTER], AimPitches[AIM_DOWN], ReadyAimPitches[AIM_UP], ReadyAimPitches[AIM_CENTER], ReadyAimPitches[AIM_DOWN]);
 	}
 	const int32 BaseClipCount = All.Num();
@@ -1331,9 +1386,21 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 		constexpr int32 FIRST_JUMP_INDEX = kClips + kAim + kAim;
 		for (int32 T = 0; T < kTransitions; ++T) CurveLine(FIRST_JUMP_INDEX + kJump + T, TEXT("Distance"), TRANSITION_TABLE_HZ, TransitionDistances[T]);
 		CurveLine(FIRST_JUMP_INDEX + JUMP_LAND, TEXT("GroundDistance"), LAND_TABLE_HZ, LandDistances);
+		// 조준 전환 12개의 거리 곡선 — 허리 전환 표(BindSet)와 같은 식으로 뽑는다
+		constexpr int32 FIRST_ADS_INDEX = FIRST_JUMP_INDEX + kStackClips + 2;	// 착지 충격 · 대기 몸짓 뒤 = 30
+		for (int32 T = 0; T < kTransitions; ++T)
+		{
+			const UAnimSequence* Clip = AdsClips.IsValidIndex(kClips + T) ? AdsClips[kClips + T] : nullptr;
+			if (!Clip) continue;
+			const float Length = FMath::Max(Clip->GetPlayLength(), 0.01f);
+			const int32 Samples = FMath::CeilToInt32(Length * TRANSITION_TABLE_HZ) + 1;
+			TArray<float> Values;
+			for (int32 S = 0; S < Samples; ++S) Values.Add(Clip->EvaluateCurveData(TRANSITION_DISTANCE_CURVE, FAnimExtractContext(FMath::Min((double)S / TRANSITION_TABLE_HZ, (double)Length))));
+			CurveLine(FIRST_ADS_INDEX + kClips + T, TEXT("Distance"), TRANSITION_TABLE_HZ, Values);
+		}
 	}
 
-	// 몽타주 표 줄과, 30개 뒤에 붙인 클립의 곡선 전부(클립 시각 기준 — 소총 재장전의 DisableLHandIK 는 몽타주가 아니라 클립에 있다, 1-c)
+	// 몽타주 표 줄과, 47개(조준 클립 17개 포함) 뒤에 붙인 클립의 곡선 전부(클립 시각 기준 — 소총 재장전의 DisableLHandIK 는 몽타주가 아니라 클립에 있다, 1-c)
 	Out += MontageLines;
 	for (int32 I = BaseClipCount; I < All.Num(); ++I)
 	{
@@ -2082,7 +2149,21 @@ bool UMOBSimpleAnimInstance::DumpClips(int32 SampleHz, FString& Out)
 		UE_LOG(LogMOBSimple, Log, TEXT("MOB_SIMPLE_MONTAGE override=%s ok=%d"), MontageNames->OverridePose, OverridePose ? 1 : 0);
 		if (!OverridePose) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL override=%s"), MontageNames->OverridePose);
 	}
-	Proxy.AppendClipDump(Out, SampleHz, Keep, Montages, OverridePose);
+	// 조준 클립(C-3) — 못 읽은 칸은 nullptr 로 넣어 덤프에 CLIPFAIL 로 남긴다(클립 묶는 도구가 거기서 멈춘다)
+	TArray<const UAnimSequence*> AdsClips;
+	const FWeaponAdsNames* AdsNames = nullptr;
+	for (const FWeaponAdsNames& Names : WEAPON_ADS)
+	{
+		if (FCString::Strcmp(Names.Key, WeaponKey) == 0) AdsNames = &Names;
+	}
+	if (!AdsNames) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL ads weapon=%s — 조준 클립 이름 표에 없다"), WeaponKey);
+	for (int32 I = 0; I < kAdsClips; ++I)
+	{
+		const UAnimSequence* Clip = AdsNames ? LoadObject<UAnimSequence>(nullptr, *FString::Printf(TEXT("%s/%s.%s"), AdsNames->Folder, AdsNames->Names[I], AdsNames->Names[I])) : nullptr;
+		if (AdsNames && !Clip) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL ads clip=%s"), AdsNames->Names[I]);
+		AdsClips.Add(Clip);
+	}
+	Proxy.AppendClipDump(Out, SampleHz, Keep, Montages, OverridePose, AdsClips);
 	return true;
 }
 

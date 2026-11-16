@@ -60,7 +60,8 @@ namespace
 	// 경로 안의 사건(-MOBACScript=events). Fire = 방아쇠를 잠깐(FIRE_TAP_SECONDS) 당긴다 · Hold/Release = 당긴 채 두기/놓기
 	// Swap = 다른 무기로 바꾼다(빠른 칸을 바꾼다 — 까닭은 EquipFoeWeapon 주석) · Back = 처음 무기로
 	// Spawn = 부활 효과 능력(GA_SpawnEffect)을 다시 켠다 — 봇을 죽였다 살리면 몸이 바뀌어 이 도구가 끊기므로 효과만 다시 튼다
-	enum class EACEvent : uint8 { None, Fire, Hold, Release, Reload, Swap, Back, Spawn };
+	// AdsOn · AdsOff = 조준을 누른다 · 뗀다(-MOBACScript=ads)
+	enum class EACEvent : uint8 { None, Fire, Hold, Release, Reload, Swap, Back, Spawn, AdsOn, AdsOff };
 
 	// 경로 한 조각. Angle = 몸 앞 기준 이동 방향(+90 오른쪽). AngleRate·YawRate = 초당 돌리는 각도
 	// PitchFrom → PitchTo = 조각 동안 시선 위아래 각(+ 위). bJump = 조각 처음에 뛴다. Ev0·Ev1 = 조각 시작에서 At0·At1 초에 일으킬 사건
@@ -189,6 +190,54 @@ namespace
 		{ TEXT("idle_end"),      1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false },
 	};
 	constexpr int32 NUM_EVENTS_SEGMENTS = UE_ARRAY_COUNT(EVENTS_SCRIPT);
+
+	// 조준 경로(-MOBACScript=ads, content-add-progress.md C-3). 조준 자세가 바뀌는 자리를 한 번씩 —
+	// 서서 켜고 끔(서기 클립 바꿈) · 조준 중 위아래 · 조준 걸음 네 방향 출발 · 멈춤 · 돌아서기(돌아서기 클립 방향 = 돌기 전 걸음 방향이라 앞뒤 · 뒤앞 · 좌우 · 우좌 넷) · 조준 점프 ·
+	// 달리다 끄고 켬(반복 클립 바꿈) · 출발 · 멈춤 · 돌아서기 도중 바꿈(Lyra 는 그 상태를 바로 빠진다, ABP_Mannequin_Base 전환 9 · 10 · 23).
+	// 길이 = startstop 경로와 같은 몫(출발 2.5 · 멈춤 2.0 · 돌아서기 1.5초). 조준 중 걸음은 300cm/s 라 같은 시간에 절반만 간다.
+	// 달리다 바꾸는 둘(run_off · run_on)은 앞 · 뒤로 같은 거리라 제자리 줄로 돌아오고, 옆 셋 뒤 ret_left 가 오른쪽으로 간 몫(≈1,200cm)을 되돌린다(계산값)
+	const FScriptSegment ADS_SCRIPT[] = {
+		{ TEXT("idle"),          2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false },
+		{ TEXT("ads_on"),        1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOn, 0.f },
+		{ TEXT("ads_up"),        1.5f, false,   0.f, 0.f, 0.f,   0.f,  45.f, false },
+		{ TEXT("ads_down"),      1.5f, false,   0.f, 0.f, 0.f,  45.f, -45.f, false },
+		{ TEXT("ads_mid"),       1.0f, false,   0.f, 0.f, 0.f, -45.f,   0.f, false },
+		{ TEXT("ads_off"),       1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOff, 0.f },
+		{ TEXT("ads_on2"),       1.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOn, 0.f },
+		{ TEXT("a_fwd"),         2.5f, true,    0.f, 0.f, 0.f },
+		{ TEXT("a_stop_fwd"),    2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("a_bwd"),         2.5f, true,  180.f, 0.f, 0.f },
+		{ TEXT("a_stop_bwd"),    2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("a_left"),        2.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("a_stop_left"),   2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("a_right"),       2.5f, true,   90.f, 0.f, 0.f },
+		{ TEXT("a_stop_right"),  2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("a_piv_bf_a"),    1.5f, true,  180.f, 0.f, 0.f },
+		{ TEXT("a_piv_bf_b"),    1.5f, true,    0.f, 0.f, 0.f },
+		{ TEXT("a_stop_bf"),     2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("a_piv_fb_a"),    1.5f, true,    0.f, 0.f, 0.f },
+		{ TEXT("a_piv_fb_b"),    1.5f, true,  180.f, 0.f, 0.f },
+		{ TEXT("a_stop_fb"),     2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("a_piv_lr_a"),    1.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("a_piv_lr_b"),    1.5f, true,   90.f, 0.f, 0.f },
+		{ TEXT("a_stop_lr"),     2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("a_piv_rl_a"),    1.5f, true,   90.f, 0.f, 0.f },
+		{ TEXT("a_piv_rl_b"),    1.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("a_stop_rl"),     2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("a_jump"),        1.6f, false,   0.f, 0.f, 0.f,   0.f,   0.f, true  },
+		{ TEXT("a_settle"),      1.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("run_off"),       2.5f, true,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOff, 1.2f },
+		{ TEXT("run_on"),        2.5f, true,  180.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOn, 1.2f },
+		{ TEXT("stop_a"),        2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("start_toggle"),  1.5f, true,   90.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOff, 0.3f },
+		{ TEXT("stop_toggle"),   2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOn, 0.3f },
+		{ TEXT("piv_toggle_a"),  1.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("piv_toggle_b"),  1.5f, true,   90.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOff, 0.2f },
+		{ TEXT("ret_left"),      2.0f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("stop_end"),      2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("idle_end"),      1.5f, false,   0.f, 0.f, 0.f },
+	};
+	constexpr int32 NUM_ADS_SEGMENTS = UE_ARRAY_COUNT(ADS_SCRIPT);
 	constexpr float FIRE_TAP_SECONDS = 0.05f;	// 한 발 사건의 방아쇠 시간 — 3프레임. 연사 소총이 한 발만 내도록 짧게(제안값)
 	constexpr int32 NUM_FOE_WEAPONS = 3;	// 상대 빠른 칸 0 권총 · 1 소총 · 2 샷건
 	const TCHAR* const WEAPON_KEYS[3] = { TEXT("pistol"), TEXT("rifle"), TEXT("shotgun") };
@@ -205,6 +254,7 @@ namespace
 		case EMOBACScript::AimJump: return AIMJUMP_SCRIPT[I];
 		case EMOBACScript::StartStop: return STARTSTOP_SCRIPT[I];
 		case EMOBACScript::Events: return EVENTS_SCRIPT[I];
+		case EMOBACScript::Ads: return ADS_SCRIPT[I];
 		case EMOBACScript::Run: break;
 		}
 		return SCRIPT[I];
@@ -216,6 +266,7 @@ namespace
 		case EMOBACScript::AimJump: return NUM_AIMJUMP_SEGMENTS;
 		case EMOBACScript::StartStop: return NUM_STARTSTOP_SEGMENTS;
 		case EMOBACScript::Events: return NUM_EVENTS_SEGMENTS;
+		case EMOBACScript::Ads: return NUM_ADS_SEGMENTS;
 		case EMOBACScript::Run: break;
 		}
 		return NUM_SEGMENTS;
@@ -264,7 +315,7 @@ void UMOBAnimCompareSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FString ScriptName;
 	FParse::Value(Cmd, TEXT("MOBACScript="), ScriptName);
 	Script = ScriptName == TEXT("aimjump") ? EMOBACScript::AimJump : ScriptName == TEXT("startstop") ? EMOBACScript::StartStop
-		: ScriptName == TEXT("events") ? EMOBACScript::Events : EMOBACScript::Run;
+		: ScriptName == TEXT("events") ? EMOBACScript::Events : ScriptName == TEXT("ads") ? EMOBACScript::Ads : EMOBACScript::Run;
 	bAimJump = Script != EMOBACScript::Run;
 	FString WeaponName = WEAPON_KEYS[1];
 	FParse::Value(Cmd, TEXT("MOBACWeapon="), WeaponName);
@@ -472,6 +523,7 @@ void UMOBAnimCompareSubsystem::BeginPass()
 	MoveAngle = Seg(Script,0).Angle;
 	AimPitch = Seg(Script,0).PitchFrom;
 	ResetSegmentStats();
+	SetFoeAdsReleased();	// 앞 판이 조준 중에 끝났어도 새 판은 뗀 채로 시작한다
 	if (UCharacterMovementComponent* Move = Target->GetCharacterMovement()) Move->StopMovementImmediately();
 	Target->TeleportTo(Home, FRotator(0.f, BodyYaw, 0.f), false, true);
 	if (bSimple) MOBResetSimpleAnim(Target);
@@ -781,7 +833,7 @@ void UMOBAnimCompareSubsystem::DriveFoe(float DeltaTime)
 		else Target->StopJumping();
 	}
 	if (S.bMove) Target->AddMovementInput(FRotator(0.f, BodyYaw + MoveAngle, 0.f).Vector(), 1.f);
-	if (Script == EMOBACScript::Events) RunEvents(DeltaTime);
+	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads) RunEvents(DeltaTime);
 }
 
 // 사건 경로 — 조각 안의 사건 시각이 이 프레임 [SegmentTime, SegmentTime + DeltaTime) 에 들면 일으킨다. 대기(DeltaTime 0)에는 안 일으킨다.
@@ -841,13 +893,37 @@ void UMOBAnimCompareSubsystem::RunEvents(float DeltaTime)
 			else ++EvSpawnFail;
 			FrameEvents += TEXT("spawn;");
 			break;
+		case EACEvent::AdsOn:
+			bFoeAdsHeld = true;
+			++EvAdsOn;
+			FrameEvents += TEXT("ads_on;");
+			break;
+		case EACEvent::AdsOff:
+			SetFoeAdsReleased();
+			++EvAdsOff;
+			FrameEvents += TEXT("ads_off;");
+			break;
 		case EACEvent::None:
 			break;
 		}
 	};
 	if (Due(S.Ev0, S.At0)) Do(S.Ev0);
 	if (Due(S.Ev1, S.At1)) Do(S.Ev1);
-	if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get()))) A->ProcessAbilityInput(DeltaTime, false);
+	if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get())))
+	{
+		// 조준은 누르는 동안 매 프레임 「눌림」 — IA_ADS 는 트리거가 없어 눌린 동안 매 프레임 Triggered, Lyra 는 그때마다 Pressed 를 보낸다(원본 기준)
+		if (bFoeAdsHeld) A->AbilityInputTagPressed(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.ADS")));
+		A->ProcessAbilityInput(DeltaTime, false);
+	}
+	else ++EvNoAsc;
+}
+
+void UMOBAnimCompareSubsystem::SetFoeAdsReleased()
+{
+	const bool bWasHeld = bFoeAdsHeld;
+	bFoeAdsHeld = false;
+	if (!bWasHeld) return;
+	if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get()))) A->AbilityInputTagReleased(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.ADS")));
 	else ++EvNoAsc;
 }
 
@@ -1170,11 +1246,11 @@ void UMOBAnimCompareSubsystem::Finish()
 		const bool bProfSaved = !BlendProfileCsv.IsEmpty() && FFileHelper::SaveStringToFile(BlendProfileCsv, *ProfilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP montages seen=%d maxLive=%d saved=%d profilesSaved=%d"), SeenMontages.Num(), MaxLiveMontages, bMontSaved ? 1 : 0, bProfSaved ? 1 : 0);
 	}
-	if (Script == EMOBACScript::Events)
+	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads)
 	{
 		// 종류마다 센 값 — 경로 표에 적힌 수(판 둘 × 조각의 사건 수)와 대조한다
-		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP events weapon=%s fire=%d hold=%d release=%d reload=%d swap=%d swapFail=%d spawn=%d spawnFail=%d noAsc=%d"),
-			WEAPON_KEYS[WeaponIndex], EvFire, EvHold, EvRelease, EvReload, EvSwap, EvSwapFail, EvSpawn, EvSpawnFail, EvNoAsc);
+		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP events weapon=%s fire=%d hold=%d release=%d reload=%d swap=%d swapFail=%d spawn=%d spawnFail=%d adsOn=%d adsOff=%d noAsc=%d"),
+			WEAPON_KEYS[WeaponIndex], EvFire, EvHold, EvRelease, EvReload, EvSwap, EvSwapFail, EvSpawn, EvSpawnFail, EvAdsOn, EvAdsOff, EvNoAsc);
 	}
 	if (bDumpClips && bSimple)
 	{

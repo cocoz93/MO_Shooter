@@ -16,6 +16,8 @@ class ULyraCharacterMovementComponent;
  *   -MOBMoveSegs=<수>       구간 수(기본 40). 구간마다 임의 바닥 위로 옮겨 처음부터 떨어뜨린다
  *   -MOBMoveSegSec=<초>     구간 길이(기본 10)
  *   -MOBMoveStress          평소 입력이 안 지나가는 갈래를 일부러 지나간다(짝수 구간은 바닥에 10cm 묻혀 시작, 홀수 구간은 임의 발사)
+ *   -MOBMoveAds             조준을 0.05~1.2초마다 무작위로 누르고 뗀다(C 조준 — 걸음 속도 ×0.5). 조준은 따로 쓰는 난수라 이동 입력은 이 옵션이 없을 때와 같다.
+ *                           조준은 능력 시스템 입력이라 다음 프레임 컨트롤러 틱에서 먹는다 — 줄 끝 칸 ads 는 이번 프레임에 누른 상태
  * 판정에 쓰는 줄은 「MOB_MOVE」 로 시작한다. 파일 형식은 Tools/MoveCheck 머리 주석이 정본이다.
  */
 UCLASS()
@@ -47,7 +49,11 @@ private:
 	int32 NumSegs = 40;
 	float SegSeconds = 10.f;
 	bool bStress = false;
+	bool bAds = false;
+	bool bAdsHeld = false;
+	double NextAdsAt = 0;
 	FRandomStream Rng;
+	FRandomStream AdsRng;
 
 	double PawnReadyAt = -1;
 	double HookedRealAt = 0;

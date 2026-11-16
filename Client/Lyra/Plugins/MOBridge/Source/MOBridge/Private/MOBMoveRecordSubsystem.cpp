@@ -14,6 +14,8 @@
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
 
+#include "AbilitySystem/LyraAbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
 #include "Character/LyraCharacterMovementComponent.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(MOBMoveRecordSubsystem)
@@ -50,7 +52,9 @@ void UMOBMoveRecordSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FParse::Value(Cmd, TEXT("MOBMoveSegs="), NumSegs);
 	FParse::Value(Cmd, TEXT("MOBMoveSegSec="), SegSeconds);
 	bStress = FParse::Param(Cmd, TEXT("MOBMoveStress"));
+	bAds = FParse::Param(Cmd, TEXT("MOBMoveAds"));
 	Rng.Initialize(Seed);
+	AdsRng.Initialize(Seed + 1);
 	GInstance = this;
 	UE_LOG(LogMOBMove, Log, TEXT("MOB_MOVE_INIT world=%s tag=%s seed=%d segs=%d segSec=%.1f"), *GetNameSafe(GetWorld()), *Tag, Seed, NumSegs, SegSeconds);
 }
@@ -113,7 +117,8 @@ void UMOBMoveRecordSubsystem::BeginRecording(ACharacter* Ch)
 
 	DumpParams(Ch);
 	Csv += TEXT("frame,seg,ev,dt,ix,iy,iz,px,py,pz,vx,vy,vz,mode,ext,lx,ly,lz,pressed,was,hold,force,count,countPre,maxSpeed,")
-		TEXT("ax,ay,az,avx,avy,avz,amode,fBlock,fWalk,fLine,fDist,fLineDist,aCount\n");
+		TEXT("ax,ay,az,avx,avy,avz,amode,fBlock,fWalk,fLine,fDist,fLineDist,aCount");
+	Csv += bAds ? TEXT(",ads\n") : TEXT("\n");
 
 	ULyraCharacterMovementComponent::MOBPreMoveHook = &UMOBMoveRecordSubsystem::PreMoveThunk;
 	ULyraCharacterMovementComponent::MOBPostMoveHook = &UMOBMoveRecordSubsystem::PostMoveThunk;
@@ -174,6 +179,7 @@ bool UMOBMoveRecordSubsystem::StartSegment(ULyraCharacterMovementComponent* M, A
 	SegTime = 0.f;
 	bPrevValid = false;
 	NextDirAt = 0;
+	NextAdsAt = 0;	// 구간 시간 기준이라 구간마다 처음부터. 누른 상태는 이어 간다
 	JumpFramesLeft = 0;
 	CurrentInput = FVector::ZeroVector;
 	if (SegIndex >= NumSegs) return false;
@@ -266,6 +272,27 @@ void UMOBMoveRecordSubsystem::OnPreMove(ULyraCharacterMovementComponent* M, FVec
 		Ch->LaunchCharacter(Launch, true, true);
 	}
 
+	// 조준 — 이번 프레임 최대 속도(maxSpeed 칸)는 앞 프레임까지 누른 것으로 정해져 있다. 여기서 바꾼 누름은 다음 프레임에 먹는다
+	if (bAds)
+	{
+		static const FGameplayTag AdsInput = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.ADS"));
+		ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Ch));
+		if (SegTime >= NextAdsAt)
+		{
+			NextAdsAt = SegTime + AdsRng.FRandRange(0.05, 1.2);
+			const bool bWant = AdsRng.FRand() < 0.5f;
+			if (A && bWant != bAdsHeld)
+			{
+				bAdsHeld = bWant;
+				if (!bWant) A->AbilityInputTagReleased(AdsInput);
+			}
+		}
+		// 사람 입력과 같게 누르고 있는 동안 매 프레임 「눌림」을 보낸다 — IA_ADS 매핑엔 트리거가 없어
+		// 눌린 동안 매 프레임 Triggered(EnhancedPlayerInput.cpp SetStateForNoTriggers), Lyra는 Triggered마다 Pressed(LyraInputComponent.h BindAbilityActions).
+		// 한 번만 보내면 다시 태어난 몸의 첫 프레임처럼 능력이 아직 안 붙었을 때 누름이 버려지고, 다음 누름까지 600으로 남는다(11-15 gym_ads 구간 5·39)
+		if (A && bAdsHeld) A->AbilityInputTagPressed(AdsInput);
+	}
+
 	const FVector P = M->UpdatedComponent->GetComponentLocation();
 	const FVector V = M->Velocity;
 	const FVector L = M->PendingLaunchVelocity;
@@ -288,9 +315,10 @@ void UMOBMoveRecordSubsystem::OnPostMove(ULyraCharacterMovementComponent* M, flo
 	const FVector V = M->Velocity;
 	const FFindFloorResult& Floor = M->CurrentFloor;
 	Csv += Row;
-	Csv += FString::Printf(TEXT("%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%d,%d,%d,%.9g,%.9g,%d\n"),
+	Csv += FString::Printf(TEXT("%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%d,%d,%d,%.9g,%.9g,%d"),
 		P.X, P.Y, P.Z, V.X, V.Y, V.Z, (int32)M->MovementMode, Floor.bBlockingHit ? 1 : 0, Floor.bWalkableFloor ? 1 : 0, Floor.bLineTrace ? 1 : 0,
 		Floor.FloorDist, Floor.LineDist, Ch ? Ch->JumpCurrentCount : 0);
+	Csv += bAds ? FString::Printf(TEXT(",%d\n"), bAdsHeld ? 1 : 0) : FString(TEXT("\n"));
 
 	PrevAfterLocation = P;
 	bPrevValid = true;

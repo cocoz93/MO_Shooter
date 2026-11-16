@@ -19,7 +19,7 @@
 //   u32 묶음 수, 묶음마다 {
 //     u8 이름 길이, 이름, u32 표본 Hz, 6f 조준 각도(위 · 가운데 · 아래 · 느슨한 위 · 가운데 · 아래),
 //     5f (groundFriction, brakingFriction, brakingFrictionFactor, brakingDecelerationWalking, gravityZ), u8 separateBraking,
-//     u32 클립 수(앞 ACLIP_COUNT 개는 EAnimClip 차례, 그 뒤는 몽타주 · 덮기 자세 클립), 클립마다 {
+//     u32 클립 수(앞 ACLIP_COUNT 개는 EAnimClip 차례 — 버전 3 부터 조준 클립 17개 포함, 그 뒤는 몽타주 · 덮기 자세 클립), 클립마다 {
 //       u8 이름 길이, 이름, f 길이(초), u8 덧붙임 종류(0 = 일반), u8 반복, f rootSpeed, u32 표본 수,
 //       u16 발 표시 수, 표시마다 { f 시각, u8 왼발 },
 //       u8 곡선 유무, 있으면 { u32 hz, u32 값 수, f[값 수] },
@@ -34,7 +34,8 @@
 // 크기 칸은 넣지 않는다. 일반 클립은 1, 덧붙임 클립은 0 으로 항상 같고, 다르면 도구가 파일을 만들지 않는다.
 namespace mo
 {
-	inline constexpr uint32_t kClipPackVersion = 2;	// 2 = 무기별 묶음 셋 + 뼈별 비중 표 · 끼움 자리 · 몽타주 표(9단계). 1 은 거부한다 — 소총까지 다시 만든다.
+	inline constexpr uint32_t kClipPackVersion = 3;	// 3 = 묶음 클립 30개 뒤에 조준 클립 17개(컨텐츠 C-3, D60) — 몽타주 클립 번호가 17 씩 밀린다. 2 는 거부한다(조준 클립이 없다).
+														// 2 = 무기별 묶음 셋 + 뼈별 비중 표 · 끼움 자리 · 몽타주 표(9단계). 1 은 거부한다 — 소총까지 다시 만든다.
 														// 2-a 에서 잠시 만든 「몽타주 칸이 빈」 판은 비중 표 칸이 없어 뒤 칸이 밀려 거부된다(BadSlot — 3-a 에서 그 파일로 확인)
 
 	enum class EClipLoad
@@ -95,8 +96,24 @@ namespace mo
 		ACLIP_TRANSITION_FIRST,								// 전환 12개 = 종류(시작 · 멈춤 · 방향 꺾기) × 4 + 방향(앞 · 뒤 · 왼 · 오른)
 		ACLIP_RECOVERY = ACLIP_TRANSITION_FIRST + 12,		// 착지 충격(덧붙임)
 		ACLIP_FIDGET,										// 대기 몸짓
-		ACLIP_COUNT,										// 30
+		// 조준 묶음(버전 3, D60) — 위 서기 · 달리기 넷 · 전환 12 와 같은 차례의 조준 클립(Idle_ADS · Walk_*). 뽑는 쪽 = MOBSimpleAnimInstance.cpp WEAPON_ADS
+		ACLIP_ADS_IDLE,
+		ACLIP_ADS_WALK_FWD,
+		ACLIP_ADS_WALK_BWD,
+		ACLIP_ADS_WALK_LEFT,
+		ACLIP_ADS_WALK_RIGHT,
+		ACLIP_ADS_TRANSITION_FIRST,							// 조준 전환 12개 — 허리 전환과 같은 차례
+		ACLIP_COUNT = ACLIP_ADS_TRANSITION_FIRST + 12,		// 47
 	};
+	static_assert(ACLIP_ADS_IDLE == 30 && ACLIP_COUNT == 47, "뽑는 쪽(AppendClipDump)의 번호와 같아야 한다");
+
+	// 쌓기 칸 번호(AnimLayer::clip) → 묶음 클립 번호. 0~16 = 점프 5 · 허리 전환 12(ACLIP_JUMP_START 부터 잇닿음), 17~28 = 조준 전환 12
+	inline constexpr int kStackHipClips = (int)(ACLIP_RECOVERY - ACLIP_JUMP_START);		// 17
+	inline constexpr int kStackClipCount = kStackHipClips + 12;							// 29
+	inline uint32_t StackClipIndex(int stackClip)
+	{
+		return stackClip < kStackHipClips ? (uint32_t)ACLIP_JUMP_START + (uint32_t)stackClip : (uint32_t)ACLIP_ADS_TRANSITION_FIRST + (uint32_t)(stackClip - kStackHipClips);
+	}
 
 	struct BoneKey
 	{
