@@ -19,6 +19,7 @@
 #include "UObject/EnumProperty.h"
 #include "UObject/UnrealType.h"
 #include "Camera/CameraActor.h"
+#include "Character/LyraCharacter.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/Engine.h"
@@ -61,7 +62,9 @@ namespace
 	// Swap = 다른 무기로 바꾼다(빠른 칸을 바꾼다 — 까닭은 EquipFoeWeapon 주석) · Back = 처음 무기로
 	// Spawn = 부활 효과 능력(GA_SpawnEffect)을 다시 켠다 — 봇을 죽였다 살리면 몸이 바뀌어 이 도구가 끊기므로 효과만 다시 튼다
 	// AdsOn · AdsOff = 조준을 누른다 · 뗀다(-MOBACScript=ads)
-	enum class EACEvent : uint8 { None, Fire, Hold, Release, Reload, Swap, Back, Spawn, AdsOn, AdsOff };
+	// CrouchOn · CrouchOff = 앉기 단추를 눌러 앉는다 · 일어선다(-MOBACScript=crouch). Lyra 단추는 누를 때마다 뒤집으므로(ToggleCrouch) 이미 그 상태면 안 누른다
+	// Melee = 근접 단추 · HitBack · HitFront = 맞은 쪽 반응 몽타주를 피해 연출과 같은 길로 튼다(-MOBACScript=melee)
+	enum class EACEvent : uint8 { None, Fire, Hold, Release, Reload, Swap, Back, Spawn, AdsOn, AdsOff, CrouchOn, CrouchOff, Melee, HitBack, HitFront };
 
 	// 경로 한 조각. Angle = 몸 앞 기준 이동 방향(+90 오른쪽). AngleRate·YawRate = 초당 돌리는 각도
 	// PitchFrom → PitchTo = 조각 동안 시선 위아래 각(+ 위). bJump = 조각 처음에 뛴다. Ev0·Ev1 = 조각 시작에서 At0·At1 초에 일으킬 사건
@@ -238,6 +241,88 @@ namespace
 		{ TEXT("idle_end"),      1.5f, false,   0.f, 0.f, 0.f },
 	};
 	constexpr int32 NUM_ADS_SEGMENTS = UE_ARRAY_COUNT(ADS_SCRIPT);
+
+	// 앉기 경로(-MOBACScript=crouch, content-add-progress.md D-3). ads 경로와 같은 짜임에 조준 누름을 앉기 누름으로 바꿨다. 앉음이 바뀌는 자리를 한 번씩 —
+	// 서서 앉고 일어섬(서기 상태 안 전환 클립 Crouch_Idle_Entry · _Exit) · 앉아 위아래 · 앉은 걸음 네 방향 출발 · 멈춤 · 돌아서기 넷 · 앉아 쏘기(쏜 뒤 덮기 자세의 앉은 판) ·
+	// 앉아 조준(서기 클립은 앉음이 조준보다 먼저) · 앉은 데서 점프(점프 능력처럼 일어선 뒤 뛴다, DriveFoe) · 달리기 · 출발 · 멈춤 · 돌아서기 도중 앉음 바꿈(ABP_Mannequin_Base 전환 9 · 10 · 23 은 CrouchStateChange 를 조준 바뀜과 같은 자리에 둔다).
+	// 길이 = ads 경로와 같은 몫. 앉은 걸음 300cm/s(MaxWalkSpeedCrouched)는 조준 걸음과 같은 빠르기라 ads 경로가 밟은 바닥 안에 머문다. 앉아 조준 걸음은 앞으로 2초 · 뒤로 2초로 돌아온다.
+	// 달리다 바꾸는 둘은 앞 ≈1,110 · 뒤 ≈1,140cm 로 제자리 줄에 돌아오고, 옆 셋(오른쪽 ≈540 · 왼쪽 ≈900 · 오른쪽 ≈510) 뒤 ret_left 0.5초가 남은 ≈150cm 를 되돌린다(계산값, 가속 뺌).
+	// 마지막 idle_end 2초 = 일어서기 전환 클립이 서기 안에서 끝나도록 c_off 보다 길게(제안값)
+	const FScriptSegment CROUCH_SCRIPT[] = {
+		{ TEXT("idle"),          2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("c_on"),          1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOn, 0.f },
+		{ TEXT("c_up"),          1.5f, false,   0.f, 0.f, 0.f,   0.f,  45.f, false },
+		{ TEXT("c_down"),        1.5f, false,   0.f, 0.f, 0.f,  45.f, -45.f, false },
+		{ TEXT("c_mid"),         1.0f, false,   0.f, 0.f, 0.f, -45.f,   0.f, false },
+		{ TEXT("c_off"),         1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOff, 0.f },
+		{ TEXT("c_on2"),         1.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOn, 0.f },
+		{ TEXT("c_fwd"),         2.5f, true,    0.f, 0.f, 0.f },
+		{ TEXT("c_stop_fwd"),    2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("c_bwd"),         2.5f, true,  180.f, 0.f, 0.f },
+		{ TEXT("c_stop_bwd"),    2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("c_left"),        2.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("c_stop_left"),   2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("c_right"),       2.5f, true,   90.f, 0.f, 0.f },
+		{ TEXT("c_stop_right"),  2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("c_piv_bf_a"),    1.5f, true,  180.f, 0.f, 0.f },
+		{ TEXT("c_piv_bf_b"),    1.5f, true,    0.f, 0.f, 0.f },
+		{ TEXT("c_stop_bf"),     2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("c_piv_fb_a"),    1.5f, true,    0.f, 0.f, 0.f },
+		{ TEXT("c_piv_fb_b"),    1.5f, true,  180.f, 0.f, 0.f },
+		{ TEXT("c_stop_fb"),     2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("c_piv_lr_a"),    1.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("c_piv_lr_b"),    1.5f, true,   90.f, 0.f, 0.f },
+		{ TEXT("c_stop_lr"),     2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("c_piv_rl_a"),    1.5f, true,   90.f, 0.f, 0.f },
+		{ TEXT("c_piv_rl_b"),    1.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("c_stop_rl"),     2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("c_fire"),        1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Fire, 0.3f },
+		{ TEXT("c_ads_on"),      1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOn, 0.f },
+		{ TEXT("c_ads_fwd"),     2.0f, true,    0.f, 0.f, 0.f },
+		{ TEXT("c_ads_stop"),    2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("c_ads_bwd"),     2.0f, true,  180.f, 0.f, 0.f },
+		{ TEXT("c_ads_off"),     2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOff, 0.5f },
+		{ TEXT("c_jump"),        1.6f, false,   0.f, 0.f, 0.f,   0.f,   0.f, true  },
+		{ TEXT("c_settle"),      1.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("run_on"),        2.5f, true,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOn, 1.2f },
+		{ TEXT("run_off"),       2.5f, true,  180.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOff, 1.2f },
+		{ TEXT("stop_a"),        2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("start_toggle"),  1.5f, true,   90.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOn, 0.3f },
+		{ TEXT("stop_toggle"),   2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOff, 0.3f },
+		{ TEXT("piv_toggle_a"),  1.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("piv_toggle_b"),  1.5f, true,   90.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOn, 0.2f },
+		{ TEXT("ret_left"),      0.5f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("stop_end"),      2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("idle_end"),      2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOff, 0.f },
+	};
+	constexpr int32 NUM_CROUCH_SEGMENTS = UE_ARRAY_COUNT(CROUCH_SCRIPT);
+
+	// 근접 경로(-MOBACScript=melee, content-add-progress.md E-2). 근접 · 맞은 쪽 반응 몽타주가 몸에 얹히는 자리를 한 번씩 —
+	// 서서 근접 둘(조각 2초 > 연타 간격 샷건 0.77초) · 달리며 근접 · 멈추는 중 근접 · 반응 뒤 · 앞 · 달리며 반응 · 멈추는 중 반응 ·
+	// 근접 중 반응 · 반응 중 근접(같은 무리면 앞 몽타주가 빠진다 — 몽타주 표의 무리 칸) · 반응 중 쏘기 · 부활 중 반응(통째 자리가 반응 뒤에 덮는지) · 앉아 근접 · 앉아 반응.
+	// 길이 = 몽타주가 다 빠질 만큼(반응 0.87초 + 빼기)에 여유를 둔 제안값. 달리는 둘은 앞 1.8 · 뒤 1.8초로 제자리 줄에 돌아온다(events 경로 run_fire 와 같은 몫)
+	const FScriptSegment MELEE_SCRIPT[] = {
+		{ TEXT("idle"),          2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("melee"),         2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Melee, 0.f },
+		{ TEXT("melee2"),        2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Melee, 0.f },
+		{ TEXT("run_melee"),     1.8f, true,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Melee, 0.4f },
+		{ TEXT("stop_melee"),    2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Melee, 0.1f },
+		{ TEXT("hit_back"),      2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::HitBack, 0.f },
+		{ TEXT("hit_front"),     2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::HitFront, 0.f },
+		{ TEXT("run_hit"),       1.8f, true,  180.f, 0.f, 0.f,   0.f,   0.f, false, ACE::HitBack, 0.4f },
+		{ TEXT("stop_hit"),      2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::HitFront, 0.1f },
+		{ TEXT("melee_hit"),     2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Melee, 0.f, ACE::HitBack, 0.2f },
+		{ TEXT("hit_melee"),     2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::HitFront, 0.f, ACE::Melee, 0.2f },
+		{ TEXT("hit_fire"),      2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::HitBack, 0.f, ACE::Fire, 0.3f },
+		{ TEXT("spawn_hit"),     3.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Spawn, 0.f, ACE::HitFront, 0.5f },
+		{ TEXT("c_on"),          1.5f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOn, 0.f },
+		{ TEXT("c_melee"),       2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Melee, 0.f },
+		{ TEXT("c_hit"),         2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::HitBack, 0.f },
+		{ TEXT("idle_end"),      2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOff, 0.f },
+	};
+	constexpr int32 NUM_MELEE_SEGMENTS = UE_ARRAY_COUNT(MELEE_SCRIPT);
+	const TCHAR* const HIT_BACK_PATH = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_HitReact_Back_Med_01.AM_MM_HitReact_Back_Med_01");
+	const TCHAR* const HIT_FRONT_PATH = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_HitReact_Front_Med_02.AM_MM_HitReact_Front_Med_02");
 	constexpr float FIRE_TAP_SECONDS = 0.05f;	// 한 발 사건의 방아쇠 시간 — 3프레임. 연사 소총이 한 발만 내도록 짧게(제안값)
 	constexpr int32 NUM_FOE_WEAPONS = 3;	// 상대 빠른 칸 0 권총 · 1 소총 · 2 샷건
 	const TCHAR* const WEAPON_KEYS[3] = { TEXT("pistol"), TEXT("rifle"), TEXT("shotgun") };
@@ -255,6 +340,8 @@ namespace
 		case EMOBACScript::StartStop: return STARTSTOP_SCRIPT[I];
 		case EMOBACScript::Events: return EVENTS_SCRIPT[I];
 		case EMOBACScript::Ads: return ADS_SCRIPT[I];
+		case EMOBACScript::Crouch: return CROUCH_SCRIPT[I];
+		case EMOBACScript::Melee: return MELEE_SCRIPT[I];
 		case EMOBACScript::Run: break;
 		}
 		return SCRIPT[I];
@@ -267,6 +354,8 @@ namespace
 		case EMOBACScript::StartStop: return NUM_STARTSTOP_SEGMENTS;
 		case EMOBACScript::Events: return NUM_EVENTS_SEGMENTS;
 		case EMOBACScript::Ads: return NUM_ADS_SEGMENTS;
+		case EMOBACScript::Crouch: return NUM_CROUCH_SEGMENTS;
+		case EMOBACScript::Melee: return NUM_MELEE_SEGMENTS;
 		case EMOBACScript::Run: break;
 		}
 		return NUM_SEGMENTS;
@@ -315,7 +404,8 @@ void UMOBAnimCompareSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FString ScriptName;
 	FParse::Value(Cmd, TEXT("MOBACScript="), ScriptName);
 	Script = ScriptName == TEXT("aimjump") ? EMOBACScript::AimJump : ScriptName == TEXT("startstop") ? EMOBACScript::StartStop
-		: ScriptName == TEXT("events") ? EMOBACScript::Events : ScriptName == TEXT("ads") ? EMOBACScript::Ads : EMOBACScript::Run;
+		: ScriptName == TEXT("events") ? EMOBACScript::Events : ScriptName == TEXT("ads") ? EMOBACScript::Ads
+		: ScriptName == TEXT("crouch") ? EMOBACScript::Crouch : ScriptName == TEXT("melee") ? EMOBACScript::Melee : EMOBACScript::Run;
 	bAimJump = Script != EMOBACScript::Run;
 	FString WeaponName = WEAPON_KEYS[1];
 	FParse::Value(Cmd, TEXT("MOBACWeapon="), WeaponName);
@@ -829,11 +919,15 @@ void UMOBAnimCompareSubsystem::DriveFoe(float DeltaTime)
 		const FRotator Aim(AimPitch, BodyYaw, 0.f);
 		if (AController* Ctrl = Target->GetController()) Ctrl->SetControlRotation(Aim);
 		if (APawn* Mark = AimMark.Get()) Mark->SetActorLocation(Target->GetPawnViewLocation() + Aim.Vector() * AIM_MARK_DISTANCE);
-		if (S.bJump && SegmentTime < JUMP_PRESS_SECONDS) Target->Jump();
+		if (S.bJump && SegmentTime < JUMP_PRESS_SECONDS)
+		{
+			if (!Target->bPressedJump) Target->UnCrouch();	// 점프 능력과 같은 차례 — 처음 누른 프레임에 일어서고 뛴다(LyraGameplayAbility_Jump.cpp:55). 앉지 않았으면 아무 일도 없다
+			Target->Jump();
+		}
 		else Target->StopJumping();
 	}
 	if (S.bMove) Target->AddMovementInput(FRotator(0.f, BodyYaw + MoveAngle, 0.f).Vector(), 1.f);
-	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads) RunEvents(DeltaTime);
+	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee) RunEvents(DeltaTime);
 }
 
 // 사건 경로 — 조각 안의 사건 시각이 이 프레임 [SegmentTime, SegmentTime + DeltaTime) 에 들면 일으킨다. 대기(DeltaTime 0)에는 안 일으킨다.
@@ -849,6 +943,12 @@ void UMOBAnimCompareSubsystem::RunEvents(float DeltaTime)
 			SetFoeFire(false);
 			FoeFireReleaseLeft = -1.f;
 		}
+	}
+	if (bFoeMeleeReleasePending)
+	{
+		bFoeMeleeReleasePending = false;
+		if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get()))) A->AbilityInputTagReleased(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.Melee")));
+		else ++EvNoAsc;
 	}
 	const FScriptSegment& S = Seg(Script, Segment);
 	const auto Due = [&](EACEvent Ev, float At) { return Ev != EACEvent::None && DeltaTime > 0.f && At + EventDelay >= SegmentTime && At + EventDelay < SegmentTime + DeltaTime; };
@@ -903,6 +1003,27 @@ void UMOBAnimCompareSubsystem::RunEvents(float DeltaTime)
 			++EvAdsOff;
 			FrameEvents += TEXT("ads_off;");
 			break;
+		case EACEvent::CrouchOn:
+		case EACEvent::CrouchOff:
+			SetFoeCrouch(Ev == EACEvent::CrouchOn);
+			FrameEvents += Ev == EACEvent::CrouchOn ? TEXT("crouch_on;") : TEXT("crouch_off;");
+			break;
+		case EACEvent::Melee:
+			if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get())))
+			{
+				A->AbilityInputTagPressed(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.Melee")));
+				bFoeMeleeReleasePending = true;
+				++EvMelee;
+			}
+			else ++EvNoAsc;
+			FrameEvents += TEXT("melee;");
+			break;
+		case EACEvent::HitBack:
+		case EACEvent::HitFront:
+			if (PlayFoeHitReact(Ev == EACEvent::HitBack)) ++(Ev == EACEvent::HitBack ? EvHitBack : EvHitFront);
+			else ++EvHitFail;
+			FrameEvents += Ev == EACEvent::HitBack ? TEXT("hit_back;") : TEXT("hit_front;");
+			break;
 		case EACEvent::None:
 			break;
 		}
@@ -925,6 +1046,28 @@ void UMOBAnimCompareSubsystem::SetFoeAdsReleased()
 	if (!bWasHeld) return;
 	if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get()))) A->AbilityInputTagReleased(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.ADS")));
 	else ++EvNoAsc;
+}
+
+// 앉기 단추 — 사람 입력이 부르는 ALyraCharacter::ToggleCrouch 그대로(IA_Crouch 는 누른 프레임에 한 번, content-add-progress.md 0-1 정정).
+// 지금 상태 판정도 ToggleCrouch 와 같게(앉았거나 앉으려는 중). 누른 뒤엔 「앉으려는가」만 본다 — 일어서기는 다음 이동 틱에 bIsCrouched 가 바뀐다
+void UMOBAnimCompareSubsystem::SetFoeCrouch(bool bWant)
+{
+	ALyraCharacter* C = Cast<ALyraCharacter>(Foe.Get());
+	const UCharacterMovementComponent* M = C ? C->GetCharacterMovement() : nullptr;
+	if (!M)
+	{
+		++EvCrouchFail;
+		return;
+	}
+	if ((C->bIsCrouched || M->bWantsToCrouch) == bWant)
+	{
+		++EvCrouchSkip;
+		return;
+	}
+	C->ToggleCrouch();
+	if (M->bWantsToCrouch != bWant) ++EvCrouchFail;	// 공중에서 누르면 Lyra 는 앉지 않는다
+	else if (bWant) ++EvCrouchOn;
+	else ++EvCrouchOff;
 }
 
 void UMOBAnimCompareSubsystem::SetFoeFire(bool bHeld)
@@ -973,6 +1116,19 @@ bool UMOBAnimCompareSubsystem::EquipFoeWeapon(int32 Index)
 	const bool bOk = QB->GetActiveSlotIndex() == Index && QB->GetActiveSlotItem() != nullptr;
 	if (bOk) HeldWeapon = Index;
 	return bOk;
+}
+
+// 맞은 쪽 반응 — 피해 연출 GCNL_Character_DamageTaken 의 MontageHit 이 부르는 것과 같은 ACharacter::PlayAnimMontage(몽타주, 배율 1)(원본 기준, 그래프)
+bool UMOBAnimCompareSubsystem::PlayFoeHitReact(bool bBack)
+{
+	ACharacter* Target = Foe.Get();
+	UAnimMontage* Montage = LoadObject<UAnimMontage>(nullptr, bBack ? HIT_BACK_PATH : HIT_FRONT_PATH);
+	if (!Target || !Montage)
+	{
+		UE_LOG(LogMOBAComp, Warning, TEXT("MOB_ACOMP hit_react target=%d montage=%d"), Target ? 1 : 0, Montage ? 1 : 0);
+		return false;
+	}
+	return Target->PlayAnimMontage(Montage, 1.f) > 0.f;
 }
 
 // 부활 효과 능력을 다시 켠다 — 이미 켜져 있으면 끄고 켠다
@@ -1246,11 +1402,19 @@ void UMOBAnimCompareSubsystem::Finish()
 		const bool bProfSaved = !BlendProfileCsv.IsEmpty() && FFileHelper::SaveStringToFile(BlendProfileCsv, *ProfilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP montages seen=%d maxLive=%d saved=%d profilesSaved=%d"), SeenMontages.Num(), MaxLiveMontages, bMontSaved ? 1 : 0, bProfSaved ? 1 : 0);
 	}
-	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads)
+	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee)
 	{
 		// 종류마다 센 값 — 경로 표에 적힌 수(판 둘 × 조각의 사건 수)와 대조한다
 		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP events weapon=%s fire=%d hold=%d release=%d reload=%d swap=%d swapFail=%d spawn=%d spawnFail=%d adsOn=%d adsOff=%d noAsc=%d"),
 			WEAPON_KEYS[WeaponIndex], EvFire, EvHold, EvRelease, EvReload, EvSwap, EvSwapFail, EvSpawn, EvSpawnFail, EvAdsOn, EvAdsOff, EvNoAsc);
+		if (Script == EMOBACScript::Melee)
+		{
+			UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP meleeEvents weapon=%s melee=%d hitBack=%d hitFront=%d hitFail=%d crouchOn=%d crouchOff=%d"), WEAPON_KEYS[WeaponIndex], EvMelee, EvHitBack, EvHitFront, EvHitFail, EvCrouchOn, EvCrouchOff);
+		}
+		if (Script == EMOBACScript::Crouch)
+		{
+			UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP crouchEvents weapon=%s on=%d off=%d skip=%d fail=%d"), WEAPON_KEYS[WeaponIndex], EvCrouchOn, EvCrouchOff, EvCrouchSkip, EvCrouchFail);
+		}
 	}
 	if (bDumpClips && bSimple)
 	{

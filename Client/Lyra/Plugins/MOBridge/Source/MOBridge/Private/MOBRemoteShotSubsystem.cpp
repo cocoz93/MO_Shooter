@@ -71,6 +71,8 @@ void UMOBRemoteShotSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 	FParse::Value(FCommandLine::Get(), TEXT("MOBRemoteShot="), Tag);
+	AfterMoveSeconds = SCRIPT_AFTER_MOVE;
+	FParse::Value(FCommandLine::Get(), TEXT("MOBRemoteShotAfterMove="), AfterMoveSeconds);	// 경로마다 첫 움직임 뒤 길이가 다르다 — 앉기 경로(D-6)는 record_remote_shot.ps1 이 준다
 	GAreScreenMessagesEnabled = false;
 	Csv = TEXT("frame,seconds,x,y,z,yaw\n");
 }
@@ -310,7 +312,7 @@ void UMOBRemoteShotSubsystem::Tick(float DeltaTime)
 			MovedAt = Now;
 			UE_LOG(LogMOBRemoteShot, Log, TEXT("MOB_REMOTESHOT moved t=%.3f"), Now - StartedAt);
 		}
-		if (MovedAt > 0 && Now - MovedAt >= SCRIPT_AFTER_MOVE + TAIL_SECONDS)
+		if (MovedAt > 0 && Now - MovedAt >= AfterMoveSeconds + TAIL_SECONDS)
 		{
 			Grabber->StopCapturingFrames();
 			Stage = EStage::Drain;

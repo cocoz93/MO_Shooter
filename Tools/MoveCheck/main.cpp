@@ -5,8 +5,11 @@
 // 입력 파일 = MOBMoveRecordSubsystem 이 쓰는 move_<이름>.csv
 //   #param <이름> <값>      실행값(블루프린트가 덮은 뒤의 값)
 //   frame,seg,ev,dt, 입력3, 앞 위치3, 앞 속도3, 앞 모드, ext, 발사대3, pressed,was,hold,force,count,countPre, maxSpeed,
-//   뒤 위치3, 뒤 속도3, 뒤 모드, fBlock,fWalk,fLine,fDist,fLineDist, aCount [, ads]
+//   뒤 위치3, 뒤 속도3, 뒤 모드, fBlock,fWalk,fLine,fDist,fLineDist, aCount [, ads] [, cev,cwant,crouched,half,walk,cwantA,crouchedA,halfA]
 //   ads(-Ads 기록만) = 이번 프레임에 조준을 누른 상태. 다음 프레임 maxSpeed 가 MaxWalkSpeed × 0.5 인지 센다(GA_ADS — C 조준)
+//   앉기 칸(-Crouch 기록만, 컨텐츠 D) = cev(0 없음 / 1 앉기 키 ToggleCrouch / 2 점프 전 일어서기 UnCrouch) · 사건 전 앉으려 함 · 앉음 ·
+//   캡슐 반높이 · MaxWalkSpeed, 그리고 이동 뒤 앉으려 함 · 앉음 · 반높이. 앞 상태는 사건 전에 잡았으므로 한 프레임 대조도 사건을 넣고 돌린다
+//   어느 칸이 있는지는 머리줄(frame,seg,…)의 이름으로 가린다
 //   ev: 0 없음 / 1 Jump / 2 StopJumping. 모드: 1 걷기 / 3 낙하. ext=1 이면 프레임 사이에 밖에서 위치가 바뀐 것
 //
 // 두 가지를 잰다
@@ -42,7 +45,37 @@ namespace
 		float dt = 0, hold = 0, force = 0, maxSpeed = 0, fDist = 0, fLineDist = 0;
 		Vec3 input, p, v, launch, ap, av;
 		int ads = -1;	// -1 = 칸 없음
+		int cev = 0, cwant = 0, crouched = 0, cwantA = 0, crouchedA = 0;
+		float half = 0, walk = 0, halfA = 0;
 	};
+
+	// 머리줄에서 읽은 덧붙은 칸
+	struct Columns
+	{
+		bool ads = false;
+		bool crouch = false;
+	};
+
+	Columns ParseHeader(const char* line)
+	{
+		Columns c;
+		std::string name;
+		for (const char* p = line;; ++p)
+		{
+			if (*p == ',' || *p == '\0' || *p == '\r' || *p == '\n')
+			{
+				if (name == "ads") c.ads = true;
+				if (name == "cev") c.crouch = true;
+				name.clear();
+				if (*p != ',') break;
+			}
+			else
+			{
+				name += *p;
+			}
+		}
+		return c;
+	}
 
 	double Dist(const Vec3& a, const Vec3& b)
 	{
@@ -70,7 +103,7 @@ namespace
 		return 0;
 	}
 
-	bool ParseRow(char* line, Row& r)
+	bool ParseRow(char* line, const Columns& cols, Row& r)
 	{
 		char* s = line;
 		const auto D = [&]() { const double v = std::strtod(s, &s); if (*s == ',') ++s; return v; };
@@ -86,11 +119,27 @@ namespace
 		r.ap = V(); r.av = V();
 		r.modeAfter = I();
 		r.fBlock = I(); r.fWalk = I(); r.fLine = I(); r.fDist = F(); r.fLineDist = F(); r.aCount = I();
-		if (*s >= '0' && *s <= '9') r.ads = I();
+		if (cols.ads) r.ads = I();
+		if (cols.crouch)
+		{
+			r.cev = I(); r.cwant = I(); r.crouched = I(); r.half = F(); r.walk = F();
+			r.cwantA = I(); r.crouchedA = I(); r.halfA = F();
+		}
 		return *s == '\0' || *s == '\r' || *s == '\n';
 	}
 
-	void SyncState(MoveState& s, const Row& r, CMoveSim& sim)
+	// 앉기 사건 — 기록기가 이동 전에 부른 것과 같은 함수
+	void ApplyCrouchEvent(CMoveSim& sim, MoveState& s, const Row& r)
+	{
+		switch (r.cev)
+		{
+		case 1: sim.ToggleCrouch(s); break;
+		case 2: sim.RequestUnCrouch(s); break;
+		default: break;
+		}
+	}
+
+	void SyncState(MoveState& s, const Row& r, CMoveSim& sim, const Columns& cols)
 	{
 		s = MoveState();
 		s.location = r.p;
@@ -103,13 +152,21 @@ namespace
 		s.jumpCurrentCount = r.count;
 		s.jumpCurrentCountPreJump = r.countPre;
 		s.maxSpeed = r.maxSpeed;
+		if (cols.crouch)
+		{
+			// 앉은 캡슐로 바닥을 찾아야 하므로 RefreshFloor 전에
+			s.wantsToCrouch = r.cwant != 0;
+			s.crouched = r.crouched != 0;
+		}
 		sim.RefreshFloor(s);
 	}
 
-	void RunTick(CMoveSim& sim, MoveState& s, const Row& r)
+	void RunTick(CMoveSim& sim, MoveState& s, const Row& r, const Columns& cols)
 	{
 		const bool hasLaunch = r.launch.x != 0 || r.launch.y != 0 || r.launch.z != 0;
-		s.maxSpeed = r.maxSpeed;
+		// maxSpeed 칸은 이동 전 GetMaxSpeed — 앉아 걸을 때 이미 300 이다. 이동 코드는 MaxWalkSpeed 를 받아 그 틱의 앉음으로 고르므로
+		// 앉기 기록은 walk 칸(MaxWalkSpeed)을 준다. 0 이면 이동 금지(Lyra GetMaxSpeed 의 태그 갈래)라 그대로 0
+		s.maxSpeed = (cols.crouch && r.maxSpeed != 0.f) ? r.walk : r.maxSpeed;
 		sim.Tick(s, r.input, r.dt, hasLaunch ? &r.launch : nullptr);
 	}
 
@@ -118,6 +175,22 @@ namespace
 		size_t frames = 0, over001 = 0, over01 = 0, over1 = 0, velOver1 = 0, modeMismatch = 0, walking = 0, falling = 0;
 		double maxDiff = 0, maxVel = 0;
 		std::vector<double> diffs;
+		// 앉기 — 이동 뒤 앉음 · 앉으려 함 · 캡슐 반높이가 Lyra 와 다른 프레임 수, 그리고 Lyra 가 앉은 프레임 수(0 이면 안 본 것)
+		size_t crouchedFrames = 0, crouchedMismatch = 0, wantMismatch = 0, halfMismatch = 0;
+
+		void AddCrouch(const CMoveSim& sim, const MoveState& s, const Row& r)
+		{
+			if (r.crouchedA) ++crouchedFrames;
+			if ((s.crouched ? 1 : 0) != r.crouchedA) ++crouchedMismatch;
+			if ((s.wantsToCrouch ? 1 : 0) != r.cwantA) ++wantMismatch;
+			if (sim.HalfHeightOf(s) != r.halfA) ++halfMismatch;
+		}
+
+		void PrintCrouch(const char* name) const
+		{
+			std::printf("%s crouch crouchedFrames=%zu crouchedMismatch=%zu wantMismatch=%zu halfMismatch=%zu\n",
+				name, crouchedFrames, crouchedMismatch, wantMismatch, halfMismatch);
+		}
 
 		void Add(const MoveState& s, const Row& r)
 		{
@@ -163,6 +236,8 @@ namespace
 		MOVE_DELTA(fallStuckSideStep); MOVE_DELTA(apexSubsteps); MOVE_DELTA(jumps); MOVE_DELTA(launches); MOVE_DELTA(startPenetrating);
 		MOVE_DELTA(resolveTeleport); MOVE_DELTA(resolveSweep); MOVE_DELTA(floorPopOut); MOVE_DELTA(perchTried); MOVE_DELTA(perchOk);
 		MOVE_DELTA(perchUnwalkableOverride); MOVE_DELTA(perchFail);
+		MOVE_DELTA(crouchGround); MOVE_DELTA(crouchAir); MOVE_DELTA(uncrouchGround); MOVE_DELTA(uncrouchGroundLowered);
+		MOVE_DELTA(uncrouchAir); MOVE_DELTA(uncrouchAirShifted); MOVE_DELTA(uncrouchBlocked);
 #undef MOVE_DELTA
 	}
 
@@ -182,6 +257,14 @@ namespace
 			(unsigned long long)c.startPenetrating, (unsigned long long)c.resolveTeleport, (unsigned long long)c.resolveSweep);
 	}
 
+	// 앉기 갈래 — 앉기 기록일 때만 찍는다(옛 기록의 COUNT 줄 수를 바꾸지 않게 이름을 따로)
+	void PrintCrouchCounters(const MoveCounters& c)
+	{
+		std::printf("CROUCH_COUNT crouchGround=%llu crouchAir=%llu uncrouchGround=%llu lowered=%llu uncrouchAir=%llu airShifted=%llu blocked=%llu\n",
+			(unsigned long long)c.crouchGround, (unsigned long long)c.crouchAir, (unsigned long long)c.uncrouchGround, (unsigned long long)c.uncrouchGroundLowered,
+			(unsigned long long)c.uncrouchAir, (unsigned long long)c.uncrouchAirShifted, (unsigned long long)c.uncrouchBlocked);
+	}
+
 	// 옮기지 않은 갈래를 타는 값이면 대조가 뜻이 없다. 값을 먼저 확인한다
 	void WarnUnported(std::map<std::string, double>& v)
 	{
@@ -194,6 +277,8 @@ namespace
 		warn("bUseFlatBaseForFloorChecks", v["bUseFlatBaseForFloorChecks"] != 0);
 		warn("bForceMaxAccel", v["bForceMaxAccel"] != 0);
 		warn("bMaintainHorizontalGroundVelocity", v["bMaintainHorizontalGroundVelocity"] == 0);
+		// 앉아 턱 끝에서 멈추는 갈래(CanWalkOffLedges 의 앉기 조건)는 안 옮겼다 — Lyra 는 참
+		if (v.count("bCanWalkOffLedgesWhenCrouching")) warn("bCanWalkOffLedgesWhenCrouching", v["bCanWalkOffLedgesWhenCrouching"] == 0);
 	}
 }
 
@@ -245,6 +330,7 @@ int main(int argc, char** argv)
 	std::map<std::string, double> values;
 	std::vector<Row> rows;
 	size_t badRows = 0;
+	Columns cols;
 	static char line[4096];
 	while (std::fgets(line, sizeof(line), f))
 	{
@@ -255,9 +341,14 @@ int main(int argc, char** argv)
 			if (sscanf_s(line + 7, "%127s %lf", name, (unsigned)sizeof(name), &value) == 2) values[name] = value;
 			continue;
 		}
+		if (std::strncmp(line, "frame,", 6) == 0)
+		{
+			cols = ParseHeader(line);
+			continue;
+		}
 		if (line[0] < '0' || line[0] > '9') continue;
 		Row r;
-		if (ParseRow(line, r)) rows.push_back(r);
+		if (ParseRow(line, cols, r)) rows.push_back(r);
 		else ++badRows;
 		if (rows.size() >= limit) break;
 	}
@@ -296,6 +387,12 @@ int main(int argc, char** argv)
 	params.minAnalogWalkSpeed = (float)values["MinAnalogWalkSpeed"];
 	params.capsuleRadius = (float)values["CapsuleRadius"];
 	params.capsuleHalfHeight = (float)values["CapsuleHalfHeight"];
+	if (values.count("CrouchedHalfHeight"))
+	{
+		params.canCrouch = true;
+		params.maxWalkSpeedCrouched = (float)values["MaxWalkSpeedCrouched"];
+		params.crouchedHalfHeight = (float)values["CrouchedHalfHeight"];
+	}
 
 	// 시험의 시험 — 환경 변수로 값을 일부러 틀려 대조가 잡는지 본다
 	char* breakValue = nullptr;
@@ -311,6 +408,10 @@ int main(int argc, char** argv)
 		params.maxWalkSpeed, params.maxAcceleration, params.groundFriction, params.brakingDecelerationWalking, params.brakingDecelerationFalling,
 		params.brakingFrictionFactor, params.useSeparateBrakingFriction ? 1 : 0, params.gravityZ, params.jumpZVelocity, params.jumpMaxHoldTime, params.airControl,
 		params.maxStepHeight, params.walkableFloorZ, params.maxSimulationTimeStep, params.maxSimulationIterations, params.terminalVelocity, params.capsuleRadius, params.capsuleHalfHeight);
+	if (cols.crouch)
+	{
+		std::printf("PARAM crouch canCrouch=%d maxWalkCrouched=%g crouchedHalf=%g\n", params.canCrouch ? 1 : 0, params.maxWalkSpeedCrouched, params.crouchedHalfHeight);
+	}
 	std::printf("ROWS total=%zu bad=%zu\n", rows.size(), badRows);
 	if (rows.empty()) return 1;
 
@@ -376,10 +477,12 @@ int main(int argc, char** argv)
 		EMoveMode unused;
 		if (!ToMode(r.modeBefore, unused)) continue;
 		MoveState s;
-		SyncState(s, r, oneSim);
+		SyncState(s, r, oneSim, cols);
 		const MoveCounters beforeCounters = oneSim.GetCounters();
-		RunTick(oneSim, s, r);
+		if (cols.crouch) ApplyCrouchEvent(oneSim, s, r);
+		RunTick(oneSim, s, r, cols);
 		oneStats.Add(s, r);
+		if (cols.crouch) oneStats.AddCrouch(oneSim, s, r);
 
 		const double d = Dist(s.location, r.ap);
 		if (d > 0.1) ++oneByModePair[r.modeBefore * 10 + r.modeAfter];
@@ -412,6 +515,7 @@ int main(int argc, char** argv)
 	}
 	if (mismatch) std::fclose(mismatch);
 	oneStats.Print("ONE");
+	if (cols.crouch) oneStats.PrintCrouch("ONE");
 	std::printf("ONE floor walkableDiff=%zu distCompared=%zu distOver0.1=%zu distMax=%.4f | over0.1 by mode(before->after):", floorWalkDiff, floorDistCompared, floorDistOver01, floorDistMax);
 	for (const auto& pair : oneByModePair) std::printf(" %d->%d=%zu", pair.first / 10, pair.first % 10, pair.second);
 	std::printf("\n");
@@ -453,30 +557,36 @@ int main(int argc, char** argv)
 			segClock = 0.f;
 			firstOver1At = -1.f;
 			segFirstSmallPrinted = false;
-			SyncState(run, r, runSim);
+			SyncState(run, r, runSim, cols);
+			if (cols.crouch) ApplyCrouchEvent(runSim, run, r);
 		}
 		else if (r.ext != 0)
 		{
 			++resyncs;
-			SyncState(run, r, runSim);
+			SyncState(run, r, runSim, cols);
+			if (cols.crouch) ApplyCrouchEvent(runSim, run, r);
 		}
 		else
 		{
+			// 기록기 순서 = 점프 전 일어서기 → 점프. 점프 허용 검사는 틱 안에서 하므로 둘 다 틱 전에 넣으면 된다
+			if (cols.crouch && r.cev == 2) ApplyCrouchEvent(runSim, run, r);
 			switch (r.ev)
 			{
 			case 1: runSim.PressJump(run); break;
 			case 2: runSim.ReleaseJump(run); break;
 			default: break;
 			}
+			if (cols.crouch && r.cev == 1) ApplyCrouchEvent(runSim, run, r);
 		}
 
 		QueryPerformanceCounter(&t0);
-		RunTick(runSim, run, r);
+		RunTick(runSim, run, r, cols);
 		QueryPerformanceCounter(&t1);
 		runSeconds += (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
 		++runTicks;
 
 		runStats.Add(run, r);
+		if (cols.crouch) runStats.AddCrouch(runSim, run, r);
 		const double d = Dist(run.location, r.ap);
 		segMax = std::max(segMax, d);
 		segClock += r.dt;
@@ -496,7 +606,9 @@ int main(int argc, char** argv)
 	std::sort(firstOver1.begin(), firstOver1.end());
 	std::printf("RUN segments=%zu over1cm=%zu over10cm=%zu worst=%.3f (seg %d) resync=%zu firstOver1 median=%.2fs\n",
 		segments, segOver1, segOver10, worstSeg, worstSegId, resyncs, firstOver1.empty() ? 0.f : firstOver1[firstOver1.size() / 2]);
+	if (cols.crouch) runStats.PrintCrouch("RUN");
 	PrintCounters(runSim.GetCounters());
+	if (cols.crouch) PrintCrouchCounters(runSim.GetCounters());
 	std::printf("TIME tick=%.2fus (ticks=%zu)\n", runTicks ? runSeconds * 1e6 / (double)runTicks : 0.0, runTicks);
 	return 0;
 }

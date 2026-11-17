@@ -27,7 +27,7 @@ public:
 	virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Always; }
 
 	// 각본 한 칸이 하는 일. 칸이 시작할 때 한 번 한다(Melee 는 칸 안 0.3초에 누른다, MeleeSpam 은 칸 내내 누른다)
-	enum class EAct : uint8 { None, Home, AdsPress, AdsRelease, CrouchToggle, Equip, FoeSetup, FoeSameTeam, MeleeAt, MeleeAtBack, MeleeAtSide, MeleeHere, MeleeSpam, PadsDump, PadOn, Away, SetHealth, Watch };
+	enum class EAct : uint8 { None, Home, AdsPress, AdsRelease, CrouchToggle, Equip, FoeSetup, FoeSameTeam, MeleeAt, MeleeAtBack, MeleeAtSide, MeleeHere, MeleeSpam, PadsDump, PadOn, Away, SetHealth, Watch, MeleeJumpAt, BumpStillAt, BumpAt, BumpStillSideAt, BumpSideAt, FoeCrouchToggle };
 
 private:
 	bool WaitReady(float DeltaTime);
@@ -39,11 +39,18 @@ private:
 	void Finish(bool bOk);
 
 	ACharacter* Me() const;
+	// 19 F-2 원인 찾기 — 부딪힘 각본에서 이동이 막힐 때마다 엔진이 준 맞은 시각 · 법선 · 쓸기 시작과 끝을 로그에 그대로 적는다(MOB_CPROBE_HIT)
+	UFUNCTION()
+	void OnPawnHit(AActor* SelfActor, AActor* OtherActor, FVector NormalImpulse, const FHitResult& Hit);
+	bool bHitsBound = false;
 	void GoHome() const;
 	void PlaceFoe(double Distance, bool bFacingMe, double Side = 0.0) const;
 	void LogScores(const TCHAR* When) const;
-	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : 0); }
-	static bool IsMeleeOnce(EAct A) { return A == EAct::MeleeAt || A == EAct::MeleeAtBack || A == EAct::MeleeAtSide || A == EAct::MeleeHere; }
+	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : 0)); }
+	static bool IsMeleeOnce(EAct A) { return A == EAct::MeleeAt || A == EAct::MeleeAtBack || A == EAct::MeleeAtSide || A == EAct::MeleeHere || A == EAct::MeleeJumpAt; }
+	// F-1 부딪힘 칸 — 순간이동으로 시작해 나는 +X 로 걷는다. FoeWalks 면 상대도 -X 로 걷는다(마주 걷기)
+	static bool IsBump(EAct A) { return A == EAct::BumpStillAt || A == EAct::BumpAt || A == EAct::BumpStillSideAt || A == EAct::BumpSideAt; }
+	static bool FoeWalks(EAct A) { return A == EAct::BumpAt || A == EAct::BumpSideAt; }
 	void PressTag(const TCHAR* TagName, bool bPress) const;
 	bool IsAbilityActive(const TCHAR* ClassNamePart) const;
 	float HealthOf(const AActor* A) const;
@@ -51,16 +58,32 @@ private:
 	ALyraWeaponSpawner* PadNear(const FVector& Where) const;
 	void StandOn(const FVector& Where) const;
 	static bool PadAvailable(const ALyraWeaponSpawner* Pad, float& OutPercent);
+	void LogMeleeTrace(const TCHAR* Which, const FVector& Hand) const;
+	void LogFoeParts(const TCHAR* Which, const TArray<FTransform>& Parts, const TArray<FName>& Names, const FVector& Loc, double Yaw) const;
+	// 몸 맞추기(-MOBCPQuinn, 17-d) — 나 · 상대를 서버 클립 · 애니 비교 기록과 같은 Quinn 몸으로 바꾸고(D33) 권총을 다시 쥐여
+	// 여성형 무기 층이 붙게 한다(무기 층은 쥘 때 몸 표식으로 고른다). 다 맞고 자리 잡으면 true
+	bool QuinnReady(float DeltaTime);
+	bool EquipWeapon(ACharacter* C, int32 Weapon, UClass*& OutDef) const;
+	void LogBodies(const TCHAR* When) const;		// MOB_CPROBE_BODY — 나 · 상대의 몸 메시와 붙은 애니 층
 
 	FString Tag;
 	bool bPads = false;
 	bool bBridge = false;
+	bool bBump = false;		// F-1 부딪힘 각본(연습장, -MOBCPMode=bump)
 	bool bReady = false;
 	bool bDone = false;
 	TWeakObjectPtr<APawn> ClearPawn;
 	float ClearSeconds = 0.f;
 	double WaitSeconds = 0;
 	double StartRealAt = 0;
+	bool bPrepared = false;
+	bool bJumpPending = false;		// 뛰며 근접 칸 — 칸 첫 프레임 입력으로 점프를 누른다
+	int32 JumpPressFrame = -1;		// 뛰며 근접 칸 — 점프를 누른 프레임(다음 프레임에 뗀다)
+	bool bForceQuinn = false;
+	int32 BodyTries = 0;
+	double BodySeconds = 0;
+	double NextBodyTryAt = 0;
+	double BodyEquippedAt = -1;
 
 	int32 Step = -1;
 	float StepTime = 0.f;
@@ -86,6 +109,14 @@ private:
 	FVector MeAtStepBegin = FVector::ZeroVector;
 	float NextWatchLogAt = 0.f;
 	TArray<double> MeleeStarts;		// 연타 칸 — 능력이 켜진 시각들
+	// 앞 프레임 끝의 내 hand_r(E-1) — 근접 능력은 입력 처리 때 켜져 그 프레임 자세를 평가하기 전 손을 읽는다(짐작, 밀기 속도로 가린다)
+	FVector PrevHand = FVector::ZeroVector;
+	bool bPrevHandValid = false;
+	// 앞 프레임 끝의 상대 몸체(물리 몸 요소마다 세상 자리) · 자리 · 요 — 능력의 쓸기는 상대 메시 몸체에도 닿는다(e1g1, 대상 종류 Pawn 에 메시도 든다)
+	TArray<FTransform> PrevFoeParts;
+	TArray<FName> PrevFoePartNames;
+	FVector PrevFoeLoc = FVector::ZeroVector;
+	double PrevFoeYaw = 0.0;
 
 	// 받침 판 — 체력 · 받침 상태가 바뀐 때를 적는다
 	float LastHp = -1.f;

@@ -18,8 +18,9 @@ namespace mo
 		constexpr uint8_t kAdditiveMeshRotation = 2;	// AAT_RotationOffsetMeshSpace
 		constexpr uint8_t kProfileBlendMask = 2;		// 엔진 EBlendProfileMode::BlendMask
 
-		// 끼움 자리 평가 차례 — 플랜 「구조」의 차례(이름이 가리키는 차례, 제 판단 · D43). 쏜 뒤 덮기는 이보다 앞(착지 충격 바로 뒤)이다
-		constexpr const char* kSlotOrder[] = { "FullBody", "FullBodyAdditivePreAim", "UpperBody", "UpperBodyAdditive" };
+		// 끼움 자리 이름 표 — 처음엔 이 표 차례대로 얹었다(플랜 「구조」의 차례, 제 판단 · D43). 지금 차례는 EvaluateLocal 이 Lyra 그래프대로 정한다(D72)
+		// 다섯째 AdditiveHitReact(맞은 쪽 반응, 컨텐츠 E-2)는 앞 넷과 따로 조준 뒤 · 손 뒤처리 앞에 얹는다(EvaluateLocal) — 차례는 Lyra 그래프 덤프에서 읽었다(원본 기준)
+		constexpr const char* kSlotOrder[] = { "FullBody", "FullBodyAdditivePreAim", "UpperBody", "UpperBodyAdditive", "AdditiveHitReact" };
 
 		float Smooth(float x)
 		{
@@ -319,7 +320,7 @@ namespace mo
 	{
 		_clips = nullptr;
 		_bundle = clips.FindBundle(bundleName);
-		if (!_bundle || _bundle->clips.size() < ACLIP_COUNT) return false;		// 47개 뒤는 몽타주 · 덮기 자세 클립(9단계 3-a, 조준 17개는 C-3)
+		if (!_bundle || _bundle->clips.size() < ACLIP_COUNT) return false;		// 67개 뒤는 몽타주 · 덮기 자세 클립(9단계 3-a, 조준 17개는 C-3, 앉기 20개는 D-3)
 
 		_handR = clips.FindBone("hand_r");
 		_gun = clips.FindBone("ik_hand_gun");
@@ -366,9 +367,12 @@ namespace mo
 			first = false;
 			++active;
 		};
-		// 허리 묶음 → 대기 몸짓 → 조준 묶음 차례. 조준 묶음 비중이 0 이면 조준 전과 같은 덧셈 차례 · 같은 수다(D60)
-		const float ads = std::max(0.f, std::min(input.adsBlend, 1.f));
-		const float hip = 1.f - ads;
+		// 허리 묶음 → 대기 몸짓 → 조준 묶음 → 앉기 묶음 차례. 조준 · 앉기 묶음 비중이 0 이면 조준 전 · 앉기 전과 같은 덧셈 차례 · 같은 수다(D60 · D62 2)
+		const float crouch = std::max(0.f, std::min(input.crouchBlend, 1.f));
+		const float stand = 1.f - crouch;
+		const float adsBlend = std::max(0.f, std::min(input.adsBlend, 1.f));
+		const float hip = (1.f - adsBlend) * stand;
+		const float ads = adsBlend * stand;
 		for (int i = 0; i < kAnimWalkClips; ++i)
 		{
 			const float weight = i == 0 ? input.weights[i] * hip * (1.f - fidget) : input.weights[i] * hip;
@@ -379,6 +383,11 @@ namespace mo
 		{
 			const float weight = input.weights[i] * ads;
 			if (weight > kZeroWeight) add(_bundle->clips[(size_t)ACLIP_ADS_IDLE + i], input.adsTimes[i], weight);
+		}
+		for (int i = 0; i < kAnimWalkClips; ++i)
+		{
+			const float weight = input.weights[i] * crouch;
+			if (weight > kZeroWeight) add(_bundle->clips[(size_t)ACLIP_CROUCH_IDLE + i], input.crouchTimes[i], weight);
 		}
 
 		if (active == 0)
@@ -557,20 +566,21 @@ namespace mo
 		}
 	}
 
-	// 쏜 뒤 윗몸 덮기 — 덮는 자세(그 클립 시각 0)를 비중 × 자리 비중 표로 뼈마다 섞는다
+	// 쏜 뒤 윗몸 덮기 — 덮는 자세(그 클립 시각 0)를 비중 × 자리 비중 표로 뼈마다 섞는다. 앉았으면 앉은 덮기 자세(D62 5 — Lyra UpdateHipFireRaiseWeaponPose)
 	void CAnimPoseEvaluator::ApplyOverride(const AnimPoseInput& input, BoneTransform* pose)
 	{
 		if (input.overrideWeight <= kZeroWeight || _bundle->overrideClip < 0 || _bundle->overrideSlot < 0) return;
-		_clips->Sample(*_bundle, _bundle->clips[(size_t)_bundle->overrideClip], 0.0, _a.data());
+		const size_t clip = input.crouched ? (size_t)ACLIP_CROUCH_OVERRIDE : (size_t)_bundle->overrideClip;
+		_clips->Sample(*_bundle, _bundle->clips[clip], 0.0, _a.data());
 		BlendPerBone(pose, _a.data(), input.overrideWeight, SlotMask(_bundle->overrideSlot), pose);
 	}
 
 	// 끼움 자리 하나. 엔진 GetSlotWeight(AnimInstanceProxy.cpp:2103) · SlotEvaluatePose(:1885) 를 옮겼다 —
 	// 그 자리에 줄이 있는 몽타주의 비중 합이 1 을 넘으면 나누고, 일반 줄은 비중대로 섞은 뒤 남은 몫(1 − 일반 비중 합)을 아래 자세로 채우고, 덧붙임 줄은 그 위에 비중만큼 얹는다.
 	// 자리에 비중 표가 있으면 그 결과를 아래 자세와 뼈별로 섞는다(뼈별 섞기 노드의 층 비중은 1 로 둔다 — 그래프를 안 읽어 모름, 제 판단)
-	void CAnimPoseEvaluator::ApplySlot(const AnimPoseInput& input, int slot, BoneTransform* pose, bool perBone)
+	bool CAnimPoseEvaluator::ApplySlot(const AnimPoseInput& input, int slot, BoneTransform* pose, bool perBone)
 	{
-		if (slot < 0) return;
+		if (slot < 0) return false;
 
 		struct Entry
 		{
@@ -625,7 +635,7 @@ namespace mo
 			total += view.weight;
 			if (clip.additive == kAdditiveNone) nonAdditive += view.weight;
 		}
-		if (count == 0) return;
+		if (count == 0) return false;
 
 		float slotWeight = total;
 		if (slotWeight > 1.f)
@@ -633,7 +643,7 @@ namespace mo
 			nonAdditive /= slotWeight;
 			slotWeight = 1.f;
 		}
-		if (slotWeight <= kZeroWeight) return;
+		if (slotWeight <= kZeroWeight) return false;
 		const float sourceWeight = std::max(0.f, std::min(1.f - nonAdditive, 1.f));
 		const bool normalize = total > 1.f + kZeroWeight;
 
@@ -673,6 +683,7 @@ namespace mo
 
 		const float* mask = SlotMask(slot);
 		if (perBone && mask) BlendPerBone(_base.data(), pose, 1.f, mask, pose);
+		return true;
 	}
 
 	void CAnimPoseEvaluator::AccumulateAim(BoneTransform* pose, uint32_t firstClip, const float pitches[3], float pitch, float weight)
@@ -778,14 +789,15 @@ namespace mo
 		BlendWalk(input, outLocal);
 		ApplyJump(input, outLocal);
 		ApplyRecovery(input, outLocal);
-		// 차례 = 끼움 자리 넷 → 쏜 뒤 덮기 → 조준(D50). 시험 깃발은 후보 판을 다시 만들 때만
+		// 차례 = Lyra ABP_Mannequin_Base AnimGraph 핀 연결(D72 — C:\tmp\mob\e2\graph_chain.py 로 따라감, 원본 기준):
+		//   윗몸 섞기(LayeredBoneBlend_2) → 사격 덧붙임(FullBodyAdditivePreAim) → 조준 층(FullBody_Aiming) → 맞은 쪽 반응(AdditiveHitReact)
+		//   → 덧붙임 층(FullBodyAdditives, 안 옮김) → 통째(FullBody) → 손 · 발 뒤처리. 쏜 뒤 덮기는 Lyra 그래프에 없는 이 파일 몫이라(D45) 자리를 D50 대로 둔다(사격 덧붙임 뒤 · 조준 앞)
+		// 옛 차례(D50 — 통째 → 사격 덧붙임 → 윗몸 → 윗몸 덧붙임, 자리마다 뼈별 섞기)는 시험 깃발 kPoseTestD50Order. 시험 깃발은 후보 판을 다시 만들 때만
+		const bool d50 = (_poseTest & kPoseTestD50Order) != 0;
 		const bool overrideOn = (_poseTest & kPoseTestNoOverride) == 0;
 		const bool overrideEarly = (_poseTest & kPoseTestOverrideEarly) != 0;
-		const bool upperAfterAim = (_poseTest & kPoseTestUpperAfterAim) != 0;
-		if (overrideOn && overrideEarly) ApplyOverride(input, outLocal);
-		ApplySlot(input, _slotOrder[0], outLocal);		// 통째(FullBody)
-		ApplySlot(input, _slotOrder[1], outLocal);		// 사격 덧붙임(FullBodyAdditivePreAim)
-		const auto applyUpper = [&]()
+		const bool upperAfterAim = d50 && (_poseTest & kPoseTestUpperAfterAim) != 0;
+		const auto applyUpperD50 = [&]()
 		{
 			if ((_poseTest & kPoseTestChainUpper) == 0 || _slotOrder[2] < 0)
 			{
@@ -799,11 +811,37 @@ namespace mo
 			const float* mask = SlotMask(_slotOrder[2]);
 			if (mask) BlendPerBone(_b.data(), outLocal, 1.f, mask, outLocal);
 		};
-		if (!upperAfterAim) applyUpper();
+		if (overrideOn && overrideEarly) ApplyOverride(input, outLocal);
+		if (d50)
+		{
+			ApplySlot(input, _slotOrder[0], outLocal);		// 통째(FullBody)
+			ApplySlot(input, _slotOrder[1], outLocal);		// 사격 덧붙임(FullBodyAdditivePreAim)
+			if (!upperAfterAim) applyUpperD50();
+		}
+		else
+		{
+			// LayeredBoneBlend_2(가림 = 윗몸 자리 비중 표 — 그래프는 UpperBodyLowerBodySplitMask · 메시 기준 회전) 바탕 = 걸음 + UpperBodyAdditive 자리(ApplyAdditive_1, 가림 없음),
+			// 섞을 쪽 = 걸음 위 UpperBody 자리. 그래서 윗몸 덧붙임은 가림이 1 보다 작은 뼈(골반 · 허리 · 빗장)에만 남는다. 두 자리가 다 비면 걸음 그대로라 건너뛴다
+			// ApplyAdditive_1 의 비중(UpperbodyDynamicAdditiveWeight — 몽타주 중 · 땅 위면 1, 아니면 초당 6 으로 0 에 다가감, 그래프 원본 기준)은 안 옮겼다 — 늘 1(D72 남은 차이)
+			if (_slotOrder[2] >= 0)
+			{
+				std::memcpy(_b.data(), outLocal, sizeof(BoneTransform) * _boneCount);
+				const bool upper = ApplySlot(input, _slotOrder[2], _b.data(), false);		// 윗몸(UpperBody)
+				const bool additive = ApplySlot(input, _slotOrder[3], outLocal, false);	// 윗몸 덧붙임(UpperBodyAdditive)
+				if (upper || additive) BlendPerBone(outLocal, _b.data(), 1.f, SlotMask(_slotOrder[2]), outLocal);
+			}
+			else
+			{
+				ApplySlot(input, _slotOrder[3], outLocal, false);
+			}
+			ApplySlot(input, _slotOrder[1], outLocal);		// 사격 덧붙임(FullBodyAdditivePreAim)
+		}
 		if (overrideOn && !overrideEarly) ApplyOverride(input, outLocal);
 		AccumulateAim(outLocal, ACLIP_AIM_UP, _bundle->aimPitch, input.pitch, input.aimBlend);
 		AccumulateAim(outLocal, ACLIP_READY_UP, _bundle->aimPitch + 3, input.pitch, 1.f - input.aimBlend);
-		if (upperAfterAim) applyUpper();
+		if (upperAfterAim) applyUpperD50();
+		ApplySlot(input, _slotOrder[4], outLocal);		// 맞은 쪽 반응(AdditiveHitReact, 컨텐츠 E-2)
+		if (!d50) ApplySlot(input, _slotOrder[0], outLocal);		// 통째(FullBody) — 부활 몽타주가 반응까지 덮는다(Lyra 와 같다, E-2-b spawn_hit 조각)
 		if (_handIK) ApplyHandIK(outLocal, (_poseTest & kPoseTestNoHandAlpha) != 0 ? 1.f : input.handLeftAlpha);
 		FromKey(_clips->Bones()[0].ref, outLocal[0]);
 		ApplyPlant(input, outLocal);
@@ -827,7 +865,7 @@ namespace mo
 		}
 	}
 
-	double CAnimPoseEvaluator::ComputeBoundRadius()
+	double CAnimPoseEvaluator::ComputeBoundRadius(double crouchMeshLiftZ)
 	{
 		// 표본 자세의 최대에 더하는 여유. 실제 판은 클립 여럿을 섞고 발 디딤으로 골반을 약 4cm 내린다.
 		// 그 몫을 덮으려고 둔 값이다(제 판단) — 실제 경로의 최대는 AnimCheck state 의 STATEBOUND 로 대조한다
@@ -837,7 +875,7 @@ namespace mo
 		std::vector<BoneTransform> local(_boneCount);
 		std::vector<BodyPose> poses(bodies.size());
 		double reach = 0;
-		const auto measure = [&](AnimPoseInput input)
+		const auto measureAt = [&](AnimPoseInput input, double meshLiftZ)
 		{
 			for (const float aimBlend : { 0.f, 1.f })
 			{
@@ -846,10 +884,17 @@ namespace mo
 					input.aimBlend = aimBlend;
 					input.pitch = pitch;
 					EvaluateLocal(input, local.data());
-					BodiesFromLocal(local.data(), poses.data());
+					BodiesFromLocal(local.data(), poses.data(), meshLiftZ);
 					for (size_t i = 0; i < bodies.size(); ++i) reach = std::max(reach, BodyReach(bodies[i], poses[i]));
 				}
 			}
+		};
+		const auto measure = [&](const AnimPoseInput& input) { measureAt(input, 0.0); };
+		// 앉기 클립(D62 7) — 앉은 캡슐(올림 crouchMeshLiftZ)과 선 캡슐(올림 0) 둘 다. 앉기 전환 첫 자세는 선 자세인데 캡슐은 이미 앉았고, 일어서기 전환은 그 반대다
+		const auto measureCrouched = [&](const AnimPoseInput& input)
+		{
+			measureAt(input, 0.0);
+			if (crouchMeshLiftZ != 0.0) measureAt(input, crouchMeshLiftZ);
 		};
 		const auto sampleTime = [this](const AnimClip& clip, uint32_t sample) { return std::min((float)((double)sample / _bundle->sampleHz), clip.length); };
 
@@ -879,7 +924,22 @@ namespace mo
 				measure(input);
 			}
 		}
-		// 쌓기 칸 전부 — 점프 · 허리 전환 · 조준 전환
+		// 앉은 서기 · 걸음 넷(D62)
+		for (uint32_t c = 0; c < (uint32_t)kAnimWalkClips; ++c)
+		{
+			const AnimClip& clip = clips[ACLIP_CROUCH_IDLE + c];
+			for (uint32_t s = 0; s < clip.samples; ++s)
+			{
+				AnimPoseInput input;
+				for (float& weight : input.weights) weight = 0.f;
+				input.weights[c] = 1.f;
+				input.crouchBlend = 1.f;
+				input.crouched = true;
+				input.crouchTimes[c] = sampleTime(clip, s);
+				measureCrouched(input);
+			}
+		}
+		// 쌓기 칸 전부 — 점프 · 허리 전환 · 조준 전환 · 앉은 전환 · 서기 안 앉기 · 일어서기
 		for (int stack = 0; stack < kStackClipCount; ++stack)
 		{
 			const AnimClip& clip = clips[StackClipIndex(stack)];
@@ -890,7 +950,8 @@ namespace mo
 				input.layers[0].clip = (int16_t)stack;
 				input.layers[0].time = sampleTime(clip, s);
 				input.layers[0].fade = 1.f;
-				measure(input);
+				if (stack >= kStackAdsEnd) measureCrouched(input);
+				else measure(input);
 			}
 		}
 		for (uint32_t s = 0; s < clips[ACLIP_RECOVERY].samples; ++s)
@@ -907,7 +968,7 @@ namespace mo
 		}
 		// 몽타주(9단계 3-b) — 서기 위에 몽타주 하나를 비중 1 로, 시각은 표본 간격마다. 덮기 · 왼손 비중은 끝값 0 · 1 을 다 본다.
 		// 모든 묶음의 몽타주 전부(조각 4) — 무기를 바꾸면 서버는 그 틱에 묶음을 바꾸고(D46), 앞 무기의 쏘기 · 재장전은 새 묶음 평가기 위에서 빠지는 중으로 남는다.
-		// 아래 서기는 허리 · 조준 둘 다(D60 — 조준한 채 쏜다)
+		// 아래 서기는 허리 · 조준 · 앉음 셋(D60 — 조준한 채 쏜다, D62 — 앉은 채 쏜다 · 앉은 덮기 자세)
 		const std::vector<ClipBundle>& bundles = _clips->Bundles();
 		for (size_t m = 0; m < bundles.size(); ++m)
 		{
@@ -916,14 +977,16 @@ namespace mo
 				const uint32_t samples = (uint32_t)std::ceil((double)montage.length * _bundle->sampleHz) + 1;
 				for (uint32_t s = 0; s < samples; ++s)
 				{
-					for (const float adsBlend : { 0.f, 1.f })
+					for (int stance = 0; stance < 3; ++stance)		// 0 = 허리, 1 = 조준, 2 = 앉음
 					{
 						for (const float overrideWeight : { 0.f, 1.f })
 						{
 							for (const float handLeftAlpha : { 0.f, 1.f })
 							{
 								AnimPoseInput input;
-								input.adsBlend = adsBlend;
+								input.adsBlend = stance == 1 ? 1.f : 0.f;
+								input.crouchBlend = stance == 2 ? 1.f : 0.f;
+								input.crouched = stance == 2;
 								input.montageCount = 1;
 								input.montages[0].bundle = (int8_t)m;
 								input.montages[0].kind = montage.kind;
@@ -931,7 +994,8 @@ namespace mo
 								input.montages[0].weight = 1.f;
 								input.overrideWeight = overrideWeight;
 								input.handLeftAlpha = handLeftAlpha;
-								measure(input);
+								if (stance == 2) measureCrouched(input);
+								else measure(input);
 							}
 						}
 					}
@@ -941,13 +1005,14 @@ namespace mo
 		return reach + kBoundMargin;
 	}
 
-	void CAnimPoseEvaluator::BodiesFromLocal(const BoneTransform* local, BodyPose* outBodies)
+	void CAnimPoseEvaluator::BodiesFromLocal(const BoneTransform* local, BodyPose* outBodies, double meshLiftZ)
 	{
 		BoneTransform* cs = _component.data();
 		ComponentFromLocal(local, cs);
 
 		BoneTransform mesh;
 		FromKey(_clips->MeshPlacement(), mesh);
+		if (meshLiftZ != 0.0) mesh.p[2] += meshLiftZ;		// 0 이면 손대지 않는다 — 앉기 전과 비트까지 같게
 		const std::vector<ClipBody>& bodies = _clips->Bodies();
 		for (size_t i = 0; i < bodies.size(); ++i)
 		{
@@ -970,5 +1035,18 @@ namespace mo
 			Rotate(q, y, outBodies[i].axisY);
 			Rotate(q, z, outBodies[i].axisZ);
 		}
+	}
+
+	// BodiesFromLocal 과 같은 곱(뼈 성분 자리 × 메시 자리) — 부위의 뼈 쪽 몫만
+	void CAnimPoseEvaluator::HandRightFromLocal(const BoneTransform* local, double outPosition[3], double meshLiftZ)
+	{
+		BoneTransform* cs = _component.data();
+		ComponentFromLocal(local, cs);
+		BoneTransform mesh;
+		FromKey(_clips->MeshPlacement(), mesh);
+		if (meshLiftZ != 0.0) mesh.p[2] += meshLiftZ;
+		BoneTransform world;
+		Multiply(cs[(size_t)_handR], mesh, world);
+		for (int c = 0; c < 3; ++c) outPosition[c] = world.p[c];
 	}
 }

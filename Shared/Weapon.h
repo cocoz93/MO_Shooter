@@ -61,6 +61,7 @@ namespace mo
 		float recoveryCooldownDelay;	// 표에만 있다 — Lyra 에서 효과가 없다(CWeaponSpread::Tick 주석)
 		float fireMontageSeconds;		// 발사 몽타주 길이 ÷ 재생 속도 — FireDelay 보다 먼저 끝나면 이쪽이 연사 간격을 정한다(샷건)
 		float reloadSeconds;			// 재장전 시작부터 탄이 들어오기까지 — 몽타주 안 AN_Reload 위치 ÷ 재생 속도
+		float meleeAbilitySeconds;		// 근접 능력이 켜져 있는 시간 = 근접 몽타주 길이 ÷ 자산 배율 − 빼기 시간. GA_Melee 는 몽타주가 빠지기 시작하면 끝난다(E-3)
 		float autoReloadPollSeconds;	// GA_Weapon_AutoReload 의 PollInterval
 		float autoReloadIdleSeconds;	// GA_Weapon_AutoReload 의 TimeSinceActivityToReload
 		Curve heatToSpread;
@@ -185,6 +186,8 @@ namespace mo
 	{
 		bool fireHeld = false;
 		bool reloadPressed = false;
+		bool meleeActive = false;	// 근접 능력이 켜져 있다 — 사격 · 재장전 입력 · 자동 재장전이 막힌다(TagRelationships_ShooterHero 의 근접 막기, E-3)
+		bool meleeStarted = false;	// 이 입력에 근접 능력이 켜졌다 — 도는 재장전을 끊는다(같은 표의 근접 끊기)
 	};
 
 	struct WeaponEvents
@@ -192,6 +195,7 @@ namespace mo
 		bool fired = false;			// 이번 틱에 한 번 발사(탄 소비) — 한 발에 탄 수만큼 광선을 쏜다
 		bool reloaded = false;		// 이번 틱에 탄이 들어옴
 		bool reloadStarted = false;
+		bool reloadCancelledByMelee = false;	// 이번 입력에 켜진 근접이 도는 재장전을 끊었다 — 탄이 안 들어간다
 		float spreadAngle = 0;			// fired 일 때 — 이번 발의 퍼짐. 이번 발이 더하는 열은 들어가지 않는다(Lyra 는 광선을 쏜 뒤 열을 더한다)
 		float spreadMultiplier = 1;
 	};
@@ -203,6 +207,8 @@ namespace mo
 	//   Lyra 의 Ability.Weapon.NoFiring 은 그 구간과 겹쳐 결과를 바꾸지 않으므로 따로 들지 않는다(빼도 기록과 같음을 확인)
 	// - 수동 재장전은 시작한 틱부터 시간이 줄고, 자동 재장전은 타이머 뒤에 시작해 다음 틱부터 준다(Lyra 에서 한 프레임 차이)
 	// 시간은 초로 들고 간다 — Lyra 는 프레임에 묶이므로 고정 틱에서 같은 간격이 나온다
+	// 근접(E-3)은 부르는 쪽이 이 순환 앞에서 켠다(CMeleeAbility) — 켜진 동안 발사 · 재장전 입력 · 자동 재장전이 막히고, 켜지는 입력에 도는 재장전이 끊긴다.
+	//   발사 능력은 근접을 막지도 끊지도 않는다(관계표에 없음). 같은 입력에 둘 다 누르면 근접이 먼저라 발사가 막힌다 — Lyra 의 같은 프레임 차례는 확인 못 했다(제 판단)
 	class CWeaponCycle;
 
 	// 무기를 바꾸면 Equip 이 발사 타이머를 지우므로, 번갈아 바꾸면 연사 제한을 건너뛸 수 있다 — 무기별로 다음에 쏠 수 있는 입력 번호를 따로 기억한다.
@@ -352,4 +358,97 @@ namespace mo
 	// 선을 먼저 쏴서 몸이 먼저면 그것, 아니면 구로 다시 쏴서 몸이 가장 먼저 닿으면 그것, 아니면 선 결과.
 	// bodies 에서 쏜 사람 자신은 호출하는 쪽이 뺀다
 	void ResolveBullet(const CMapCollision& map, const BodyPlacement* bodies, size_t bodyCount, const Vec3& start, const Vec3& end, double sweepRadius, BulletResult& out);
+
+	// ─── 근접 ──────────────────────────────────────────────
+	// 값 = GA_Melee · GE_Damage_Melee 기본 객체(content-add-progress.md 0-3 표 · GA_Melee_cdo.t3d), 판정 차례 = GA_Melee 그래프, 확인 = Lyra 실행 기록(E-1 e1g1 · e1g3)
+
+	inline constexpr double kMeleeDistance = 350.0;		// 쓸기 길이 — 시작 = hand_r 뼈, 끝 = 시작 + 몸 앞 × 이 값
+	inline constexpr double kMeleeRadius = 96.0;		// 쓸기 구 반지름. 에셋은 반지름 96 · 반높이 48 캡슐인데 반높이가 반지름보다 작아 축이 0 = 구다(e1g1 원통 거리 37개가 구 해석값과 0.002cm 안)
+	inline constexpr float kMeleeDamage = 100.f;		// 기본 피해. 거리 · 재질 보정 없음(0-3 실행 기록 — 앞 150~520 아홉 번 모두 100)
+	inline constexpr double kMeleePushStrength = 2200.0;	// GA_Melee Strength — 맞히면 공격자를 몸 앞으로 이 값 × (맞은 거리 ÷ kMeleeDistance) 초속으로 민다(컨텐츠 E-2-1)
+	inline constexpr float kMeleePushDuration = 0.05f;		// GA_Melee Duration — 60fps 에서 3프레임. 그 뒤는 마지막 밀기 속도에서 보통 제동(e1g3 300 → 105.7cm · 400 → 269.0cm)
+
+	// 근접이 보는 몸 하나. 캡슐(LyraPawnCapsule)과 메시 몸체(LyraPawnMesh)가 둘 다 대상 종류 Pawn 이라 둘 다 쓸기에 걸린다(e1g1 — 정면 상대는 메시가 먼저)
+	struct MeleeTarget
+	{
+		BodyPlacement body;					// 캡슐 중심 · 요 · 자세(자세가 비면 서 있는 고정 포즈 몸체)
+		double capsuleRadius = 35.0;
+		double capsuleHalfHeight = 90.0;		// 앉으면 65
+		bool sameTeam = false;
+	};
+
+	enum class EMeleeHit : uint8_t
+	{
+		None,		// 아무 몸에도 안 닿음
+		SameTeam,	// 가장 먼저 닿은 몸이 같은 팀 — 피해 · 밀기 없음. 그 뒤의 다른 팀은 안 본다(GA_Melee 는 단일 쓸기)
+		Blocked,	// 손 → 닿은 점 선이 무기 채널 맵에 막힘
+		Hit,
+	};
+
+	struct MeleeResult
+	{
+		EMeleeHit kind = EMeleeHit::None;
+		uint32_t targetIndex = 0;	// targets 번호(None 이 아닐 때)
+		double distance = 0;		// 쓸기 시작 → 처음 닿은 때 구 중심(언리얼 FHitResult::Distance). 처음부터 겹치면 0. 밀기 세기가 이 값에 비례한다
+		Vec3 location;				// 처음 닿은 때 구 중심
+		Vec3 impactPoint;			// 닿은 점 — 벽 광선의 끝
+		bool capsule = false;		// 캡슐에 닿음. 거짓이면 메시 몸체(shape 번호)
+		uint32_t shape = 0;
+	};
+
+	// GA_Melee 차례 그대로 — 구를 hand → hand + forward × kMeleeDistance 로 쓸어 가장 먼저 닿은 몸 하나 → 같은 팀이면 SameTeam →
+	// hand → 닿은 점 선이 무기 채널 맵에 막히면 Blocked → 아니면 Hit.
+	// hand = 앞 프레임 자세의 hand_r 뼈(능력은 그 프레임 자세 평가 전에 켜진다, e1g1). forward = 몸 앞 단위 벡터(요만). targets 에서 공격자 자신은 부르는 쪽이 뺀다.
+	// - 같은 때 닿은 것이 여럿이면(처음부터 겹침 등) targets 앞의 몸, 한 몸 안에서는 메시 몸체를 캡슐보다 먼저 친다. 엔진이 고르는 차례는 확인 못 했다(e1g1 앞 150 은 메시)
+	// - 벽 광선을 다른 몸이 막는 경우는 안 본다. 그 선은 쓸기 부피 안이라, 선에 걸리는 몸은 쓸기에 먼저(또는 같은 때) 닿는다
+	void ResolveMelee(const CMapCollision& map, const MeleeTarget* targets, size_t targetCount, const Vec3& hand, const Vec3& forward, MeleeResult& out);
+
+	// GA_Melee 밀기 힘 — ApplyRootMotionConstantForce(방향 = 몸 앞, 세기 = Strength × NormalizeToRange(맞은 거리, 0, Distance)).
+	// 맞은 거리는 FHitResult::Distance 라 float, 세기는 블루프린트 double 곱 뒤 능력 작업 인자 float 로 줄어든다 — 그 차례대로.
+	// 부르는 쪽 = 맞음(Hit)일 때만(같은 팀 · 빗나감은 밀기 없음, 0-3 gym2). 넣기 = CMoveSim::ApplyRootForce(이동 상태, 이 값, kMeleePushDuration)
+	Vec3 MeleePushForce(const Vec3& forward, double hitDistance);
+
+	// 근접 손(hand_r)을 세계에 놓는다 — 몸 기준 손(요 0, CAnimPoseEvaluator::HandRightFromLocal)을 요로 돌려 캡슐 중심에 더한다(TraceBody 의 몸 → 세계와 같은 돌림).
+	// 서버(CRoom::MeleeHandOf)와 봇 화면 판정이 같이 쓴다
+	Vec3 MeleeHandWorld(const Vec3& location, float yawDegrees, const double localHand[3]);
+	// 손을 구할 자세가 없을 때(애니 클립 없음 · 부활 첫 입력)의 몸 기준 손 — 권총 기본 자세 · 선 메시(MeleeCheck HAND 줄, 클립 묶음으로 계산한 값). 앉았으면 z 에 메시 올림을 더한다
+	inline constexpr double kMeleeRestHandLocal[3] = { 37.792, 21.166, 52.242 };
+	// 앉은 기본 자세 손 — 권총 앉기 묶음 비중 1 · 앉음 · 메시 올림 0(MeleeCheck HAND crouch=1 줄). 선 손에 올림만 더하면 앉은 자세 손과 68.6cm 어긋났다(17-b2 q0)
+	inline constexpr double kMeleeRestHandCrouchLocal[3] = { 41.229, 16.321, -14.304 };
+	// 자세가 없을 때의 몸 기준 손 — 앉았으면 앉은 기본 손에 메시 올림을 더한다. MeleeCheck 가 두 상수를 클립 계산값과 견준다(REST 줄)
+	inline void MeleeRestHandLocal(bool crouched, double crouchMeshLiftZ, double out[3])
+	{
+		const double* rest = crouched ? kMeleeRestHandCrouchLocal : kMeleeRestHandLocal;
+		out[0] = rest[0];
+		out[1] = rest[1];
+		out[2] = rest[2] + (crouched ? crouchMeshLiftZ : 0.0);
+	}
+
+	// 근접 능력이 켜져 있는 입력 수 = 켜진 시간 ÷ 틱을 올림. 몽타주가 빠지기 시작하는 프레임 안(입력 처리 뒤)에서 끝나 그다음 입력에서 다시 켜진다 —
+	// 연타 기록(e1g3 spam_*)의 다시 켜지는 간격 권총 34 · 소총 35 · 샷건 46 프레임과 같다(실측)
+	uint32_t MeleeAbilityInputs(const WeaponDef& def, float tickSeconds);
+
+	// 근접 능력(GA_Melee)이 켜져 있나 — 틱이 아니라 입력 개수로 센다(발사 간격 · 이동 막음과 같은 까닭: 클라가 같은 입력을 돌려 보면 같은 결과).
+	// 켜진 동안 누름은 버린다(bRetriggerInstancedAbility = False). 서버 · 내 화면 예측 · 대조 도구가 같이 쓴다.
+	// 차례 = 입력마다 NextInput → (누름이 있으면) TryActivate → 무기 순환(WeaponInput 의 근접 두 칸)
+	class CMeleeAbility
+	{
+	public:
+		void NextInput() { if (_inputsLeft > 0) --_inputsLeft; }
+		// 꺼져 있으면 켠다. 켰으면 true. 켜는 입력도 켜진 입력 수에 든다
+		bool TryActivate(const WeaponDef& def, float tickSeconds)
+		{
+			if (_inputsLeft > 0) return false;
+			_inputsLeft = MeleeAbilityInputs(def, tickSeconds);
+			return true;
+		}
+		bool IsActive() const { return _inputsLeft > 0; }
+		// 다음 입력에서 누르면 켜지나 — 부르는 쪽이 켜질 입력에만 화면 근접 판정을 하려고 입력을 넣기 전에 본다
+		bool WillActivateNextInput() const { return _inputsLeft <= 1; }
+		uint32_t GetInputsLeft() const { return _inputsLeft; }
+		void Reset() { _inputsLeft = 0; }
+
+	private:
+		uint32_t _inputsLeft = 0;	// 이 입력을 포함해 켜져 있을 입력 수. 0 = 꺼짐
+	};
 }

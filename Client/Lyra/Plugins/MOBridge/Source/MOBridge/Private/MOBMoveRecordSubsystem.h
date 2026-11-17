@@ -18,6 +18,10 @@ class ULyraCharacterMovementComponent;
  *   -MOBMoveStress          평소 입력이 안 지나가는 갈래를 일부러 지나간다(짝수 구간은 바닥에 10cm 묻혀 시작, 홀수 구간은 임의 발사)
  *   -MOBMoveAds             조준을 0.05~1.2초마다 무작위로 누르고 뗀다(C 조준 — 걸음 속도 ×0.5). 조준은 따로 쓰는 난수라 이동 입력은 이 옵션이 없을 때와 같다.
  *                           조준은 능력 시스템 입력이라 다음 프레임 컨트롤러 틱에서 먹는다 — 줄 끝 칸 ads 는 이번 프레임에 누른 상태
+ *   -MOBMoveCrouch          앉기를 0.2~2.5초마다 누른다(D 앉기). 키와 같은 길 ALyraCharacter::ToggleCrouch — 땅 위에서만 앉고, 앉았으면 일어선다.
+ *                           점프는 Lyra 점프 능력처럼 일어서기를 먼저 부른다(LyraGameplayAbility_Jump.cpp:55). 앉기도 따로 쓰는 난수라 이동 입력은 그대로.
+ *                           셋째 구간마다 천장이 낮은 자리(앉은 캡슐은 들어가고 선 캡슐은 안 들어가는 곳)에서 앉은 채 시작해 일어서기 막힘을 지나간다.
+ *                           줄 끝 칸 = cev(0 없음 · 1 앉기 누름 · 2 점프가 부른 일어서기) · 앞 wants · 앞 crouched · 앞 half · walk(MaxWalkSpeed) · 뒤 wants · 뒤 crouched · 뒤 half
  * 판정에 쓰는 줄은 「MOB_MOVE」 로 시작한다. 파일 형식은 Tools/MoveCheck 머리 주석이 정본이다.
  */
 UCLASS()
@@ -54,6 +58,18 @@ private:
 	double NextAdsAt = 0;
 	FRandomStream Rng;
 	FRandomStream AdsRng;
+
+	// 앉기(-MOBMoveCrouch, D-1)
+	void FindLowSpots(ACharacter* Ch);
+	bool bCrouch = false;
+	double NextCrouchAt = 0;
+	FRandomStream CrouchRng;
+	TArray<FVector> LowSpots;		// 앉은 캡슐 중심 자리
+	int32 LowSegs = 0;
+	int32 CrouchEv = 0;
+	bool bWantsBefore = false, bCrouchedBefore = false;
+	float HalfBefore = 0.f, WalkBefore = 0.f;
+	int32 CrouchPresses = 0, JumpUncrouches = 0, CrouchedFrames = 0, BlockedFrames = 0, FallCrouchedFrames = 0, CrouchChanges = 0;
 
 	double PawnReadyAt = -1;
 	double HookedRealAt = 0;

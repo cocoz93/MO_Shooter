@@ -5,6 +5,7 @@
 #include "MapCollision.h"
 #include "MatchRules.h"
 #include "Movement.h"
+#include "Pickups.h"
 #include "Weapon.h"
 
 #include <array>
@@ -47,13 +48,20 @@ namespace mo
 	inline const char* AnimBundleOf(uint8_t weapon) { return GetWeaponDef((EWeapon)weapon).name; }
 
 	// 서버가 애니 상태에 넘기는 사건(9단계 조각 4). 틱 안에서 생긴 차례대로 쌓아 그 틱 애니 갱신 앞에 몽타주로 튼다
-	enum class EAnimEvent : uint8_t { Spawn, Swap, Fire, Reload, Count };
+	// 근접(E-3) — Melee = 공격자 근접 몽타주, HitBack · HitFront = 맞은 쪽 반응(둘 중 무작위, 서버가 정해 쌓는다)
+	enum class EAnimEvent : uint8_t { Spawn, Swap, Fire, Reload, Melee, HitBack, HitFront, Count };
 
 	// 클립을 주면 몸 판정이 서 있는 자세 대신 그 시점의 애니 자세를 쓴다(D32). 비어 있으면 지금까지와 같다
 	struct AnimOptions
 	{
 		const CAnimClips* clips = nullptr;	// 프로세스가 들고 있다. 방보다 오래 산다
 		double boundRadius = 0.0;			// CAnimPoseEvaluator::ComputeBoundRadius
+	};
+
+	// 체력 받침(컨텐츠 B) — main 이 --pads= 로 읽어 들고 있다. 방보다 오래 산다. 없으면 받침 없는 판
+	struct PickupOptions
+	{
+		const std::vector<PickupPad>* pads = nullptr;
 	};
 
 	// 시점 입력의 네 갈래. 값을 돌려주는 함수로 두어 시험이 갈래를 전수로 볼 수 있게 한다
@@ -83,6 +91,15 @@ namespace mo
 		uint64_t firesBlockedPostGame = 0;	// 경기 끝 단계의 발사 입력 — GE_BlockAbilityInput
 		uint64_t adsInputs = 0;				// 조준이 켜진 채 적용한 입력(C-4)
 		uint64_t shotsAimed = 0;			// 조준 비율 1 로 쏜 발 — 퍼짐이 조준 배수를 탄 발(C-4)
+		uint64_t crouchPresses = 0;			// 앉기 키가 든 입력(D-5) — ToggleCrouch 를 부른 수
+		uint64_t crouchedInputs = 0;		// 이동 뒤 앉아 있는 입력(D-5) — 앉은 걸음 · 퍼짐 · 자세가 돈 입력 수
+		uint64_t shotsCrouched = 0;			// 앉은 채 쏜 발(D-5) — 퍼짐 계산에 앉음이 들어간 발
+		uint64_t pawnBlockMoves = 0;		// 사람끼리 막기(F-2)로 남의 캡슐을 넘겨 굴린 입력 — 시험 전용 --testNoPawnBlock 판은 0
+		uint64_t pawnBlockOthers = 0;		// 그 입력들에 넘긴 캡슐 수 합(산 사람만 — Lyra 는 죽으면 캡슐 충돌을 끈다)
+		uint64_t pawnHits = 0;				// 그중 이동 쓸기가 사람에 먼저 닿음(CMoveSim pawnHits 차이)
+		uint64_t pawnStartPenetrating = 0;	// 그중 시작부터 겹침 — 정확한 식으로 겹친 것은 정확한 식, 단정밀도로만 닿은 것은 엔진 IsDone 갈래(pawnTouchStart)
+		uint64_t pawnOddSimplex = 0;		// 엔진 계산을 옮기지 않은 갈래를 탐 — 0 이어야 한다(Movement.cpp SweepPawnLikeChaos)
+		uint64_t pawnTouchStart = 0;		// 사람 쓸기가 처음부터 여유 안(λ = 0)으로 끝나 엔진처럼 겹침 맞음으로 돌려준 횟수(고르기 전 — 막은 것만이 아님)
 		uint64_t bullets = 0;
 		uint64_t bulletsHitMap = 0;
 		uint64_t bulletsHitBody = 0;
@@ -90,10 +107,41 @@ namespace mo
 		uint64_t bulletsMissed = 0;
 		uint64_t damageEvents = 0;
 		uint64_t kills = 0;					// 맞아서 죽음
+		uint64_t assists = 0;				// 처치 도움(A-1) — 죽음마다 처치자를 뺀, 그 사람에게 피해를 준 사람 수
+		uint64_t pickups = 0;				// 받침을 집음(B-2) — 겹침 시작으로 · 다시 검사로 둘 다
+		uint64_t pickupsFromRecheck = 0;	// 그중 다시 켜진 뒤 다시 검사로 집은 것(CheckForExistingOverlaps)
+		uint64_t pickupsFullHealth = 0;		// 켜진 받침에 닿았지만 체력이 가득 차 안 집음(GiveWeapon 이 false)
+		uint64_t padRespawns = 0;			// 대기가 끝나 다시 켜짐
+		uint64_t padRechecks = 0;			// 다시 켜진 뒤 서 있는 사람을 다시 본 횟수
 		uint64_t falls = 0;					// 떨어져 죽음
 		uint64_t spawns = 0;
 		uint64_t spawnsFromFallback = 0;	// 적이 없거나 자리가 모두 찜돼 무작위·대체 자리로
 		uint64_t phaseChanges = 0;
+
+		// 근접(컨텐츠 E-3) — 켬(meleeStarts) = 맞음 + 같은 팀 + 벽 + 빗나감 = 보낸 S2C_MELEE. 되감기 네 갈래 합도 켬
+		uint64_t meleePresses = 0;			// 근접 단추가 든 입력
+		uint64_t meleeStarts = 0;
+		uint64_t meleeWhileActive = 0;		// 켜져 있어 버린 누름(bRetriggerInstancedAbility = False)
+		uint64_t meleeBlockedPostGame = 0;	// 경기 끝 단계의 누름 — GE_BlockAbilityInput
+		uint64_t meleeHits = 0;
+		uint64_t meleeSameTeam = 0;
+		uint64_t meleeBlocked = 0;			// 손 → 닿은 점 선이 벽에 막힘
+		uint64_t meleeMisses = 0;
+		uint64_t meleePushes = 0;			// 넣은 밀기 = 맞음
+		uint64_t meleeHitImmune = 0;		// 맞았지만 무적 — 피해 0, 밀기 · 반응은 넣는다(제 판단, Lyra 기록 없음)
+		uint64_t meleeDamageEvents = 0;		// 근접이 보낸 S2C_DAMAGE — damageEvents 에도 든다
+		uint64_t meleeKills = 0;			// 근접으로 죽음 — kills 에도 든다
+		uint64_t meleeTargets = 0;			// 판정에 넣은 몸 수(켬마다 그때 살아 있던 남)
+		uint64_t meleePoses = 0;			// 그중 애니 자세로 판정한 몸 — 사격 자세 통계(poseTargets 등)와 따로 센다
+		uint64_t meleePoseSkipped = 0;		// 그중 쓸기 근처에도 없어 자세를 안 구한 몸(캡슐은 그대로 본다)
+		uint64_t meleeHandFallback = 0;		// 앞 틱 자세가 없어(애니 없음 · 그 틱 기록 없음) 권총 기본 자세 손으로 — 애니를 켠 판에서는 부활 첫 입력 말고 0 이어야 한다
+		uint64_t meleeFiresBlocked = 0;		// 근접이 켜져 있어 막은 발사 누름
+		uint64_t meleeReloadCancels = 0;	// 근접이 켜지며 끊은 재장전(탄이 안 들어감)
+		uint64_t meleeReloadMontageCancels = 0;	// 근접 몽타주가 먼저 끈 재장전 칸(쏘기의 reloadCancels 와 같은 길)
+		uint64_t meleeRewindNoView = 0;
+		uint64_t meleeRewindFuture = 0;
+		uint64_t meleeRewindClamped = 0;
+		uint64_t meleeRewindOk = 0;
 
 		// 권위 확인 — 일부러 보낸 나쁜 입력을 사유별로 센다. 정직한 클라는 여기 일곱이 전부 0 이어야 한다
 		uint64_t inputsRejectedBadValue = 0;	// NaN·무한대 — 통째로 버림
@@ -157,7 +205,8 @@ namespace mo
 	class CRoom
 	{
 	public:
-		CRoom(const CMapCollision& map, const MoveParams& params, const MatchRules& rules, uint32_t seed, bool allowDebug, IRoomSender& sender, uint32_t roomId, const RewindOptions& rewind = RewindOptions(), const AnimOptions& anim = AnimOptions());
+		CRoom(const CMapCollision& map, const MoveParams& params, const MatchRules& rules, uint32_t seed, bool allowDebug, IRoomSender& sender, uint32_t roomId, const RewindOptions& rewind = RewindOptions(), const AnimOptions& anim = AnimOptions(),
+			const PickupOptions& pickups = PickupOptions());
 
 		// 반환 = 방 안에서 쓰는 번호. 자리가 없거나 경기가 끝나 가면 0. 환영과 시작 자리는 여기서 보낸다
 		uint32_t AddPlayer(int64_t session);
@@ -179,7 +228,8 @@ namespace mo
 		static constexpr int kInputQueueSize = 32;		// 0.53초치
 		static constexpr int kMaxInputTokens = 8;		// 입력이 밀렸을 때 한 틱에 더 꺼낼 수 있는 한도
 		static constexpr int kIdleMoveAfterTicks = 15;	// 입력이 이만큼 안 오면 빈 입력으로 움직임
-		static constexpr int kAnimEventsPerTick = 1 + 3 * kMaxInputTokens;	// 부활 하나 + 입력마다 교체 · 쏘기 · 재장전. 넘치면 버리고 센다
+		// 부활 하나 + 입력마다 교체 · 쏘기 · 재장전 · 근접 + 남이 때린 근접 반응(근접 간격이 34 입력 넘게라 한 틱에 한 사람이 둘 못 때린다). 넘치면 버리고 센다
+		static constexpr int kAnimEventsPerTick = 1 + 4 * kMaxInputTokens + (wire::kMaxPlayersInRoom - 1);
 
 		struct QueuedInput
 		{
@@ -196,6 +246,7 @@ namespace mo
 			float yaw = 0;
 			float pitch = 0;
 			bool alive = false;
+			bool crouched = false;			// 그 틱 이동이 끝낸 앉음(D62 8) — 판정 자세의 앉은 묶음 · 메시 올림
 			wire::AnimStateWire anim{};
 			uint8_t animWeapon = 0;			// anim 을 만든 자세 묶음(무기 번호) — 판정은 이 묶음으로 푼다
 		};
@@ -215,12 +266,17 @@ namespace mo
 			bool jumpHeld = false;
 			AdsAbility ads;					// 조준 능력(C-4) — 걸음 속도 · 카메라 · 애니 · STATE_ADS
 			CAimCamera aimCamera;			// 사격 퍼짐이 읽는 조준 비율의 출처(C-1)
+			CMeleeAbility melee;			// 근접 능력(E-3) — 입력 개수로 센다. 부활하면 꺼진 채
 			bool dead = false;
 			uint32_t respawnTick = 0;		// dead 일 때
 			uint32_t immuneUntilTick = 0;
 			int moveLockInputs = 0;			// 틱이 아니라 입력 개수로 센다 — 클라가 같은 입력을 돌려 보면 같은 결과가 나오게
 			uint16_t kills = 0;
 			uint16_t deaths = 0;
+			uint16_t assists = 0;			// 처치 도움(A-1, ShooterCore AssistProcessor) — kills · deaths 와 같이 경기 시작에 0
+			std::array<uint32_t, wire::kMaxPlayersInRoom> damagedBy{};	// 이 사람에게 0보다 큰 피해를 준 사람 번호(DamageHistory) — 죽을 때 도움을 주고 지운다
+			int damagedByCount = 0;
+			std::vector<uint8_t> padOverlap;	// 받침마다 지금 겹쳐 있나 — 겹침이 「시작」될 때만 집으므로 앞 상태를 든다. 죽으면 0(충돌이 꺼진다)
 			uint32_t lastSeq = 0;
 			uint32_t lastQueuedSeq = 0;
 			uint32_t lastReceivedSeq = 0;	// 대기열에서 버린 입력도 센다 — 번호를 건너뛰었는지는 받은 번호로 본다
@@ -271,6 +327,15 @@ namespace mo
 			uint32_t seq;
 		};
 
+		// ALyraWeaponSpawner 하나의 상태 — bIsWeaponAvailable · CoolDownTimerHandle · CheckOverlapsDelayTimerHandle
+		struct PadState
+		{
+			bool available = true;
+			uint32_t readyTick = 0;		// 꺼져 있을 때 — 이 틱의 받침 단계에서 켜진다
+			bool recheckPending = false;
+			uint32_t recheckTick = 0;	// 이 틱의 받침 단계에서 서 있는 사람을 다시 본다
+		};
+
 		struct StartSlot
 		{
 			SpawnPoint point;
@@ -286,14 +351,24 @@ namespace mo
 		void TickRespawns();
 		void TickClaims();
 		void TickPlayerInputs(Player& player);
-		void ApplyInput(Player& player, const wire::Input& input);
+		void ApplyInput(Player& player, const wire::Input& input, bool serverMade = false);	// serverMade = 입력이 늦어 서버가 만든 빈 입력
 		void ApplyPlace(Player& player, const wire::DebugPlace& place);
 		bool IsStartOccupied(const StartSlot& slot) const;
 		int ChooseStart(const Player& player);
 		void SpawnPlayer(Player& player);
 		void KillPlayer(Player& target, Player* attacker, uint8_t weapon, bool weakSpot);
+		static void NoteDamage(Player& target, uint32_t attackerId);
+		bool OverlapsPad(const MoveState& move, const PickupPad& pad) const;
+		void UpdatePadOverlaps(Player& player);
+		bool TryPickup(size_t padIndex, Player& player, bool fromTimer);
+		void TickPads();
+		void ResetPads();
+		void SendPad(size_t padIndex, wire::EPickupReason reason, const Player* picker, float heal, const Player* only);
+		size_t PadCount() const { return _pickups.pads ? _pickups.pads->size() : 0; }
 		bool IsImmune(const Player& player) const;
 		Vec3 ResolveAimStart(const Player& player, const Vec3& locationBeforeMove, const Vec3& aim);
+		bool TryMelee(Player& player, const wire::Input& input);
+		bool MeleeHandOf(const Player& player, Vec3& out);
 		void RecordRewindSamples();
 		bool GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out, float& outAlpha) const;
 		void UpdateAnimStates();
@@ -320,6 +395,8 @@ namespace mo
 		const uint32_t _roomId;
 		const RewindOptions _rewind;
 		const AnimOptions _anim;
+		const PickupOptions _pickups;
+		std::vector<PadState> _padStates;	// _pickups.pads 와 같은 차례
 		CMoveSim _moveSim;
 		CSpreadRng _spawnRng;		// 시작 자리 고르기 전용. 탄 방향은 입력 번호로 정해져(SpreadSeed) 서버에 탄 난수 상태가 없다
 		uint32_t _tick = 0;
@@ -336,6 +413,9 @@ namespace mo
 		std::vector<BodyPlacement> _bodies;		// 사격 판정 때마다 다시 채운다 — 매번 할당하지 않으려고 멤버로 둔다
 		std::vector<BodyPlacement> _bodiesNow;	// --rewindShadow 일 때만 — 같은 탄을 현재 자리로 계산
 		std::vector<Player*> _bodyOwners;
+		std::vector<MeleeTarget> _meleeTargets;	// 근접 판정 때마다 다시 채운다
+		std::vector<PawnCapsule> _pawnScratch;	// 사람끼리 막기 — 입력마다 남의 캡슐을 다시 채운다(할당을 안 하려고 멤버)
+		std::vector<Player*> _meleeOwners;
 		bool _animReady = false;
 		std::array<CAnimPoseEvaluator, (size_t)EWeapon::Count> _poseEvaluators;	// 무기 번호 차례 — 묶음마다 하나
 		std::array<CAnimState, (size_t)EWeapon::Count> _animCodecs;			// 받은 상태를 자세 입력으로 푸는 데만 쓴다 — 재생 상태는 안 쓴다

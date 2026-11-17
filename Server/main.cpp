@@ -2,7 +2,7 @@
 //
 //   Server --map=<파일.mocl> [--port=7791] [--seed=20261102] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일]
 //          [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=1] [--maxSessions=64]
-//          [--measureFrom=초 --measureSeconds=초] [--clips=파일]
+//          [--measureFrom=초 --measureSeconds=초] [--clips=파일] [--pads=파일]
 //
 // --debug 는 시험 클라가 위치·체력을 정할 수 있게 한다. 사람이 하는 판에서는 켜지 않는다.
 // --warmup·--matchSeconds·--targetScore 는 시험에서 Lyra 값을 줄일 때만 쓴다.
@@ -16,6 +16,7 @@
 #include "GameProtocol.h"
 #include "GameThread.h"
 #include "KillRecord.h"
+#include "Pickups.h"
 #include "Room.h"
 
 #include "NetIoModel.h"
@@ -66,7 +67,9 @@ namespace
 		double measureSeconds = 0;
 		mo::RewindOptions rewind;
 		std::string clipsPath;
+		std::string padsPath;		// 체력 받침(컨텐츠 B) — 리포 밖 파일(Tools/LyraPilot/make_pads.py). 없으면 받침 없는 판
 		mo::AnimOptions anim;
+		mo::PickupOptions pickups;	// 받침 목록은 main 이 들고 있다 — 방은 가리키기만
 	};
 
 	bool ParseArgs(int argc, char** argv, Args& out)
@@ -85,6 +88,7 @@ namespace
 			if (value("--map=", v)) out.mapPath = v;
 			else if (value("--port=", v)) out.port = std::atoi(v.c_str());
 			else if (value("--clips=", v)) out.clipsPath = v;
+			else if (value("--pads=", v)) out.padsPath = v;
 			else if (value("--seed=", v)) out.seed = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
 			else if (value("--duration=", v)) out.durationSeconds = std::atof(v.c_str());
 			else if (value("--record=", v)) out.recordPath = v;
@@ -98,6 +102,7 @@ namespace
 			else if (value("--measureSeconds=", v)) out.measureSeconds = std::atof(v.c_str());
 			else if (s == "--exitWhenEmpty") out.exitWhenEmpty = true;
 			else if (s == "--debug") out.debug = true;
+			else if (s == "--testNoPawnBlock") out.rules.pawnBlock = false;	// 시험 전용 — 사람끼리 막기를 끈다(MatchRules.h · 봇도 같이 줘야 한다)
 			else if (s == "--rewindShadow") out.rewind.shadow = true;
 			else if (s == "--rewindLog") out.rewind.log = true;
 			else if (s == "--rewindNoSpread") out.rewind.noSpread = true;
@@ -139,7 +144,7 @@ namespace
 	}
 
 	// 클립을 읽고, 방에서 쓸 초기화가 무기 묶음마다 되는지 시작할 때 확인한다. 넓은 공 = 세 묶음 중 가장 큰 것
-	bool LoadClips(const std::string& path, mo::CAnimClips& clips, double& outBoundRadius, double (&outBundleRadius)[(size_t)mo::EWeapon::Count])
+	bool LoadClips(const std::string& path, double crouchMeshLiftZ, mo::CAnimClips& clips, double& outBoundRadius, double (&outBundleRadius)[(size_t)mo::EWeapon::Count])
 	{
 		std::vector<char> data;
 		if (!ReadFile(path, data) || clips.LoadFromMemory(data.data(), data.size()) != mo::EClipLoad::Ok) return false;
@@ -150,7 +155,7 @@ namespace
 			mo::CAnimPoseEvaluator evaluator;
 			mo::CAnimState state;
 			if (!evaluator.Init(clips, bundle) || !state.Init(clips, bundle)) return false;
-			outBundleRadius[weapon] = evaluator.ComputeBoundRadius();
+			outBundleRadius[weapon] = evaluator.ComputeBoundRadius(crouchMeshLiftZ);		// 앉은 클립은 앉은 캡슐의 메시 올림으로도 잰다(D-4)
 			outBoundRadius = std::max(outBoundRadius, outBundleRadius[weapon]);
 		}
 		return true;
@@ -342,6 +347,7 @@ namespace
 			settings.debug = _args.debug;
 			settings.rewind = _args.rewind;
 			settings.anim = _args.anim;
+			settings.pickups = _args.pickups;
 			if (!_args.recordPath.empty()) settings.recordPath = mo::RoomRecordPath(_args.recordPath, id);
 			_threads[thread]->PostCreateRoom(id, settings);
 			return id;
@@ -512,7 +518,7 @@ int main(int argc, char** argv)
 	Args args;
 	if (!ParseArgs(argc, argv, args))
 	{
-		std::printf("쓰는 법: Server --map=<파일.mocl> [--port=7791] [--seed=N] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일] [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=N] [--maxSessions=N]\n");
+		std::printf("쓰는 법: Server --map=<파일.mocl> [--port=7791] [--seed=N] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일] [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=N] [--maxSessions=N] [--clips=파일] [--pads=파일]\n");
 		return 2;
 	}
 
@@ -523,11 +529,12 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
+	const mo::MoveParams params = mo::MakeLyraMoveParams();
 	mo::CAnimClips clips;		// 서버가 멈출 때까지 방들이 읽는다
 	if (!args.clipsPath.empty())
 	{
 		double bundleRadius[(size_t)mo::EWeapon::Count] = {};
-		if (!LoadClips(args.clipsPath, clips, args.anim.boundRadius, bundleRadius))
+		if (!LoadClips(args.clipsPath, mo::CMoveSim(map, params).CrouchMeshLiftZ(), clips, args.anim.boundRadius, bundleRadius))
 		{
 			std::printf("[오류] 클립을 읽지 못함: %s\n", args.clipsPath.c_str());
 			return 1;
@@ -537,7 +544,33 @@ int main(int argc, char** argv)
 			mo::AnimBundleOf(0), bundleRadius[0], mo::AnimBundleOf(1), bundleRadius[1], mo::AnimBundleOf(2), bundleRadius[2]);
 	}
 
-	const mo::MoveParams params = mo::MakeLyraMoveParams();
+	// 받침 — 틀린 줄이 하나라도 있으면 시작하지 않는다(받침 하나 빠진 판은 Lyra 와 다른 맵)
+	std::vector<mo::PickupPad> pads;		// 서버가 멈출 때까지 방들이 읽는다
+	if (!args.padsPath.empty())
+	{
+		std::vector<char> data;
+		if (!ReadFile(args.padsPath, data))
+		{
+			std::printf("[오류] 받침 파일을 읽지 못함: %s\n", args.padsPath.c_str());
+			return 1;
+		}
+		size_t badLine = 0;
+		const mo::EPadsLoad loaded = mo::ParsePickupPads(data.data(), data.size(), pads, badLine);
+		if (loaded != mo::EPadsLoad::Ok)
+		{
+			std::printf("[오류] 받침 파일이 틀림: %s — %s (줄 %zu)\n", args.padsPath.c_str(), mo::PadsLoadName(loaded), badLine);
+			return 1;
+		}
+	}
+	if (!pads.empty()) args.pickups.pads = &pads;
+	std::printf("PADS count=%zu file=%s\n", pads.size(), args.padsPath.empty() ? "-" : args.padsPath.c_str());
+	for (size_t i = 0; i < pads.size(); ++i)
+	{
+		const mo::PickupPad& pad = pads[i];
+		std::printf("PAD %zu name=%s at=(%.3f,%.3f,%.3f) r=%.1f hh=%.1f heal=%g respawn=%g recheck=%g\n", i, pad.name.c_str(),
+			pad.location.x, pad.location.y, pad.location.z, pad.radius, pad.halfHeight, pad.heal, pad.respawnSeconds, pad.recheckSeconds);
+	}
+
 	CMatchServer server(args, map, params);
 	if (!server.Start())
 	{
@@ -669,6 +702,17 @@ int main(int argc, char** argv)
 		(unsigned long long)room.shots, (unsigned long long)room.firesBlockedPostGame, (unsigned long long)room.bullets, (unsigned long long)room.bulletsHitMap, (unsigned long long)room.bulletsHitBody, (unsigned long long)room.bulletsHitImmune, (unsigned long long)room.bulletsMissed, (unsigned long long)room.damageEvents);
 	std::printf("SERVER ads inputs=%llu shotsAimed=%llu (applied=%llu shots=%llu)\n",
 		(unsigned long long)room.adsInputs, (unsigned long long)room.shotsAimed, (unsigned long long)room.inputsApplied, (unsigned long long)room.shots);
+	std::printf("SERVER crouch presses=%llu crouchedInputs=%llu shotsCrouched=%llu (applied=%llu shots=%llu)\n",
+		(unsigned long long)room.crouchPresses, (unsigned long long)room.crouchedInputs, (unsigned long long)room.shotsCrouched, (unsigned long long)room.inputsApplied, (unsigned long long)room.shots);
+	// 사람끼리 막기(F-2) — 꺼진 판은 전부 0. 켜면 blockMoves = 산 채 굴린 입력(applied 중 몇), oddSimplex 는 늘 0 이어야 한다
+	std::printf("SERVER pawn block=%d blockMoves=%llu others=%llu hits=%llu startPenetrating=%llu oddSimplex=%llu touchStart=%llu (applied=%llu)\n", args.rules.pawnBlock ? 1 : 0,
+		(unsigned long long)room.pawnBlockMoves, (unsigned long long)room.pawnBlockOthers, (unsigned long long)room.pawnHits, (unsigned long long)room.pawnStartPenetrating,
+		(unsigned long long)room.pawnOddSimplex, (unsigned long long)room.pawnTouchStart, (unsigned long long)room.inputsApplied);
+	// 근접(E-3) — starts = hits + sameTeam + blocked + misses = 보낸 S2C_MELEE. 되감기 네 갈래 합 = starts
+	std::printf("SERVER melee presses=%llu starts=%llu whileActive=%llu blockedPostGame=%llu hits=%llu sameTeam=%llu blocked=%llu misses=%llu pushes=%llu hitImmune=%llu damageEvents=%llu kills=%llu targets=%llu poses=%llu poseSkipped=%llu handFallback=%llu firesBlocked=%llu reloadCancels=%llu rewind noView=%llu future=%llu clamped=%llu ok=%llu\n",
+		(unsigned long long)room.meleePresses, (unsigned long long)room.meleeStarts, (unsigned long long)room.meleeWhileActive, (unsigned long long)room.meleeBlockedPostGame, (unsigned long long)room.meleeHits, (unsigned long long)room.meleeSameTeam, (unsigned long long)room.meleeBlocked, (unsigned long long)room.meleeMisses,
+		(unsigned long long)room.meleePushes, (unsigned long long)room.meleeHitImmune, (unsigned long long)room.meleeDamageEvents, (unsigned long long)room.meleeKills, (unsigned long long)room.meleeTargets, (unsigned long long)room.meleePoses, (unsigned long long)room.meleePoseSkipped, (unsigned long long)room.meleeHandFallback,
+		(unsigned long long)room.meleeFiresBlocked, (unsigned long long)room.meleeReloadCancels, (unsigned long long)room.meleeRewindNoView, (unsigned long long)room.meleeRewindFuture, (unsigned long long)room.meleeRewindClamped, (unsigned long long)room.meleeRewindOk);
 	std::printf("REJECT badValue=%llu moveOver=%llu weaponId=%llu debugPlace=%llu aimFar=%llu swap=%llu aimWall=%llu droppedFull=%llu oldSeq=%llu badPackets=%llu | aimStale=%llu fireTooSoon=%llu fireEmpty=%llu seqGapFire=%llu\n",
 		(unsigned long long)room.inputsRejectedBadValue, (unsigned long long)room.movesOverLength, (unsigned long long)room.weaponIdRejected, (unsigned long long)room.debugPlacesRejected, (unsigned long long)room.shotsAimReplaced,
 		(unsigned long long)room.firesRejectedSwap, (unsigned long long)room.shotsAimPulledBack, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq, (unsigned long long)badPackets,
@@ -693,16 +737,22 @@ int main(int argc, char** argv)
 			dropped(EAnimEvent::Spawn), dropped(EAnimEvent::Swap), dropped(EAnimEvent::Fire), dropped(EAnimEvent::Reload),
 			starts(mo::MONTAGE_SPAWN), starts(mo::MONTAGE_UNEQUIP), starts(mo::MONTAGE_EQUIP), starts(mo::MONTAGE_FIRE), starts(mo::MONTAGE_RELOAD),
 			(unsigned long long)room.montageFails, (unsigned long long)room.reloadCancels, (unsigned long long)room.montageDrops);
+		// 근접 몽타주(E-3) — 사건 − 버림 = 튼 수. 반응은 맞은 쪽에 쌓여 같은 틱에 죽으면 버린다
+		std::printf("SERVER animMelee events melee=%llu hitBack=%llu hitFront=%llu dropped melee=%llu hitBack=%llu hitFront=%llu starts melee=%llu hitBack=%llu hitFront=%llu reloadCancels=%llu\n",
+			ev(EAnimEvent::Melee), ev(EAnimEvent::HitBack), ev(EAnimEvent::HitFront), dropped(EAnimEvent::Melee), dropped(EAnimEvent::HitBack), dropped(EAnimEvent::HitFront),
+			starts(mo::MONTAGE_MELEE), starts(mo::MONTAGE_HIT_BACK), starts(mo::MONTAGE_HIT_FRONT), (unsigned long long)room.meleeReloadMontageCancels);
 	}
-	std::printf("SERVER kills=%llu falls=%llu spawns=%llu spawnsFromFallback=%llu phaseChanges=%llu finished=%d\n",
-		(unsigned long long)room.kills, (unsigned long long)room.falls, (unsigned long long)room.spawns, (unsigned long long)room.spawnsFromFallback, (unsigned long long)room.phaseChanges, firstFinished ? 1 : 0);
+	std::printf("SERVER pickups=%llu fromRecheck=%llu fullHealth=%llu padRespawns=%llu padRechecks=%llu\n", (unsigned long long)room.pickups, (unsigned long long)room.pickupsFromRecheck,
+		(unsigned long long)room.pickupsFullHealth, (unsigned long long)room.padRespawns, (unsigned long long)room.padRechecks);
+	std::printf("SERVER kills=%llu assists=%llu falls=%llu spawns=%llu spawnsFromFallback=%llu phaseChanges=%llu finished=%d\n",
+		(unsigned long long)room.kills, (unsigned long long)room.assists, (unsigned long long)room.falls, (unsigned long long)room.spawns, (unsigned long long)room.spawnsFromFallback, (unsigned long long)room.phaseChanges, firstFinished ? 1 : 0);
 	if (firstFinished)
 	{
 		const mo::wire::Result& result = firstFinished->result;
 		std::printf("TEAMSCORE a=%u b=%u target=%u winner=%u resultTick=%u\n", result.teamScoreA, result.teamScoreB, result.targetScore, result.winningTeam, result.tick);
 		for (int i = 0; i < result.count; ++i)
 		{
-			std::printf("SCORE id=%u team=%u kills=%u deaths=%u\n", result.players[i].id, result.players[i].team, result.players[i].kills, result.players[i].deaths);
+			std::printf("SCORE id=%u team=%u kills=%u deaths=%u assists=%u\n", result.players[i].id, result.players[i].team, result.players[i].kills, result.players[i].deaths, result.players[i].assists);
 		}
 	}
 	return 0;

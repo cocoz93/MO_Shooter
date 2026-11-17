@@ -17,9 +17,12 @@ namespace mo
 	inline std::string KillRecordLine(const wire::Kill& kill)
 	{
 		char line[128];
-		std::snprintf(line, sizeof(line), "KILL,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", kill.tick, kill.attacker, kill.target,
-			kill.teamScoreA, kill.teamScoreB, kill.attackerKills, kill.targetDeaths, kill.weapon, kill.weakSpot);
-		return line;
+		std::snprintf(line, sizeof(line), "KILL,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u", kill.tick, kill.attacker, kill.target,
+			kill.teamScoreA, kill.teamScoreB, kill.attackerKills, kill.targetDeaths, kill.weapon, kill.weakSpot, kill.assistCount);
+		std::string text = line;
+		const int count = kill.assistCount < wire::kMaxPlayersInRoom - 1 ? kill.assistCount : wire::kMaxPlayersInRoom - 1;
+		for (int i = 0; i < count; ++i) text += "," + std::to_string(kill.assisters[i]);	// 도움 번호 — 서버가 보낸 차례 그대로
+		return text + "\n";
 	}
 
 	inline std::string ResultRecordLines(const wire::Result& result)
@@ -30,7 +33,7 @@ namespace mo
 		for (int i = 0; i < result.count; ++i)
 		{
 			const wire::PlayerResult& player = result.players[i];
-			std::snprintf(line, sizeof(line), "SCORE,%u,%u,%u,%u\n", player.id, player.team, player.kills, player.deaths);
+			std::snprintf(line, sizeof(line), "SCORE,%u,%u,%u,%u,%u\n", player.id, player.team, player.kills, player.deaths, player.assists);
 			text += line;
 		}
 		return text;

@@ -94,6 +94,7 @@ namespace mo
 			d.autoReloadIdleSeconds = 0.66f;
 			d.fireMontageSeconds = 0.666667f / 1.f;
 			d.reloadSeconds = 1.631531f / 1.500000f;
+			d.meleeAbilitySeconds = 1.14999998f / 1.20000005f - 0.400000006f;	// AM_MM_Pistol_Melee 길이 ÷ 배율 − 빼기(클립 묶음 자산 값) → 34 입력
 			d.heatToSpread = MakeCurve(kPistolSpread);
 			d.heatToHeatPerShot = MakeCurve(kPistolHeat);
 			d.heatToCooldownPerSecond = MakeCurve(kPistolCool);
@@ -131,6 +132,7 @@ namespace mo
 			d.autoReloadIdleSeconds = 0.66f;
 			d.fireMontageSeconds = 0.533f / 1.f;
 			d.reloadSeconds = 1.74658f;
+			d.meleeAbilitySeconds = 1.06666672f / 1.10000002f - 0.400000006f;	// AM_MM_Rifle_Melee → 35 입력
 			d.heatToSpread = MakeCurve(kRifleSpread);
 			d.heatToHeatPerShot = MakeCurve(kRifleHeat);
 			d.heatToCooldownPerSecond = MakeCurve(kRifleCool);
@@ -168,6 +170,7 @@ namespace mo
 			d.autoReloadIdleSeconds = 0.66f;
 			d.fireMontageSeconds = 0.666667f / 2.2f;
 			d.reloadSeconds = 2.243124f;
+			d.meleeAbilitySeconds = 1.16666663f / 1.10000002f - 0.300000012f;	// AM_MM_Shotgun_Melee → 46 입력
 			d.heatToSpread = MakeCurve(kShotgunSpread);
 			d.heatToHeatPerShot = MakeCurve(kShotgunHeat);
 			d.heatToCooldownPerSecond = MakeCurve(kShotgunCool);
@@ -639,8 +642,15 @@ namespace mo
 	{
 		WeaponEvents ev;
 
-		// 입력 처리 — 발사. 재장전보다 먼저다(Weapon.h 주석)
-		if (input.fireHeld && !_fireActive && _magazine >= 1)
+		// 근접이 켜지는 입력 — 도는 재장전 능력이 끊긴다(근접의 끊기 태그). 근접 처리가 이 순환보다 먼저다(Weapon.h 주석)
+		if (input.meleeStarted && _reloadLeft > 0)
+		{
+			_reloadLeft = 0;
+			ev.reloadCancelledByMelee = true;
+		}
+
+		// 입력 처리 — 발사. 재장전보다 먼저다(Weapon.h 주석). 근접이 켜져 있으면 막힌다(근접의 막기 태그)
+		if (input.fireHeld && !input.meleeActive && !_fireActive && _magazine >= 1)
 		{
 			--_magazine;
 			ev.spreadAngle = _spread.GetSpreadAngle();
@@ -653,8 +663,8 @@ namespace mo
 			ev.fired = true;
 		}
 
-		// 입력 처리 — 재장전. 발사 능력이 켜져 있으면 막힌다(Ability.ActivateFail.TagsBlocked)
-		if (input.reloadPressed && !_fireActive && _reloadLeft <= 0 && _magazine < _def->magazineSize && _spare > 0)
+		// 입력 처리 — 재장전. 발사 능력 · 근접 능력이 켜져 있으면 막힌다(Ability.ActivateFail.TagsBlocked)
+		if (input.reloadPressed && !_fireActive && !input.meleeActive && _reloadLeft <= 0 && _magazine < _def->magazineSize && _spare > 0)
 		{
 			StartReload();
 			ev.reloadStarted = true;
@@ -688,7 +698,7 @@ namespace mo
 		if (_pollLeft <= 1e-4f)
 		{
 			_pollLeft += _def->autoReloadPollSeconds;
-			if (_magazine == 0 && _spare > 0 && _idleSeconds >= _def->autoReloadIdleSeconds && _reloadLeft <= 0)
+			if (_magazine == 0 && _spare > 0 && _idleSeconds >= _def->autoReloadIdleSeconds && _reloadLeft <= 0 && !input.meleeActive)	// 근접 중 검사는 재장전 능력이 막혀 그냥 지나간다(원본 기준)
 			{
 				StartReload();
 				ev.reloadStarted = true;
@@ -900,5 +910,75 @@ namespace mo
 			}
 		}
 		out = lineResult;
+	}
+
+	// ─── 근접 ──────────────────────────────────────────────
+
+	void ResolveMelee(const CMapCollision& map, const MeleeTarget* targets, size_t targetCount, const Vec3& hand, const Vec3& forward, MeleeResult& out)
+	{
+		out = MeleeResult();
+		const Vec3 delta = forward * kMeleeDistance;
+		const Vec3 end = hand + delta;
+		double best = 2.0;
+		bool found = false;
+		for (size_t i = 0; i < targetCount; ++i)
+		{
+			const MeleeTarget& target = targets[i];
+			// 메시 몸체 — 사격의 구 판정과 같은 길(몸체를 구 반지름만큼 부풀려 선분으로, 상자는 둥근 상자)
+			BodyHit bodyHit;
+			if (TraceBody(target.body, hand, end, kMeleeRadius, bodyHit) && bodyHit.time < best)
+			{
+				best = bodyHit.time;
+				found = true;
+				out.targetIndex = (uint32_t)i;
+				out.capsule = false;
+				out.shape = bodyHit.shape;
+				out.impactPoint = bodyHit.point;
+			}
+			// 캡슐 — 세운 캡슐(축 반길이 = 반높이 − 반지름)을 구 반지름만큼 부풀려 선분으로
+			double t = 0;
+			Vec3 normal;
+			const double axisHalf = std::max(target.capsuleHalfHeight - target.capsuleRadius, 0.0);
+			if (SegmentCapsuleZ(hand - target.body.center, delta, axisHalf, target.capsuleRadius + kMeleeRadius, t, normal) && t < best)
+			{
+				best = t;
+				found = true;
+				out.targetIndex = (uint32_t)i;
+				out.capsule = true;
+				out.shape = 0;
+				out.impactPoint = hand + delta * t - normal * kMeleeRadius;
+			}
+		}
+		if (!found) return;
+		out.distance = best * kMeleeDistance;
+		out.location = hand + delta * best;
+		if (targets[out.targetIndex].sameTeam)
+		{
+			out.kind = EMeleeHit::SameTeam;
+			return;
+		}
+		RayHit wall;
+		out.kind = map.Raycast(hand, out.impactPoint, MAP_BLOCK_WEAPON, wall) ? EMeleeHit::Blocked : EMeleeHit::Hit;
+	}
+
+	uint32_t MeleeAbilityInputs(const WeaponDef& def, float tickSeconds)
+	{
+		const float inputs = std::ceil(def.meleeAbilitySeconds / tickSeconds - 1e-3f);	// 작은 허용치 = float 나눗셈이 정수 바로 위로 넘는 것을 막는다
+		return inputs < 1.f ? 1u : (uint32_t)inputs;
+	}
+
+	Vec3 MeleePushForce(const Vec3& forward, double hitDistance)
+	{
+		const double distance = (double)(float)hitDistance;		// FHitResult::Distance
+		const float strength = (float)(kMeleePushStrength * ((distance - 0.0) / (kMeleeDistance - 0.0)));	// NormalizeToRange(값, 0, 350) × Strength → 작업 인자 float
+		return forward * (double)strength;		// ConstantForce->Force = WorldDirection * Strength
+	}
+
+	Vec3 MeleeHandWorld(const Vec3& location, float yawDegrees, const double localHand[3])
+	{
+		const double yaw = yawDegrees * kPi / 180.0;
+		const double cosYaw = std::cos(yaw);
+		const double sinYaw = std::sin(yaw);
+		return location + Vec3(localHand[0] * cosYaw - localHand[1] * sinYaw, localHand[0] * sinYaw + localHand[1] * cosYaw, localHand[2]);
 	}
 }

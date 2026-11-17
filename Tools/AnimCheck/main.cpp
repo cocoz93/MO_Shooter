@@ -610,7 +610,9 @@ namespace
 		float disableLeftHand = 0.f;
 		int ads = -1;					// 조준 변수 GameplayTag_IsADS(C-3). -1 = 이 칸이 없는 옛 기록
 		int onGround = -1;				// IsOnGround. -1 = 칸 없음
+		int crouched = -1;				// 앉음 변수 IsCrouching(D-3). -1 = 이 칸이 없는 옛 기록
 		std::string locomotion;			// 이동 상태 기계(LocomotionSM)의 지금 상태 이름. 빈 칸 = 칸 없음
+		std::string idleStance;			// 무기 층 서기 안 상태 기계(IdleStance) 상태 이름 — Idle · StanceTransition. 빈 칸 = 칸 없음
 		std::string weapon;
 		std::string events;
 		std::vector<ProbeMontage> montages;
@@ -659,6 +661,7 @@ namespace
 		std::vector<std::string> header;
 		int cPass = -1, cFrame = -1, cFiring = -1, cSince = -1, cOverride = -1, cHand = -1, cAim = -1, cUpper = -1, cCurves = -1, cEvents = -1, cMontages = -1, cWeapon = -1;
 		int cAds = -1, cGround = -1, cLocomotion = -1;		// C-3 에 더한 칸 — 없어도 읽는다(9단계 기록엔 없다)
+		int cCrouch = -1, cStance = -1;						// D-3 에 쓰는 칸 — 없어도 읽는다(앉기 전 기록도 칸은 있다)
 		const auto bySuffix = [&](const char* suffix)
 		{
 			const size_t n = std::strlen(suffix);
@@ -697,6 +700,8 @@ namespace
 				cAds = bySuffix(".GameplayTag_IsADS");
 				cGround = bySuffix(".IsOnGround");
 				cLocomotion = Column(header, "sm:ABP_Mannequin_Base.LocomotionSM");
+				cCrouch = bySuffix(".IsCrouching");		// 「ABP_Mannequin_Base.IsCrouching」 — 맞춤 속성 칸 「__CustomProperty_isCrouching_<번호>」는 끝이 달라 안 걸린다
+				cStance = bySuffix(".IdleStance");			// 「sm:ABP_<무기>AnimLayers_Feminine.IdleStance」 — 무기 층마다 이름 앞이 다르다
 				const int need[] = { cPass, cFrame, cFiring, cSince, cOverride, cHand, cAim, cUpper, cCurves, cEvents, cMontages, cWeapon };
 				for (int column : need)
 				{
@@ -729,6 +734,8 @@ namespace
 			if (cAds >= 0) row.ads = std::atoi(cells[(size_t)cAds].c_str()) != 0 ? 1 : 0;
 			if (cGround >= 0) row.onGround = std::atoi(cells[(size_t)cGround].c_str()) != 0 ? 1 : 0;
 			if (cLocomotion >= 0) row.locomotion = cells[(size_t)cLocomotion];
+			if (cCrouch >= 0) row.crouched = std::atoi(cells[(size_t)cCrouch].c_str()) != 0 ? 1 : 0;
+			if (cStance >= 0) row.idleStance = cells[(size_t)cStance];
 			if (!ParseProbeMontages(cells[(size_t)cMontages], row.montages))
 			{
 				std::printf("STATE FAIL Lyra 기록 줄 %zu 몽타주 칸을 못 읽음: %s\n", lineNumber, cells[(size_t)cMontages].c_str());
@@ -751,11 +758,14 @@ namespace
 		return -1;
 	}
 
+	// 앉은 캡슐의 메시 올림(D62 7) = 선 반높이 90 − 앉은 반높이 65(Lyra B_Hero_ShooterMannequin, 컨텐츠 0-3 실측). 이 도구는 이동 인자를 안 읽어 상수로 둔다
+	constexpr double kCrouchMeshLiftZ = 25.0;
+
 	int RunState(int argc, char** argv)
 	{
 		if (argc < 6)
 		{
-			std::printf("사용: AnimCheck state <clips.bin> <animcmp_<Tag>.csv> <animcmp_<Tag>_moves.csv> <out.csv> [--brakeScale=배율] [--groundAdd=cm] [--wire] [--wireKeepNew] [--probe=<animcmp_ev_<무기>_probe.csv>] [--montDump=<out.csv>] [--montageTest=N] [--poseTest=N] [--slotProfile=<비중 표 이름>] [--overrideProfile=<비중 표 이름>] [--adsLag=N] [--noAds]\n");
+			std::printf("사용: AnimCheck state <clips.bin> <animcmp_<Tag>.csv> <animcmp_<Tag>_moves.csv> <out.csv> [--brakeScale=배율] [--groundAdd=cm] [--wire] [--wireKeepNew] [--probe=<animcmp_ev_<무기>_probe.csv>] [--montDump=<out.csv>] [--montageTest=N] [--poseTest=N] [--slotProfile=<비중 표 이름>] [--overrideProfile=<비중 표 이름>] [--adsLag=N] [--noAds] [--crouchLag=N] [--noCrouch] [--crouchLift=cm] [--stanceFade=넣기프레임:빼기프레임]\n");
 			return 2;
 		}
 		float brakeScale = 1.f;
@@ -770,6 +780,12 @@ namespace
 		const char* overrideProfileName = nullptr;	// 쏜 뒤 덮기 자리를 이 표로
 		int adsLag = 1;								// 조준 입력을 몇 줄 앞 기록에서 가져오나(C-3, 1 = 실제 경로)
 		bool noAds = false;							// 조준 입력을 늘 0 으로(일부러 틀림)
+		// 앉음 입력(D-3) — 갱신 f 의 앉음 = 기록 줄 f−crouchLag 의 IsCrouching. 앉음은 이동이 바꾸고 같은 프레임 애니 갱신이 읽는다(D62 8) —
+		// 기록에서 IsCrouching 이 바뀐 줄에 CrouchStateChange 가 같이 켜진다(animcmp_crouch_<무기>_probe.csv 20줄, 실측) → 0 이 실제 경로. 1 은 일부러 틀림
+		int crouchLag = 0;
+		bool noCrouch = false;						// 앉음 입력을 늘 0 으로(앉기를 옮기기 전 기준선)
+		double crouchLift = kCrouchMeshLiftZ;		// 앉은 메시 올림(일부러 틀림 — 0 · 50)
+		int stanceInFrames = -1, stanceOutFrames = -1;	// 서기 안 전환을 넣고 빼는 섞기 후보(1/60초 프레임 수, D62 4 후보 비교). -1 = 안 줌 → 실제 경로(넣기 0 · 빼기 15, D63)
 		int tracePass = -1, traceFrom = 0, traceTo = -1;		// --trace=판:처음-끝 — 그 줄들의 상태 · 쌓기 칸을 찍는다(어긋난 곳 찾기용)
 		double maxReach = 0;
 		size_t poseMontageRows = 0, poseOverrideRows = 0, poseHandRows = 0;		// 자세에 몽타주 · 덮기 · 왼팔 비중이 실제로 들어간 줄(새 길을 지났는지)
@@ -789,6 +805,10 @@ namespace
 			else if (std::strncmp(argv[i], "--overrideProfile=", 18) == 0) overrideProfileName = argv[i] + 18;
 			else if (std::strncmp(argv[i], "--adsLag=", 9) == 0) adsLag = std::atoi(argv[i] + 9);
 			else if (std::strcmp(argv[i], "--noAds") == 0) noAds = true;
+			else if (std::strncmp(argv[i], "--crouchLag=", 12) == 0) crouchLag = std::atoi(argv[i] + 12);
+			else if (std::strcmp(argv[i], "--noCrouch") == 0) noCrouch = true;
+			else if (std::strncmp(argv[i], "--crouchLift=", 13) == 0) crouchLift = std::strtod(argv[i] + 13, nullptr);
+			else if (std::strncmp(argv[i], "--stanceFade=", 13) == 0) std::sscanf(argv[i] + 13, "%d:%d", &stanceInFrames, &stanceOutFrames);
 			else if (std::strncmp(argv[i], "--trace=", 8) == 0) std::sscanf(argv[i] + 8, "%d:%d-%d", &tracePass, &traceFrom, &traceTo);
 			else
 			{
@@ -881,6 +901,7 @@ namespace
 		}
 		if (brakeScale != 1.f) state.SetBrakingScaleForTest(brakeScale);
 		state.SetMontageTestFlags(montageTest);
+		if (stanceInFrames >= 0 && stanceOutFrames >= 0) state.SetStanceFadeForTest((float)stanceInFrames / 60.f, (float)stanceOutFrames / 60.f);		// 묶음을 다시 읽어도 안 바뀌는 값
 		CAnimPoseEvaluator& firstEvaluator = evaluators[(size_t)state.BundleIndex()];
 
 		// 판별 입력을 번호 순으로 묶는다. 번호가 비면 어느 입력이 빠졌는지 모른 채 상태가 어긋나므로 거부한다
@@ -932,7 +953,11 @@ namespace
 		// 0 · 2 는 일부러 틀림(한 프레임 이르게 · 늦게), noAds = 조준을 안 넣음
 		bool adsSinceReset = false;		// 조준이 들어간 뒤로는 덮기 비중이 조준 갈래 값(0 · 1)에서 시작하므로 처음 쏘기 전이라도 댄다
 		size_t adsFedRows = 0, adsBlendRows = 0, adsPartialRows = 0, adsMissingRows = 0;
-		size_t smRows = 0, smDiff = 0, smDiffAds = 0, smDiffHip = 0;
+		size_t crouchFedRows = 0, crouchBlendRows = 0, crouchPartialRows = 0, crouchMissingRows = 0, crouchNoColumnRows = 0;
+		// 서기 안 전환 대조(D62 4) — Lyra IdleStance 가 StanceTransition 인 줄 ↔ 우리 쌓기에 서기 안 전환 칸이 있는 줄. 앉기 · 일어서기 종류는 Lyra 쪽 IsCrouching 으로
+		size_t stanceRows = 0, stanceBoth = 0, stanceLyraOnly = 0, stanceOursOnly = 0, stanceKindDiff = 0, stanceLyraOnlyIdle = 0, stanceOursOnlyIdle = 0;
+		std::vector<std::string> stanceFirst;
+		size_t smRows = 0, smDiff = 0, smDiffAds = 0, smDiffHip = 0, smDiffCrouch = 0;
 		std::map<std::string, size_t> smPairs;			// 「Lyra 상태 > 우리 상태」 → 줄 수
 		std::vector<std::string> smFirst;				// 앞 몇 개 어긋난 줄
 		bool smWasDiff = false;
@@ -1051,12 +1076,25 @@ namespace
 				}
 				adsIn = source->ads > 0;
 			}
+			bool crouchIn = false;
+			if (lyra && !noCrouch)
+			{
+				const ProbeRow* source = probeAt(row.pass, row.frame - crouchLag);
+				if (!source)
+				{
+					source = lyra;
+					++crouchMissingRows;
+				}
+				if (source->crouched < 0) ++crouchNoColumnRows;
+				crouchIn = source->crouched > 0;
+			}
 			const auto t0 = std::chrono::steady_clock::now();
 			for (; nextSeq <= row.seq; ++nextSeq)
 			{
 				AnimMoveInput input = found->second[(size_t)nextSeq]->input;
 				input.groundDistance += groundAdd;
 				input.ads = adsIn;
+				input.crouched = crouchIn;
 				state.Update(input);
 				++fed;
 			}
@@ -1067,6 +1105,9 @@ namespace
 			}
 			if (state.AdsBlend() > 0.f) ++adsBlendRows;
 			if (state.AdsBlend() > 0.f && state.AdsBlend() < 1.f) ++adsPartialRows;
+			if (crouchIn) ++crouchFedRows;
+			if (state.CrouchBlend() > 0.f) ++crouchBlendRows;
+			if (state.CrouchBlend() > 0.f && state.CrouchBlend() < 1.f) ++crouchPartialRows;
 			updateSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
 			if (lyra)
@@ -1122,20 +1163,48 @@ namespace
 						++smDiff;
 						if (lyra->ads > 0) ++smDiffAds;
 						else ++smDiffHip;
+						if (lyra->crouched > 0) ++smDiffCrouch;		// 조준 · 허리와 겹쳐 센다(앉아 조준은 둘 다)
 						++smPairs[raw + ">" + got];
 						if (!smWasDiff)
 						{
 							++smRuns;
 							if (smFirst.size() < 12)
 							{
-								char text[160];
-								std::snprintf(text, sizeof(text), "(pass=%d frame=%d lyra=%s got=%s ads=%d moveAds=%d adsBlend=%.3f)", row.pass, row.frame, raw.c_str(), got, lyra->ads, state.MoveAds() ? 1 : 0, state.AdsBlend());
+								char text[200];
+								std::snprintf(text, sizeof(text), "(pass=%d frame=%d lyra=%s got=%s ads=%d moveAds=%d adsBlend=%.3f crouch=%d moveCrouch=%d crouchBlend=%.3f)", row.pass, row.frame, raw.c_str(), got, lyra->ads, state.MoveAds() ? 1 : 0, state.AdsBlend(),
+									lyra->crouched, state.MoveCrouch() ? 1 : 0, state.CrouchBlend());
 								smFirst.push_back(text);
 							}
 						}
 					}
 					smWasDiff = !same && !lagOne;
 					smPrevRef = ref;
+				}
+				// 서기 안 전환(D62 4) — Lyra 의 서기 안 상태 기계는 서기 상태가 섞여 나가는 동안에도 상태 이름을 지닌다. 우리 칸도 출발 · 점프 아래에서 돈다 → 이동 상태와 따로 센다
+				if (!lyra->idleStance.empty())
+				{
+					++stanceRows;
+					const bool lyraStance = lyra->idleStance == "StanceTransition";
+					const int ours = state.StanceLayer();
+					const bool lyraIdle = lyra->locomotion == "Idle";
+					if (lyraStance && ours != 0)
+					{
+						++stanceBoth;
+						if (ours != (lyra->crouched > 0 ? 1 : 2)) ++stanceKindDiff;
+					}
+					else if (lyraStance || ours != 0)
+					{
+						if (lyraStance) ++stanceLyraOnly;
+						else ++stanceOursOnly;
+						if (lyraStance && lyraIdle) ++stanceLyraOnlyIdle;
+						if (!lyraStance && lyraIdle) ++stanceOursOnlyIdle;
+						if (stanceFirst.size() < 12)
+						{
+							char text[160];
+							std::snprintf(text, sizeof(text), "(pass=%d frame=%d lyra=%s/%s ours=%d state=%s crouch=%d)", row.pass, row.frame, lyra->idleStance.c_str(), lyra->locomotion.c_str(), ours, state.MoveStateName(), lyra->crouched);
+							stanceFirst.push_back(text);
+						}
+					}
 				}
 
 				// 사건 뒤 목록 대조 — 엔진 배열 차례 그대로
@@ -1215,12 +1284,13 @@ namespace
 			state.ToPoseInput(got);
 			if (row.pass == tracePass && row.frame >= traceFrom && row.frame <= traceTo)
 			{
-				std::printf("TRACE pass=%d frame=%d state=%s ads=%d moveAds=%d adsBlend=%.4f lyra=%s layers=", row.pass, row.frame, state.MoveStateName(), adsIn ? 1 : 0, state.MoveAds() ? 1 : 0, state.AdsBlend(), lyra ? lyra->locomotion.c_str() : "-");
+				std::printf("TRACE pass=%d frame=%d state=%s ads=%d moveAds=%d adsBlend=%.4f crouch=%d moveCrouch=%d crouchBlend=%.4f lyra=%s/%s layers=", row.pass, row.frame, state.MoveStateName(), adsIn ? 1 : 0, state.MoveAds() ? 1 : 0, state.AdsBlend(),
+					crouchIn ? 1 : 0, state.MoveCrouch() ? 1 : 0, state.CrouchBlend(), lyra ? lyra->locomotion.c_str() : "-", lyra ? lyra->idleStance.c_str() : "-");
 				for (int k = 0; k < got.layerCount; ++k) std::printf("%d@%.4f*%.3f ", got.layers[k].clip, got.layers[k].time, got.layers[k].fade);
 				std::printf("walk=");
 				for (int k = 0; k < kAnimWalkClips; ++k)
 				{
-					if (got.weights[k] > 0.001f) std::printf("%d*%.3f@hip%.4f/ads%.4f ", k, got.weights[k], got.times[k], got.adsTimes[k]);
+					if (got.weights[k] > 0.001f) std::printf("%d*%.3f@hip%.4f/ads%.4f/crouch%.4f ", k, got.weights[k], got.times[k], got.adsTimes[k], got.crouchTimes[k]);
 				}
 				std::printf("\n");
 			}
@@ -1229,7 +1299,7 @@ namespace
 				wire::AnimStateWire onWire{};
 				state.ToWire(onWire);
 				const AnimPoseInput exact = got;
-				state.FromWire(onWire, got.pitch, got);
+				state.FromWire(onWire, got.pitch, got.crouched, got);
 				if (wireKeepNew)
 				{
 					got.montageCount = exact.montageCount;
@@ -1279,7 +1349,7 @@ namespace
 			if (got.handLeftAlpha < 1.f) ++poseHandRows;
 			const auto poseStart = std::chrono::steady_clock::now();
 			evaluator.EvaluateLocal(got, local.data());
-			evaluator.BodiesFromLocal(local.data(), poses.data());
+			evaluator.BodiesFromLocal(local.data(), poses.data(), got.crouched ? crouchLift : 0.0);
 			const double poseSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - poseStart).count();
 			const int poseKind = got.montageCount > 0 ? 0 : (got.overrideWeight > 0.00001f ? 1 : 2);
 			poseKindSeconds[poseKind] += poseSeconds;
@@ -1313,7 +1383,7 @@ namespace
 		}
 		std::printf("STATEPOSE poseTest=%d slotProfile=%s overrideProfile=%s rows=%zu montageRows=%zu overrideRows=%zu handRows=%zu montageMisses=%llu trackOutside=%llu\n", poseTest, slotProfileName ? slotProfileName : "-", overrideProfileName ? overrideProfileName : "-", rows.size(), poseMontageRows, poseOverrideRows, poseHandRows, montageMisses, trackOutside);
 		double bound = 0;
-		for (CAnimPoseEvaluator& evaluator : evaluators) bound = std::max(bound, evaluator.ComputeBoundRadius());
+		for (CAnimPoseEvaluator& evaluator : evaluators) bound = std::max(bound, evaluator.ComputeBoundRadius(kCrouchMeshLiftZ));
 		std::printf("STATEBOUND reach=%.3f bound=%.3f wire=%d\n", maxReach, bound, useWire ? (wireKeepNew ? 2 : 1) : 0);
 		if (probePath)
 		{
@@ -1334,7 +1404,11 @@ namespace
 			std::printf("STATEUDW rowsAfterMontage=%zu below1=%zu\n", udwRows, udwBelow);
 			std::printf("STATELAYER rows=%zu swapRowsSkipped=%zu reloadCancels=%zu beforeFireRows=%zu\n", layerRows, layerSwapRows, reloadCancels, beforeFireRows);
 			std::printf("STATEADS adsLag=%d noAds=%d fedRows=%zu blendRows=%zu partialRows=%zu missingLagRows=%zu\n", adsLag, noAds ? 1 : 0, adsFedRows, adsBlendRows, adsPartialRows, adsMissingRows);
-			std::printf("STATESM rows=%zu lagOne=%zu diff=%zu diffAds=%zu diffHip=%zu runs=%zu\n", smRows, smLagOne, smDiff, smDiffAds, smDiffHip, smRuns);
+			std::printf("STATECROUCH crouchLag=%d noCrouch=%d lift=%.1f stanceFade=%d:%d fedRows=%zu blendRows=%zu partialRows=%zu missingLagRows=%zu noColumnRows=%zu\n", crouchLag, noCrouch ? 1 : 0, crouchLift, stanceInFrames, stanceOutFrames,
+				crouchFedRows, crouchBlendRows, crouchPartialRows, crouchMissingRows, crouchNoColumnRows);
+			std::printf("STATESTANCE rows=%zu both=%zu kindDiff=%zu lyraOnly=%zu oursOnly=%zu lyraOnlyIdle=%zu oursOnlyIdle=%zu\n", stanceRows, stanceBoth, stanceKindDiff, stanceLyraOnly, stanceOursOnly, stanceLyraOnlyIdle, stanceOursOnlyIdle);
+			for (const std::string& text : stanceFirst) std::printf("STATESTANCEFIRST %s\n", text.c_str());
+			std::printf("STATESM rows=%zu lagOne=%zu diff=%zu diffAds=%zu diffHip=%zu diffCrouch=%zu runs=%zu\n", smRows, smLagOne, smDiff, smDiffAds, smDiffHip, smDiffCrouch, smRuns);
 			for (const auto& pair : smPairs) std::printf("STATESMPAIR %s rows=%zu\n", pair.first.c_str(), pair.second);
 			for (const std::string& text : smFirst) std::printf("STATESMFIRST %s\n", text.c_str());
 			const auto print = [&](const char* tag, const DiffColumn* column)

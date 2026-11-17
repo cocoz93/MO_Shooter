@@ -50,6 +50,7 @@ private:
 	double StartedAt = 0;
 	double NextGrabAt = 0;
 	double MovedAt = 0;
+	double AfterMoveSeconds = 0;	// 첫 움직임 뒤 촬영 길이 — 처음 값은 Initialize 에서 SCRIPT_AFTER_MOVE(cpp)
 
 	TWeakObjectPtr<ACharacter> Target;
 	TWeakObjectPtr<ACameraActor> Camera;

@@ -11,10 +11,11 @@ class ACharacter;
 class APawn;
 class APlayerState;
 class ULyraEquipmentInstance;
+class ALyraWeaponSpawner;
 struct FMOBCore;
 struct FGameplayAbilityActorInfo;
 
-namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; } }
+namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; } struct Vec3; }
 
 // 남의 캐릭터 — 서버 상태를 틱 번호와 함께 쌓아 0.1초 뒤 시점을 보여 준다
 struct FMOBSnapshot
@@ -25,6 +26,7 @@ struct FMOBSnapshot
 	float Yaw = 0, Pitch = 0;
 	int8 MoveX = 0, MoveY = 0;
 	bool bFalling = false;
+	bool bCrouched = false;		// STATE_CROUCHED — 앉은 자세 풀기 · 캡슐 · 메시 올림(D-5-c)
 };
 
 struct FMOBRemote
@@ -57,6 +59,15 @@ struct FMOBRemote
 	TWeakObjectPtr<ULyraEquipmentInstance> Equipped;
 };
 
+// 내 근접 화면 판정 하나(E-3 17-c) — 서버 근접 소식과 입력 번호로 견준다
+struct FMOBMeleeGuess
+{
+	uint8 Kind = 0;			// wire::EMeleeResult 차례(없음 · 같은 팀 · 벽 · 맞음)
+	uint32 Target = 0;
+	float ForceX = 0.f, ForceY = 0.f;	// 예측에 넣은 밀기 힘(맞음이 아니면 0)
+	float Distance = 0.f;
+};
+
 /**
  * Lyra 와 매치 서버를 잇는다 — 입력을 서버로 보내고 서버 결과를 받는다. 판정은 전부 서버 몫.
  * 와이어 형식 = MO_Shooter/Shared/GameProtocol.h(봇과 같은 한 벌).
@@ -66,8 +77,8 @@ struct FMOBRemote
  *   -MOBServer=127.0.0.1:7791   서버 접속(접속하면 막기 스위치 둘을 켠다 — 끄려면 -MOBBlockDamage=0)
  *   -MOBAutoInput               사람 없이 정해진 입력을 넣는다(걷기·점프·사격·재장전·무기 바꾸기)
  *   -MOBAutoAim                 자동 입력이 보이는 적 중 가장 가까운 적을 겨눠 쏜다(맞은 표시·내 처치를 보려고)
- *   -MOBKeepPickups             맵의 무기·체력 줍기 받침을 그대로 둔다(기본은 숨김 — 서버에 줍기가 아직 없다)
- *   -MOBBreakAt=N               준비된 뒤 N초에 Lyra 체력·팀 점수·탄을 일부러 틀어 비교 코드가 잡는지 본다
+ *   -MOBKeepPickups             맵의 무기·체력 줍기 받침을 Lyra 그대로 둔다(기본 = 무기 받침은 숨기고, 체력 받침은 서버 받침 소식 S2C_PICKUP 으로 그린다 — B-3)
+ *   -MOBBreakAt=N               준비된 뒤 N초에 Lyra 체력·팀 점수·탄·내 도움(점수판 +2 · 센 값 +1)을 일부러 틀어 비교 코드가 잡는지 본다
  *   -MOBEventShots              적이 보일 때·맞혔을 때·처치·내 죽음에 사진(Saved/MOB/<tag>_<사건>_<N>.png)
  *   -MOBShotAt=10,15            준비된 뒤 N초에 캡처(Saved/MOB/<tag>_<N>.png)
  *   -MOBRecord=start,dur,fps    프레임 연속 캡처(사람 확인 영상용)
@@ -77,8 +88,13 @@ struct FMOBRemote
  *   -MOBNoViewClamp             시험 옵션. 화면 시점 묶기를 끈다(고치기 전 동작과 견줄 때만). 평소에는 상태가 늦게 와 상대를 마지막 자리에 세워 둔 프레임에 그 상태의 틱을 화면 시점으로 보고한다(candidate1-pilot-plan.md 파일럿 2)
  *   -MOBTag=name                산출물 파일 이름 앞부분
  *   -MOBBreakPredictAt=N        일부러 틀리기 — 준비된 뒤 N초에 내 예측 위치를 1m 민다(보정이 잡는지 보려고)
+ *   -MOBSelfBodyDelay=N         시험 옵션. 내 몸 Quinn 바꾸기(D85)를 캐릭터를 처음 본 뒤 N초 미룬다 — 총을 쥔 뒤 몸이 바뀌는 경우를 만든다(층이 빠진 채 남는지 보려고)
  *   -MOBSimpleAnim              화면 시험 — 상대를 Lyra 애니 대신 소총 클립 단순 재생으로 움직인다(MOBSimpleAnimInstance.h)
  *   -MOBStandAt=x,y,z           촬영 전용 — 내 입력을 보내지 않고 서버에 이 자리에 서 있겠다고만 알린다. 서버 --debug 필요(MOBRemoteShotSubsystem.h)
+ *   -MOBStandHp=N               -MOBStandAt 의 부활 뒤 첫 자리 옮김 체력(받침 시험 — 다친 채 받침 위에 선다). 준 때만 그 뒤 20초마다 알림은 서버가 본 지금 체력으로 보낸다(조용히 체력을 바꾸지 않게)
+ *   -MOBAutoMelee               자동 입력에 근접을 더한다 — 적이 4m 안이면 누르고 있고, 아니면 6초마다 0.1초 누른다. -MOBAutoAim 과 같이 켜면 적이 10m 안에 보여도 다가간다(6초 중 4초). 없으면 기존 자동 입력 그대로
+ *   -MOBBreakMeleeBlock         일부러 틀리기 — Lyra 근접 능력의 입력 표식을 안 떼어 Lyra 가 키로 혼자 근접을 켠다(MOB_MELEE lyraSelf 가 늘어야 한다)
+ *   -MOBBreakPadsAt=N           일부러 틀리기 — 준비된 뒤 N초에 묶인 받침 하나의 Lyra 켜짐을 뒤집고 · 다음 회복 효과를 건너뛰고 · 다음 받침 소식 하나를 버린다(check_pads_bridge.py 가 잡는지 보려고)
  * 판정에 쓰는 줄은 전부 「MOB_」 로 시작한다.
  */
 UCLASS()
@@ -110,6 +126,7 @@ private:
 	void AddRemoteSnapshot(const mo::wire::PlayerState& P, uint32 ServerTick, const mo::wire::AnimStateWire* Anim);
 	void ApplyServerAnim(FMOBRemote& R, ACharacter* Ch, const FMOBSnapshot& From, const FMOBSnapshot* To, float Alpha);
 	void EnsureRemoteBody(FMOBRemote& R, ACharacter* Ch);
+	void EnsureSelfBody(ACharacter* Ch);
 	void LogViewParts(uint32 InSeq, uint32 Target, const ACharacter& Shown);
 	void CheckEngineRays(uint32 InSeq, uint32 Target, const ACharacter& Shown);
 	void SpawnRemote(FMOBRemote& R);
@@ -132,9 +149,16 @@ private:
 	void QueuePacket(const void* Pkt, int32 Size);
 	void TickInput(double Now);
 	void TickAbilityFire();
+	void TickAbilityMelee();
+	FMOBMeleeGuess JudgeMelee(mo::Vec3& OutPush);
 	void TickAutoInput(double T);
 	void TickCapture(double T);
 	void TickPickups(double Now);
+	void HandlePickup(const mo::wire::Pickup& M);
+	void HandleMelee(const mo::wire::Melee& M);
+	ALyraWeaponSpawner* BindPad(int32 Index);
+	void ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects);
+	float ApplyPadHeal(const mo::wire::Pickup& M, ALyraWeaponSpawner* Actor);
 	void RequestEventShot(const TCHAR* Name, double Delay, int32 MaxCount);
 	void TickRecord(double T);
 	void DrainGrabber();
@@ -157,9 +181,17 @@ private:
 	bool bAutoAim = false;
 	bool bEventShots = false;
 	bool bKeepPickups = false;
+	float StandHp = -1.f;			// -MOBStandHp — 0 이하 = 안 줌(늘 100)
+	bool bStandPlaced = false;
+	float BreakPadsAt = -1;
+	bool bBreakPadHeal = false;		// 일부러 틀림 — 다음 회복 효과를 건너뜀
+	bool bBreakPadDrop = false;		// 일부러 틀림 — 다음 받침 소식을 버림
 	bool bSimpleAnim = false;
 	bool bServerAnim = false;		// -MOBServerAnim — 남의 캐릭터 자세를 서버가 보낸 상태로 정한다(후보 1, D32)
 	bool bAnimBonesChecked = false;
+	bool bBreakMeleeBlock = false;	// -MOBBreakMeleeBlock — 일부러 틀림: Lyra 근접 능력의 입력 표식을 안 뗀다(Lyra 가 혼자 켜 lyraSelf 가 는다)
+	bool bAutoMeleeOn = false;		// -MOBAutoMelee — 자동 입력에 근접을 더한다
+	bool bBreakCrouchBlock = false;	// -MOBBreakCrouchBlock — 일부러 틀림: 앉기 막기 갈고리가 어긋남을 세기만 하고 안 되돌린다. Lyra 가 혼자 앉으며 캡슐을 옮겨 내 캐릭터 밀림(selfDriftOver1cm)이 늘어야 한다(D-5-c)
 	bool bAbilityOwnTimer = false;	// -MOBAbilityOwnTimer — 내 사격 능력을 Lyra 자기 타이머 · 원본 난수로 둔다(고치기 전 동작과 견줄 때만, D53)
 	bool bRayCheck = false;			// -MOBRayCheck — 같은 자세에 엔진 광선과 TraceBody 를 쏴 견준다(5단계)
 	FString RayBreak;				// -MOBRayBreak=yaw|nothick — 이 대조가 틀림을 잡는지 볼 때만
@@ -189,6 +221,7 @@ private:
 	FMOBCore* Core = nullptr;	// 맵·이동 계산·내 예측 — 만들고 지우는 곳 = Connect / Deinitialize
 	uint8 Weapon = 0;
 	bool bReloadWasDown = false;
+	bool bCrouchWasDown = false;
 
 	// 내 캐릭터 화면 — 예측은 60Hz 로 끊겨 있어 직전·지금 사이를 메우고, 보정으로 생긴 차이는 서서히 없앤다
 	FVector SelfPrev = FVector::ZeroVector;
@@ -197,6 +230,18 @@ private:
 	FVector SelfLastSet = FVector::ZeroVector;
 	bool bSelfSet = false;
 	FName LastPawnName;
+
+	// 내 몸도 Quinn(D85 — D33 연장). 캐릭터마다 한 번 닫는다: 몸이 Quinn 이고 무기 층이 여성형이면 끝
+	TWeakObjectPtr<ACharacter> SelfBodyChecking;	// 지금 보고 있는 캐릭터 — 바뀌면 시도 수를 새로 센다
+	bool bSelfBodyDone = false;
+	double SelfBodyNextTryAt = 0;
+	int32 SelfBodyTries = 0, SelfReequipTries = 0;
+	int64 SelfBodyDonePawns = 0, SelfBodySets = 0, SelfReequips = 0, SelfBodyFails = 0;
+	float SelfBodyDelay = 0;			// -MOBSelfBodyDelay (시험)
+	double SelfEmptyLogAt = 0;			// 층이 빈 채 기다리는 줄 — 1초에 한 줄
+	int32 SelfEmptyLogs = 0;			// 캐릭터마다 그 줄 수(상한 20)
+	int64 SelfBodyEmptyFrames = 0;		// Quinn 몸인데 층이 빈 채 기다린 프레임 합
+	double SelfEmptySince = 0;			// 층이 비기 시작한 때(0 = 비어 있지 않음) — 쥔 칸이 있는데 1초 넘으면 다시 쥔다(D88)
 
 	TMap<uint32, FMOBRemote> Remotes;
 	double TickClockOffset = 0;		// 서버 틱 - 내 시계 * 60
@@ -209,6 +254,25 @@ private:
 	bool bNamedSelf = false;
 	double NextPickupCheckAt = 0;
 	int32 PickupsHidden = 0;
+	// 체력 받침(B-3) — 칸 = 서버 받침 번호. 상태는 서버 소식 그대로, 액터는 자리로 찾아 묶는다
+	struct FMOBPad
+	{
+		bool bKnown = false;			// 서버 소식을 한 번이라도 받음
+		bool bAvailable = true;
+		uint32 ReadyTick = 0;
+		uint32 CooldownTicks = 0;
+		FVector Location = FVector::ZeroVector;
+		TWeakObjectPtr<ALyraWeaponSpawner> Actor;
+	};
+	TArray<FMOBPad> Pads;
+	// msgs = 받은 받침 소식(takes · readies · syncs = 까닭별), badIndex = 번호가 칸 수 밖, noActor = 받을 때 맵 받침을 못 찾은 소식,
+	// bound = 맵 받침을 서버 받침에 묶은 수(Lyra 가 받침을 새로 놓아 다시 묶은 것 포함), heals = 받침 회복 효과(GiveWeapon)를 건 수,
+	// healBeforeFix = 회복 전 Lyra 체력이 서버 값(회복 뒤 - 회복량)과 달라 먼저 맞춘 수, healMismatch = 회복 효과 뒤 체력이 서버 회복 뒤 체력과 다른 수(그때 서버 값으로 맞춤),
+	// healNoPawn = 집은 사람 몸이 없거나 죽어 있던 수, stateChecks · stateDiff = 1초마다 묶인 받침의 Lyra 켜짐 · 구슬 보임 · 충돌 꺼짐을 서버 상태와 견준 수 · 다른 수(그때 서버 상태로 다시 그림)
+	int64 PadMsgs = 0, PadTakes = 0, PadReadies = 0, PadSyncs = 0, PadBadIndex = 0, PadNoActor = 0, PadBound = 0;
+	int64 PadHeals = 0, PadHealBeforeFix = 0, PadHealMismatch = 0, PadHealNoPawn = 0, PadStateChecks = 0, PadStateDiff = 0;
+	int32 PadDiffLinesLeft = 10;
+	uint32 LastStateTick = 0;		// 마지막으로 받은 상태의 틱 — 받침 소식은 그 틱의 상태보다 먼저 나가므로, 이 틱까지의 서버 사건은 다 받았어야 한다
 	int32 HpDiffLinesLeft = 20;
 	int64 HpFixes = 0;
 	double InputRawMax = 0, InputSentMax = 0;
@@ -245,8 +309,15 @@ private:
 	bool bAutoPitchSweep = false;
 	int32 InputsSinceSpawn = 0;
 	int64 AimSweepSkipped = 0;
-	int64 AimSweepInputs[2][18] = {};
-	double AimSweepDistMax[2][18] = {}, AimSweepHorizMax[2][18] = {};
+	// 칸 번호 = 조준(0 · 1) + 앉음이면 2(D-6-a — 앉으면 카메라가 내려가 시작점 거리가 바뀐다)
+	int64 AimSweepInputs[4][18] = {};
+	double AimSweepDistMax[4][18] = {}, AimSweepHorizMax[4][18] = {};
+	// 앉거나 선 직후 0.25초를 따로 — Lyra 카메라는 앉는 순간 받침점을 그대로 두고(LyraCameraMode.cpp GetPivotLocation, 캡슐 반높이 차를 더한다)
+	// 앉은 눈높이로 0.2초에 걸쳐 섞어 내린다(LyraCameraMode_ThirdPerson.cpp UpdateCrouchOffset, 배수 5). 그동안 시작점이 캡슐 중심보다 서 있을 때보다 최대 25 높다(D-6-a). [0] = 섬 · [1] = 앉음
+	bool bSweepCrouched = false;
+	double SweepCrouchChangedAt = -1.0;
+	int64 AimSweepFreshInputs[2] = {};
+	double AimSweepFreshMax[2] = {}, AimSweepSteadyMax[2] = {};
 	double AimSweepPitchMin = 0, AimSweepPitchMax = 0;
 	// 조준 키 → Lyra 최대 속도(C-5 사람 판, D61 미검증 닫기) — 키가 바뀐 프레임부터 Lyra 이동 최대 속도가 따라 바뀌기까지 몇 프레임인가.
 	// [0] = 뗌 · [1] = 누름, 칸 = 0 · 1 · 2 프레임 늦음 · 3 = 3프레임 안에 안 바뀜(죽음 · 능력 막힘 등)
@@ -269,12 +340,30 @@ private:
 	TArray<TPair<double, FString>> PendingEventShots;
 	bool bAutoJump = false;
 	bool bAutoReload = false;
+	bool bAutoCrouch = false;
+	bool bAutoMelee = false;
 	uint8 AutoWeapon = 0;
 	int32 AutoWeaponFixed = -1;		// -MOBAutoWeapon=N — 자동 시험의 무기를 고정한다(-1 = 10초마다 바꿈). 무기별 대조에 쓴다
 
 	// 관측값
 	int64 InputsSent = 0, InputsSkipped = 0;
 	int64 InputsFire = 0, InputsJump = 0, InputsReload = 0, InputsWeaponChange = 0;
+	// 근접(E-3 17-c) — 단추를 실은 입력 · 화면 판정 · 화면 판정 결과(없음 · 같은 팀 · 벽 · 맞음) · 서버가 보낸 내 근접 결과(같은 넷) · 그중 화면과 결과가 다름 ·
+	// 결과는 같은데 대상이 다름 · 소식에 맞는 화면 판정이 없음 · 남의 근접 소식. 힘 차이 최대 = 화면 판정 밀기 ↔ 서버 밀기
+	int64 InputsMelee = 0, MeleeJudged = 0, MeleeScreen[4] = {}, MeleeMine[4] = {}, MeleeKindDiff = 0, MeleeTargetDiff = 0, MeleeNoGuess = 0, MeleeOthers = 0;
+	double MeleeForceDiffMax = 0;
+	// Lyra 근접 능력 — 예측이 켠 근접(켤 차례로 둠) · 켬 · 켜기 실패 · 능력 칸 없음 · 기다리다 버림 · 기다린 프레임 · 다리가 안 켰는데 켜짐(Lyra 혼자) · 입력 표식을 뗀 칸
+	int64 MeleeQueued = 0, MeleeDriven = 0, MeleeActivateFail = 0, MeleeNoSpec = 0, MeleeDropped = 0, MeleeWaitFrames = 0, LyraMeleeSelf = 0, LyraMeleeStripped = 0;
+	bool bMeleePending = false;
+	uint32 MeleePendingSeq = 0;
+	uint64 MeleePendingFrame = 0;
+	bool bLyraMeleeWasActive = false;
+	float MeleeYaw = 0.f;		// 서버 player.yaw = 마지막으로 적용한 입력의 요(부활 직후는 시작 자리 요) — 다음 근접의 몸 앞(봇 _meleeYaw 와 같다)
+	int32 MeleeLinesLeft = 60;	// 근접 하나씩 줄(MOB_MELEE_ONE) 남은 수
+	int32 DriftLinesLeft = 20;	// 내 밀림 1cm 넘는 프레임 줄(MOB_SELF_DRIFT) 남은 수
+	TMap<uint32, FMOBMeleeGuess> MeleeGuesses;	// 입력 번호 → 화면 판정
+	int64 InputsCrouch = 0, CrouchComparedOn = 0, CrouchFlagDiff = 0;	// 앉기를 누른 입력 · 서버가 앉음으로 보낸 비교 줄 · 그중 내 예측과 어긋남(D-5-c)
+	int64 SelfCrouchChanges = 0, RemoteCrouchChanges = 0, RemoteLiftFrames = 0;	// 내 · 남의 캐릭터 앉음을 바꾼 수 · 남의 메시를 올린 프레임 수(D-5-c)
 	int64 InputsAds = 0, AdsComparedOn = 0, AdsFlagDiff = 0;	// 조준을 누른 입력 · 서버가 조준 켜짐으로 보낸 비교 줄 · 그중 내 예측과 어긋남(C-4)
 	int64 StatesRecv = 0, StatesWithoutMe = 0, ShotsRecv = 0, DamagesRecv = 0, MatchesRecv = 0, KillsRecv = 0, SpawnsRecv = 0;
 	int64 UnknownPackets = 0, SendShort = 0;
@@ -292,6 +381,7 @@ private:
 	int64 AnimPoseEvalsByWeapon[3] = {};	// 무기 번호(EWeapon) 차례 권총 · 소총 · 샷건 — 무기 수와 같은지 .cpp 에서 정적 검사
 	int64 AnimSetChanges = 0, AnimSetMisses = 0, AnimBadWeapon = 0;
 	int64 AnimAdsLayers = 0, AnimBadLayers = 0;	// 언리얼 경로에서 조준 전환 층을 허리 전환으로 바꿔 튼 수 · 칸 밖이라 버린 층 수(C-5)
+	int64 AnimCrouchLayers = 0, AnimStanceLayers = 0;	// 같은 경로에서 앉은 전환 층을 허리 전환으로 바꿔 튼 수 · 서기 안 전환 층을 걷기 · 서기 자리로 돌린 수(D-3)
 	int64 AnimMontageCellsIn = 0, AnimMontageCells = 0, AnimMontageMisses = 0, AnimMontageFrames = 0, AnimSlotPasses = 0, AnimMontageNoSlot = 0, AnimMaskMissing = 0, AnimWeaponNotifies = 0, AnimWeaponPlaying = 0, AnimSoundNotifies = 0, AnimMontageRestarts = 0, AnimStepStates = 0;	// 몽타주(9단계 5-a)
 	struct FMOBRayStats { int64 Rays = 0, Map = 0, EngHit = 0, Same = 0, EngOnly = 0, MineOnly = 0, Both = 0, BoneSame = 0, EngWeak = 0, WeakLost = 0, WeakGain = 0; };
 	FMOBRayStats RayStats[2][2];		// [선 · 구 5.5][몸 쪽 · 머리 쪽 겨눔]
@@ -318,6 +408,11 @@ private:
 	double HpDiffMax = 0;
 	int64 SelfRespawns = 0, RemoteRespawns = 0, ScoreFixes = 0, AmmoFixes = 0, WeaponSwaps = 0, RemoteEquips = 0, PhaseChanges = 0, ShotCues = 0, HitMarkers = 0, CountDownSets = 0;
 	int32 LastCountDownShown = -1;
+	// 도움(A-3) — 처치 패킷의 도움 번호로 센 사람별 도움 수. Lyra AssistProcessor 가 혼자 센 점수판 값을 처치마다 이 값으로 덮는다
+	TMap<uint32, int32> ServerAssists;
+	int64 AssistsRecv = 0, AssistFixes = 0, AssistResultPlayers = 0, AssistResultLyraDiff = 0, AssistResultCountDiff = 0;
+	int64 AssistResultLyraSeen = 0, AssistResultLyraSum = 0;	// 결과 대조에서 Lyra 사람 정보를 찾은 수 · 그 점수판 도움 합 — diff 0 이 「못 읽음」이 아님을 보이는 지나간 양
+	void SyncAssists();
 	bool bLoggedScoringMissing = false;
 	bool bPostGamePrepared = false;
 	int32 LyraScoreA = -1, LyraScoreB = -1;

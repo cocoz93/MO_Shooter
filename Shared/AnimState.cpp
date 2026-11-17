@@ -37,6 +37,11 @@ namespace mo
 		// 조준이 바뀌어 출발 · 돌아서기 → 달리기 반복, 멈춤 → 서기로 빠질 때의 섞기(D60 3) — 그 전환 규칙에 시간이 안 적혀 엔진 기본값 0.2초(AnimStateTransitionNode.cpp:84, 원본 기준).
 		// Lyra 기록에서 나가는 출발 클립 비중이 10프레임쯤에 0 이 된다(animcmp_ads_rifle_probe.csv 3506~3516, 실측)
 		constexpr float kAdsChangeSeconds = 0.2f;
+		// 서기 안 앉기 · 일어서기 전환에서 서기로 돌아가는 남은 시간(D62 4) — 엔진 자동 전환 규칙(AnimNode_StateMachine.cpp:850-854 「남은 시간 ≤ 전환 시간」, 원본 기준).
+		// 길이 0.733 · 0.900 · 0.733 인 세 클립이 다 시각 0.483 · 0.650 · 0.483 을 마지막으로 서기로 갔다(animcmp_crouch_<무기>_probe.csv c_on · c_off, 실측).
+		// 덤 1e-4 = 1/60초 간격 시각의 float 더하기 어긋남이 문턱을 넘나들지 않게(한 프레임 앞 0.2667 과는 0.0166 떨어져 있다, 제 판단)
+		constexpr float kStanceExitRemaining = 0.25f;
+		constexpr float kStanceExitSlack = 1.e-4f;
 		constexpr float kStepLeaderWeight = 0.5f;
 		constexpr float kPivotMinSpeed = 10.f;
 		constexpr float kDistanceRateMin = 0.25f;
@@ -50,20 +55,28 @@ namespace mo
 		// - 샷건 = 소총 몸이라 소총 값(D45)
 		// - 조준 전환(D60 3) = 같은 방법으로 컨텐츠 C-3 기록 animcmp_ads_<무기>_probe.csv 에서 잰 값(/c/tmp/mob/c3/exit_ads.py). 같은 방향을 2~3번 잰 값이 다 같다.
 		//   조준을 바꿔 빠진 것(start_toggle · piv_toggle 구간)은 뺐다
+		// - 앉은 전환(D62 3) = 같은 방법으로 컨텐츠 D-3-a 기록 animcmp_crouch_<무기>_probe.csv 에서 잰 값(/c/tmp/mob/d3/exit_crouch.py). 같은 방향을 1~3번 잰 값이 다 같다.
+		//   앉음 · 조준을 바꿔 빠진 것(stop_toggle · c_ads_off)과 돌아서기 → 멈춤(stop_end)은 뺐다. 샷건은 소총과 프레임까지 같다
+		// - 앉아 쏜 뒤 들기 = Lyra 무기 층 RaiseWeaponAfterFiringWhenCrouched — 소총 · 샷건 참 · 권총 거짓(무기 층 기본값 원본 기준 + 기록 권총 앉은 덮기 자세 0프레임, 실측. D62 5)
 		struct BundleTiming
 		{
 			const char* bundle;
 			float stopClipSeconds;			// 멈춘 뒤 서기 상태가 될 때까지 — 대기 몸짓 시계의 출발점
 			float exitTimes[3][4];			// [출발 · 멈춤 · 돌아서기][방향] — 전환 클립이 이 시각을 지나면 달리기 · 서기로 빠진다
 			float adsExitTimes[3][4];		// 조준 전환 클립의 같은 표
+			float crouchExitTimes[3][4];	// 앉은 전환 클립의 같은 표
+			bool raiseWhenCrouched;
 		};
 		constexpr BundleTiming kBundleTimings[] = {
 			{ "rifle", 1.35f, { { 0.791f, 1.165f, 1.185f, 1.122f }, { 1.712f, 2.046f, 2.180f, 2.277f }, { 1.344f, 1.591f, 1.565f, 1.358f } },
-			  { { 1.025f, 0.852f, 0.719f, 0.630f }, { 1.782f, 1.948f, 1.944f, 1.446f }, { 1.005f, 1.193f, 1.232f, 1.148f } } },
+			  { { 1.025f, 0.852f, 0.719f, 0.630f }, { 1.782f, 1.948f, 1.944f, 1.446f }, { 1.005f, 1.193f, 1.232f, 1.148f } },
+			  { { 1.059f, 1.252f, 1.091f, 1.151f }, { 1.479f, 1.281f, 1.280f, 1.044f }, { 1.839f, 1.831f, 1.519f, 1.629f } }, true },
 			{ "pistol", 0.35f, { { 0.533f, 0.424f, 1.359f, 1.023f }, { 0.675f, 1.016f, 1.016f, 1.008f }, { 1.433f, 1.526f, 1.734f, 1.822f } },
-			  { { 0.864f, 0.894f, 0.745f, 0.726f }, { 1.110f, 0.936f, 1.076f, 0.691f }, { 1.851f, 2.021f, 1.798f, 2.301f } } },
+			  { { 0.864f, 0.894f, 0.745f, 0.726f }, { 1.110f, 0.936f, 1.076f, 0.691f }, { 1.851f, 2.021f, 1.798f, 2.301f } },
+			  { { 1.226f, 1.156f, 1.100f, 1.167f }, { 0.727f, 0.692f, 0.941f, 0.911f }, { 1.699f, 1.871f, 1.877f, 2.113f } }, false },
 			{ "shotgun", 1.35f, { { 0.791f, 1.165f, 1.185f, 1.122f }, { 1.712f, 2.046f, 2.180f, 2.277f }, { 1.344f, 1.591f, 1.565f, 1.358f } },
-			  { { 1.025f, 0.852f, 0.719f, 0.630f }, { 1.782f, 1.948f, 1.944f, 1.446f }, { 1.005f, 1.193f, 1.232f, 1.148f } } },
+			  { { 1.025f, 0.852f, 0.719f, 0.630f }, { 1.782f, 1.948f, 1.944f, 1.446f }, { 1.005f, 1.193f, 1.232f, 1.148f } },
+			  { { 1.059f, 1.252f, 1.091f, 1.151f }, { 1.479f, 1.281f, 1.280f, 1.044f }, { 1.839f, 1.831f, 1.519f, 1.629f } }, true },
 		};
 
 		constexpr float kSmallNumber = 1.e-8f;			// 엔진 UE_SMALL_NUMBER
@@ -328,6 +341,11 @@ namespace mo
 
 	bool CAnimState::PlayFireMontage(float playRate, int bundle, bool& cancelledReload)
 	{
+		return PlayMontageCancellingReload(MONTAGE_FIRE, playRate, bundle, cancelledReload);
+	}
+
+	bool CAnimState::PlayMontageCancellingReload(uint8_t kind, float playRate, int bundle, bool& cancelledReload)
+	{
 		cancelledReload = false;
 		for (int i = 0; i < _montageCount; ++i)
 		{
@@ -336,7 +354,7 @@ namespace mo
 			cancelledReload = StopMontageKind(MONTAGE_RELOAD, instance.bundle);
 			break;
 		}
-		return PlayMontage(MONTAGE_FIRE, playRate, bundle);
+		return PlayMontage(kind, playRate, bundle);
 	}
 
 	void CAnimState::StopMontage(MontageInstance& instance, uint8_t option, float blendSeconds)
@@ -530,15 +548,34 @@ namespace mo
 		return "?";
 	}
 
+	int CAnimState::StanceLayer() const
+	{
+		for (int i = _count - 1; i >= 0; --i)
+		{
+			if (_stack[i].settled) continue;
+			if (_stack[i].clip == kAnimStanceEntry) return 1;
+			if (_stack[i].clip == kAnimStanceExit) return 2;
+		}
+		return 0;
+	}
+
 	// 쏜 뒤 시간 → 덮기 비중 → 조준 보정 비중(D45). Lyra 차례 = 기본 애니(쏜 뒤 시간)가 먼저, 무기 층(덮기 · 조준)이 그 값을 같은 갱신에 읽는다
 	// 조준 중(D60 4) = Lyra 층의 같은 함수가 쏜 뒤 시간보다 먼저 보는 갈래 — 땅에선 덮기 0 · 조준 보정 1, 공중에선 덮기 1 · 조준 보정 1, 둘 다 보간 없이 바로.
-	// 기록에서 조준한 채 뜬 프레임에 덮기 0 → 1, 내려앉은 프레임에 1 → 0 으로 바로 바뀐다(animcmp_ads_rifle_probe.csv 2908 · 2969, 실측). 앉기는 컨텐츠 D 에서 더한다
-	void CAnimState::UpdateFiring(bool accelerating, bool falling, bool ads, float deltaSeconds)
+	// 기록에서 조준한 채 뜬 프레임에 덮기 0 → 1, 내려앉은 프레임에 1 → 0 으로 바로 바뀐다(animcmp_ads_rifle_probe.csv 2908 · 2969, 실측).
+	// 앉기(D62 5) = 같은 함수의 앉기 갈래(flow_layers_all.txt:2466-2600 풀이, 원본 기준) — ① (앉았고 앉아 쏜 뒤 안 듦) 또는 (서서 땅에서 조준) → 덮기 0 · 조준 보정 1
+	// ② 쏜 지 0.5초 안 또는 (조준하고 앉았거나 공중) → 덮기 1 · 조준 보정 1 ③ 그 밖 = 보간. 앉지 않으면 ① · ② 가 앞 조준 갈래와 같은 값을 낸다
+	void CAnimState::UpdateFiring(bool accelerating, bool falling, bool ads, bool crouched, float deltaSeconds)
 	{
 		_timeSinceFired = _firing ? 0.f : std::min(_timeSinceFired + deltaSeconds, kNeverFiredSeconds);
-		if (ads)
+		if ((crouched && !_raiseWhenCrouched) || (!crouched && ads && !falling))
 		{
-			_overrideWeight = falling ? 1.f : 0.f;
+			_overrideWeight = 0.f;
+			_aimBlend = 1.f;
+			return;
+		}
+		if (ads && (crouched || falling))
+		{
+			_overrideWeight = 1.f;
 			_aimBlend = 1.f;
 			return;
 		}
@@ -599,13 +636,16 @@ namespace mo
 		// 조준 묶음은 새 층이 들어올 때의 조준 상태 그대로 — 새 층의 서기 · 달리기는 처음부터 그 묶음 클립을 고른다(제 판단, 무기 교체 중 조준은 기록에 없다)
 		_adsBlend = _ads ? 1.f : 0.f;
 		_moveAds = _ads;
+		// 앉기 묶음도 같은 식(제 판단, 무기 교체 중 앉음 바꿈은 기록에 없다). 공중이면 쌓기가 남는데, 그 안 서기 안 전환 칸은 새 묶음의 같은 칸 클립으로 이어 돈다
+		_crouchBlend = _crouch ? 1.f : 0.f;
+		_moveCrouch = _crouch;
 		return true;
 	}
 
 	bool CAnimState::LoadBundle(const CAnimClips& clips, const char* bundleName)
 	{
 		const ClipBundle* bundle = clips.FindBundle(bundleName);
-		if (!bundle || bundle->clips.size() < ACLIP_COUNT) return false;		// 47개 뒤는 몽타주 · 덮기 자세 클립(9단계 3-a, 조준 17개는 C-3)
+		if (!bundle || bundle->clips.size() < ACLIP_COUNT) return false;		// 67개 뒤는 몽타주 · 덮기 자세 클립(9단계 3-a, 조준 17개는 C-3, 앉기 20개는 D-3)
 		_clips = &clips;
 		_bundleIndex = (int)(bundle - clips.Bundles().data());
 		const BundleTiming* timing = nullptr;
@@ -621,13 +661,17 @@ namespace mo
 			{
 				_exitTimes[0][kind][direction] = timing->exitTimes[kind][direction];
 				_exitTimes[1][kind][direction] = timing->adsExitTimes[kind][direction];
+				_exitTimes[2][kind][direction] = timing->crouchExitTimes[kind][direction];
 			}
 		}
+		_raiseWhenCrouched = timing->raiseWhenCrouched;
 
+		static_assert(ACLIP_ADS_IDLE + kAnimWalkClips <= ACLIP_ADS_TRANSITION_FIRST && ACLIP_CROUCH_IDLE + kAnimWalkClips <= ACLIP_CROUCH_TRANSITION_FIRST, "묶음마다 서기 · 걸음 넷이 잇닿아야 한다");
+		const size_t setFirst[3] = { (size_t)ACLIP_IDLE, (size_t)ACLIP_ADS_IDLE, (size_t)ACLIP_CROUCH_IDLE };
 		_stepCycle = 1;
 		for (int i = 0; i < kAnimBaseClips; ++i)
 		{
-			const AnimClip& clip = bundle->clips[i < kAnimWalkClips ? (size_t)ACLIP_IDLE + i : (size_t)ACLIP_ADS_IDLE + (i - kAnimWalkClips)];
+			const AnimClip& clip = bundle->clips[setFirst[i / kAnimWalkClips] + (size_t)(i % kAnimWalkClips)];
 			_lengths[i] = std::max(clip.length, 0.01f);
 			_rootSpeeds[i] = clip.rootSpeed;
 
@@ -654,7 +698,7 @@ namespace mo
 		for (int i = 0; i < kAnimStackClips; ++i) _stackLengths[i] = std::max(bundle->clips[StackClipIndex(i)].length, 0.01f);
 		for (size_t c = 0; c < ACLIP_COUNT; ++c)
 		{
-			// 패킷의 시각은 이 길이까지만 담는다 — 대기 몸짓 칸만 눈금이 다르다. 47개 뒤 몽타주 클립은 클립 시각이 아니라 몽타주 시각이 패킷에 실린다(조각 4)
+			// 패킷의 시각은 이 길이까지만 담는다 — 대기 몸짓 칸만 눈금이 다르다. 67개 뒤 몽타주 클립은 클립 시각이 아니라 몽타주 시각이 패킷에 실린다(조각 4)
 			if (bundle->clips[c].length > (c == ACLIP_FIDGET ? kWireFidgetMax : kWireTimeMax)) return false;
 		}
 		// 몽타주 칸(조각 4) — 몽타주 시각이 패킷 시각 칸에, 묶음 번호가 칸 번호의 위 4비트에 들어가야 한다. 다른 묶음 몽타주도 틀 수 있어 전부 본다
@@ -726,6 +770,10 @@ namespace mo
 		_ads = false;
 		_moveAds = false;
 		for (float& time : _adsTimes) time = 0.f;
+		_crouchBlend = 0.f;
+		_crouch = false;
+		_moveCrouch = false;
+		for (float& time : _crouchTimes) time = 0.f;
 	}
 
 	void CAnimState::StepSpan(int clip, int step, float& outStart, float& outEnd) const
@@ -738,13 +786,15 @@ namespace mo
 
 	// 조준 중엔 대기 몸짓 시계를 「서기에 막 들어온 때」로 되돌린다 — Lyra 는 조준 중 CanPlayIdleBreak 가 거짓이라 매 갱신 ResetIdleBreakTransitionLogic(D60 5, 원본 기준).
 	// 그래서 서서 조준을 풀면 6초 뒤에 몸짓이 나온다. 몸짓 중에 조준하면 움직일 때처럼 빠지는 중으로 보고, 허리 서기 몫(서기 비중 × (1 − 조준 묶음 비중))이 0 이 되면 끝낸다(제 판단, 기록에 없다)
-	void CAnimState::UpdateIdleBreak(bool still, bool ads, float deltaSeconds)
+	// 앉음도 같다(D62 6) — noIdleBreak = 조준 또는 앉음. 허리 서기 몫 = 서기 비중 × (1 − 조준 묶음 비중) × (1 − 앉기 묶음 비중)
+	// 몽타주 중도 같다(D71) — CanPlayIdleBreak 의 IsAnyMontagePlaying(엔진 MontageInstances.Num() > 0, 빠지는 중 포함). 근접 기록에서 서버만 근접 직후 몸짓을 틀어 22부위가 최대 70cm 벌어졌다(실측)
+	void CAnimState::UpdateIdleBreak(bool still, bool noIdleBreak, float deltaSeconds)
 	{
 		if (_fidgetTime >= 0.f)
 		{
 			_fidgetTime += deltaSeconds;
-			if (!still || ads) _fidgetLeaving = true;
-			if (_fidgetTime >= _fidgetLength || (_fidgetLeaving && _weights[kClipIdle] * (1.f - _adsBlend) <= kZeroWeight))
+			if (!still || noIdleBreak) _fidgetLeaving = true;
+			if (_fidgetTime >= _fidgetLength || (_fidgetLeaving && _weights[kClipIdle] * ((1.f - _adsBlend) * (1.f - _crouchBlend)) <= kZeroWeight))
 			{
 				_fidgetTime = -1.f;
 				_fidgetLeaving = false;
@@ -752,7 +802,7 @@ namespace mo
 			}
 			return;
 		}
-		if (ads)
+		if (noIdleBreak)
 		{
 			_standTime = still ? _stopClipSeconds : 0.f;
 			return;
@@ -783,6 +833,37 @@ namespace mo
 		layer.time = 0.f;
 		layer.fade = fadeSeconds > 0.f ? 0.f : 1.f;
 		layer.fadeSeconds = fadeSeconds;
+		layer.settled = false;
+	}
+
+	// 서기 상태에서 앉음이 바뀜 → 앉기 · 일어서기 전환 칸을 얹는다(D62 4). 바로 얹으면(실제 경로, D63) 아래 칸은 다 덮여 이번 갱신 끝에 버려지므로 먼저 비운다 —
+	// 칸이 차서 밀려나는 수(_stackOverflows)를 안 늘리려고. 그 위에 이번 갱신의 출발 · 점프가 얹힐 수 있다(Lyra 서기 상태가 섞여 나가는 동안 같은 갱신에 StanceTransition 으로 간다 —
+	// 앉은 채 점프 기록에서 일어서기 전환이 점프 섞기 첫 프레임 몫 0.93 으로 섰다, 실측)
+	void CAnimState::PushStance(bool crouched)
+	{
+		if (_stanceInSeconds <= 0.f) _count = 0;
+		PushJump(crouched ? kAnimStanceEntry : kAnimStanceExit, _stanceInSeconds);
+	}
+
+	// 서기 안 전환이 남은 0.25초에 닿으면 서기로 돌아간다(D62 4) — 이 갱신이 시각을 넘기기 전, 앞 갱신이 남긴 시각으로 본다(엔진은 전환 규칙을 앞 프레임 시각으로 판정한다).
+	// 서기 클립은 처음부터(기록에서 돌아간 프레임의 서기 시각 0.017 = 한 프레임). 실제 경로(D63) = 그 칸이 맨 위면 서기 자리를 0.25초에 걸쳐 덮는다(엔진 자동 전환 섞기 —
+	// 문턱인 남은 시간이 곧 섞기 시간). 위에 출발 · 점프 칸이 있으면 그 칸을 그 자리에서 서기 자리로 바꾼다(제 판단 — 덮인 칸이라 자세 몫이 작고, 칸을 하나 더 쌓지 않는다)
+	void CAnimState::SettleStance()
+	{
+		for (int i = 0; i < _count; ++i)
+		{
+			Layer& layer = _stack[i];
+			if (layer.clip < kAnimStanceEntry || layer.settled) continue;
+			if (_stackLengths[layer.clip] - layer.time > kStanceExitRemaining + kStanceExitSlack) continue;
+			_idleTime = 0.f;
+			if (_stanceOutSeconds > 0.f && i == _count - 1)
+			{
+				layer.settled = true;
+				PushJump(kJumpNone, _stanceOutSeconds);
+				return;
+			}
+			layer.clip = kJumpNone;
+		}
 	}
 
 	float CAnimState::TimeFromDistance(int transition, float value) const
@@ -863,14 +944,16 @@ namespace mo
 		_moveState = state;
 		_moveDirection = direction;
 		_followClip = -1;
-		_moveAds = _ads;		// 전환 클립은 들어갈 때의 조준으로 고른다(D60 3)
-		PushJump(kAnimJumpClips + (_moveAds ? kAnimTransitions : 0) + kind * 4 + direction, fadeSeconds);
+		_moveAds = _ads;		// 전환 클립은 들어갈 때의 조준 · 앉음으로 고른다(D60 3 · D62 3) — 앉음이 조준보다 먼저
+		_moveCrouch = _crouch;
+		const int set = _moveCrouch ? 2 : _moveAds ? 1 : 0;
+		PushJump(kAnimJumpClips + set * kAnimTransitions + kind * 4 + direction, fadeSeconds);
 	}
 
 	void CAnimState::EnterLocomotion(EMoveState state, float fadeSeconds)
 	{
 		_followClip = -1;
-		if (state == EMoveState::Cycle && _count > 0 && _stack[_count - 1].clip >= kAnimJumpClips)
+		if (state == EMoveState::Cycle && _count > 0 && _stack[_count - 1].clip >= kAnimJumpClips && _stack[_count - 1].clip < kAnimStanceEntry)
 		{
 			const Layer& top = _stack[_count - 1];
 			const int transition = top.clip - kAnimJumpClips;
@@ -990,9 +1073,10 @@ namespace mo
 			EnterTransition(EMoveState::Pivot, CardinalFromAngle(AngleOf(velocity)), kToPivotSeconds);
 		};
 		const auto enterStop = [&]() { EnterTransition(EMoveState::Stop, CardinalFromAngle(AngleOf(velocity)), kToStopSeconds); };
-		// 조준이 바뀌면 전환 클립을 버리고 반복 · 서기로(D60 3). 우선순위는 Lyra 전환 표 차례 — 출발 · 돌아서기에선 빠지는 시각 다음, 멈춤에선 출발 다음 · 빠지는 시각 앞(원본 기준)
-		const float(&exitTimes)[3][4] = _exitTimes[_moveAds ? 1 : 0];
-		const bool adsChanged = _ads != _moveAds;
+		// 조준이 바뀌면 전환 클립을 버리고 반복 · 서기로(D60 3). 우선순위는 Lyra 전환 표 차례 — 출발 · 돌아서기에선 빠지는 시각 다음, 멈춤에선 출발 다음 · 빠지는 시각 앞(원본 기준).
+		// 앉음이 바뀌어도 같다 — 같은 전환 규칙이 CrouchStateChange 를 ADSStateChanged 와 같은 자리에 둔다(D62 3)
+		const float(&exitTimes)[3][4] = _exitTimes[_moveCrouch ? 2 : _moveAds ? 1 : 0];
+		const bool setChanged = _ads != _moveAds || _crouch != _moveCrouch;		// 전환 클립 묶음을 고른 조준 · 앉음이 바뀌었나
 		switch (_moveState)
 		{
 		case EMoveState::Idle:
@@ -1007,7 +1091,7 @@ namespace mo
 			else if (!accelerating) enterStop();
 			else if (pivotNeeded) enterPivot();
 			else if (topTime >= exitTimes[kTransitionStart][_moveDirection]) EnterLocomotion(EMoveState::Cycle, kStartToCycleSeconds);
-			else if (adsChanged) EnterLocomotion(EMoveState::Cycle, kAdsChangeSeconds);
+			else if (setChanged) EnterLocomotion(EMoveState::Cycle, kAdsChangeSeconds);
 			break;
 		case EMoveState::Cycle:
 			if (!accelerating) enterStop();
@@ -1015,14 +1099,14 @@ namespace mo
 			break;
 		case EMoveState::Stop:
 			if (accelerating) EnterTransition(EMoveState::Start, CardinalFromAngle(AngleOf(acceleration)), kStopToStartSeconds);
-			else if (adsChanged) EnterLocomotion(EMoveState::Idle, kAdsChangeSeconds);
+			else if (setChanged) EnterLocomotion(EMoveState::Idle, kAdsChangeSeconds);
 			else if (speed < 1.f && topTime >= exitTimes[kTransitionStop][_moveDirection]) EnterLocomotion(EMoveState::Idle, kStopToIdleSeconds);
 			break;
 		case EMoveState::Pivot:
 			if (!accelerating) enterStop();
 			else if (pivotNeeded && accelDirection[0] * _pivotAccelDirection[0] + accelDirection[1] * _pivotAccelDirection[1] < 0.0) enterPivot();
 			else if (topTime >= exitTimes[kTransitionPivot][_moveDirection]) EnterLocomotion(EMoveState::Cycle, kPivotToCycleSeconds);
-			else if (adsChanged) EnterLocomotion(EMoveState::Cycle, kAdsChangeSeconds);
+			else if (setChanged) EnterLocomotion(EMoveState::Cycle, kAdsChangeSeconds);
 			break;
 		case EMoveState::Air:
 			break;
@@ -1097,7 +1181,7 @@ namespace mo
 		for (int i = 0; i < _count; ++i)
 		{
 			Layer& layer = _stack[i];
-			if (i == _count - 1 && layer.clip >= kAnimJumpClips) layer.time = TransitionClipTime(layer, deltaSeconds);
+			if (i == _count - 1 && layer.clip >= kAnimJumpClips && layer.clip < kAnimStanceEntry) layer.time = TransitionClipTime(layer, deltaSeconds);
 			else layer.time = layer.clip == kJumpLand && !land.empty() ? std::max(layer.time, LandTimeFromDistance(groundDistance)) : layer.time + deltaSeconds;
 			if (layer.fadeSeconds > 0.f) layer.fade = std::min(layer.fade + deltaSeconds / layer.fadeSeconds, 1.f);
 		}
@@ -1123,6 +1207,7 @@ namespace mo
 		const float deltaSeconds = input.deltaSeconds;
 		const double* velocity = input.velocity;
 		const float speed = (float)std::sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1]);
+		SettleStance();		// 서기 시계를 넘기기 전에(되돌린 시계가 이번 갱신에 한 프레임 간다)
 
 		float targets[kAnimWalkClips] = {};
 		const float moveAlpha = Clamp(speed / kMoveFullSpeed, 0.f, 1.f);
@@ -1161,19 +1246,26 @@ namespace mo
 		const float adsTarget = _ads ? 1.f : 0.f;
 		_adsBlend += (adsTarget - _adsBlend) * follow;
 		if (std::fabs(adsTarget - _adsBlend) <= kZeroWeight) _adsBlend = adsTarget;
-		const float hipShare = 1.f - _adsBlend;
+		// 앉기 묶음 비중(D62 2) — 같은 따라가기 · 같은 붙이기. 앉기가 조준보다 먼저라 서 있는 몫(1 − 앉기)을 허리 · 조준이 나눈다
+		const bool crouchChanged = input.crouched != _crouch;
+		_crouch = input.crouched;
+		const float crouchTarget = _crouch ? 1.f : 0.f;
+		_crouchBlend += (crouchTarget - _crouchBlend) * follow;
+		if (std::fabs(crouchTarget - _crouchBlend) <= kZeroWeight) _crouchBlend = crouchTarget;
+		const float standShare = 1.f - _crouchBlend;
+		const float setShares[3] = { (1.f - _adsBlend) * standShare, _adsBlend * standShare, _crouchBlend };
 
 		// 달리기 진행 — 클립의 원래 속도와 실제 속도의 비로 재생하고, 발걸음 단위로 함께 넘어가 섞이는 두 클립의 발이 같은 때 닿게 한다.
-		// 조준 묶음이 섞이는 동안은 두 묶음 클립을 비중대로 같이 센다
+		// 조준 · 앉기 묶음이 섞이는 동안은 묶음 클립을 비중대로 같이 센다(앉지 않으면 앉기 몫이 0 이라 조준 전 · 앉기 전과 같은 수)
 		float directionWeight = 0.f;
 		float rootSpeed = 0.f;
 		float stepSeconds = 0.f;
 		for (int i = kClipFwd; i <= kClipRight; ++i)
 		{
-			for (int set = 0; set < 2; ++set)
+			for (int set = 0; set < 3; ++set)
 			{
 				const int clip = i + set * kAnimWalkClips;
-				const float weight = _weights[i] * (set == 0 ? hipShare : _adsBlend);
+				const float weight = _weights[i] * setShares[set];
 				float start, end;
 				StepSpan(clip, _step, start, end);
 				directionWeight += weight;
@@ -1194,12 +1286,13 @@ namespace mo
 				_step = (_step + 1) % _stepCycle;
 			}
 		}
-		// 서기 시계는 하나 — 조준을 바꿔도 이어 간다(Lyra 허리 4.900 → 조준 4.917, 실측). 도는 길이는 지금 조준 쪽 서기 클립이다
-		const float idleLength = _lengths[_ads ? kAnimWalkClips + kClipIdle : kClipIdle];
+		// 서기 시계는 하나 — 조준을 바꿔도 이어 간다(Lyra 허리 4.900 → 조준 4.917, 실측). 도는 길이는 지금 고른 쪽(앉음 > 조준 > 허리) 서기 클립이다
+		const float idleLength = _lengths[(_crouch ? 2 * kAnimWalkClips : _ads ? kAnimWalkClips : 0) + kClipIdle];
 		_idleTime = idleLength > 0.f ? std::fmod(_idleTime + deltaSeconds, idleLength) : 0.f;
 
 		_times[kClipIdle] = WrapIdle(_idleTime, _lengths[kClipIdle]);
 		_adsTimes[kClipIdle] = WrapIdle(_idleTime, _lengths[kAnimWalkClips + kClipIdle]);
+		_crouchTimes[kClipIdle] = WrapIdle(_idleTime, _lengths[2 * kAnimWalkClips + kClipIdle]);
 		_timesStep = _step;
 		_timesStepFrac = _stepFrac;
 		_timesIdle = _idleTime;
@@ -1210,12 +1303,14 @@ namespace mo
 			_times[i] = std::fmod(start + _stepFrac * (end - start), _lengths[i]);
 			StepSpan(kAnimWalkClips + i, _step, start, end);
 			_adsTimes[i] = std::fmod(start + _stepFrac * (end - start), _lengths[kAnimWalkClips + i]);
+			StepSpan(2 * kAnimWalkClips + i, _step, start, end);
+			_crouchTimes[i] = std::fmod(start + _stepFrac * (end - start), _lengths[2 * kAnimWalkClips + i]);
 		}
 
 		_pitch = input.pitch;
 		const bool falling = input.falling;
 		const bool accelerating = input.accelerating;
-		UpdateFiring(accelerating, falling, _ads, deltaSeconds);
+		UpdateFiring(accelerating, falling, _ads, _crouch, deltaSeconds);
 		const float timeToApex = velocity[2] > 0.0 && _gravity > kSmallNumber ? (float)velocity[2] / _gravity : 0.f;
 		const float groundDistance = input.groundDistance;
 
@@ -1235,9 +1330,16 @@ namespace mo
 		_plantOffset[1] = 0.f;
 		_plantOffset[2] = plant ? -_plantDrop : 0.f;
 
+		// 서기 상태에서 앉음이 바뀌면 앉기 · 일어서기 전환(D62 4). 서기였으면 이번 갱신의 출발 · 점프보다 아래에, 멈춤 · 공중에서 이번에 서기로 왔으면 그 위에 얹는다
+		// (멈춘 채 일어서기 기록 — 멈춤 클립이 그 프레임에 빠지고 일어서기 전환이 바로 섰다, 실측)
+		const bool wasIdle = _moveState == EMoveState::Idle;
+		if (crouchChanged && wasIdle) PushStance(_crouch);
 		UpdateTransitions(input, deltaSeconds);
+		if (crouchChanged && !wasIdle && _moveState == EMoveState::Idle) PushStance(_crouch);
 		UpdateJump(falling, accelerating, (float)velocity[2], timeToApex, groundDistance, deltaSeconds);
-		UpdateIdleBreak(!falling && !accelerating && speed < 1.f && !HasJumpLayer(), _ads, deltaSeconds);
+		// 몽타주 칸은 이번 갱신에서 넘기기 전 것이다 — 엔진은 몽타주를 먼저 넘기고 이 판정을 하므로 끝나는 프레임에서 한 프레임 갈린다(시계 6초 앞에선 16ms, 제 판단)
+		// 사격 태그(GameplayTag_IsFiring)는 안 넣었다 — 사격 몽타주가 그 시간을 덮는다고 본다(짐작)
+		UpdateIdleBreak(!falling && !accelerating && speed < 1.f && !HasJumpLayer(), _ads || _crouch || _montageCount > 0, deltaSeconds);
 
 		// 왼손 비중은 앞 자세의 곡선으로 — 기록에서 HandIK_Left_Alpha 가 곡선보다 한 프레임 늦다(실측). 그다음 몽타주를 넘기고 이번 자세 목록을 뜬다
 		_handLeftAlpha = _handFresh ? 1.f : Clamp(1.f - _disableLeftHand, 0.f, 1.f);
@@ -1254,6 +1356,7 @@ namespace mo
 		out.idleTime = ToWireTime(_timesIdle);
 		out.aimBlend = ToWireByte(_aimBlend);
 		out.adsBlend = ToWireByte(_adsBlend);
+		out.crouchBlend = ToWireByte(_crouchBlend);
 		out.fidgetTime = _fidgetTime < 0.f ? wire::kAnimTimeNone : ToWireFidget(_fidgetTime);
 		out.recoveryTime = _recoveryTime < 0.f ? wire::kAnimTimeNone : ToWireTime(_recoveryTime);
 		out.plantDrop = (int16_t)std::lround(Clamp(-_plantOffset[2], -300.f, 300.f) * kWirePlantScale);
@@ -1280,7 +1383,7 @@ namespace mo
 		}
 	}
 
-	void CAnimState::FromWire(const wire::AnimStateWire& in, float pitch, AnimPoseInput& out) const
+	void CAnimState::FromWire(const wire::AnimStateWire& in, float pitch, bool crouched, AnimPoseInput& out) const
 	{
 		float sum = 0.f;
 		for (int i = 0; i < kAnimWalkClips; ++i)
@@ -1300,6 +1403,7 @@ namespace mo
 		const float idle = FromWireTime(in.idleTime);
 		out.times[kClipIdle] = WrapIdle(idle, _lengths[kClipIdle]);
 		out.adsTimes[kClipIdle] = WrapIdle(idle, _lengths[kAnimWalkClips + kClipIdle]);
+		out.crouchTimes[kClipIdle] = WrapIdle(idle, _lengths[2 * kAnimWalkClips + kClipIdle]);
 		const float frac = (float)in.stepFrac / 65535.f;
 		for (int i = kClipFwd; i <= kClipRight; ++i)
 		{
@@ -1308,8 +1412,12 @@ namespace mo
 			out.times[i] = std::fmod(start + frac * (end - start), _lengths[i]);
 			StepSpan(kAnimWalkClips + i, in.step, start, end);
 			out.adsTimes[i] = std::fmod(start + frac * (end - start), _lengths[kAnimWalkClips + i]);
+			StepSpan(2 * kAnimWalkClips + i, in.step, start, end);
+			out.crouchTimes[i] = std::fmod(start + frac * (end - start), _lengths[2 * kAnimWalkClips + i]);
 		}
 		out.adsBlend = (float)in.adsBlend / 255.f;
+		out.crouchBlend = (float)in.crouchBlend / 255.f;
+		out.crouched = crouched;
 
 		out.fidgetTime = in.fidgetTime == wire::kAnimTimeNone ? -1.f : FromWireFidget(in.fidgetTime);
 		out.recoveryTime = in.recoveryTime == wire::kAnimTimeNone ? -1.f : FromWireTime(in.recoveryTime);
@@ -1347,8 +1455,11 @@ namespace mo
 			out.weights[i] = _weights[i];
 			out.times[i] = _times[i];
 			out.adsTimes[i] = _adsTimes[i];
+			out.crouchTimes[i] = _crouchTimes[i];
 		}
 		out.adsBlend = _adsBlend;
+		out.crouchBlend = _crouchBlend;
+		out.crouched = _crouch;
 		out.fidgetTime = _fidgetTime;
 		out.layerCount = _count;
 		for (int i = 0; i < kAnimLayerMax; ++i)

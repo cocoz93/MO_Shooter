@@ -6,6 +6,10 @@
 //   ServerProbe <map.mocl> <move.csv> --checkStarts=<weapons_match.txt>		서버 없이
 //   ServerProbe <map.mocl> <move.csv> --authority --serverLog=<서버 출력 파일>	서버는 --warmup=0 --exitWhenEmpty, --debug 없이
 //   ServerProbe <map.mocl> <move.csv> --rewind --serverLog=<서버 출력 파일>	서버는 --debug --rewindShadow --warmup=0 --exitWhenEmpty
+//   ServerProbe <map.mocl> <move.csv> --pads --serverLog=<서버 출력 파일>	서버는 --debug --warmup=0 --exitWhenEmpty --pads=<받침 파일>
+//      → 출력을 Tools/LyraPilot/check_pads.py 가 Lyra 받침 판 기록과 대조한다
+//   ServerProbe <map_gym.mocl> <move.csv> --melee=<cprobe_<tag>.log> --serverLog=<서버 출력 파일>	서버는 --debug --warmup=0 --exitWhenEmpty [--clips=<클립 파일>]
+//      → Lyra 연습장 근접 칸을 서버에 돌려 결과 · 대상 · 피해 · 밀린 거리 · 손을 견준다(7번, 컨텐츠 E-3). 기록 표는 같은 이름의 .csv
 //
 // 1. 재생: Lyra 이동 기록의 입력에 무기 입력을 섞어 보내고, 돌아온 상태를 같은 공용 코드(Shared)를 여기서 돌린 결과와 비교한다.
 //    서버가 입력을 틱마다 하나씩 빠짐없이 같은 순서로 썼다면 float 까지 똑같다. Lyra 와의 차이도 같이 적는다.
@@ -39,6 +43,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -188,15 +193,20 @@ namespace
 			{ "MaxDepenetrationWithGeometry", p.maxDepenetrationWithGeometry }, { "TerminalVelocity", p.terminalVelocity }, { "JumpMaxHoldTime", p.jumpMaxHoldTime }, { "JumpMaxCount", (double)p.jumpMaxCount },
 			{ "MinAnalogWalkSpeed", p.minAnalogWalkSpeed }, { "CapsuleRadius", p.capsuleRadius }, { "CapsuleHalfHeight", p.capsuleHalfHeight },
 		};
+		// 앉기 인자 — 앉기 기록(컨텐츠 D-1, move_expanse_crouch.csv)부터 머리에 실린다. 그 전 기록에는 없으니 있을 때만 본다
+		//   bCanWalkOffLedgesWhenCrouching 은 서버에 칸이 없다 — 앉아도 턱에서 떨어질 수 있다(1)고 보고 옮겼으므로 1 과 대조한다
+		const Item crouchItems[] = {
+			{ "MaxWalkSpeedCrouched", p.maxWalkSpeedCrouched }, { "CrouchedHalfHeight", p.crouchedHalfHeight }, { "bCanWalkOffLedgesWhenCrouching", 1.0 },
+		};
 		int checked = 0, missing = 0, diff = 0;
-		for (const Item& item : items)
+		const auto check = [&](const Item& item)
 		{
 			const auto it = values.find(item.name);
 			if (it == values.end())
 			{
 				++missing;
 				std::printf("PARAM 기록에 없음 %s\n", item.name);
-				continue;
+				return;
 			}
 			++checked;
 			if (std::fabs((float)it->second - (float)item.mine) > 0.f)
@@ -204,6 +214,15 @@ namespace
 				++diff;
 				std::printf("PARAM 다름 %s lyra=%.8f mine=%.8f\n", item.name, it->second, item.mine);
 			}
+		};
+		for (const Item& item : items) check(item);
+		if (values.count("CrouchedHalfHeight"))
+		{
+			for (const Item& item : crouchItems) check(item);
+		}
+		else
+		{
+			std::printf("PARAM 앉기 인자 건너뜀 — 앉기 전 기록\n");
 		}
 		std::printf("PARAM checked=%d missing=%d diff=%d\n", checked, missing, diff);
 		return checked > 0 && missing == 0 && diff == 0;
@@ -501,6 +520,7 @@ namespace
 		std::vector<wire::Spawn> spawns;
 		std::vector<wire::Kill> kills;
 		std::vector<wire::Match> matches;
+		std::vector<wire::Melee> melees;
 		std::vector<wire::PlayerState> history;
 		std::vector<uint32_t> historyTicks;		// history 와 같은 칸 — 그 상태가 어느 틱 것인가
 		wire::Result result = wire::Result();
@@ -558,6 +578,13 @@ namespace
 					wire::Match match = wire::Match();
 					std::memcpy(&match, data, std::min(size, (int)sizeof(match)));
 					matches.push_back(match);
+					break;
+				}
+				case wire::Msg::S2C_MELEE:
+				{
+					wire::Melee melee = wire::Melee();
+					std::memcpy(&melee, data, std::min(size, (int)sizeof(melee)));
+					melees.push_back(melee);
 					break;
 				}
 				case wire::Msg::S2C_RESULT:
@@ -1397,7 +1424,7 @@ namespace
 		PumpFor(clients, 1, 0.05);
 		const size_t shotsBeforeAim = a.shots.size();
 		int aimFarSent = 0;
-		const Vec3 forged[] = { Vec3(0, 0, 500), Vec3(300, 0, 0), Vec3(130, 0, 0), Vec3(0, 0, 150) };	// 멀리 · 수평으로 120 넘음(한도 바로 위) · 위로 120 넘음
+		const Vec3 forged[] = { Vec3(0, 0, 500), Vec3(300, 0, 0), Vec3(150, 0, 0), Vec3(0, 0, 170) };	// 멀리 · 수평으로 140 넘음(한도 바로 위) · 위로 140 넘음 — 한도 140(D66, 전엔 120 에 130 · 150)
 		RunTicks(clients, 1, 40, [&](int i)
 		{
 			++aimFarSent;
@@ -1897,6 +1924,533 @@ namespace
 		std::printf("REWIND 실패 %d건\n", fails);
 		return fails == 0;
 	}
+
+	// ─── 6. 체력 받침(--pads, 컨텐츠 B-2) ─────────────────
+	// Lyra 받침 판(record_content_probe.ps1 -Mode pads, MOBContentProbeSubsystem.cpp PADS_SCRIPT)을 같은 차례 · 같은 길이 · 같은 자리로 돌린다.
+	// 순간이동 · 체력 정하기는 시험 입력(C2S_DEBUG_PLACE) 하나로 한다 — Lyra 의 SetHealth 단계는 그 자리(집)에 다시 놓으며 체력만 바꾼다.
+	// 여기는 구동과 기록만: 단계마다 자리 옮긴 틱 · 체력이 바뀐 틱(상태 패킷)을 PADPROBE 줄로, 서버 사건은 서버 출력의 PADEV 줄을 그대로 옮겨 찍는다
+	bool RunPads(int port, const std::string& serverLog)
+	{
+		ShotClient client;
+		if (!ConnectAndHello(client.net, port, client.welcome))
+		{
+			std::printf("PADPROBE 접속 실패\n");
+			return false;
+		}
+		timeBeginPeriod(1);
+		// 자리 = Lyra 기록 cprobe_pads2.log — 집 MOB_CPROBE_READY home, 받침 위 MOB_CPROBE_STAND spot(바닥 + 반높이 + 3)
+		const Vec3 home(-4300.0, 0.0, -368.010);
+		const Vec3 bigSpot(0.0, 0.0, -1206.475);
+		const Vec3 smallSpot(0.0, -1086.0, 378.0);
+		enum class EAct { Away, PadBig, PadSmall, SetHealth40 };
+		struct Step { const char* name; double seconds; EAct act; };
+		// PADS_SCRIPT 와 같은 줄 — settle 은 Lyra 에서 받침 정보만 찍는 단계라 집에 선다
+		const Step steps[] = {
+			{ "settle", 1.0, EAct::Away },
+			{ "big_full", 2.0, EAct::PadBig },
+			{ "away1", 1.0, EAct::Away },
+			{ "hp40", 0.5, EAct::SetHealth40 },
+			{ "big_hurt", 52.0, EAct::PadBig },
+			{ "away2", 1.0, EAct::Away },
+			{ "hp40b", 0.5, EAct::SetHealth40 },
+			{ "small_hurt", 22.0, EAct::PadSmall },
+			{ "end", 0.5, EAct::Away },
+		};
+		PumpFor(&client, 1, 0.3);
+		size_t scanned = 0;
+		float lastHp = client.hasSelf ? client.self.hp : -1.f;
+		const auto scan = [&](const char* step, uint32_t placeSeq, bool& placeSeen)
+		{
+			for (; scanned < client.history.size(); ++scanned)
+			{
+				const wire::PlayerState& s = client.history[scanned];
+				const uint32_t tick = client.historyTicks[scanned];
+				if (!placeSeen && s.lastSeq >= placeSeq)
+				{
+					placeSeen = true;
+					std::printf("PADPROBE step=%s placeTick=%u hp=%.1f at=(%.3f,%.3f,%.3f)\n", step, tick, s.hp, s.x, s.y, s.z);
+				}
+				if (s.hp != lastHp)
+				{
+					std::printf("PADPROBE step=%s hpTick=%u hp=%.1f>%.1f\n", step, tick, lastHp, s.hp);
+					lastHp = s.hp;
+				}
+			}
+		};
+		int placesSeen = 0;
+		for (const Step& step : steps)
+		{
+			const float hpNow = client.hasSelf ? client.self.hp : 100.f;
+			switch (step.act)
+			{
+			case EAct::Away: client.Place(home, hpNow); break;
+			case EAct::PadBig: client.Place(bigSpot, hpNow); break;
+			case EAct::PadSmall: client.Place(smallSpot, hpNow); break;
+			case EAct::SetHealth40: client.Place(home, 40.f); break;
+			}
+			const uint32_t placeSeq = client.seq;
+			bool placeSeen = false;
+			RunTicks(&client, 1, (int)std::lround(step.seconds * 60.0),
+				[&](int) { SendAim(client, home, home + Vec3(100, 0, 0), 0, 0, 0, 0); scan(step.name, placeSeq, placeSeen); }, [] { return false; });
+			PumpFor(&client, 1, 0.05);
+			scan(step.name, placeSeq, placeSeen);
+			if (placeSeen) ++placesSeen;
+		}
+		timeEndPeriod(1);
+		client.net.Close();
+
+		std::string log;
+		for (int i = 0; i < 100 && log.empty(); ++i)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			std::ifstream file(serverLog, std::ios::binary);
+			log.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+			if (log.find("SERVER kills=") == std::string::npos) log.clear();
+		}
+		int events = 0;
+		size_t at = 0;
+		while (at < log.size())
+		{
+			size_t end = log.find('\n', at);
+			if (end == std::string::npos) end = log.size();
+			const std::string line = log.substr(at, end - at);
+			if (line.rfind("PADEV ", 0) == 0 || line.rfind("SERVER pickups=", 0) == 0 || line.rfind("PADS ", 0) == 0)
+			{
+				std::printf("%s\n", line.c_str());
+				if (line.rfind("PADEV ", 0) == 0) ++events;
+			}
+			at = end + 1;
+		}
+		const int stepCount = (int)(sizeof(steps) / sizeof(steps[0]));
+		std::printf("PADPROBE 단계 %d 중 자리 옮김 확인 %d · 서버 출력 %s · 받침 사건 %d줄\n", stepCount, placesSeen, log.empty() ? "못 읽음" : "읽음", events);
+		return placesSeen == stepCount && !log.empty() && events > 0;
+	}
+
+	// ─── 7. 근접(--melee, 컨텐츠 E-3) ─────────────────────
+	// Lyra 연습장 근접 판(record_content_probe.ps1 -Mode gym → cprobe_<tag>.log · .csv)의 칸마다 공격자 · 상대를 Lyra 자리에 놓고,
+	// 같은 요로 선 뒤 근접을 한 번 누른다. 견주는 것
+	//   결과 = 서버 근접 소식(S2C_MELEE 결과 · 대상 · 피해) ↔ Lyra(MOB_CPROBE_MELEE hit · dmg, 같은 팀 칸은 쓸기 줄 hit)
+	//   밀린 거리 = 서버 상태의 수평 이동 ↔ Lyra lunge2d. Lyra 는 미끄러지다 상대 캡슐에 닿으면 멈춘다 — 플레이어끼리 부딪힘(컨텐츠 F)이 없는
+	//     서버는 더 간다. 닿은 칸(기록 표의 공격자 ↔ 상대 수평 거리 최솟값이 두 반지름 + 1 안)은 거리를 견주지 않고 따로 센다
+	//   손 · 맞은 거리 = 서버 시험 줄 MELEEEV(--debug) ↔ Lyra 쓸기 줄 MOB_CPROBE_MTRACE which=prev(앞 프레임 손 — 능력이 쓰는 손)
+	// 손이 다르면(서버는 자기 애니 자세의 손, 클립 없이 뜨면 기본 자세 손) 맞은 거리 · 밀린 거리가 그만큼 다르다 — 그 크기를 재는 것이 목적이고,
+	// 통과 조건은 결과 · 대상 · 피해 · 안 맞은 칸의 안 밀림만이다
+	constexpr int kMeleeSettleTicks = 40;		// 놓은 뒤 서 있는 틱 — 앞 입력의 요(몸 앞) · 애니 서기 · 되감기 기록이 놓은 자리로 찬다
+	constexpr int kMeleeChangeTicks = 120;		// 무기를 바꿨거나 앉는 칸은 더 선다 — 무기 꺼내기 · 앉기 전환 자세가 끝나게(Lyra 칸은 오래 든 무기 · 앉은 자세에서 눌렀다)
+	constexpr int kMeleeSlideTicks = 120;		// 누른 뒤 — 밀기 3프레임 뒤 보통 제동으로 멈출 때까지(Lyra 칸 하나 0.75초 안에 멈춘다)
+
+	struct MeleeCell
+	{
+		std::string step;
+		Vec3 center, foe, fwd, hand;	// 공격자 캡슐 중심 · 상대 캡슐 중심 · 몸 앞 · 앞 프레임 손(Lyra)
+		Vec3 start;					// 근접 직전 공격자 자리 = 기록 표에서 능력이 켜진 줄 바로 앞 줄. 쓸기 줄 center 는 밀기가 한 프레임 들어간 뒤다(맞은 칸에서 힘 ÷ 60 만큼 앞, 실측)
+		bool hasStart = false;
+		float foeYaw = 0;
+		bool sameTeam = false;		// 앞선 MOB_CPROBE_FOE_SAME 줄 — 상대가 같은 팀(MeleeCheck 와 같은 읽기)
+		bool crouched = false;		// 공격자가 앉아 있음
+		bool traceHit = false;		// 기록 도구 쓸기가 몸에 닿음
+		bool traceWall = false;		// 그 손 → 닿은 점 선이 벽에 막힘(wall=1)
+		double traceDist = 0;		// 그 맞은 거리
+		EWeapon weapon = EWeapon::Pistol;	// 공격자 몽타주(myMontage AM_MM_<무기>_Melee)
+		bool hasResult = false;
+		bool lyraHit = false;		// 능력이 맞힘(피해 줄)
+		float lyraDamage = 0;
+		double lyraLunge = 0;
+		double contactGap = 1e9;	// 칸 안에서 공격자 ↔ 상대 수평 거리 최솟값
+		// 17-d 걸으며 · 뛰며 칸 — 칸 첫 줄 자리에서 줄마다 Lyra 와 같은 입력을 보내 근접 직전 자리까지 따라간다
+		int runPhase = 0;				// 0 = 첫 줄 전 · 1 = 근접 앞 · 2 = 근접 뒤
+		bool hasRun = false;			// 첫 줄이 멈춰 있다(거기서 출발할 수 있다)
+		bool moving = false;			// 근접 앞이나 근접 입력에 +X 누름 · 점프가 있다
+		bool walking = false;			// 칸 어디든 +X 누름 — 밀린 거리에 걸음이 섞인다
+		Vec3 runStart;					// 칸 첫 줄 자리
+		std::vector<uint8_t> runWalk, runJump;	// 근접 입력 앞 이동마다 +X 누름 · 점프 누름
+		uint8_t meleeWalk = 0;			// 근접 입력(능력이 켜진 줄의 이동)의 +X 누름
+		std::vector<uint8_t> slideWalk;	// 근접 입력 뒤 이동마다 +X 누름
+	};
+
+	// 줄에서 " 이름=" 뒤 값(빈칸까지)
+	std::string FieldValue(const std::string& line, const char* key)
+	{
+		const std::string pattern = std::string(" ") + key + "=";
+		const size_t at = line.find(pattern);
+		if (at == std::string::npos) return std::string();
+		const size_t from = at + pattern.size();
+		const size_t end = line.find(' ', from);
+		return line.substr(from, end == std::string::npos ? std::string::npos : end - from);
+	}
+
+	bool FieldVec(const std::string& line, const char* key, Vec3& out)
+	{
+		const std::string v = FieldValue(line, key);
+		double x = 0, y = 0, z = 0;
+		if (v.empty() || std::sscanf(v.c_str(), "%lf,%lf,%lf", &x, &y, &z) != 3) return false;
+		out = Vec3(x, y, z);
+		return true;
+	}
+
+	bool ReadMeleeCells(const std::string& logPath, const std::string& csvPath, std::vector<MeleeCell>& cells)
+	{
+		std::ifstream log(logPath, std::ios::binary);
+		if (!log) return false;
+		std::map<std::string, size_t> byStep;
+		std::string line;
+		bool sameTeam = false;
+		while (std::getline(log, line))
+		{
+			if (!line.empty() && line.back() == '\r') line.pop_back();
+			const std::string step = FieldValue(line, "step");
+			if (line.find("MOB_CPROBE_FOE_SAME ") != std::string::npos) sameTeam = true;
+			else if (line.find("MOB_CPROBE_FOE ") != std::string::npos) sameTeam = false;
+			else if (line.find("MOB_CPROBE_MTRACE ") != std::string::npos && FieldValue(line, "which") == "prev")
+			{
+				if (byStep.count(step)) continue;		// 칸마다 첫 근접만. 연타 칸(spam_*)은 MELEE 줄이 없어 아래에서 빠진다
+				MeleeCell cell;
+				cell.step = step;
+				if (!FieldVec(line, "center", cell.center) || !FieldVec(line, "foe", cell.foe) || !FieldVec(line, "fwd", cell.fwd) || !FieldVec(line, "hand", cell.hand)) continue;
+				cell.foeYaw = (float)std::atof(FieldValue(line, "foeYaw").c_str());
+				cell.traceHit = FieldValue(line, "hit") == "1";
+				cell.traceWall = FieldValue(line, "wall") == "1";
+				if (cell.traceHit) cell.traceDist = std::atof(FieldValue(line, "dist").c_str());
+				cell.crouched = FieldValue(line, "crouched") == "1";
+				cell.sameTeam = sameTeam;
+				byStep[step] = cells.size();
+				cells.push_back(cell);
+			}
+			else if (line.find("MOB_CPROBE_MELEE ") != std::string::npos)
+			{
+				const auto it = byStep.find(step);
+				if (it == byStep.end()) continue;
+				MeleeCell& cell = cells[it->second];
+				cell.hasResult = true;
+				cell.lyraHit = FieldValue(line, "hit") == "1";
+				cell.lyraDamage = (float)std::atof(FieldValue(line, "dmg").c_str());
+				cell.lyraLunge = std::atof(FieldValue(line, "lunge2d").c_str());
+				const std::string montage = FieldValue(line, "myMontage");
+				cell.weapon = montage.find("Rifle") != std::string::npos ? EWeapon::Rifle : montage.find("Shotgun") != std::string::npos ? EWeapon::Shotgun : EWeapon::Pistol;
+			}
+		}
+		cells.erase(std::remove_if(cells.begin(), cells.end(), [](const MeleeCell& c) { return !c.hasResult; }), cells.end());		// 근접 직전 자리가 없는 칸은 아래 표 읽기 뒤에 뺀다
+		byStep.clear();
+		for (size_t i = 0; i < cells.size(); ++i) byStep[cells[i].step] = i;
+
+		// 닿음 · 근접 직전 자리 — 기록 표(frame,t,step,ev,px,py,pz,... 22 foeX, 23 foeY). Lyra lunge2d 도 앞 줄 자리부터 잰 값이다
+		std::ifstream csv(csvPath, std::ios::binary);
+		if (!csv) return false;
+		std::getline(csv, line);
+		int colWalk = -1;		// 17-d 칸 walk(그 줄 프레임에 +X 누름). 옛 기록엔 없다
+		{
+			size_t from = 0;
+			for (int i = 0;; ++i)
+			{
+				const size_t comma = line.find(',', from);
+				std::string name = line.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+				while (!name.empty() && (name.back() == '\r' || name.back() == '\n')) name.pop_back();
+				if (name == "walk") colWalk = i;
+				if (comma == std::string::npos) break;
+				from = comma + 1;
+			}
+		}
+		const auto walkOf = [&](const std::vector<std::string>& row) -> uint8_t { return colWalk >= 0 && (int)row.size() > colWalk && std::atoi(row[(size_t)colWalk].c_str()) != 0 ? 1 : 0; };
+		const auto jumpOf = [](const std::vector<std::string>& row) -> uint8_t { return row.size() > 3 && row[3].find("jump_press;") != std::string::npos ? 1 : 0; };
+		std::vector<std::string> previous;
+		while (std::getline(csv, line))
+		{
+			std::vector<std::string> cols;
+			size_t from = 0;
+			while (true)
+			{
+				const size_t comma = line.find(',', from);
+				cols.push_back(line.substr(from, comma == std::string::npos ? std::string::npos : comma - from));
+				if (comma == std::string::npos) break;
+				from = comma + 1;
+			}
+			if (cols.size() < 24) continue;
+			const std::vector<std::string> before = previous;
+			previous = cols;
+			const auto it = byStep.find(cols[2]);
+			if (it == byStep.end()) continue;
+			MeleeCell& cell = cells[it->second];
+			const bool sameStepBefore = before.size() >= 24 && before[2] == cols[2];
+			if (cell.runPhase == 0)
+			{
+				// 칸 첫 줄 — 근접 칸은 시작에 남은 입력을 비우고 순간이동하므로 멈춰 있어야 한다(vz · speed2d 0)
+				cell.runStart = Vec3(std::atof(cols[4].c_str()), std::atof(cols[5].c_str()), std::atof(cols[6].c_str()));
+				cell.hasRun = std::atof(cols[9].c_str()) == 0.0 && std::atof(cols[10].c_str()) == 0.0;
+				cell.runPhase = 1;
+			}
+			else if (sameStepBefore)
+			{
+				const uint8_t walk = walkOf(before), jump = jumpOf(before);
+				if (cell.runPhase == 1 && cols[3].find("melee_start;") != std::string::npos)
+				{
+					cell.meleeWalk = walk;
+					cell.runPhase = 2;
+				}
+				else if (cell.runPhase == 1)
+				{
+					cell.runWalk.push_back(walk);
+					cell.runJump.push_back(jump);
+				}
+				else cell.slideWalk.push_back(walk);
+				if (walk) cell.walking = true;
+				if (cell.runPhase == 1 && (walk || jump)) cell.moving = true;
+				if (cell.runPhase == 2 && cell.meleeWalk) cell.moving = true;
+			}
+			if (!cell.hasStart && cols[3].find("melee_start;") != std::string::npos && before.size() >= 24 && before[2] == cols[2])
+			{
+				cell.start = Vec3(std::atof(before[4].c_str()), std::atof(before[5].c_str()), std::atof(before[6].c_str()));
+				cell.hasStart = true;
+			}
+			const double dx = std::atof(cols[4].c_str()) - std::atof(cols[22].c_str());
+			const double dy = std::atof(cols[5].c_str()) - std::atof(cols[23].c_str());
+			cell.contactGap = std::min(cell.contactGap, std::sqrt(dx * dx + dy * dy));
+		}
+		const size_t read = cells.size();
+		for (const MeleeCell& c : cells)
+		{
+			if (c.moving && !c.hasRun) std::printf("MELEEPROBE step=%s 움직이는 칸인데 첫 줄이 멈춰 있지 않음 — 뺌\n", c.step.c_str());
+		}
+		cells.erase(std::remove_if(cells.begin(), cells.end(), [](const MeleeCell& c) { return !c.hasStart || (c.moving && !c.hasRun); }), cells.end());
+		if (cells.size() != read) std::printf("MELEEPROBE 기록 표에 근접 시작 줄이 없는 칸 %zu 뺌\n", read - cells.size());
+		return !cells.empty() && cells.size() == read;
+	}
+
+	// 칸에 안 쓰는 사람을 세울 먼 자리 — 바닥이 있고 맵과 안 겹친다
+	bool ParkSpot(const CMapCollision& map, const Vec3& from, Vec3& out)
+	{
+		for (double distance : { 1500.0, 1200.0, 2000.0, 1000.0 })
+		{
+			for (int d = 0; d < 16; ++d)
+			{
+				const double angle = d * kPi / 8.0;
+				// 바닥을 위에서 찾고 그 위에 선 캡슐(반높이 90 + 2)이 맵과 안 겹치는지 — 앉은 칸의 낮은 중심에서 재도 같게
+				const Vec3 top = from + Vec3(std::cos(angle) * distance, std::sin(angle) * distance, 200.0);
+				RayHit floor;
+				if (!map.Raycast(top, top + Vec3(0, 0, -600), MAP_BLOCK_MOVE, floor) || floor.startInside) continue;
+				const Vec3 at = top + Vec3(0, 0, 92.0 - floor.distance);
+				if (map.OverlapCapsule(at, 35, 90, MAP_BLOCK_MOVE)) continue;
+				out = at;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void SendYaw(ShotClient& client, float yaw, uint8_t buttons, EWeapon weapon, float moveX = 0.f)
+	{
+		wire::Input input = wire::Input();
+		input.seq = ++client.seq;
+		input.moveX = moveX;		// 걸으며 칸 — 기록 도구가 넣은 +X 누름(월드 축)
+		input.yaw = yaw;
+		input.buttons = buttons;
+		input.weapon = (uint8_t)weapon;
+		client.net.SendPacket(input, wire::Msg::C2S_INPUT);
+	}
+
+	bool RunMelee(int port, const CMapCollision& map, const std::string& cprobeLog, const std::string& serverLog)
+	{
+		std::string csvPath = cprobeLog;
+		if (csvPath.size() > 4 && csvPath.compare(csvPath.size() - 4, 4, ".log") == 0) csvPath.replace(csvPath.size() - 4, 4, ".csv");
+		std::vector<MeleeCell> cells;
+		if (!ReadMeleeCells(cprobeLog, csvPath, cells))
+		{
+			std::printf("MELEEPROBE Lyra 기록을 읽지 못함 %s\n", cprobeLog.c_str());
+			return false;
+		}
+		std::unique_ptr<ShotClient[]> clients(new ShotClient[3]);
+		for (int i = 0; i < 3; ++i)
+		{
+			if (!ConnectAndHello(clients[i].net, port, clients[i].welcome))
+			{
+				std::printf("MELEEPROBE 접속 실패\n");
+				return false;
+			}
+		}
+		int foeIndex = -1, allyIndex = -1;
+		for (int i = 1; i < 3; ++i)
+		{
+			if (clients[i].welcome.team != clients[0].welcome.team) { if (foeIndex < 0) foeIndex = i; }
+			else if (allyIndex < 0) allyIndex = i;
+		}
+		if (foeIndex < 0 || allyIndex < 0)
+		{
+			std::printf("MELEEPROBE 세 사람 팀이 다른 팀 하나 · 같은 팀 하나로 안 갈림\n");
+			return false;
+		}
+		timeBeginPeriod(1);
+		PumpFor(clients.get(), 3, 0.3);
+		ShotClient& attacker = clients[0];
+		const MoveParams moveParams = MakeLyraMoveParams();		// CMoveSim 은 설정을 참조로 든다 — 임시값을 넘기면 사라진 메모리를 읽는다
+		const CMoveSim sim(map, moveParams);
+		EWeapon heldWeapon = EWeapon::Pistol;		// 접속 때 든 무기 — 처음 칸이 다른 무기면 더 선다
+		int crouchMismatch = 0;
+		std::vector<uint32_t> seqs(cells.size(), 0);
+		std::vector<Vec3> befores(cells.size()), afters(cells.size());
+		std::vector<bool> beforeFound(cells.size(), false), beforeCrouched(cells.size(), false);
+		std::vector<uint32_t> beforeSeqs(cells.size(), 0);		// 근접 앞 상태가 처리를 마친 입력 번호
+		for (size_t c = 0; c < cells.size(); ++c)
+		{
+			const MeleeCell& cell = cells[c];
+			const int targetIndex = cell.sameTeam ? allyIndex : foeIndex;
+			const int parkIndex = cell.sameTeam ? foeIndex : allyIndex;
+			const float attackerYaw = (float)(std::atan2(cell.fwd.y, cell.fwd.x) * 180.0 / kPi);
+			Vec3 park;
+			if (!ParkSpot(map, cell.start, park))
+			{
+				std::printf("MELEEPROBE step=%s 비켜 설 자리를 못 찾음\n", cell.step.c_str());
+				return false;
+			}
+			const size_t historyFrom = attacker.history.size();
+			// 놓으면 선 자세(서버 ApplyPlace 가 MoveState 를 새로 만든다) — 앉는 칸은 선 높이에 놓고 앉기를 한 번 누른다(누를 때마다 바뀌는 단추)
+			// 걸으며 · 뛰며 칸은 칸 첫 줄 자리에 놓고 아래에서 따라간다(17-d)
+			attacker.Place(cell.moving ? cell.runStart : cell.crouched ? cell.start + Vec3(0, 0, sim.CrouchMeshLiftZ()) : cell.start, 100.f);
+			clients[targetIndex].Place(cell.foe, 1000.f);		// 근접 피해 100 으로 안 죽게 — 칸마다 다시 놓아 체력도 돌린다
+			clients[parkIndex].Place(park, 100.f);
+			const auto sendAll = [&](uint8_t attackerButtons, float attackerMoveX)
+			{
+				SendYaw(attacker, attackerYaw, attackerButtons, cell.weapon, attackerMoveX);
+				SendYaw(clients[targetIndex], cell.foeYaw, 0, EWeapon::Pistol);
+				SendYaw(clients[parkIndex], 0.f, 0, EWeapon::Pistol);
+			};
+			const int settle = kMeleeSettleTicks + (cell.weapon != heldWeapon || cell.crouched ? kMeleeChangeTicks : 0);
+			heldWeapon = cell.weapon;
+			RunTicks(clients.get(), 3, settle, [&](int tick) { sendAll(tick == 0 && cell.crouched ? (uint8_t)wire::BUTTON_CROUCH : (uint8_t)0, 0.f); }, [] { return false; });
+			if (cell.moving)
+			{
+				// 따라가기 입력을 틱마다 하나씩, 그다음 틱에 근접
+				RunTicks(clients.get(), 3, (int)cell.runWalk.size() + 1, [&](int i)
+				{
+					if ((size_t)i < cell.runWalk.size()) sendAll(cell.runJump[(size_t)i] ? (uint8_t)wire::BUTTON_JUMP : (uint8_t)0, cell.runWalk[(size_t)i] ? 1.f : 0.f);
+					else sendAll(wire::BUTTON_MELEE, cell.meleeWalk ? 1.f : 0.f);
+				}, [] { return false; });
+			}
+			else sendAll(wire::BUTTON_MELEE, 0.f);
+			seqs[c] = attacker.seq;
+			RunTicks(clients.get(), 3, kMeleeSlideTicks, [&](int i) { sendAll(0, (size_t)i < cell.slideWalk.size() && cell.slideWalk[(size_t)i] ? 1.f : 0.f); }, [] { return false; });
+			PumpFor(clients.get(), 3, 0.1);
+			for (size_t h = historyFrom; h < attacker.history.size(); ++h)
+			{
+				const wire::PlayerState& s = attacker.history[h];
+				if (s.lastSeq < seqs[c])
+				{
+					befores[c] = Vec3(s.x, s.y, s.z);
+					beforeFound[c] = true;
+					beforeSeqs[c] = s.lastSeq;
+					beforeCrouched[c] = (s.flags & wire::STATE_CROUCHED) != 0;
+				}
+				afters[c] = Vec3(s.x, s.y, s.z);
+			}
+		}
+		timeEndPeriod(1);
+		for (int i = 0; i < 3; ++i) clients[i].net.Close();
+
+		// 서버 시험 줄 — 공격자 입력 번호 → 손 · 맞은 거리
+		std::string serverText;
+		for (int i = 0; i < 100 && serverText.empty(); ++i)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			std::ifstream file(serverLog, std::ios::binary);
+			serverText.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+			if (serverText.find("SERVER kills=") == std::string::npos) serverText.clear();
+		}
+		std::map<uint32_t, std::string> events;
+		size_t at = 0;
+		while (at < serverText.size())
+		{
+			size_t end = serverText.find('\n', at);
+			if (end == std::string::npos) end = serverText.size();
+			std::string line = serverText.substr(at, end - at);
+			if (!line.empty() && line.back() == '\r') line.pop_back();
+			if (line.rfind("MELEEEV ", 0) == 0 && (uint32_t)std::strtoul(FieldValue(line, "attacker").c_str(), nullptr, 10) == attacker.welcome.playerId)
+			{
+				events[(uint32_t)std::strtoul(FieldValue(line, "seq").c_str(), nullptr, 10)] = line;
+			}
+			at = end + 1;
+		}
+
+		int kindDiff = 0, targetDiff = 0, damageDiff = 0, missing = 0, slideWithoutHit = 0, contactCells = 0, slidesCompared = 0, eventsMissing = 0;
+		double slideDiffMax = 0, distDiffMax = 0, handDiffMax = 0;
+		constexpr double kContactGap = 2 * 35.0 + 1.0;		// MeleeCheck kContactSlack 과 같은 어림(닿은 넷 70.1, 안 닿은 것 중 가장 가까운 것 90.9 — e1g3)
+		int movingCells = 0, runMeasured = 0, runFails = 0;
+		constexpr double kRunTolerance = 1.0;		// 따라간 근접 직전 자리 허용 — 같은 이동 코드라 0 이어야 한다(d3c 잰 칸 0.000). 한 이동(걷기 6cm)이 모자라면 걸린다
+		double runDiffMax = 0;		// 따라간 칸 — 서버 근접 직전 자리 ↔ Lyra 근접 직전 자리
+		for (size_t c = 0; c < cells.size(); ++c)
+		{
+			const MeleeCell& cell = cells[c];
+			const int targetIndex = cell.sameTeam ? allyIndex : foeIndex;
+			const wire::Melee* got = nullptr;
+			for (const wire::Melee& m : attacker.melees)
+			{
+				if (m.attacker == attacker.welcome.playerId && m.seq == seqs[c]) got = &m;
+			}
+			// Lyra 결과 = 피해 줄이 맞음. 아니면 기록 도구 쓸기로 — 안 닿음 · 같은 팀 · 벽(wall=1). 남이 닿고 벽도 없는데 피해가 없으면 빗나감으로 두어 서버 맞음과 갈리게
+			const uint8_t expect = cell.lyraHit ? wire::MELEE_HIT : !cell.traceHit ? wire::MELEE_NONE : cell.sameTeam ? wire::MELEE_SAME_TEAM : cell.traceWall ? wire::MELEE_BLOCKED : wire::MELEE_NONE;
+			if (beforeFound[c] && beforeCrouched[c] != cell.crouched) ++crouchMismatch;
+			const bool contact = cell.contactGap < kContactGap;
+			const double slide = beforeFound[c] ? std::sqrt((afters[c].x - befores[c].x) * (afters[c].x - befores[c].x) + (afters[c].y - befores[c].y) * (afters[c].y - befores[c].y)) : -1.0;
+			if (!got || !beforeFound[c])
+			{
+				++missing;
+				std::printf("MELEEPROBE step=%s 서버 근접 소식 %s · 근접 앞 상태 %s\n", cell.step.c_str(), got ? "받음" : "없음", beforeFound[c] ? "있음" : "없음");
+				continue;
+			}
+			const bool kindOk = got->result == expect;
+			const uint32_t expectTarget = expect == wire::MELEE_NONE ? 0u : clients[targetIndex].welcome.playerId;
+			const bool targetOk = got->target == expectTarget || expect == wire::MELEE_BLOCKED;
+			const bool damageOk = got->damage == (expect == wire::MELEE_HIT ? cell.lyraDamage : 0.f);
+			if (!kindOk) ++kindDiff;
+			if (!targetOk) ++targetDiff;
+			if (!damageOk) ++damageDiff;
+			double slideDiff = -1, distDiff = -1, handDiff = -1;
+			if (got->result != wire::MELEE_HIT)
+			{
+				if (slide > 0.01 && !cell.walking) ++slideWithoutHit;		// 걸으며 칸은 걸음이 섞여 안 본다
+			}
+			else if (contact) ++contactCells;
+			else
+			{
+				slideDiff = std::abs(slide - cell.lyraLunge);
+				slideDiffMax = std::max(slideDiffMax, slideDiff);
+				++slidesCompared;
+			}
+			if (got->result == wire::MELEE_HIT && cell.traceHit)
+			{
+				distDiff = std::abs((double)got->distance - cell.traceDist);
+				distDiffMax = std::max(distDiffMax, distDiff);
+			}
+			const auto ev = events.find(seqs[c]);
+			Vec3 serverHand;
+			int fromPose = -1;
+			if (ev != events.end() && FieldVec(ev->second, "hand", serverHand))
+			{
+				handDiff = Length(serverHand - cell.hand);
+				handDiffMax = std::max(handDiffMax, handDiff);
+				fromPose = std::atoi(FieldValue(ev->second, "fromPose").c_str());
+			}
+			else ++eventsMissing;
+			if (cell.moving)
+			{
+				++movingCells;
+				// 서버가 한 틱에 입력 둘을 처리하면 근접 바로 앞 입력 뒤 상태가 따로 오지 않는다 — 그때는 못 잰다(-1)
+				const bool exact = beforeSeqs[c] + 1 == seqs[c];
+				const double runDiff = exact ? Length(befores[c] - cell.start) : -1.0;
+				if (exact)
+				{
+					++runMeasured;
+					runDiffMax = std::max(runDiffMax, runDiff);
+					if (runDiff > kRunTolerance) ++runFails;
+				}
+				std::printf("MELEEPROBE run step=%s inputs=%zu walk=%d jump=%d meleeWalk=%u runDiff=%.3f\n", cell.step.c_str(), cell.runWalk.size(),
+					(int)std::count(cell.runWalk.begin(), cell.runWalk.end(), (uint8_t)1), (int)std::count(cell.runJump.begin(), cell.runJump.end(), (uint8_t)1), (unsigned)cell.meleeWalk, runDiff);
+			}
+			std::printf("MELEEPROBE step=%s %s weapon=%u crouch=%d/%d lyra hit=%d trace=%d dist=%.3f dmg=%.0f lunge=%.2f contactGap=%.1f | server result=%u target=%s dist=%.3f dmg=%.0f slide=%.2f fromPose=%d | slideDiff=%.2f distDiff=%.3f handDiff=%.2f\n",
+				cell.step.c_str(), kindOk && targetOk && damageOk ? "ok" : "DIFF", (unsigned)cell.weapon, cell.crouched ? 1 : 0, beforeCrouched[c] ? 1 : 0, cell.lyraHit ? 1 : 0, cell.traceHit ? 1 : 0, cell.traceDist, cell.lyraDamage, cell.lyraLunge, cell.contactGap,
+				(unsigned)got->result, targetOk ? "ok" : "DIFF", got->distance, got->damage, slide, fromPose, slideDiff, distDiff, handDiff);
+		}
+		std::printf("MELEEPROBE cells=%zu missing=%d kindDiff=%d targetDiff=%d damageDiff=%d slideWithoutHit=%d | slidesCompared=%d contact=%d slideDiffMax=%.2f distDiffMax=%.3f handDiffMax=%.2f eventsMissing=%d crouchMismatch=%d moving=%d runMeasured=%d runFails=%d runDiffMax=%.3f\n",
+			cells.size(), missing, kindDiff, targetDiff, damageDiff, slideWithoutHit, slidesCompared, contactCells, slideDiffMax, distDiffMax, handDiffMax, eventsMissing, crouchMismatch, movingCells, runMeasured, runFails, runDiffMax);
+		return missing == 0 && kindDiff == 0 && targetDiff == 0 && damageDiff == 0 && slideWithoutHit == 0 && eventsMissing == 0 && crouchMismatch == 0 && slidesCompared > 0 && runFails == 0;
+	}
 }
 
 int main(int argc, char** argv)
@@ -1910,7 +2464,8 @@ int main(int argc, char** argv)
 	int port = 7791;
 	size_t rowLimit = (size_t)-1;
 	bool breakMirror = false, breakSpread = false, breakDamage = false, rulesOnly = false;
-	bool authorityOnly = false, rewindOnly = false;
+	bool authorityOnly = false, rewindOnly = false, padsOnly = false;
+	std::string meleeLog;
 	std::string serverLog;
 	std::string startsDump;
 	for (int i = 3; i < argc; ++i)
@@ -1924,6 +2479,8 @@ int main(int argc, char** argv)
 		else if (s == "--rules") rulesOnly = true;
 		else if (s == "--authority") authorityOnly = true;
 		else if (s == "--rewind") rewindOnly = true;
+		else if (s == "--pads") padsOnly = true;
+		else if (s.rfind("--melee=", 0) == 0) meleeLog = s.substr(8);
 		else if (s.rfind("--serverLog=", 0) == 0) serverLog = s.substr(12);
 		else if (s.rfind("--checkStarts=", 0) == 0) startsDump = s.substr(14);
 		else
@@ -1965,6 +2522,18 @@ int main(int argc, char** argv)
 		const bool rewindOk = RunRewind(port, map, rows, serverLog);
 		std::printf("RESULT %s (되감기)\n", rewindOk ? "PASS" : "FAIL");
 		return rewindOk ? 0 : 1;
+	}
+	if (!meleeLog.empty())
+	{
+		const bool meleeOk = RunMelee(port, map, meleeLog, serverLog);
+		std::printf("RESULT %s (근접 — 결과 · 대상 · 피해 · 안 맞은 칸 안 밀림 · 따라간 자리. 밀린 거리 · 손 차이는 잰 값)\n", meleeOk ? "PASS" : "FAIL");
+		return meleeOk ? 0 : 1;
+	}
+	if (padsOnly)
+	{
+		const bool padsOk = RunPads(port, serverLog);
+		std::printf("RESULT %s (받침 구동 — 대조는 check_pads.py)\n", padsOk ? "PASS" : "FAIL");
+		return padsOk ? 0 : 1;
 	}
 	if (rulesOnly)
 	{

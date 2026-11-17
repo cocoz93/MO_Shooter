@@ -1,6 +1,7 @@
 ﻿#include "Movement.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 
 namespace mo
@@ -39,6 +40,9 @@ namespace mo
 		p.minAnalogWalkSpeed = 200.f;
 		p.capsuleRadius = 35.f;
 		p.capsuleHalfHeight = 90.f;
+		p.maxWalkSpeedCrouched = 300.f;		// 0-3 실행 기록 · move_expanse_crouch.csv 머리(컨텐츠 D)
+		p.crouchedHalfHeight = 65.f;		// LyraCharacter.cpp:62
+		p.canCrouch = true;					// LyraCharacter.cpp:60
 		return p;
 	}
 
@@ -93,6 +97,326 @@ namespace mo
 		inline Vec3 PlaneProject(const Vec3& v, const Vec3& normal) { return v - normal * Dot(v, normal); }
 		inline float Square(float v) { return v * v; }
 		inline float ClampF(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+		// 선 캡슐 둘의 맞은 점 = 서 있는 쪽 축에서 두 축이 겹치는 높이(겹치지 않으면 가까운 끝) + 법선 × 그쪽 반지름
+		// at = 움직이는 쪽 중심(축 반길이 segMover), center = 서 있는 쪽 중심(축 반길이 segPawn · 반지름 rPawn)
+		inline Vec3 UprightImpactPoint(const Vec3& at, double segMover, const Vec3& center, double segPawn, const Vec3& n, double rPawn)
+		{
+			const double lo = std::max(center.z - segPawn, at.z - segMover), hi = std::min(center.z + segPawn, at.z + segMover);
+			const double zb = lo <= hi ? (lo + hi) * 0.5 : (at.z > center.z ? center.z + segPawn : center.z - segPawn);
+			return Vec3(center.x, center.y, zb) + n * rPawn;
+		}
+
+		// 선 캡슐 둘(컨텐츠 F) — 움직이는 캡슐(반지름 ra · 반높이 hha)이 서 있는 캡슐(center · rb · hhb)에 처음 닿는 시각.
+		// 두 축이 모두 세로라 「점(움직이는 쪽 중심) ↔ 축 반길이 (hha−ra)+(hhb−rb) · 반지름 ra+rb 인 세로 캡슐」 광선 문제로 줄어든다.
+		// 시각은 맞닿는 순간 그대로다(뒤로 물리기는 MoveComponent 가 맵 맞음과 같은 식으로 한다 — F-1 멈춤 거리 70.100 = 70 + 0.1)
+		bool SweepUprightCapsule(const Vec3& start, const Vec3& end, double ra, double hha, const Vec3& center, double rb, double hhb, CapsuleHit& out)
+		{
+			const double R = ra + rb;
+			const double segA = std::max(0.0, hha - ra), segB = std::max(0.0, hhb - rb);
+			const double L = segA + segB;
+			const auto axisPoint = [&](const Vec3& p) { return Vec3(center.x, center.y, center.z + std::max(-L, std::min(L, p.z - center.z))); };
+			const auto fill = [&](const Vec3& at, double time, const Vec3& fallbackNormal)
+			{
+				const Vec3 off = at - axisPoint(at);
+				const double len = Size(off);
+				const Vec3 n = len > 1e-8 ? off * (1.0 / len) : fallbackNormal;
+				out = CapsuleHit();
+				out.time = time;
+				out.distance = Size(end - start) * time;
+				out.normal = n;
+				out.impactNormal = n;
+				out.impactPoint = UprightImpactPoint(at, segA, center, segB, n, rb);
+				out.penetrationDepth = time == 0.0 ? std::max(0.0, R - len) : 0.0;
+				out.startPenetrating = time == 0.0;
+			};
+			const Vec3 d = end - start;
+			const Vec3 off0 = start - axisPoint(start);
+			if (SizeSq(off0) < R * R)
+			{
+				// 시작부터 겹침 — 빠져나갈 방향은 축에서 멀어지는 쪽. 중심이 축 위면 움직임 반대쪽(그것도 없으면 +X)
+				const Vec3 back = SafeNormal(Flat(d) * -1.0);
+				fill(start, 0.0, IsZero(back) ? Vec3(1, 0, 0) : back);
+				return true;
+			}
+			double best = 2.0;
+			// 옆면 — 수평 원과 만나는 첫 시각, 그때 높이가 축 반길이 안
+			const double hx = start.x - center.x, hy = start.y - center.y;
+			const double a2 = d.x * d.x + d.y * d.y;
+			if (a2 > 0.0)
+			{
+				const double b = hx * d.x + hy * d.y;
+				const double c = hx * hx + hy * hy - R * R;
+				const double disc = b * b - a2 * c;
+				if (disc >= 0.0 && b < 0.0)
+				{
+					const double t = (-b - std::sqrt(disc)) / a2;
+					if (t >= 0.0 && t <= 1.0 && std::fabs(start.z + d.z * t - center.z) <= L) best = t;
+				}
+			}
+			// 위 · 아래 끝 구
+			const double A = Dot(d, d);
+			for (int side = -1; side <= 1 && A > 0.0; side += 2)
+			{
+				const Vec3 m = start - Vec3(center.x, center.y, center.z + side * L);
+				const double B = Dot(m, d), Cc = Dot(m, m) - R * R;
+				const double disc = B * B - A * Cc;
+				if (disc < 0.0 || B >= 0.0) continue;
+				const double t = (-B - std::sqrt(disc)) / A;
+				if (t < 0.0 || t > 1.0 || side * (start.z + d.z * t - center.z) < L) continue;
+				best = std::min(best, t);
+			}
+			if (best > 1.0) return false;
+			fill(start + d * best, best, SafeNormal(Flat(d) * -1.0));
+			return true;
+		}
+
+		// 사람끼리 쓸기를 엔진과 같은 단정밀도로(19 F-2) — Chaos GJKRaycast2ImplSimd(UE 5.8 GJK.h 1590~1800)를 세로 캡슐 둘에 대해 옮긴 것.
+		// 엔진은 맞은 거리는 정확히 내지만 법선은 마지막으로 다가간 반복의 방향(V)을 돌려준다 — 정확한 법선과 최대 0.03도 다르고,
+		// 비스듬히 스치는 칸에서 그 차이가 틱마다 쌓여 위치가 0.28 cm 까지 벌어졌다(BumpCheck still_p20).
+		// 같은 계산을 파이썬으로 흉내 낸 것이 Lyra 기록 471번(cprobe_f1e) 전부와 법선 소수 8자리 · 거리 1e-6 까지 같았다.
+		// - 곱더하기는 곱 · 더하기를 따로 반올림한다(Windows 기본 빌드는 FMA 꺼짐 — WindowsPlatform.h PLATFORM_ALWAYS_HAS_FMA3 0)
+		// - 내적 = (x*x + y*y) + z*z, 정규화 = v * (1 / sqrt(내적))  (UnrealMathSSE.h InternalVectorDot3X · VectorNormalize)
+		// 그래서 이 묶음은 float 연산 순서가 곧 사양이다. 식을 「정리」하지 말 것
+		namespace chaos_f
+		{
+			struct V3f { float x, y, z; };
+			inline V3f Sub(const V3f& a, const V3f& b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
+			inline V3f Neg(const V3f& a) { return { -a.x, -a.y, -a.z }; }
+			inline float Dot3(const V3f& a, const V3f& b)
+			{
+				const float px = a.x * b.x, py = a.y * b.y, pz = a.z * b.z;
+				return (px + py) + pz;
+			}
+			inline V3f Normalize(const V3f& v)
+			{
+				const float r = 1.f / std::sqrt(Dot3(v, v));
+				return { v.x * r, v.y * r, v.z * r };
+			}
+			// 선분 받침 — 축 (0,0,1) 과의 내적이 0 이상이면 위 끝(CoreSegment.h 53~60)
+			inline const V3f& Support(const V3f& dir, const V3f& bottom, const V3f& top) { return dir.z >= 0.f ? top : bottom; }
+
+			// VectorLineSimplexFindOrigin(SimplexVectorized.h 12~62) — X0 은 Simplex[0] 참조라 갈아 끼운 뒤 값을 쓴다
+			inline V3f LineSimplex(V3f* S, V3f* As, V3f* Bs, int& n)
+			{
+				const V3f x1 = S[1];
+				const V3f x0ToX1 = Sub(S[1], S[0]);
+				const float dot = Dot3(Neg(S[0]), x0ToX1);
+				const bool isX0 = 0.f >= dot;
+				const float sq = Dot3(x0ToX1, x0ToX1);
+				const bool isX1 = dot >= sq || FLT_MIN >= sq;
+				if (isX1)
+				{
+					S[0] = S[1];
+					As[0] = As[1];
+					Bs[0] = Bs[1];
+				}
+				float ratio = dot / sq;
+				ratio = ratio > 0.f ? ratio : 0.f;		// _mm_max_ps(NaN, 0) = 0
+				ratio = ratio < 1.f ? ratio : 1.f;
+				V3f closest = { ratio * x0ToX1.x + S[0].x, ratio * x0ToX1.y + S[0].y, ratio * x0ToX1.z + S[0].z };
+				if (isX0) closest = S[0];
+				else if (isX1) closest = x1;
+				n = isX0 || isX1 ? 1 : 2;
+				return closest;
+			}
+
+			// VectorSimplexFindClosestToOrigin — 세로 캡슐 둘이면 삼각형은 늘 퇴화해 선분으로 돌아간다(SimplexVectorized.h 66~88).
+			// 퇴화하지 않는 삼각형 · 사면체는 옮기지 않았다 → false
+			inline bool FindClosest(V3f* S, int& n, V3f* As, V3f* Bs, V3f& out)
+			{
+				switch (n)
+				{
+				case 1:
+					out = S[0];
+					return true;
+				case 2:
+					out = LineSimplex(S, As, Bs, n);
+					return true;
+				case 3:
+				{
+					const V3f ab = Sub(S[1], S[0]), ac = Sub(S[2], S[0]);
+					const V3f tri = { ab.y * ac.z - ab.z * ac.y, ab.z * ac.x - ab.x * ac.z, ab.x * ac.y - ab.y * ac.x };
+					const V3f tiny = { S[0].x * FLT_MIN, S[0].y * FLT_MIN, S[0].z * FLT_MIN };
+					if (!(Dot3(tiny, tiny) >= Dot3(tri, tri))) return false;
+					n = 2;
+					out = LineSimplex(S, As, Bs, n);
+					return true;
+				}
+				default:
+					return false;
+				}
+			}
+
+			// Touch = 처음부터 여유 안(λ = 0)에서 끝남 — outLambda 에 겹친 깊이(0 이상), outNormal 에 빠져나갈 방향
+			enum class Ray { Miss, Hit, Touch, Odd };
+			// A = 맞는 쪽(지역 원점, 선분 반길이 segA), B = 움직이는 쪽(지역 좌표 선분 끝 bBot · bTop). 법선은 A 에서 B 쪽
+			inline Ray Raycast(float segA, const V3f& bBot, const V3f& bTop, const V3f& rayDir, float rayLen, float inflation, float& outLambda, V3f& outNormal)
+			{
+				const V3f aBot = { 0.f, 0.f, -segA }, aTop = { 0.f, 0.f, segA };
+				constexpr float kEps2 = 1e-6f;
+				const float inflation2 = inflation * inflation + kEps2;
+				V3f x = { 0.f, 0.f, 0.f };
+				V3f sa = Support(rayDir, aBot, aTop), sb = Support(Neg(rayDir), bBot, bTop);
+				V3f As[4] = { sa, x, x, x }, Bs[4] = { sb, x, x, x }, S[4] = { x, x, x, x };
+				float lambda = 0.f;
+				V3f v = Sub(x, Sub(sa, sb));
+				V3f normal = { 0.f, 0.f, 1.f };
+				int n = 0;
+				float preDist2 = FLT_MAX;
+				// 엔진 쓸기는 MTD 를 늘 켠다(SceneQuery.cpp 380 · GeometryQueries.cpp 65 — 원본 기준). 그래서 여유 안에서 시작하면
+				// 바로 멈추지 않고 핵(선분)끼리 가장 가까운 점을 더 찾는다(GJK.h 1655 · 1727 · 1744~1762). 그 사이 실제로는 떨어져 있었음이 드러나면 광선이 다시 나아간다.
+				// 이 이어 돌기는 F-2 봇 판에서 결과를 바꾼 적이 없고(꺼도 숫자가 같았다) Lyra 기록과도 대조하지 않았다 — 원본을 읽고 옮긴 것이다
+				const float initialDist2 = Dot3(v, v);
+				bool closeEnough = initialDist2 < inflation2 && initialDist2 < kEps2;
+				bool inflatedCloseEnough = closeEnough;
+				bool degenerate = false;
+				for (int it = 0; !(closeEnough || degenerate) && it < 32; ++it)
+				{
+					v = Normalize(v);
+					sa = Support(v, aBot, aTop);
+					sb = Support(Neg(v), bBot, bTop);
+					const V3f p = Sub(sa, sb);
+					const V3f w = Sub(x, p);
+					As[n] = sa;
+					Bs[n] = sb;
+					const float vDotW = Dot3(v, w);
+					if (vDotW > inflation)
+					{
+						// 아직 떨어져 있다 — 광선을 따라 다가간다(보수적 전진). 이때의 V 가 법선이 된다
+						const float vDotRay = Dot3(v, rayDir);
+						if (vDotRay >= 0.f) return Ray::Miss;
+						const float preLambda = lambda;
+						lambda = lambda - (vDotW - inflation) / vDotRay;
+						if (lambda > preLambda)
+						{
+							if (lambda > rayLen) return Ray::Miss;
+							x = { lambda * rayDir.x + 0.f, lambda * rayDir.y + 0.f, lambda * rayDir.z + 0.f };
+							normal = v;
+							for (int i = 0; i < 3; ++i) S[i] = Sub(x, Sub(As[i], Bs[i]));
+							S[n++] = Sub(x, p);
+							preDist2 = FLT_MAX;
+							inflatedCloseEnough = false;
+						}
+					}
+					else
+					{
+						S[n++] = w;
+					}
+					// 엔진 그대로 — 거리(vDotW)와 거리 제곱(preDist2)을 견준다(GJK.h 1731)
+					if (inflatedCloseEnough && vDotW >= 0.f) closeEnough = kEps2 + vDotW >= preDist2;
+					if (!closeEnough)
+					{
+						if (!FindClosest(S, n, As, Bs, v)) return Ray::Odd;
+						const float newDist2 = Dot3(v, v);
+						closeEnough = inflation2 > newDist2;
+						degenerate = newDist2 >= preDist2;
+						preDist2 = newDist2;
+						if (closeEnough)
+						{
+							inflatedCloseEnough = lambda == 0.f && preDist2 > kEps2 && inflation2 > kEps2 && n < 4;
+							closeEnough = !inflatedCloseEnough;
+						}
+					}
+					else
+					{
+						// 끝내기 전 단체 정리 한 번(GJK.h 1767)
+						if (!FindClosest(S, n, As, Bs, v)) return Ray::Odd;
+					}
+				}
+				if (lambda > 0.f)
+				{
+					outLambda = lambda;
+					outNormal = normal;
+					return Ray::Hit;
+				}
+				// 처음부터 여유 안 — GJK.h 1800~1849 의 IsDone 갈래. 핵끼리 맞닿은 깊은 겹침(preDist2 ≤ 1e-6)은 EPA 로 가는데 옮기지 않았다.
+				// F-2 봇 판에서는 정확한 간격이 70.0000157(여유 70)인데 단정밀도 반복이 더 나아가지 못하고(degenerate) 끝나 깊이 0 으로 나왔다
+				// (예측이 받은 남의 위치와 딱 맞닿은 채 다시 돌린 걸음 — 서버 쪽 0). 이 갈래도 Lyra 기록과 대조하지 않았다
+				if (!(inflation > 0.f && preDist2 > kEps2 && FLT_MAX > preDist2)) return Ray::Odd;
+				outNormal = Normalize(v);
+				outLambda = std::max(std::min(inflation - std::sqrt(preDist2), FLT_MAX), 0.f);
+				return Ray::Touch;
+			}
+		}
+
+		// 엔진의 사람끼리 쓸기 — 맞는 쪽 캡슐의 지역 좌표(그 사람 yaw 로 돌린 것)에서 위 계산을 돌린다.
+		// 시작부터 겹침 · 옮기지 않은 단체(odd)는 정확한 식(SweepUprightCapsule)으로 갈음한다
+		bool SweepPawnLikeChaos(const Vec3& start, const Vec3& end, float radius, float halfHeight, const PawnCapsule& pawn, CapsuleHit& out, bool& odd, bool& touch)
+		{
+			odd = false;
+			touch = false;
+			CapsuleHit exact;
+			const bool exactHit = SweepUprightCapsule(start, end, radius, halfHeight, pawn.center, pawn.radius, pawn.halfHeight, exact);
+			// 시작부터 겹침 — 엔진은 EPA 로 빠져나갈 방향을 찾는다. 그 길은 옮기지 않았다(F-1 · F-2 기록에 겹친 채 시작한 사람 쓸기 없음)
+			if (exactHit && exact.startPenetrating)
+			{
+				out = exact;
+				return true;
+			}
+			// SceneQuery.cpp 512~533 — 쓸기 길이는 float 로 줄이고(DeltaSize), 방향 = 차이 × (1 / 그 float 길이)(FVector::operator/)
+			const Vec3 delta = end - start;
+			const float lengthF = (float)Size(delta);
+			if (!(lengthF > kSmall))
+			{
+				if (exactHit) out = exact;
+				return exactHit;
+			}
+			const double rScale = 1.0 / (double)lengthF;
+			const Vec3 dir(delta.x * rScale, delta.y * rScale, delta.z * rScale);
+			const double yawRad = (double)pawn.yaw * (3.14159265358979323846 / 180.0);
+			const double c = std::cos(yawRad), s = std::sin(yawRad);
+			const auto toLocal = [&](const Vec3& w) { return Vec3(c * w.x + s * w.y, -s * w.x + c * w.y, w.z); };
+			const Vec3 b = toLocal(start - pawn.center);
+			const Vec3 ld = toLocal(dir);
+			const double segMover = std::max(0.0, (double)halfHeight - (double)radius);
+			const double segPawn = std::max(0.0, (double)pawn.halfHeight - (double)pawn.radius);
+			// 움직이는 쪽 선분 끝은 double 로 구한 뒤 float 로 (GeometryQueries.cpp ComputeLocalCapsule)
+			const chaos_f::V3f bBot = { (float)b.x, (float)b.y, (float)(b.z - segMover) };
+			const chaos_f::V3f bTop = { (float)b.x, (float)b.y, (float)(b.z - segMover + 2.0 * segMover) };
+			const chaos_f::V3f rayDir = { (float)ld.x, (float)ld.y, (float)ld.z };
+			float lambda = 0.f;
+			chaos_f::V3f nLocal = { 0.f, 0.f, 0.f };
+			switch (chaos_f::Raycast((float)segPawn, bBot, bTop, rayDir, lengthF, radius + pawn.radius, lambda, nLocal))
+			{
+			case chaos_f::Ray::Miss:
+				return false;
+			case chaos_f::Ray::Odd:
+				odd = true;
+				if (exactHit) out = exact;
+				return exactHit;
+			case chaos_f::Ray::Touch:
+			{
+				// 엔진 — 거리 = −깊이(≤ 0)라 처음부터 겹침으로 바뀐다(ChaosInterfaceWrapperCore.h HadInitialOverlap · CollisionConversions.cpp 583~621).
+				// 시각 0 · 깊이 = |거리| · 법선 = 빠져나갈 방향. 0 거리의 법선 다시 구하기(같은 파일 647)는 엔진에서 빈 함수다
+				touch = true;
+				const Vec3 nt = SafeNormal(Vec3(c * nLocal.x - s * nLocal.y, s * nLocal.x + c * nLocal.y, nLocal.z));
+				out = CapsuleHit();
+				out.time = 0.0;
+				out.distance = 0.0;
+				out.normal = nt;
+				out.impactNormal = nt;
+				out.impactPoint = UprightImpactPoint(start, segMover, pawn.center, segPawn, nt, pawn.radius);
+				out.penetrationDepth = lambda;
+				out.startPenetrating = true;
+				return true;
+			}
+			case chaos_f::Ray::Hit:
+				break;
+			}
+			const Vec3 n = SafeNormal(Vec3(c * nLocal.x - s * nLocal.y, s * nLocal.x + c * nLocal.y, nLocal.z));
+			// CollisionConversions.cpp 369 — 시각 = float(거리 / 쓸기 길이)
+			const double time = (double)(float)((double)lambda / (double)lengthF);
+			out = CapsuleHit();
+			out.time = time;
+			out.distance = lambda;
+			out.normal = n;
+			out.impactNormal = n;
+			out.impactPoint = UprightImpactPoint(start + delta * time, segMover, pawn.center, segPawn, n, pawn.radius);
+			out.penetrationDepth = 0.0;
+			out.startPenetrating = false;
+			return true;
+		}
 
 		void FillFromCapsule(MoveHit& out, const CapsuleHit& hit, const Vec3& start, const Vec3& end)
 		{
@@ -175,7 +499,9 @@ namespace mo
 	bool CMoveSim::JumpIsAllowed() const
 	{
 		const MoveState& s = *_s;
-		if (!_p.canJump) return false;		// Lyra CanAttemptJump 은 웅크림을 보지 않는다. 걷기·낙하만 있으니 모드 검사는 항상 참
+		// CanAttemptJump = IsJumpAllowed && !bWantsToCrouch && (걷기 || 낙하). 걷기·낙하만 있으니 모드 검사는 항상 참.
+		// Lyra 가 뺀 것은 ACharacter 의 앉음(bIsCrouched) 검사뿐이다(LyraCharacter.cpp:461) — 앉으려는 중이면 여전히 못 뛴다
+		if (!_p.canJump || s.wantsToCrouch) return false;
 
 		if (!s.wasJumping || _p.jumpMaxHoldTime <= 0.f)
 		{
@@ -241,6 +567,166 @@ namespace mo
 		}
 	}
 
+	// ---------------------------------------------------------------- 앉기 (컨텐츠 D)
+
+	void CMoveSim::ToggleCrouch(MoveState& state) const
+	{
+		if (state.crouched || state.wantsToCrouch)
+		{
+			state.wantsToCrouch = false;		// ACharacter::UnCrouch
+		}
+		else if (state.mode == EMoveMode::Walking && _p.canCrouch)
+		{
+			state.wantsToCrouch = true;			// ACharacter::Crouch — CanCrouch(앉지 않음 · CanEverCrouch)
+		}
+	}
+
+	void CMoveSim::RequestUnCrouch(MoveState& state) const
+	{
+		state.wantsToCrouch = false;
+	}
+
+	float CMoveSim::CrouchedHalfHeight() const
+	{
+		return std::max(std::max(0.f, _p.capsuleRadius), _p.crouchedHalfHeight);
+	}
+
+	float CMoveSim::MaxSpeedNow() const
+	{
+		// LyraCharacterMovementComponent::GetMaxSpeed — 이동 금지면 0(부르는 쪽이 maxSpeed 를 0 으로 준다), 아니면 엔진 GetMaxSpeed:
+		// 걷기 = 앉았으면 MaxWalkSpeedCrouched, 낙하 = MaxWalkSpeed(앉아 떨어져도). 조준 배수는 MaxWalkSpeed 만 바꾼다(0-3 실행 기록)
+		const MoveState& s = *_s;
+		if (s.maxSpeed == 0.f) return 0.f;
+		return (IsWalking() && s.crouched) ? _p.maxWalkSpeedCrouched : s.maxSpeed;
+	}
+
+	void CMoveSim::UpdateCharacterStateBeforeMovement()
+	{
+		const MoveState& s = *_s;
+		if (s.crouched && (!s.wantsToCrouch || !CanCrouchInCurrentState()))
+		{
+			UnCrouch();
+		}
+		else if (!s.crouched && s.wantsToCrouch && CanCrouchInCurrentState())
+		{
+			Crouch();
+		}
+	}
+
+	void CMoveSim::UpdateCharacterStateAfterMovement()
+	{
+		if (_s->crouched && !CanCrouchInCurrentState()) UnCrouch();
+	}
+
+	void CMoveSim::Crouch()
+	{
+		MoveState& s = *_s;
+		if (!CanCrouchInCurrentState()) return;
+		if (HalfHeight() == _p.crouchedHalfHeight)
+		{
+			s.crouched = true;
+			return;
+		}
+
+		// 캡슐을 줄인다(중심 그대로). 엔진은 SetCapsuleSize 뒤에 SetIsCrouched 를 하지만 그 사이에 앉음을 읽는 곳이 없어 같다.
+		// bCrouchMaintainsBaseLocation = 걷기 모드에 들어올 때 참, 나갈 때 거짓(OnMovementModeChanged) → 걷기 모드인가와 같다
+		const float halfHeightAdjust = HalfHeight() - CrouchedHalfHeight();
+		s.crouched = true;
+		if (IsWalking())
+		{
+			// 바닥 자리를 지키게 줄인 캡슐을 아래로 쓸어 내린다(MoveComponent 를 직접 — 평면 제한 없이)
+			MoveComponent(Vec3(0.0, 0.0, -(double)halfHeightAdjust), true, nullptr, false);
+			++_count.crouchGround;
+		}
+		else
+		{
+			++_count.crouchAir;
+		}
+		s.forceNextFloorCheck = true;
+	}
+
+	void CMoveSim::UnCrouch()
+	{
+		MoveState& s = *_s;
+		if (!s.crouched) return;
+
+		constexpr float kSweepInflation = kKindaSmall * 10.f;		// UE_KINDA_SMALL_NUMBER * 10
+		constexpr double kMinExtent = (double)kKindaSmall * 10.0;	// GetPawnCapsuleExtent 의 「0 까지 줄이지 않기」
+		const float radius = _p.capsuleRadius;
+		const float currentHalf = HalfHeight();
+		const float halfHeightAdjust = _p.capsuleHalfHeight - currentHalf;
+		const Vec3 pawnLocation = s.location;
+
+		// 선 캡슐보다 살짝 큰 캡슐 — GetPawnCapsuleCollisionShape(SHRINK_HeightCustom, -SweepInflation - 차이). 반높이 계산은 double, 모양에 담길 때 float
+		const float shrink = -kSweepInflation - halfHeightAdjust;
+		const float standHalf = (float)std::max((double)currentHalf - (double)shrink, kMinExtent);
+		bool encroached = true;
+
+		if (!IsWalking())
+		{
+			// 제자리에서 키운다
+			encroached = _map.OverlapCapsule(pawnLocation, radius, standHalf, MAP_BLOCK_MOVE);
+			if (encroached && halfHeightAdjust > 0.f)
+			{
+				// 반지름만큼 짧은 캡슐로 아래를 쓸어 바닥을 찾고, 거기서 일어설 수 있나 본다
+				const float shrinkHalf = currentHalf - radius;
+				const float traceDist = currentHalf - shrinkHalf;
+				const float shortHalf = (float)std::max((double)currentHalf - (double)shrinkHalf, kMinExtent);
+				MoveHit hit;
+				SweepTest(pawnLocation, pawnLocation + Vec3(0.0, 0.0, -(double)traceDist), radius, shortHalf, hit);
+				if (hit.startPenetrating)
+				{
+					encroached = true;
+				}
+				else
+				{
+					const float distanceToBase = (hit.time * traceDist) + shortHalf;
+					const Vec3 newLocation = pawnLocation + Vec3(0.0, 0.0, (double)(-distanceToBase + standHalf + kSweepInflation + kMinFloorDist / 2.f));
+					encroached = _map.OverlapCapsule(newLocation, radius, standHalf, MAP_BLOCK_MOVE);
+					if (!encroached)
+					{
+						MoveComponent(newLocation - pawnLocation, false, nullptr, false);
+						++_count.uncrouchAirShifted;
+					}
+				}
+			}
+			if (!encroached) ++_count.uncrouchAir;
+		}
+		else
+		{
+			// 바닥 자리를 지키며 키운다
+			Vec3 standingLocation = pawnLocation + Vec3(0.0, 0.0, (double)(standHalf - currentHalf));
+			encroached = _map.OverlapCapsule(standingLocation, radius, standHalf, MAP_BLOCK_MOVE);
+			bool lowered = false;
+			if (encroached)
+			{
+				// 머리 위가 살짝 걸리면 바닥 쪽으로 붙여 다시 본다
+				const float minFloorDist = kKindaSmall * 10.f;
+				if (s.floor.blockingHit && s.floor.floorDist > minFloorDist)
+				{
+					standingLocation.z -= (double)(s.floor.floorDist - minFloorDist);
+					encroached = _map.OverlapCapsule(standingLocation, radius, standHalf, MAP_BLOCK_MOVE);
+					lowered = true;
+				}
+			}
+			if (!encroached)
+			{
+				MoveComponent(standingLocation - pawnLocation, false, nullptr, false);
+				s.forceNextFloorCheck = true;
+				++_count.uncrouchGround;
+				if (lowered) ++_count.uncrouchGroundLowered;
+			}
+		}
+
+		// 아직 걸리면 그만둔다 — 앉은 채로 남고, bWantsToCrouch 가 거짓이면 다음 틱에 다시 시도한다
+		if (encroached)
+		{
+			++_count.uncrouchBlocked;
+			return;
+		}
+		s.crouched = false;
+	}
+
 	// ---------------------------------------------------------------- 틱
 
 	void CMoveSim::Tick(MoveState& state, const Vec3& input, float deltaTime, const Vec3* launch)
@@ -263,7 +749,22 @@ namespace mo
 			s.analogInputModifier = 0.f;
 		}
 
-		// PerformMovement
+		// PerformMovement — 앉기 · 일어서기는 발사보다 먼저(UpdateCharacterStateBeforeMovement → HandlePendingLaunch)
+		// 밀기(루트 모션 힘)는 원본 차례대로 — 밖에서 바뀐 속도 옮기기 → 끝난 밀기 지우기 → 앉기 · 발사 → 발사가 바꾼 속도 옮기기 → 밀기 준비(2815~2941)
+		RootForceState& rootForce = s.rootForce;
+		if (rootForce.hasAdditive)
+		{
+			const Vec3 adjustment = s.velocity - s.lastUpdateVelocity;
+			if (!IsZero(adjustment))
+			{
+				rootForce.lastPreAdditiveVelocity = rootForce.lastPreAdditiveVelocity + adjustment;
+				++_count.rootForceExternal;
+			}
+		}
+		const bool hasRootForce = rootForce.active;		// HasRootMotionSources — 지우기 전에 본다. 그래서 막 끝난 이동에도 준비가 돌아 hasAdditive 가 꺼진다
+		if (hasRootForce) CleanUpRootForce();
+		const Vec3 oldVelocity = s.velocity;
+		UpdateCharacterStateBeforeMovement();
 		if (launch && !IsZero(*launch))
 		{
 			s.velocity = *launch;
@@ -271,10 +772,89 @@ namespace mo
 			s.forceNextFloorCheck = true;
 			++_count.launches;
 		}
+		if (rootForce.hasAdditive)
+		{
+			const Vec3 adjustment = s.velocity - oldVelocity;
+			if (!IsZero(adjustment))
+			{
+				rootForce.lastPreAdditiveVelocity = rootForce.lastPreAdditiveVelocity + adjustment;
+				++_count.rootForceExternal;
+			}
+		}
+		if (hasRootForce) PrepareRootForce(deltaTime);
 
 		ClearJumpInput(deltaTime);
 		s.numJumpApexAttempts = 0;
 		StartNewPhysics(deltaTime, 0);
+		UpdateCharacterStateAfterMovement();
+		s.lastUpdateVelocity = s.velocity;		// PerformMovement 끝(3165)
+	}
+
+	// ---------------------------------------------------------------- 루트 모션 힘(근접 밀기, 컨텐츠 E-2-1)
+
+	void CMoveSim::ApplyRootForce(MoveState& state, const Vec3& force, float duration)
+	{
+		RootForceState& rootForce = state.rootForce;
+		++_count.rootForceApplied;
+		if (rootForce.active) ++_count.rootForceReplaced;
+		rootForce.force = force;
+		rootForce.duration = duration;
+		rootForce.time = 0.f;
+		rootForce.active = true;
+		rootForce.finished = false;
+		// hasAdditive · additiveApplied · lastPreAdditiveVelocity 는 묶음 쪽 값이라 그대로 둔다(원본은 대기 칸에 넣기만 한다)
+	}
+
+	void CMoveSim::CleanUpRootForce()
+	{
+		RootForceState& rootForce = _s->rootForce;
+		if (!rootForce.finished) return;
+		// 덧붙인 힘이 지워질 때 그 속도를 덧붙이기 전 속도에 더해 남긴다(RootMotionSource.cpp 1362~1377) — 다음 걸음의 되돌림이 이 값을 쓰므로
+		// 마지막 밀기 속도가 그대로 이어진다. 유지 갈래라 자르기(ClampVelocity) · 정하기(SetVelocity)는 없다 — Lyra 기록도 1000 으로 안 잘렸다
+		if (rootForce.additiveApplied)
+		{
+			const double z = rootForce.lastPreAdditiveVelocity.z;
+			rootForce.lastPreAdditiveVelocity = rootForce.lastPreAdditiveVelocity + rootForce.force;
+			rootForce.lastPreAdditiveVelocity.z = z;		// IgnoreZAccumulate
+		}
+		rootForce.active = false;
+		rootForce.finished = false;
+		++_count.rootForceFinished;
+	}
+
+	void CMoveSim::PrepareRootForce(float deltaTime)
+	{
+		RootForceState& rootForce = _s->rootForce;
+		rootForce.hasAdditive = false;
+		if (!rootForce.active) return;
+		// 끝 틱 자르기 끔 · 시작 시각 조정 없음 → 준비 시간 = 이동 틱이라 이번 몫 = Force × (틱 ÷ 틱) = Force.
+		// 시간은 float 로 쌓는다(SetTime → CheckTimeOut) — 1/60 세 번의 합이 반올림으로 0.05 를 넘어 3번째 이동에서 끝난다(Lyra 3프레임과 같음)
+		rootForce.time = rootForce.time + deltaTime;
+		rootForce.finished = rootForce.time >= rootForce.duration;
+		rootForce.hasAdditive = true;
+		++_count.rootForcePrepared;
+	}
+
+	void CMoveSim::RestorePreAdditiveRootMotionVelocity()
+	{
+		RootForceState& rootForce = _s->rootForce;
+		if (!rootForce.additiveApplied) return;
+		_s->velocity = rootForce.lastPreAdditiveVelocity;
+		rootForce.additiveApplied = false;
+		++_count.rootForceRestores;
+	}
+
+	void CMoveSim::ApplyRootMotionToVelocity()
+	{
+		RootForceState& rootForce = _s->rootForce;
+		if (!rootForce.hasAdditive) return;
+		rootForce.lastPreAdditiveVelocity = _s->velocity;
+		const double z = _s->velocity.z;
+		_s->velocity = _s->velocity + rootForce.force;
+		_s->velocity.z = z;		// IgnoreZAccumulate
+		rootForce.additiveApplied = true;
+		++_count.rootForceAdds;
+		// 밀기로 위쪽 속도가 생기면 낙하로 바꾸는 갈래(4566~4586)는 위아래를 안 건드려 늘 0 이라 옮기지 않았다
 	}
 
 	void CMoveSim::RefreshFloor(MoveState& state)
@@ -349,7 +929,7 @@ namespace mo
 		if (deltaTime < kMinTickTime) return;
 
 		friction = std::max(0.f, friction);
-		const float maxInputSpeed = std::max(s.maxSpeed * s.analogInputModifier, _p.minAnalogWalkSpeed);
+		const float maxInputSpeed = std::max(MaxSpeedNow() * s.analogInputModifier, _p.minAnalogWalkSpeed);
 		const float maxSpeed = std::max(0.f, maxInputSpeed);
 
 		const bool zeroAcceleration = IsZero(s.acceleration);
@@ -497,13 +1077,32 @@ namespace mo
 		}
 
 		CapsuleHit sweepHit;
-		const bool hit = _map.SweepCapsule(traceStart, traceEnd, _p.capsuleRadius, _p.capsuleHalfHeight, MAP_BLOCK_MOVE, sweepHit);
+		bool hit = _map.SweepCapsule(traceStart, traceEnd, _p.capsuleRadius, HalfHeight(), MAP_BLOCK_MOVE, sweepHit);
+		// 다른 사람 캡슐(컨텐츠 F) — 맵보다 먼저 닿거나(같은 시각이면 맵), 맵 맞음이 빠져나가는 겹침이라 무시될 때 사람 맞음을 쓴다
+		// (엔진은 여러 맞음을 받아 무시하지 않는 첫 맞음을 고른다 — PrimitiveComponent MoveComponentImpl, 원본 기준)
+		bool pawnHit = false;
+		CapsuleHit pawnSweep;
+		if (_pawnCount > 0 && SweepPawns(traceStart, traceEnd, _p.capsuleRadius, HalfHeight(), pawnSweep))
+		{
+			const bool mapIgnored = hit && sweepHit.startPenetrating && !neverIgnoreBlockingOverlaps && (float)Dot(sweepHit.impactNormal, SafeNormal(delta)) > 0.f;
+			if (!hit || mapIgnored || pawnSweep.time < sweepHit.time)
+			{
+				sweepHit = pawnSweep;
+				hit = pawnHit = true;
+			}
+		}
 
 		bool blocked = false;
 		MoveHit blocking;
 		if (hit)
 		{
 			FillFromCapsule(blocking, sweepHit, traceStart, traceEnd);
+			blocking.pawn = pawnHit;
+			if (pawnHit)
+			{
+				++_count.pawnHits;
+				if (blocking.startPenetrating) ++_count.pawnStartPenetrating;
+			}
 			if (blocking.startPenetrating) ++_count.startPenetrating;
 
 			// PullBackHit — 면에 딱 붙지 않게 시간을 조금 물린다. 닿은 위치(location)는 그대로 둔다
@@ -559,7 +1158,8 @@ namespace mo
 		if (!hit.startPenetrating) return Vec3();
 		const float depth = hit.penetrationDepth > 0.f ? hit.penetrationDepth : 0.125f;
 		const Vec3 result = hit.normal * (double)(depth + kPullback);
-		return ClampedToMaxSize(result, _p.maxDepenetrationWithGeometry);
+		// 사람에게서 빼낼 때는 따로 한도(엔진 UCharacterMovementComponent::GetPenetrationAdjustment — 맞은 것이 폰이면 MaxDepenetrationWithPawn)
+		return ClampedToMaxSize(result, hit.pawn ? _p.maxDepenetrationWithPawn : _p.maxDepenetrationWithGeometry);
 	}
 
 	bool CMoveSim::ResolvePenetration(const Vec3& adjustment, const MoveHit& hit)
@@ -569,7 +1169,8 @@ namespace mo
 		if (!IsZero(adjustment))
 		{
 			const bool encroached = _map.OverlapCapsule(hit.traceStart + adjustment, _p.capsuleRadius + kOverlapInflation,
-				_p.capsuleHalfHeight + kOverlapInflation, MAP_BLOCK_MOVE);
+				HalfHeight() + kOverlapInflation, MAP_BLOCK_MOVE)
+				|| OverlapPawns(hit.traceStart + adjustment, _p.capsuleRadius + kOverlapInflation, HalfHeight() + kOverlapInflation);
 			if (!encroached)
 			{
 				MoveComponent(adjustment, false, nullptr, false);
@@ -782,6 +1383,40 @@ namespace mo
 		}
 	}
 
+	bool CMoveSim::SweepPawns(const Vec3& start, const Vec3& end, float radius, float halfHeight, CapsuleHit& out)
+	{
+		bool any = false;
+		for (size_t i = 0; i < _pawnCount; ++i)
+		{
+			CapsuleHit h;
+			bool odd = false, touch = false;
+			const bool got = SweepPawnLikeChaos(start, end, radius, halfHeight, _pawns[i], h, odd, touch);
+			if (odd) ++_count.pawnOddSimplex;
+			if (touch) ++_count.pawnTouchStart;
+			if (!got) continue;
+			if (!any || h.time < out.time)
+			{
+				out = h;
+				any = true;
+			}
+		}
+		return any;
+	}
+
+	bool CMoveSim::OverlapPawns(const Vec3& center, float radius, float halfHeight) const
+	{
+		for (size_t i = 0; i < _pawnCount; ++i)
+		{
+			const PawnCapsule& p = _pawns[i];
+			const double L = std::max(0.0, (double)halfHeight - radius) + std::max(0.0, (double)p.halfHeight - p.radius);
+			const double dz = std::max(0.0, std::fabs(center.z - p.center.z) - L);
+			const double dx = center.x - p.center.x, dy = center.y - p.center.y;
+			const double R = (double)radius + p.radius;
+			if (dx * dx + dy * dy + dz * dz < R * R) return true;
+		}
+		return false;
+	}
+
 	// ---------------------------------------------------------------- 걷기
 
 	Vec3 CMoveSim::ComputeGroundMovementDelta(const Vec3& delta, const MoveHit& rampHit, bool hitFromLineTrace) const
@@ -834,8 +1469,9 @@ namespace mo
 
 			if (hit.IsValidBlockingHit())
 			{
-				// 걷는 중의 유효한 부딪힘이면 CanStepUp 은 참이다(맵에 턱 금지 표시가 없다)
-				if (!StepUp(delta * (double)(1.f - percentTimeApplied), hit, outComputedFloor, outFloor))
+				// 걷는 중의 유효한 부딪힘이면 CanStepUp 은 참이다(맵에 턱 금지 표시가 없다). 사람 캡슐은 거짓 — 오르지 않고 바로 미끄러진다(컨텐츠 F,
+				// 엔진 MoveAlongFloor 의 「!CanCharacterStepUp → HandleImpact · SlideAlongSurface」 갈래)
+				if (hit.pawn || !StepUp(delta * (double)(1.f - percentTimeApplied), hit, outComputedFloor, outFloor))
 				{
 					SlideAlongSurface(delta, 1.f - percentTimeApplied, hit.normal, hit);
 				}
@@ -851,7 +1487,7 @@ namespace mo
 
 		const Vec3 oldLocation = s.location;
 		const float pawnRadius = _p.capsuleRadius;
-		const float pawnHalfHeight = _p.capsuleHalfHeight;
+		const float pawnHalfHeight = HalfHeight();
 
 		const float initialImpactZ = (float)inHit.impactPoint.z;
 		const float oldLocationZ = (float)oldLocation.z;
@@ -1030,10 +1666,12 @@ namespace mo
 
 			const Vec3 oldLocation = s.location;
 
+			RestorePreAdditiveRootMotionVelocity();
 			MaintainHorizontalGroundVelocity();
 			s.acceleration = Flat(s.acceleration);
 
 			CalcVelocity(timeTick, _p.groundFriction, _p.brakingDecelerationWalking);
+			ApplyRootMotionToVelocity();		// 원본은 이 뒤에 「밀기가 이동 모드를 바꿨으면 다시 시작」— 위아래를 안 건드려 모드가 안 바뀐다
 
 			const Vec3 moveVelocity = s.velocity;
 			const Vec3 delta = moveVelocity * (double)timeTick;
@@ -1119,7 +1757,7 @@ namespace mo
 	{
 		out = FloorResult();
 		const float pawnRadius = _p.capsuleRadius;
-		const float pawnHalfHeight = _p.capsuleHalfHeight;
+		const float pawnHalfHeight = HalfHeight();
 
 		bool skipSweep = false;
 		if (downwardSweep && downwardSweep->IsValidBlockingHit())
@@ -1253,7 +1891,7 @@ namespace mo
 		if (maxFloorDist <= 0.f) return false;
 
 		const Vec3 capsuleLocation = hit.location;
-		const float hitAboveBase = std::max(0.f, (float)(hit.impactPoint.z - capsuleLocation.z) + _p.capsuleHalfHeight);
+		const float hitAboveBase = std::max(0.f, (float)(hit.impactPoint.z - capsuleLocation.z) + HalfHeight());
 		const float perchLineDist = std::max(0.f, maxFloorDist - hitAboveBase);
 		const float perchSweepDist = std::max(0.f, maxFloorDist);
 		const float actualSweepDist = perchSweepDist + _p.capsuleRadius;
@@ -1322,7 +1960,7 @@ namespace mo
 		{
 			if (!IsWalkable(hit)) return false;
 
-			const double lowerHemisphereZ = hit.location.z - (double)_p.capsuleHalfHeight + (double)_p.capsuleRadius;
+			const double lowerHemisphereZ = hit.location.z - (double)HalfHeight() + (double)_p.capsuleRadius;
 			if (hit.impactPoint.z >= lowerHemisphereZ) return false;
 			if (!IsWithinEdgeTolerance(hit.location, hit.impactPoint, _p.capsuleRadius)) return false;
 		}
@@ -1379,6 +2017,7 @@ namespace mo
 			const Vec3 oldLocation = s.location;
 			s.justTeleported = false;
 			const Vec3 oldVelocityWithRootMotion = s.velocity;
+			RestorePreAdditiveRootMotionVelocity();
 			const Vec3 oldVelocity = s.velocity;
 
 			const float maxDecel = _p.brakingDecelerationFalling;
@@ -1408,6 +2047,7 @@ namespace mo
 			}
 
 			s.velocity = NewFallVelocity(s.velocity, gravity, gravityTime);
+			ApplyRootMotionToVelocity();
 
 			// 꼭대기를 정확히 지나도록 틱을 쪼갠다 — 프레임이 달라도 점프 높이가 같아지게
 			if (oldVelocityWithRootMotion.z > 0.0 && s.velocity.z <= 0.0 && s.numJumpApexAttempts < _p.maxJumpApexAttemptsPerSimulation)
@@ -1429,6 +2069,13 @@ namespace mo
 						--iterations;
 						++s.numJumpApexAttempts;
 						++_count.apexSubsteps;
+						// 밀기에도 돌려준 시간을 돌려준다(5002) — SetTime 이 끝남 표시를 다시 본다
+						if (s.rootForce.active)
+						{
+							s.rootForce.time = std::max(0.f, s.rootForce.time - timeToRefund);
+							s.rootForce.finished = s.rootForce.time >= s.rootForce.duration;
+							++_count.rootForceApexRefund;
+						}
 					}
 				}
 			}
@@ -1576,8 +2223,8 @@ namespace mo
 									s.randomState = s.randomState * 1664525u + 1013904223u;
 									return (float)(s.randomState >> 8) / 16777216.f;
 								};
-								s.velocity.x += (double)(0.25f * s.maxSpeed * (random01() - 0.5f));
-								s.velocity.y += (double)(0.25f * s.maxSpeed * (random01() - 0.5f));
+								s.velocity.x += (double)(0.25f * MaxSpeedNow() * (random01() - 0.5f));
+								s.velocity.y += (double)(0.25f * MaxSpeedNow() * (random01() - 0.5f));
 								s.velocity.z = (double)std::max(_p.jumpZVelocity * 0.25f, 1.f);
 								delta = s.velocity * (double)timeTick;
 								SafeMove(delta, hit);

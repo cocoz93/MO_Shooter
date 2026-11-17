@@ -333,6 +333,106 @@ namespace mo
 			if (sp >= 0 && sp <= 1 && up >= 0 && up <= 1) best = planeT;
 		}
 
+		// 길이 0 이면 NaN 을 돌려준다 — 엔진 VectorNormalize 가 0 벡터에서 NaN 을 내고, NaN 비교는 모두 거짓이라
+		// 그 축으로는 「떨어져 있다」고 판정하지 않는다. 같은 결과를 내려고 일부러 0 으로 바꾸지 않는다
+		inline Vec3 NormalizeOrNaN(const Vec3& v)
+		{
+			const double len2 = Dot(v, v);
+			if (len2 <= 0) { const double nan = std::numeric_limits<double>::quiet_NaN(); return Vec3(nan, nan, nan); }
+			return v * (1.0 / std::sqrt(len2));
+		}
+
+		inline int SignOf(double v) { return v > 0 ? 1 : (v < 0 ? -1 : 0); }
+
+		// 메시 삼각형과 캡슐(축 x1-x2, 반지름 r)이 겹치나 — Chaos ComputeCapsuleTriangleOverlapSimd 를 그대로 옮겼다
+		//   (Engine/Source/Runtime/Experimental/Chaos/Private/Chaos/Collision/TriangleOverlap.cpp, UE 5.8)
+		// - 왜 정확한 거리를 쓰지 않나: 엔진은 거리를 재지 않고 몇 개의 축만 시험해서, 어느 축으로도 못 가르면 겹쳤다고 본다.
+		//   캡슐 끝 반구가 삼각형 모서리 바로 옆에 있으면 실제로는 떨어져 있어도 겹쳤다고 나온다.
+		//   Lyra 는 이 판정으로 일어서기를 막으므로(앉기 기록 89프레임, 모서리와 0.05~0.93cm 떨어진 자리) 같은 판정을 써야 같은 결과가 난다
+		// - 엔진은 메시 로컬 공간에서 float 로 계산한다. 여기는 월드 공간 double 이라 경계에 아주 붙은 값은 다를 수 있다
+		// - 볼록 물체·상자는 엔진이 GJK(거의 정확한 거리)로 재므로 이 판정을 쓰지 않는다
+		bool ChaosCapsuleTriangleOverlap(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& x1, const Vec3& x2, double radius)
+		{
+			const Vec3 x2x1 = x1 - x2;
+			const double sqrX2X1 = Dot(x2x1, x2x1);
+			const bool zeroLength = sqrX2X1 == 0;
+
+			const Vec3 ab = b - a;
+			const Vec3 bc = c - b;
+			const Vec3 ca = a - c;
+			const Vec3 normal = NormalizeOrNaN(Cross(ab, bc));
+
+			const Vec3 centroid = (a + b + c) * (1.0 / 3.0);
+			const Vec3 centroidA = a - centroid;
+			const Vec3 centroidB = b - centroid;
+			const Vec3 centroidC = c - centroid;
+
+			const Vec3 ax1 = x1 - a;
+			const Vec3 ax2 = x2 - a;
+			const Vec3 bx1 = x1 - b;
+			const Vec3 cx1 = x1 - c;
+
+			// 변의 바깥 평면 — 변 방향 e, 변 끝점에서 축 두 끝까지 toX1·toX2. 축 양 끝 중 가까운 쪽까지의 거리로 가른다
+			const auto edgePlanes = [&](const Vec3& e, const Vec3& toX1, const Vec3& toX2) -> bool
+			{
+				const Vec3 plane = NormalizeOrNaN(Cross(e, normal));
+				double edge = std::min(Dot(toX1, plane), Dot(toX2, plane));
+				if (edge > radius) return true;
+				// 삼각형 법선 대신 「변과 캡슐 축 끝점」으로 만든 평면을 한 번 더 본다. 축 두 끝이 모두 변 바깥에 있을 때만
+				if (edge > 0)
+				{
+					Vec3 other = NormalizeOrNaN(Cross(e, Cross(toX1, e)));
+					edge = std::min(Dot(toX1, other), Dot(toX2, other));
+					if (edge > radius) return true;
+					other = NormalizeOrNaN(Cross(e, Cross(toX2, e)));
+					edge = std::min(Dot(toX1, other), Dot(toX2, other));
+					if (edge > radius) return true;
+				}
+				return false;
+			};
+			if (edgePlanes(ca, ax1, ax2)) return false;
+			if (edgePlanes(ab, bx1, x2 - b)) return false;
+			if (edgePlanes(bc, cx1, x2 - c)) return false;
+
+			// 삼각형 면
+			const double ax1Dist = Dot(ax1, normal);
+			const double ax2Dist = Dot(ax2, normal);
+			if (SignOf(ax1Dist) == SignOf(ax2Dist))
+			{
+				if (std::min(std::fabs(ax1Dist), std::fabs(ax2Dist)) > radius) return false;
+			}
+
+			// 꼭짓점 — 꼭짓점에서 축까지 가장 가까운 점이 그 꼭짓점 바깥쪽 영역에 있을 때만
+			const Vec3 planeAB = NormalizeOrNaN(Cross(ab, normal));
+			const Vec3 planeBC = NormalizeOrNaN(Cross(bc, normal));
+			const Vec3 planeCA = NormalizeOrNaN(Cross(ca, normal));
+			const double sqrRadius = radius * radius;
+			const auto vertexOut = [&](const Vec3& v, const Vec3& vx1, const Vec3& planeL, const Vec3& planeR, const Vec3& centroidV) -> bool
+			{
+				const double t = zeroLength ? 0.0 : Clamp01(Dot(x2x1, vx1) / sqrX2X1);
+				const Vec3 pv = x1 * (1.0 - t) + x2 * t;
+				const Vec3 vpv = pv - v;
+				const double betweenSeg = Dot(Cross(planeL, vpv), Cross(planeR, vpv));
+				return betweenSeg < 0 && Dot(vpv, centroidV) > 0 && Dot(vpv, vpv) > sqrRadius;
+			};
+			if (vertexOut(a, ax1, planeAB, planeCA, centroidA)) return false;
+			if (vertexOut(b, bx1, planeAB, planeBC, centroidB)) return false;
+			if (vertexOut(c, cx1, planeBC, planeCA, centroidC)) return false;
+
+			// 변 × 캡슐 축
+			const auto edgeAxis = [&](const Vec3& e, const Vec3& centroidV, const Vec3& toX1) -> bool
+			{
+				Vec3 axis = NormalizeOrNaN(Cross(x2x1, e));
+				if (0 > Dot(centroidV, axis)) axis = axis * -1.0;
+				return Dot(toX1, axis) > radius;
+			};
+			if (edgeAxis(ca, centroidA, cx1)) return false;
+			if (edgeAxis(ab, centroidB, ax1)) return false;
+			if (edgeAxis(bc, centroidC, bx1)) return false;
+
+			return true;
+		}
+
 		// 캡슐 축 s0-s1 이 d 만큼 움직일 때 삼각형에 처음 닿는 t. 면 + 세 변
 		void SweepSegmentTriangle(const Vec3& s0, const Vec3& s1, const Vec3& d, double r, const Vec3& a, const Vec3& b, const Vec3& c, double& best)
 		{
@@ -1098,11 +1198,22 @@ namespace mo
 				for (uint32_t i = 0; i < node.count; ++i)
 				{
 					const Tri& tri = tree.tris[node.first + i];
-					Vec3 onSeg, onTri;
-					if (SegmentTriangleDistance(s0, s1, VertexOf(tri.v, 0), VertexOf(tri.v, 1), VertexOf(tri.v, 2), onSeg, onTri) <= radius)
+					const Vec3 a = VertexOf(tri.v, 0), b = VertexOf(tri.v, 1), c = VertexOf(tri.v, 2);
+					if (tri.flags & MAP_SOLID)
 					{
-						return true;
+						Vec3 onSeg, onTri;
+						if (SegmentTriangleDistance(s0, s1, a, b, c, onSeg, onTri) <= radius) return true;
+						continue;
 					}
+					// 메시 — 엔진은 삼각형마다 상자를 먼저 대 보고, 닿은 것만 축 시험을 한다. 축 시험이 넉넉하게 「겹침」을 내므로
+					// 상자에서 거르지 않은 먼 삼각형이 겹침으로 나오지 않게 같은 순서를 따른다
+					if (minBox[0] > std::max(a.x, std::max(b.x, c.x)) || maxBox[0] < std::min(a.x, std::min(b.x, c.x))
+						|| minBox[1] > std::max(a.y, std::max(b.y, c.y)) || maxBox[1] < std::min(a.y, std::min(b.y, c.y))
+						|| minBox[2] > std::max(a.z, std::max(b.z, c.z)) || maxBox[2] < std::min(a.z, std::min(b.z, c.z)))
+					{
+						continue;
+					}
+					if (ChaosCapsuleTriangleOverlap(a, b, c, s0, s1, radius)) return true;
 				}
 			}
 		}

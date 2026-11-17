@@ -1,0 +1,6 @@
+add_executable(MeleeCheck main.cpp)
+target_link_libraries(MeleeCheck PRIVATE MoShared)
+if(MSVC)
+    target_compile_options(MeleeCheck PRIVATE /W4 /utf-8)
+    target_compile_definitions(MeleeCheck PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+endif()

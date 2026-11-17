@@ -18,13 +18,15 @@ struct FMOBServerAnimResult
 	int32 MontageCells = 0;		// 언리얼 경로(손가락 · 꼬임 뼈)에 넣은 몽타주 칸 수
 	int32 MontageMisses = 0;	// 무기 번호 · 몽타주 자산이 없어 못 넣은 칸 수
 	int32 SlotPasses = 0;		// 이번 갱신에서 엔진 SlotEvaluatePose 를 부른 끼움 자리 수(넣은 칸이 실제로 자세에 들어갔나)
-	bool bMaskMissing = false;	// 윗몸 자리 뼈 가림(UpperBodyMask)을 못 찾았다 — 윗몸 자리를 통째로 얹는다
+	bool bMaskMissing = false;	// 윗몸 자리 뼈 가림(UpperBodyLowerBodySplitMask, D72 — 처음엔 UpperBodyMask)을 못 찾았다 — 윗몸 자리를 통째로 얹는다
 	int32 WeaponNotifies = 0;	// 이번에 튼 무기 메시 몽타주 알림 수
 	int32 WeaponPlaying = 0;	// 그중 튼 직후 붙은 무기 메시에 몽타주가 돌고 있던 수(알림이 실제로 무기를 움직였나)
 	int32 SoundNotifies = 0;	// 이번에 튼 소리 알림 수
 	int32 MontageRestarts = 0;	// 같은 자산 · 앞서지 않은 시각의 앞 칸이 있었지만, 틱 차이만큼 못 나가 새 칸으로 본 수(앞 상태와 틱이 벌어져 옛 칸이 빠지고 새 칸이 같은 자산으로 선 때)
 	int32 StepStates = 0;		// 알림을 훑은 받은 상태 수(지난 프레임 뒤로 받은 상태 전부)
 	int32 AdsLayers = 0;		// 받은 쌓기 층 중 조준 전환이라 같은 차례의 허리 전환으로 바꿔 튼 수(C-5)
+	int32 CrouchLayers = 0;		// 받은 쌓기 층 중 앉은 전환이라 같은 차례의 허리 전환으로 바꿔 튼 수(D-3)
+	int32 StanceLayers = 0;		// 받은 쌓기 층 중 서기 안 앉기 · 일어서기 전환이라 걷기 · 서기 자리로 돌린 수(D-3)
 	int32 BadLayers = 0;		// 바꿔도 칸 밖이라 걷기 · 서기 자리로 돌린 층 수 — 0 이어야 한다
 };
 
@@ -65,7 +67,7 @@ struct FMOBSimpleAnimProxy : public FAnimInstanceProxy
 	static constexpr int32 kJumpStack = 4;	// 점프 전환이 겹칠 때 함께 섞이는 상태 수의 상한(Lyra 실행값에서 많아야 셋)
 	static constexpr int32 kTransitions = 12;	// 네 방향 × 출발 · 멈춤 · 돌아서기(-MOBSimpleTransitions)
 	static constexpr int32 kStackClips = kJump + kTransitions;	// 쌓기가 틀 수 있는 클립 수. 번호 = 점프 5개 뒤에 종류 × 4 + 방향
-	static constexpr int32 kMontageKindCount = 5;	// 몽타주 종류 수(Shared/AnimClips.h MONTAGE_KIND_COUNT — cpp 에서 같은지 본다)
+	static constexpr int32 kMontageKindCount = 8;	// 몽타주 종류 수(Shared/AnimClips.h MONTAGE_KIND_COUNT — cpp 에서 같은지 본다)
 	static constexpr int32 kMontageCells = 3;		// 함께 도는 몽타주 칸 수의 상한(Shared/AnimPose.h kAnimMontageMax — cpp 에서 같은지 본다)
 
 	// 몽타주 칸 하나가 앞 상태에서 이 상태까지 지나간 구간 — 알림을 틀 때 쓴다. From < 0 = 새로 생긴 칸(시각 0 부터 본다)
@@ -98,8 +100,9 @@ struct FMOBSimpleAnimProxy : public FAnimInstanceProxy
 	// Montages(9단계 3-a) = 종류 차례(Shared/AnimClips.h EMontageKind)의 몽타주 — 줄마다 클립을 30개 뒤에 붙여 뽑고 MONTAGE · TRACK · MCURVE · SCURVE 줄을 낸다.
 	// OverridePose = 쏜 뒤 윗몸 덮기 자세의 클립(OVERRIDE 줄). 둘 다 30개 판(-MOBSimpleAimJump -MOBSimpleTransitions)에서만 쓴다
 	// AdsClips(C-3, D60) = 조준 클립 17개(서기 · 걷기 넷 · 전환 12). 같은 판에서 30개 바로 뒤(30~46)에 붙인다 — 몽타주 클립은 그 뒤로 밀린다
+	// CrouchClips(D-3) = 앉기 클립 20개(서기 · 걷기 넷 · 전환 12 · 앉기 · 일어서기 전환 · 앉아 쏜 뒤 덮기 자세). 조준 클립 바로 뒤(47~66)
 	void AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones, const TArray<const UAnimMontage*>& Montages, const UAnimSequence* OverridePose,
-		const TArray<const UAnimSequence*>& AdsClips) const;
+		const TArray<const UAnimSequence*>& AdsClips, const TArray<const UAnimSequence*>& CrouchClips) const;
 	// 촬영 기록용 — 위아래 조준 · 점프에 쓴 입력과 상태
 	void GetAimJump(float& OutPitch, int32& OutJumpClip, float& OutJumpWeight) const;
 	// 대조 기록용 — 지금 재생 중인 클립을 Lyra 기록(-MOBACProbe)과 같은 「클립@시각*가중치;」 꼴로 붙인다
@@ -253,7 +256,8 @@ private:
 
 	// 몽타주(9단계 5-a) — 받은 칸을 엔진 몽타주 평가 자료로 넣고 끼움 자리 넷을 엔진 SlotEvaluatePose 로 얹는다(손가락 · 꼬임 뼈 몫).
 	// 쏜 뒤 윗몸 덮기는 안 넣는다(제 판단, 재개점 설계) — 판정 뼈는 어차피 서버 자세가 덮고, 빠지는 것은 덮기 동안의 손가락 · 꼬임 뼈 몫뿐이다
-	void ApplyMontages(FPoseContext& Output);
+	// 차례는 서버와 같은 Lyra 그래프 차례(D72) — bAfterAim 거짓 = 윗몸 섞기 · 사격 덧붙임(조준 앞), 참 = 맞은 쪽 반응 · 통째(조준 뒤)
+	void ApplyMontages(FPoseContext& Output, bool bAfterAim);
 	struct FMontageCell
 	{
 		UAnimMontage* Montage = nullptr;
@@ -265,7 +269,7 @@ private:
 	FMontageCell NotifyCells[kMontageCells];	// 알림을 마지막으로 훑은 상태의 칸(MontageCells 는 보여 줄 상태의 칸이라 따로 둔다)
 	int32 NotifyCellCount = 0;
 	uint32 NotifyTick = 0;			// NotifyCells 를 받은 상태의 서버 틱
-	TArray<FPerBoneBlendWeight> UpperMaskWeights;	// 윗몸 자리 뼈 가림(UpperBodyMask) — 압축 뼈 차례
+	TArray<FPerBoneBlendWeight> UpperMaskWeights;	// 윗몸 자리 뼈 가림(UpperBodyLowerBodySplitMask, D72) — 압축 뼈 차례
 	uint16 UpperMaskSerial = 0;		// UpperMaskWeights 를 만들 때의 뼈 목록 번호
 	bool bUpperMaskMissing = false;
 	int32 SlotPasses = 0;			// 마지막 Evaluate 가 SlotEvaluatePose 를 부른 자리 수

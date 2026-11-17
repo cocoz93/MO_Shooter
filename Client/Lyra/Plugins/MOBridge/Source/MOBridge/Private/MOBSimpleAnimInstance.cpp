@@ -156,10 +156,13 @@ namespace
 	// 무기별 몽타주(9단계 3-a) — 서버 몽타주 표의 입력. 자산 이름은 Lyra 원본 기록(9단계 1-b, animcmp_ev_<무기>_montages.csv)에서 그 무기를 든 채 사건을 냈을 때 뜬 것이다
 	// (사격 = fire_stand · 재장전 = reload · 꺼내기 = 그 무기로 돌아온 swap_back 조각의 첫 프레임). 차례 = Shared/AnimClips.h EMontageKind(사격 · 재장전 · 꺼내기 · 빼기 · 부활).
 	// 샷건 꺼내기 = 소총 것(샷건 자산이 없고 기록에서도 AM_MM_Rifle_Equip) · 빼기 · 부활은 세 무기가 같은 자산이다
-	constexpr int32 kMontageKinds = 5;
+	// 근접 · 맞은 쪽 반응 뒤 · 앞(컨텐츠 E-2) — 근접 자산은 근접 시험판 e1g3 에서 그 무기를 든 채 능력이 튼 것(실측), 반응 둘은 근접에 늘 나오는 두 개(D58, 세 무기 같은 자산)
+	constexpr int32 kMontageKinds = 8;
 	const TCHAR* const UNEQUIP_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Generic_Unequip.AM_MM_Generic_Unequip");
 	const TCHAR* const SPAWN_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Pistol_Spawn.AM_MM_Pistol_Spawn");
 	const TCHAR* const RIFLE_EQUIP_MONTAGE = TEXT("/Game/Weapons/Rifle/Animations/AM_MM_Rifle_Equip.AM_MM_Rifle_Equip");
+	const TCHAR* const HIT_BACK_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_HitReact_Back_Med_01.AM_MM_HitReact_Back_Med_01");
+	const TCHAR* const HIT_FRONT_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_HitReact_Front_Med_02.AM_MM_HitReact_Front_Med_02");
 	struct FWeaponMontageNames
 	{
 		const TCHAR* Key;							// FWeaponClipNames::Key 와 같다
@@ -168,12 +171,17 @@ namespace
 	};
 	const FWeaponMontageNames WEAPON_MONTAGES[] = {
 		{ TEXT("rifle"), { TEXT("/Game/Weapons/Rifle/Animations/AM_MM_Rifle_Fire.AM_MM_Rifle_Fire"), TEXT("/Game/Weapons/Rifle/Animations/AM_MM_Rifle_Reload.AM_MM_Rifle_Reload"),
-			RIFLE_EQUIP_MONTAGE, UNEQUIP_MONTAGE, SPAWN_MONTAGE }, TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle/MF_Rifle_Idle_Hipfire.MF_Rifle_Idle_Hipfire") },
+			RIFLE_EQUIP_MONTAGE, UNEQUIP_MONTAGE, SPAWN_MONTAGE,
+			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Rifle_Melee.AM_MM_Rifle_Melee"), HIT_BACK_MONTAGE, HIT_FRONT_MONTAGE },
+			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle/MF_Rifle_Idle_Hipfire.MF_Rifle_Idle_Hipfire") },
 		{ TEXT("pistol"), { TEXT("/Game/Weapons/Pistol/Animations/AM_MM_Pistol_Fire.AM_MM_Pistol_Fire"), TEXT("/Game/Weapons/Pistol/Animations/AM_MM_Pistol_Reload.AM_MM_Pistol_Reload"),
-			TEXT("/Game/Weapons/Pistol/Animations/AM_MM_Pistol_Equip.AM_MM_Pistol_Equip"), UNEQUIP_MONTAGE, SPAWN_MONTAGE },
+			TEXT("/Game/Weapons/Pistol/Animations/AM_MM_Pistol_Equip.AM_MM_Pistol_Equip"), UNEQUIP_MONTAGE, SPAWN_MONTAGE,
+			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Pistol_Melee.AM_MM_Pistol_Melee"), HIT_BACK_MONTAGE, HIT_FRONT_MONTAGE },
 			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Pistol/MF_Pistol_Hipfire_OverridePose.MF_Pistol_Hipfire_OverridePose") },
 		{ TEXT("shotgun"), { TEXT("/Game/Weapons/Shotgun/Animations/AM_MM_Shotgun_Fire.AM_MM_Shotgun_Fire"), TEXT("/Game/Weapons/Shotgun/Animations/AM_MM_Shotgun_Reload.AM_MM_Shotgun_Reload"),
-			RIFLE_EQUIP_MONTAGE, UNEQUIP_MONTAGE, SPAWN_MONTAGE }, TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle/MF_Rifle_Idle_Hipfire.MF_Rifle_Idle_Hipfire") },
+			RIFLE_EQUIP_MONTAGE, UNEQUIP_MONTAGE, SPAWN_MONTAGE,
+			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Shotgun_Melee.AM_MM_Shotgun_Melee"), HIT_BACK_MONTAGE, HIT_FRONT_MONTAGE },
+			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle/MF_Rifle_Idle_Hipfire.MF_Rifle_Idle_Hipfire") },
 	};
 	constexpr int32 MONTAGE_CURVE_HZ = 120;		// 몽타주 · 몽타주 클립 곡선을 뽑는 간격(클립 표본과 같은 간격, 제안값)
 
@@ -204,6 +212,31 @@ namespace
 		{ TEXT("rifle"), RIFLE_FOLDER, RIFLE_ADS_NAMES },
 		{ TEXT("pistol"), PISTOL_FOLDER, PISTOL_ADS_NAMES },
 		{ TEXT("shotgun"), RIFLE_FOLDER, RIFLE_ADS_NAMES },
+	};
+
+	// 앉기 클립(컨텐츠 D-3) — 클립 파일 버전 4 에서 조준 17개 뒤(47~66)에 붙는 20개. 차례 = Shared/AnimClips.h ACLIP_CROUCH_IDLE 부터
+	// 서기 · 걷기 넷 · 전환 12(조준 클립과 같은 차례) · 서기 안 앉기 · 일어서기 전환(Crouch_Idle_Entry · _Exit) · 앉아 쏜 뒤 덮기 자세(Aim_HipFirePose_Crouch).
+	// 이름 = Lyra 여성 몸 무기 층 기본값(ABP_RifleAnimLayers_Feminine · ABP_PistolAnimLayers_Feminine CDO)에 든 자산(원본 기준) — 두 무기 다 MM 이다.
+	// 샷건 = 소총 것(샷건 여성 층은 값을 안 덮고, 샷건 층 기본값이 소총 앉기 클립이다). 앉은 제자리 돌기(Crouch_TurnInPlace_*)는 허리 쪽도 안 옮겨 뺐다
+	constexpr int32 kCrouchClips = 20;
+	const TCHAR* const RIFLE_CROUCH_NAMES[kCrouchClips] = {
+		TEXT("MM_Rifle_Crouch_Idle"), TEXT("MM_Rifle_Crouch_Walk_Fwd"), TEXT("MM_Rifle_Crouch_Walk_Bwd"), TEXT("MM_Rifle_Crouch_Walk_Left"), TEXT("MM_Rifle_Crouch_Walk_Right"),
+		TEXT("MM_Rifle_Crouch_Walk_Fwd_Start"), TEXT("MM_Rifle_Crouch_Walk_Bwd_Start"), TEXT("MM_Rifle_Crouch_Walk_Left_Start"), TEXT("MM_Rifle_Crouch_Walk_Right_Start"),
+		TEXT("MM_Rifle_Crouch_Walk_Fwd_Stop"), TEXT("MM_Rifle_Crouch_Walk_Bwd_Stop"), TEXT("MM_Rifle_Crouch_Walk_Left_Stop"), TEXT("MM_Rifle_Crouch_Walk_Right_Stop"),
+		TEXT("MM_Rifle_Crouch_Walk_Fwd_Pivot"), TEXT("MM_Rifle_Crouch_Walk_Bwd_Pivot"), TEXT("MM_Rifle_Crouch_Walk_Left_Pivot"), TEXT("MM_Rifle_Crouch_Walk_Right_Pivot"),
+		TEXT("MM_Rifle_Crouch_Entry"), TEXT("MM_Rifle_Crouch_Exit"), TEXT("MM_Rifle_Crouch_OverridePose"),
+	};
+	const TCHAR* const PISTOL_CROUCH_NAMES[kCrouchClips] = {
+		TEXT("MM_Pistol_Crouch_Idle"), TEXT("MM_Pistol_Crouch_Walk_Fwd"), TEXT("MM_Pistol_Crouch_Walk_Bwd"), TEXT("MM_Pistol_Crouch_Walk_Left"), TEXT("MM_Pistol_Crouch_Walk_Right"),
+		TEXT("MM_Pistol_Crouch_Walk_Fwd_Start"), TEXT("MM_Pistol_Crouch_Walk_Bwd_Start"), TEXT("MM_Pistol_Crouch_Walk_Left_Start"), TEXT("MM_Pistol_Crouch_Walk_Right_Start"),
+		TEXT("MM_Pistol_Crouch_Walk_Fwd_Stop"), TEXT("MM_Pistol_Crouch_Walk_Bwd_Stop"), TEXT("MM_Pistol_Crouch_Walk_Left_Stop"), TEXT("MM_Pistol_Crouch_Walk_Right_Stop"),
+		TEXT("MM_Pistol_Crouch_Walk_Fwd_Pivot"), TEXT("MM_Pistol_Crouch_Walk_Bwd_Pivot"), TEXT("MM_Pistol_Crouch_Walk_Left_Pivot"), TEXT("MM_Pistol_Crouch_Walk_Right_Pivot"),
+		TEXT("MM_Pistol_Crouch_Entry"), TEXT("MM_Pistol_Crouch_Exit"), TEXT("MM_Pistol_Crouch_OverridePose"),
+	};
+	const FWeaponAdsNames WEAPON_CROUCH[] = {
+		{ TEXT("rifle"), RIFLE_FOLDER, RIFLE_CROUCH_NAMES },
+		{ TEXT("pistol"), PISTOL_FOLDER, PISTOL_CROUCH_NAMES },
+		{ TEXT("shotgun"), RIFLE_FOLDER, RIFLE_CROUCH_NAMES },
 	};
 
 	// 아래는 Lyra 원본 실행값에서 읽은 값이다(animcmp_probe_lyra_probe.csv, 11-06 · 60프레임 · 제자리 점프와 달리며 점프가 같은 값).
@@ -556,12 +589,24 @@ void FMOBSimpleAnimProxy::SetServerFrame(const mo::AnimPoseInput& Input, int32 W
 	// 받은 쌓기 칸 17~28 은 조준 전환이다(Shared/AnimClips.h StackClipIndex, D60). 이 경로는 조준 클립을 안 묶었으니(JumpClips 는 17칸)
 	// 같은 차례의 허리 전환으로 튼다 — 이 경로가 보여 주는 것은 판정 밖 뼈(손가락 · 비틀림 뼈)뿐이고 판정 뼈는 ApplyServerBones 가 덮는다.
 	// 그대로 넣으면 JumpClips 밖을 읽는다(C-5 조준 봇 판 `c5vp1` 에서 ApplyJump 가 멈춤)
-	static_assert(kStackClips == mo::kStackHipClips && kStackClips + kTransitions == mo::kStackClipCount, "조준 전환 = 허리 전환 + kTransitions 차례여야 한다");
+	// 29~40 앉은 전환도 같은 차례의 허리 전환으로, 41 · 42 서기 안 앉기 · 일어서기 전환은 허리 쪽 짝이 없어 걷기 · 서기 자리로 돌린다(D62 4)
+	static_assert(kStackClips == mo::kStackHipClips && kStackClips + kTransitions == mo::kStackAdsEnd && mo::kStackAdsEnd + kTransitions + 2 == mo::kStackClipCount,
+		"조준 전환 = 허리 전환 + kTransitions, 앉은 전환 = 조준 전환 + kTransitions, 그 뒤 서기 안 전환 둘 차례여야 한다");
 	JumpCount = FMath::Min(Input.layerCount, kJumpStack);
 	for (int32 I = 0; I < JumpCount; ++I)
 	{
 		int32 Clip = Input.layers[I].clip;
-		if (Clip >= kStackClips)
+		if (Clip >= mo::kStackAdsEnd + kTransitions && Clip < mo::kStackClipCount)
+		{
+			Clip = JUMP_NONE;
+			++Out.StanceLayers;
+		}
+		else if (Clip >= mo::kStackAdsEnd && Clip < mo::kStackClipCount)
+		{
+			Clip -= 2 * kTransitions;
+			++Out.CrouchLayers;
+		}
+		else if (Clip >= kStackClips)
 		{
 			Clip -= kTransitions;
 			++Out.AdsLayers;
@@ -1237,7 +1282,7 @@ void FMOBSimpleAnimProxy::AppendPlayers(FString& Out) const
 }
 
 void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSet<int32>& KeepBones, const TArray<const UAnimMontage*>& Montages, const UAnimSequence* OverridePose,
-	const TArray<const UAnimSequence*>& AdsClips) const
+	const TArray<const UAnimSequence*>& AdsClips, const TArray<const UAnimSequence*>& CrouchClips) const
 {
 	// 자세를 읽는 길은 Evaluate 와 같다(GetAnimationPose, 뿌리 이동 안 뽑음, 반복 재생)
 	const FBoneContainer& Bones = GetRequiredBones();
@@ -1260,7 +1305,7 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 	}
 
 	// 클립 번호 = 걸음 5 · 조준 3 · 느슨한 조준 3 · 점프 5 · 전환 12 · 착지 충격 · 대기 몸짓(-MOBSimpleAimJump -MOBSimpleTransitions 일 때 30개, Shared/AnimClips.h 와 같은 차례).
-	// 같은 판에서 그 뒤에 조준 클립 17개(30~46, 클립 파일 버전 3)가 붙는다.
+	// 같은 판에서 그 뒤에 조준 클립 17개(30~46, 클립 파일 버전 3) · 앉기 클립 20개(47~66, 버전 4)가 붙는다.
 	// 그 플래그가 없으면 예전처럼 앞의 5개뿐이다. 반복 여부는 Evaluate 와 같게 준다 — 표본을 끝까지 읽을 때 앞으로 감기는지가 달라진다
 	struct FDumpClip { const UAnimSequence* Clip; float Length; bool bLoop; float RootSpeed; };
 	TArray<FDumpClip, TInlineAllocator<32>> All;
@@ -1277,6 +1322,15 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 		for (int32 I = 0; I < kAdsClips; ++I)
 		{
 			const UAnimSequence* Clip = AdsClips.IsValidIndex(I) ? AdsClips[I] : nullptr;
+			const bool bBase = I < kClips;
+			const float Length = Clip ? FMath::Max(Clip->GetPlayLength(), 0.01f) : 0.f;
+			const float RootSpeed = Clip && bBase ? (float)Clip->ExtractRootMotionFromRange(0.0, Length, FAnimExtractContext()).GetTranslation().Size() / Length : 0.f;
+			All.Add({ Clip, Length, bBase, RootSpeed });
+		}
+		// 앉기 클립 20개(버전 4, D-3) — 조준 클립과 같은 식. 서기 · 걷기 넷만 반복하고, 전환 12 · 앉기/일어서기 전환 · 덮기 자세는 한 번 재생
+		for (int32 I = 0; I < kCrouchClips; ++I)
+		{
+			const UAnimSequence* Clip = CrouchClips.IsValidIndex(I) ? CrouchClips[I] : nullptr;
 			const bool bBase = I < kClips;
 			const float Length = Clip ? FMath::Max(Clip->GetPlayLength(), 0.01f) : 0.f;
 			const float RootSpeed = Clip && bBase ? (float)Clip->ExtractRootMotionFromRange(0.0, Length, FAnimExtractContext()).GetTranslation().Size() / Length : 0.f;
@@ -1398,9 +1452,21 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 			for (int32 S = 0; S < Samples; ++S) Values.Add(Clip->EvaluateCurveData(TRANSITION_DISTANCE_CURVE, FAnimExtractContext(FMath::Min((double)S / TRANSITION_TABLE_HZ, (double)Length))));
 			CurveLine(FIRST_ADS_INDEX + kClips + T, TEXT("Distance"), TRANSITION_TABLE_HZ, Values);
 		}
+		// 앉은 전환 12개의 거리 곡선(D-3) — 조준 전환과 같은 식. 앉기 묶음은 조준 클립 17개 바로 뒤(47)부터
+		constexpr int32 FIRST_CROUCH_INDEX = FIRST_ADS_INDEX + kAdsClips;
+		for (int32 T = 0; T < kTransitions; ++T)
+		{
+			const UAnimSequence* Clip = CrouchClips.IsValidIndex(kClips + T) ? CrouchClips[kClips + T] : nullptr;
+			if (!Clip) continue;
+			const float Length = FMath::Max(Clip->GetPlayLength(), 0.01f);
+			const int32 Samples = FMath::CeilToInt32(Length * TRANSITION_TABLE_HZ) + 1;
+			TArray<float> Values;
+			for (int32 S = 0; S < Samples; ++S) Values.Add(Clip->EvaluateCurveData(TRANSITION_DISTANCE_CURVE, FAnimExtractContext(FMath::Min((double)S / TRANSITION_TABLE_HZ, (double)Length))));
+			CurveLine(FIRST_CROUCH_INDEX + kClips + T, TEXT("Distance"), TRANSITION_TABLE_HZ, Values);
+		}
 	}
 
-	// 몽타주 표 줄과, 47개(조준 클립 17개 포함) 뒤에 붙인 클립의 곡선 전부(클립 시각 기준 — 소총 재장전의 DisableLHandIK 는 몽타주가 아니라 클립에 있다, 1-c)
+	// 몽타주 표 줄과, 67개(조준 클립 17개 · 앉기 클립 20개 포함) 뒤에 붙인 클립의 곡선 전부(클립 시각 기준 — 소총 재장전의 DisableLHandIK 는 몽타주가 아니라 클립에 있다, 1-c)
 	Out += MontageLines;
 	for (int32 I = BaseClipCount; I < All.Num(); ++I)
 	{
@@ -1711,26 +1777,44 @@ void FMOBSimpleAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 	}
 }
 
-// 받은 몽타주 칸을 끼움 자리 넷에 얹는다(9단계 5-a, 손가락 · 꼬임 뼈 몫 — 판정 뼈는 끝에서 서버 자세가 덮는다).
+// 받은 몽타주 칸을 끼움 자리 다섯에 얹는다(9단계 5-a · 다섯째 맞은 쪽 반응은 컨텐츠 E-2, 손가락 · 꼬임 뼈 몫 — 판정 뼈는 끝에서 서버 자세가 덮는다).
 // 칸은 엔진 몽타주 평가 자료(MontageEvaluationData)로 넣는다. 엔진은 갱신마다 재생 중인 몽타주로 이 자료를 다시 채우는데(UAnimInstance::UpdateMontageEvaluationData)
 // 이 인스턴스는 몽타주를 틀지 않아 빈 채로 온다 → 평가 안에서 채워 이번 평가가 쓰고, 다음 갱신이 다시 비운다.
-// 자리 차례 · 뼈 가림은 서버 자세 계산과 같다(Shared/AnimPose.cpp kSlotOrder · ApplySlot — 자리마다 SlotEvaluatePose 뒤, 비중 표가 있으면 아래 자세와 뼈별로 섞는다 · 메시 기준 회전)
-void FMOBSimpleAnimProxy::ApplyMontages(FPoseContext& Output)
+// 자리 차례 · 뼈 가림은 서버 자세 계산과 같다(Shared/AnimPose.cpp EvaluateLocal · ApplySlot, D72 — Lyra ABP_Mannequin_Base 그래프 차례). 처음엔 자리마다 SlotEvaluatePose 뒤, 비중 표가 있으면 아래 자세와 뼈별로 섞었다 · 메시 기준 회전)
+void FMOBSimpleAnimProxy::ApplyMontages(FPoseContext& Output, bool bAfterAim)
 {
 	static_assert(kMontageCells == mo::kAnimMontageMax, "몽타주 칸 수 = Shared kAnimMontageMax");
 	static_assert(kMontageKindCount == mo::MONTAGE_KIND_COUNT && kMontageKinds == mo::MONTAGE_KIND_COUNT, "몽타주 종류 수 = Shared MONTAGE_KIND_COUNT");
-	static const FName UPPER_BODY_MASK(TEXT("UpperBodyMask"));		// 클립 파일을 뽑을 때 윗몸 두 자리에 붙인 비중 표(make_clip_pack.py SLOTS)
-	struct FSlot
+	// 윗몸 자리 비중 표 = Lyra 그래프 LayeredBoneBlend_2 의 가림(make_clip_pack.py SLOTS 윗몸 자리와 같다, D72). 처음엔 UpperBodyMask(D50)
+	static const FName UPPER_BODY_MASK(TEXT("UpperBodyLowerBodySplitMask"));
+	static const FName FULL_BODY(TEXT("FullBody"));
+	static const FName PRE_AIM(TEXT("FullBodyAdditivePreAim"));
+	static const FName UPPER_BODY(TEXT("UpperBody"));
+	static const FName UPPER_BODY_ADDITIVE(TEXT("UpperBodyAdditive"));
+	static const FName HIT_REACT(TEXT("AdditiveHitReact"));
+
+	// 가림 없는 자리 — 엔진 끼움 노드(FAnimNode_Slot::Evaluate_AnyThread)처럼 아래 자세 위에 바로 얹는다
+	const auto ApplyPlainSlot = [this, &Output](const FName& Name)
 	{
-		FName Name;
-		bool bMasked;
+		float SlotWeight = 0.f, SourceWeight = 0.f, TotalWeight = 0.f;
+		GetSlotWeight(Name, SlotWeight, SourceWeight, TotalWeight);
+		if (SlotWeight <= ZERO_ANIMWEIGHT_THRESH) return;
+		++SlotPasses;
+		FPoseContext Source(Output);
+		Source = Output;
+		FAnimationPoseData SourceData(Source);
+		FAnimationPoseData OutputData(Output);
+		SlotEvaluatePose(Name, SourceData, SourceWeight, OutputData, SlotWeight, TotalWeight);
 	};
-	static const FSlot SLOTS[] = {
-		{ FName(TEXT("FullBody")), false },
-		{ FName(TEXT("FullBodyAdditivePreAim")), false },
-		{ FName(TEXT("UpperBody")), true },
-		{ FName(TEXT("UpperBodyAdditive")), true },
-	};
+
+	if (bAfterAim)
+	{
+		// 조준 층 뒤 — 맞은 쪽 반응 → (덧붙임 층 FullBodyAdditives, 안 옮김) → 통째. 평가 자료는 조준 앞 단계가 이번 평가에 채워 둔 것이다
+		if (GetMontageEvaluationData().Num() == 0) return;
+		ApplyPlainSlot(HIT_REACT);
+		ApplyPlainSlot(FULL_BODY);
+		return;
+	}
 
 	SlotPasses = 0;
 	TArray<FMontageEvaluationState>& Data = GetMontageEvaluationData();
@@ -1774,42 +1858,64 @@ void FMOBSimpleAnimProxy::ApplyMontages(FPoseContext& Output)
 		}
 	}
 
-	for (const FSlot& Slot : SLOTS)
+	// 조준 층 앞 — LayeredBoneBlend_2: 바탕 = 아래 자세 + UpperBodyAdditive(ApplyAdditive_1, 가림 없음) · 섞을 쪽 = 아래 자세 위 UpperBody, 가림 = 윗몸 자리 비중 표.
+	// 그다음 사격 덧붙임(FullBodyAdditivePreAim). ApplyAdditive_1 의 비중(UpperbodyDynamicAdditiveWeight)은 서버처럼 늘 1 이다(D72 남은 차이)
+	float UpperWeight = 0.f, UpperSource = 0.f, UpperTotal = 0.f;
+	float AdditiveWeight = 0.f, AdditiveSource = 0.f, AdditiveTotal = 0.f;
+	GetSlotWeight(UPPER_BODY, UpperWeight, UpperSource, UpperTotal);
+	GetSlotWeight(UPPER_BODY_ADDITIVE, AdditiveWeight, AdditiveSource, AdditiveTotal);
+	const bool bUpper = UpperWeight > ZERO_ANIMWEIGHT_THRESH;
+	const bool bAdditive = AdditiveWeight > ZERO_ANIMWEIGHT_THRESH;
+	if (bUpper || bAdditive)
 	{
-		float SlotWeight = 0.f, SourceWeight = 0.f, TotalWeight = 0.f;
-		GetSlotWeight(Slot.Name, SlotWeight, SourceWeight, TotalWeight);
-		if (SlotWeight <= ZERO_ANIMWEIGHT_THRESH) continue;
-		++SlotPasses;
-
-		FPoseContext Source(Output);
-		Source = Output;
-		if (!Slot.bMasked || bUpperMaskMissing)
+		FPoseContext Locomotion(Output);
+		Locomotion = Output;
+		FPoseContext Upper(Output);
+		if (bUpper)
 		{
-			// 비중 표가 없는 자리(또는 표를 못 찾음) — 엔진 끼움 노드(FAnimNode_Slot::Evaluate_AnyThread)처럼 아래 자세 위에 바로 얹는다
-			FAnimationPoseData SourceData(Source);
+			++SlotPasses;
+			FAnimationPoseData SourceData(Locomotion);
+			FAnimationPoseData UpperData(Upper);
+			SlotEvaluatePose(UPPER_BODY, SourceData, UpperSource, UpperData, UpperWeight, UpperTotal);
+		}
+		else
+		{
+			Upper = Locomotion;
+		}
+		FPoseContext Base(Output);
+		if (bAdditive)
+		{
+			++SlotPasses;
+			FAnimationPoseData SourceData(Locomotion);
+			FAnimationPoseData BaseData(Base);
+			SlotEvaluatePose(UPPER_BODY_ADDITIVE, SourceData, AdditiveSource, BaseData, AdditiveWeight, AdditiveTotal);
+		}
+		else
+		{
+			Base = Locomotion;
+		}
+		if (bUpperMaskMissing)
+		{
+			// 표를 못 찾음 — 윗몸 자리를 통째로(있으면), 없으면 덧붙인 바탕
+			Output = bUpper ? Upper : Base;
+		}
+		else
+		{
+			TArray<FCompactPose, TInlineAllocator<1>> Targets;
+			TArray<FBlendedCurve, TInlineAllocator<1>> TargetCurves;
+			TArray<UE::Anim::FStackAttributeContainer, TInlineAllocator<1>> TargetAttributes;
+			Targets.SetNum(1);
+			TargetCurves.SetNum(1);
+			TargetAttributes.SetNum(1);
+			Targets[0].MoveBonesFrom(Upper.Pose);
+			TargetCurves[0].MoveFrom(Upper.Curve);
+			TargetAttributes[0].MoveFrom(Upper.CustomAttributes);
 			FAnimationPoseData OutputData(Output);
-			SlotEvaluatePose(Slot.Name, SourceData, SourceWeight, OutputData, SlotWeight, TotalWeight);
-			continue;
+			FAnimationRuntime::BlendPosesPerBoneFilter(Base.Pose, Targets, Base.Curve, TargetCurves, Base.CustomAttributes, TargetAttributes, OutputData, UpperMaskWeights,
+				FAnimationRuntime::EBlendPosesPerBoneFilterFlags::MeshSpaceRotation, ECurveBlendOption::Override);
 		}
-		FPoseContext Slotted(Output);
-		{
-			FAnimationPoseData SourceData(Source);
-			FAnimationPoseData SlottedData(Slotted);
-			SlotEvaluatePose(Slot.Name, SourceData, SourceWeight, SlottedData, SlotWeight, TotalWeight);
-		}
-		TArray<FCompactPose, TInlineAllocator<1>> Targets;
-		TArray<FBlendedCurve, TInlineAllocator<1>> TargetCurves;
-		TArray<UE::Anim::FStackAttributeContainer, TInlineAllocator<1>> TargetAttributes;
-		Targets.SetNum(1);
-		TargetCurves.SetNum(1);
-		TargetAttributes.SetNum(1);
-		Targets[0].MoveBonesFrom(Slotted.Pose);
-		TargetCurves[0].MoveFrom(Slotted.Curve);
-		TargetAttributes[0].MoveFrom(Slotted.CustomAttributes);
-		FAnimationPoseData OutputData(Output);
-		FAnimationRuntime::BlendPosesPerBoneFilter(Source.Pose, Targets, Source.Curve, TargetCurves, Source.CustomAttributes, TargetAttributes, OutputData, UpperMaskWeights,
-			FAnimationRuntime::EBlendPosesPerBoneFilterFlags::MeshSpaceRotation, ECurveBlendOption::Override);
 	}
+	ApplyPlainSlot(PRE_AIM);
 }
 
 bool FMOBSimpleAnimProxy::Evaluate(FPoseContext& Output)
@@ -1866,10 +1972,12 @@ bool FMOBSimpleAnimProxy::Evaluate(FPoseContext& Output)
 	{
 		// 차례 = 걸음 · 점프 → 착지 충격 덧붙임 → 조준 보정. Lyra 그래프의 차례는 열어 보지 않았다(둘 다 덧붙임이라 바뀌어도 차이는 작다)
 		// 서버 구동이면 착지 충격과 조준 사이에 몽타주 자리 넷을 얹는다 — 서버 자세 계산과 같은 차례(Shared/AnimPose.cpp EvaluateLocal, D50)
+		// 컨텐츠 E-2-b 뒤로는 Lyra 그래프 차례(D72) — 조준 앞에 윗몸 섞기 · 사격 덧붙임, 조준 뒤에 맞은 쪽 반응 · 통째
 		ApplyJump(Output);
 		ApplyRecovery(Output);
-		if (bServerDriven) ApplyMontages(Output);
+		if (bServerDriven) ApplyMontages(Output, false);
 		ApplyAim(Output);
+		if (bServerDriven) ApplyMontages(Output, true);
 		ApplyHandIK(Output);	// 실행값: 손은 IK 총 뼈에 붙고(공중 거리 0.0), 그 뒤 발 디딤 내림이 손까지 함께 내린다(땅 거리 4.0)
 	}
 
@@ -2163,7 +2271,21 @@ bool UMOBSimpleAnimInstance::DumpClips(int32 SampleHz, FString& Out)
 		if (AdsNames && !Clip) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL ads clip=%s"), AdsNames->Names[I]);
 		AdsClips.Add(Clip);
 	}
-	Proxy.AppendClipDump(Out, SampleHz, Keep, Montages, OverridePose, AdsClips);
+	// 앉기 클립(D-3) — 조준 클립과 같은 방식
+	TArray<const UAnimSequence*> CrouchClips;
+	const FWeaponAdsNames* CrouchNames = nullptr;
+	for (const FWeaponAdsNames& Names : WEAPON_CROUCH)
+	{
+		if (FCString::Strcmp(Names.Key, WeaponKey) == 0) CrouchNames = &Names;
+	}
+	if (!CrouchNames) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL crouch weapon=%s — 앉기 클립 이름 표에 없다"), WeaponKey);
+	for (int32 I = 0; I < kCrouchClips; ++I)
+	{
+		const UAnimSequence* Clip = CrouchNames ? LoadObject<UAnimSequence>(nullptr, *FString::Printf(TEXT("%s/%s.%s"), CrouchNames->Folder, CrouchNames->Names[I], CrouchNames->Names[I])) : nullptr;
+		if (CrouchNames && !Clip) UE_LOG(LogMOBSimple, Error, TEXT("MOB_SIMPLE_FAIL crouch clip=%s"), CrouchNames->Names[I]);
+		CrouchClips.Add(Clip);
+	}
+	Proxy.AppendClipDump(Out, SampleHz, Keep, Montages, OverridePose, AdsClips, CrouchClips);
 	return true;
 }
 

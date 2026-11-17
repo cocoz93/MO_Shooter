@@ -36,6 +36,7 @@ namespace mo
 		std::string recordPath;		// 비어 있으면 안 적는다
 		RewindOptions rewind;
 		AnimOptions anim;
+		PickupOptions pickups;
 	};
 
 	struct RoomSummary

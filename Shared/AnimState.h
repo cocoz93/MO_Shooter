@@ -13,15 +13,19 @@
 // - 몽타주(9단계 3-b) = 엔진 FAlphaBlend · FAnimMontageInstance(Play · Stop · UpdateWeight · Advance) · Montage_PlayInternal 의 무리 끄기를 옮겼다.
 //   정답지는 Lyra 기록 animcmp_ev_<무기>_probe.csv 의 몽타주 칸이다(AnimCheck state --probe).
 // - 조준(컨텐츠 C-3, D60) = 단순 재생(MOBSimpleAnimInstance)에는 없는 몫이라 Lyra 기록 animcmp_ads_<무기>_probe.csv 와 걸음 상태 기계 전환 표에서 바로 옮겼다.
+// - 앉기(컨텐츠 D-3, D62) = 같은 식으로 Lyra 기록 animcmp_crouch_<무기>_probe.csv 와 전환 표에서 옮겼다. 앉기 묶음이 조준 묶음보다 먼저다.
 // - 언리얼 안에서도 컴파일돼야 하므로 예외·RTTI 를 쓰지 않는다. 사람 하나에 객체 하나를 쓴다.
 namespace mo
 {
 	inline constexpr int kAnimJumpClips = 5;			// 뛰어오름 · 오르는 중 · 꼭대기 · 떨어지는 중 · 내려앉음
 	inline constexpr int kAnimTransitions = 12;			// 네 방향 × 시작 · 멈춤 · 방향 꺾기
-	inline constexpr int kAnimTransitionClips = kAnimTransitions * 2;			// 허리 12 + 조준 12(D60). 전환 번호 = 쌓기 칸 번호 − kAnimJumpClips
-	inline constexpr int kAnimStackClips = kAnimJumpClips + kAnimTransitionClips;	// 29
-	inline constexpr int kAnimBaseClips = kAnimWalkClips * 2;					// 서기 · 걸음 넷 × 허리 · 조준. 조준 칸 = 허리 칸 + kAnimWalkClips
-	static_assert(kAnimStackClips == kStackClipCount && kAnimJumpClips + kAnimTransitions == kStackHipClips, "쌓기 칸 번호가 AnimClips.h StackClipIndex 와 같아야 한다");
+	inline constexpr int kAnimTransitionClips = kAnimTransitions * 3;			// 허리 12 + 조준 12(D60) + 앉음 12(D62). 전환 번호 = 쌓기 칸 번호 − kAnimJumpClips
+	inline constexpr int kAnimStanceEntry = kAnimJumpClips + kAnimTransitionClips;	// 41 — 서기 안 앉기 전환의 쌓기 칸 번호(D62 4)
+	inline constexpr int kAnimStanceExit = kAnimStanceEntry + 1;				// 42 — 서기 안 일어서기 전환
+	inline constexpr int kAnimStackClips = kAnimStanceExit + 1;				// 43
+	inline constexpr int kAnimBaseClips = kAnimWalkClips * 3;					// 서기 · 걸음 넷 × 허리 · 조준 · 앉음. 조준 칸 = 허리 칸 + kAnimWalkClips, 앉음 칸 = 허리 칸 + 2 × kAnimWalkClips
+	static_assert(kAnimStackClips == kStackClipCount && kAnimJumpClips + kAnimTransitions == kStackHipClips && kAnimJumpClips + kAnimTransitions * 2 == kStackAdsEnd,
+		"쌓기 칸 번호가 AnimClips.h StackClipIndex 와 같아야 한다");
 
 	// 한 프레임의 입력. 속도와 가속은 몸 기준(요 0) 값이다
 	struct AnimMoveInput
@@ -36,6 +40,7 @@ namespace mo
 		bool hasFloorGap = false;			// 땅에서 바닥을 찾았나
 		float plantGap = 0.f;				// 메시 뿌리가 바닥보다 얼마나 위인가(cm)
 		bool ads = false;					// 조준 중인가 — 이 갱신 앞에 정해진 조준 능력 상태(서버 = 이 틱 입력을 적용한 뒤 값, D61). Lyra 는 능력이 바뀐 뒤 첫 갱신이 본다(실측 — 기록 도구가 프레임 끝에 켜서 기록에선 한 줄 앞 값)
+		bool crouched = false;				// 앉았나 — 이 갱신 앞 이동이 끝낸 앉음(언리얼 bIsCrouched, D62 8). Lyra 기록은 앉음이 바뀐 프레임에 애니도 바뀐다(animcmp_crouch_rifle_probe.csv c_on · c_off, 실측)
 	};
 
 	class CAnimState
@@ -51,8 +56,8 @@ namespace mo
 
 		// 패킷 · 되감기 기록에 싣는 형식. 서버 판정과 화면이 둘 다 이 값으로 자세를 만들어야 양쪽이 같은 수를 본다(D32 · D35)
 		void ToWire(wire::AnimStateWire& out) const;
-		// 받은 상태 → 자세 입력. 이 객체의 표(클립 길이 · 발 표시)만 읽고 재생 상태는 안 건드린다. pitch 는 PlayerState 에 이미 있는 값이다
-		void FromWire(const wire::AnimStateWire& in, float pitch, AnimPoseInput& out) const;
+		// 받은 상태 → 자세 입력. 이 객체의 표(클립 길이 · 발 표시)만 읽고 재생 상태는 안 건드린다. pitch · crouched 는 PlayerState 에 이미 있는 값이다(D62 8 — 앉음은 쏜 뒤 덮기 자세를 고른다)
+		void FromWire(const wire::AnimStateWire& in, float pitch, bool crouched, AnimPoseInput& out) const;
 
 		int StackOverflows() const { return _stackOverflows; }
 
@@ -69,6 +74,8 @@ namespace mo
 		// 쏘기 사건 — 들어오는 중 · 다 들어온 재장전 칸이 있으면 그 칸 하나를 StopMontageKind 로 먼저 끄고 쏘기를 튼다. 서버와 대조 도구(AnimCheck)가 같이 쓴다.
 		// cancelledReload = 재장전을 끊었나. 반환 = PlayMontage 결과
 		bool PlayFireMontage(float playRate, int bundle, bool& cancelledReload);
+		// 재장전 능력을 끊는 능력의 몽타주 — 쏘기와 같은 길로 재장전 칸을 먼저 끄고 kind 를 튼다. 근접(E-3)이 쓴다(근접도 재장전을 끊는다, TagRelationships_ShooterHero)
+		bool PlayMontageCancellingReload(uint8_t kind, float playRate, int bundle, bool& cancelledReload);
 		// 발사 능력이 켜져 있나(Lyra 태그 IsFiring). Update 뒤에 부른다 — 다음 Update 의 「쏜 뒤 시간」이 이 값을 본다
 		void SetFiring(bool firing) { _firing = firing; }
 
@@ -91,9 +98,14 @@ namespace mo
 		float OverrideWeight() const { return _overrideWeight; }
 		float AimBlend() const { return _aimBlend; }
 		float AdsBlend() const { return _adsBlend; }		// 조준 묶음 비중(D60) — 0 = 허리 클립만, 1 = 조준 클립만
+		float CrouchBlend() const { return _crouchBlend; }	// 앉기 묶음 비중(D62 2) — 조준 묶음보다 먼저 나눈다
 		// 이동 상태 이름 — Lyra LocomotionSM 의 상태 이름과 같은 낱말(공중은 Lyra 점프 상태 다섯을 묶은 "Air"). 대조 도구가 Lyra 기록과 비교한다
 		const char* MoveStateName() const;
 		bool MoveAds() const { return _moveAds; }		// 지금 전환 클립을 고른 조준 여부(D60)
+		bool MoveCrouch() const { return _moveCrouch; }	// 지금 전환 클립을 고른 앉음 여부(D62 3)
+		// 쌓기에 서기 안 앉기 · 일어서기 전환 칸이 있나(D62 4) — Lyra IdleStance 의 StanceTransition 과 대조한다. 0 = 없음, 1 = 앉기, 2 = 일어서기(맨 위 것).
+		// 서기로 돌아가며 빠지는 중인 칸(settled)은 안 센다 — Lyra 는 그 섞기가 시작되는 프레임에 상태 이름을 Idle 로 바꾼다
+		int StanceLayer() const;
 		float HandLeftAlpha() const { return _handLeftAlpha; }
 		float DisableLeftHand() const { return _disableLeftHand; }		// 이번 자세의 DisableLHandIK 곡선(사건 앞 목록으로)
 
@@ -104,6 +116,9 @@ namespace mo
 		static constexpr int kMontageTestNoGroup = 2;		// 같은 무리를 안 끈다
 		static constexpr int kMontageTestLinear = 4;		// 넣기 · 빼기 곡선을 다 선형으로
 		void SetMontageTestFlags(int flags) { _montageTest = flags; }
+		// 서기 안 전환을 넣고 빼는 섞기 시간 후보 고르기용(D62 4 — 22부위로 고른다). 실제 경로 = 넣기 0 · 빼기 0.25초(D63).
+		// in 0 = 바로 얹는다. out > 0 이면 그 칸이 맨 위일 때 서기 자리를 그 시간에 걸쳐 덮고, 전환 클립은 끝까지 돈다. out 0 = 그 자리를 서기로 바로 바꾼다
+		void SetStanceFadeForTest(float inSeconds, float outSeconds) { _stanceInSeconds = inSeconds; _stanceOutSeconds = outSeconds; }
 
 	private:
 		// 엔진 FAlphaBlend 에서 몽타주 비중이 쓰는 몫(사용자 곡선 · 관성 섞기는 안 옮긴다 — D48)
@@ -147,6 +162,7 @@ namespace mo
 			float time = 0.f;
 			float fade = 1.f;
 			float fadeSeconds = 0.f;
+			bool settled = false;		// 서기 안 전환 칸이 이미 서기 자리로 넘겼다(빼기 섞기 후보에서만 — 다시 안 넘기게)
 		};
 
 		bool LoadBundle(const CAnimClips& clips, const char* bundleName);		// 표만 읽는다 — 재생 상태는 안 건드린다
@@ -154,8 +170,10 @@ namespace mo
 		bool FollowStepsOfTransition(float deltaSeconds);
 		void UpdateTransitions(const AnimMoveInput& input, float deltaSeconds);
 		void UpdateJump(bool falling, bool accelerating, float velocityZ, float timeToApex, float groundDistance, float deltaSeconds);
-		void UpdateIdleBreak(bool still, bool ads, float deltaSeconds);
+		void UpdateIdleBreak(bool still, bool noIdleBreak, float deltaSeconds);
 		void PushJump(int clip, float fadeSeconds);
+		void PushStance(bool crouched);
+		void SettleStance();
 		void EnterTransition(EMoveState state, int direction, float fadeSeconds);
 		void EnterLocomotion(EMoveState state, float fadeSeconds);
 		void JumpWeights(float out[kAnimLayerMax]) const;
@@ -167,7 +185,7 @@ namespace mo
 		bool HasJumpLayer() const;
 		float PredictStopDistance(float speed) const;
 		float PredictPivotDistance(const double acceleration[3], const double velocity[3]) const;
-		void UpdateFiring(bool accelerating, bool falling, bool ads, float deltaSeconds);
+		void UpdateFiring(bool accelerating, bool falling, bool ads, bool crouched, float deltaSeconds);
 		void UpdateMontages(float deltaSeconds);
 		bool AdvanceMontage(MontageInstance& instance, float deltaSeconds);		// false = 다 빠졌다(엔진 Terminate)
 		void StopMontage(MontageInstance& instance, uint8_t option, float blendSeconds);
@@ -178,10 +196,10 @@ namespace mo
 		// 클립에서 읽어 둔 값
 		const CAnimClips* _clips = nullptr;
 		int _bundleIndex = -1;
-		float _lengths[kAnimBaseClips] = {};				// 허리 서기 · 걸음 넷, 조준 서기 · 걸음 넷
+		float _lengths[kAnimBaseClips] = {};				// 허리 서기 · 걸음 넷, 조준 서기 · 걸음 넷, 앉은 서기 · 걸음 넷
 		float _rootSpeeds[kAnimBaseClips] = {};
 		std::vector<float> _stepTimes[kAnimBaseClips];		// 왼발 표시부터 차례로. 클립 끝을 넘어가면 길이를 더해 계속 커진다
-		int _stepCycle = 1;									// 걸음 클립 여덟(허리 · 조준)의 발 표시 수의 최소공배수
+		int _stepCycle = 1;									// 걸음 클립 열둘(허리 · 조준 · 앉음)의 발 표시 수의 최소공배수
 		float _stackLengths[kAnimStackClips] = {};
 		const std::vector<float>* _transitionDistances[kAnimTransitionClips] = {};
 		const std::vector<ClipMarker>* _transitionMarkers[kAnimTransitionClips] = {};
@@ -196,7 +214,8 @@ namespace mo
 		bool _separateBraking = false;
 		// 묶음 이름으로 고른 무기별 시각(AnimState.cpp kBundleTimings)
 		float _stopClipSeconds = 0.f;
-		float _exitTimes[2][3][4] = {};		// [허리 · 조준][출발 · 멈춤 · 돌아서기][앞 · 뒤 · 왼 · 오른]
+		float _exitTimes[3][3][4] = {};		// [허리 · 조준 · 앉음][출발 · 멈춤 · 돌아서기][앞 · 뒤 · 왼 · 오른]
+		bool _raiseWhenCrouched = false;	// Lyra 무기 층 RaiseWeaponAfterFiringWhenCrouched(D62 5)
 
 		// 상태
 		float _weights[kAnimWalkClips] = { 1.f, 0.f, 0.f, 0.f, 0.f };
@@ -205,6 +224,12 @@ namespace mo
 		float _adsBlend = 0.f;						// 조준 묶음 비중 — 방향 비중과 같은 따라가기
 		bool _ads = false;							// 이번 갱신이 본 조준
 		bool _moveAds = false;						// 지금 전환 클립이 조준 묶음인가 — 들어갈 때 고른다(D60 3)
+		float _crouchTimes[kAnimWalkClips] = {};	// 앉은 서기 · 걸음 넷의 시각 — 조준과 같은 걸음 번호 · 진행률 · 서기 시계(D62 2)
+		float _crouchBlend = 0.f;					// 앉기 묶음 비중 — 방향 비중과 같은 따라가기
+		bool _crouch = false;						// 이번 갱신이 본 앉음
+		bool _moveCrouch = false;					// 지금 전환 클립이 앉음 묶음인가 — 들어갈 때 고른다(D62 3)
+		float _stanceInSeconds = 0.f;				// 서기 안 전환을 넣는 섞기 — Lyra 는 바꾼 프레임에 비중 1.00(D-3-a 기록, 실측)
+		float _stanceOutSeconds = 0.25f;			// 빼는 섞기 = 엔진 자동 전환의 섞기 시간(남은 시간 문턱과 같은 값, D63)
 		int _step = 0;
 		float _stepFrac = 0.f;
 		float _idleTime = 0.f;
@@ -251,4 +276,17 @@ namespace mo
 		int _montageDrops = 0;
 		int _montageTest = 0;
 	};
+
+	// 그 자세에 맞은 쪽 반응 몽타주(MONTAGE_HIT_BACK · MONTAGE_HIT_FRONT) 칸이 실렸나 — 서버 REWIND react= 와 봇 BOTSHOT targetReact= 가
+	// 이 한 정의로 「상대가 반응 중」인 쏨을 따로 센다(E-3 17-d). 반응은 근접에 맞을 때만 켜진다(Room.cpp EMeleeHit::Hit)
+	inline bool HasHitReactMontage(const wire::AnimStateWire& anim)
+	{
+		constexpr uint8_t kKindMask = (uint8_t)((1 << wire::kAnimMontageKindBits) - 1);
+		for (uint8_t i = 0; i < anim.montageCount && i < wire::kAnimMontagesOnWire; ++i)
+		{
+			const uint8_t kind = (uint8_t)(anim.montages[i].montage & kKindMask);
+			if (kind == MONTAGE_HIT_BACK || kind == MONTAGE_HIT_FRONT) return true;
+		}
+		return false;
+	}
 }

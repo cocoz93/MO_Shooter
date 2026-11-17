@@ -19,7 +19,7 @@
 //   u32 묶음 수, 묶음마다 {
 //     u8 이름 길이, 이름, u32 표본 Hz, 6f 조준 각도(위 · 가운데 · 아래 · 느슨한 위 · 가운데 · 아래),
 //     5f (groundFriction, brakingFriction, brakingFrictionFactor, brakingDecelerationWalking, gravityZ), u8 separateBraking,
-//     u32 클립 수(앞 ACLIP_COUNT 개는 EAnimClip 차례 — 버전 3 부터 조준 클립 17개 포함, 그 뒤는 몽타주 · 덮기 자세 클립), 클립마다 {
+//     u32 클립 수(앞 ACLIP_COUNT 개는 EAnimClip 차례 — 버전 3 부터 조준 클립 17개 · 버전 4 부터 앉기 클립 20개 포함, 그 뒤는 몽타주 · 덮기 자세 클립), 클립마다 {
 //       u8 이름 길이, 이름, f 길이(초), u8 덧붙임 종류(0 = 일반), u8 반복, f rootSpeed, u32 표본 수,
 //       u16 발 표시 수, 표시마다 { f 시각, u8 왼발 },
 //       u8 곡선 유무, 있으면 { u32 hz, u32 값 수, f[값 수] },
@@ -34,7 +34,9 @@
 // 크기 칸은 넣지 않는다. 일반 클립은 1, 덧붙임 클립은 0 으로 항상 같고, 다르면 도구가 파일을 만들지 않는다.
 namespace mo
 {
-	inline constexpr uint32_t kClipPackVersion = 3;	// 3 = 묶음 클립 30개 뒤에 조준 클립 17개(컨텐츠 C-3, D60) — 몽타주 클립 번호가 17 씩 밀린다. 2 는 거부한다(조준 클립이 없다).
+	inline constexpr uint32_t kClipPackVersion = 5;	// 5 = 몽타주 종류 5 → 8(근접 · 맞은 쪽 반응 뒤 · 앞, 컨텐츠 E-2). 칸 꼴은 그대로다. 4 는 거부한다(근접 몽타주가 없다).
+														// 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3) — 몽타주 클립 번호가 20 씩 더 밀린다. 3 은 거부한다(앉기 클립이 없다).
+														// 3 = 묶음 클립 30개 뒤에 조준 클립 17개(컨텐츠 C-3, D60) — 몽타주 클립 번호가 17 씩 밀린다. 2 는 거부한다(조준 클립이 없다).
 														// 2 = 무기별 묶음 셋 + 뼈별 비중 표 · 끼움 자리 · 몽타주 표(9단계). 1 은 거부한다 — 소총까지 다시 만든다.
 														// 2-a 에서 잠시 만든 「몽타주 칸이 빈」 판은 비중 표 칸이 없어 뒤 칸이 밀려 거부된다(BadSlot — 3-a 에서 그 파일로 확인)
 
@@ -58,7 +60,7 @@ namespace mo
 	enum class ESlotMode : uint8_t
 	{
 		Replace,		// 통째로 바꾼다(부활 FullBody)
-		Additive,		// 덧붙인다(사격 FullBodyAdditivePreAim · 윗몸 덧붙임 UpperBodyAdditive)
+		Additive,		// 덧붙인다(사격 FullBodyAdditivePreAim · 윗몸 덧붙임 UpperBodyAdditive · 맞은 쪽 반응 AdditiveHitReact)
 		PerBone,		// 뼈별 비중으로 섞는다(윗몸 UpperBody)
 		Count,
 	};
@@ -71,6 +73,9 @@ namespace mo
 		MONTAGE_EQUIP,		// 이 무기를 꺼낼 때
 		MONTAGE_UNEQUIP,	// 앞 무기를 넣을 때(세 무기 같은 자산)
 		MONTAGE_SPAWN,		// 부활(세 무기 같은 자산)
+		MONTAGE_MELEE,		// 근접 공격(무기마다 자산 — GA_Melee 의 무기별 MeleeAttackMontage, e1g3 실측 권총 · 소총 · 샷건 셋)
+		MONTAGE_HIT_BACK,	// 맞은 쪽 반응 AM_MM_HitReact_Back_Med_01(세 무기 같은 자산). 근접은 이것과 아래 것 중 무작위(D58)
+		MONTAGE_HIT_FRONT,	// 맞은 쪽 반응 AM_MM_HitReact_Front_Med_02
 		MONTAGE_KIND_COUNT,
 	};
 
@@ -103,17 +108,33 @@ namespace mo
 		ACLIP_ADS_WALK_LEFT,
 		ACLIP_ADS_WALK_RIGHT,
 		ACLIP_ADS_TRANSITION_FIRST,							// 조준 전환 12개 — 허리 전환과 같은 차례
-		ACLIP_COUNT = ACLIP_ADS_TRANSITION_FIRST + 12,		// 47
+		// 앉기 묶음(버전 4, D-3) — 서기 · 걷기 넷 · 전환 12 는 조준 묶음과 같은 차례(Crouch_Idle · Crouch_Walk_*). 그 뒤 서기 상태 안 앉기 · 일어서기 전환과
+		// 앉아 쏜 뒤 덮기 자세(Aim_HipFirePose_Crouch). 뽑는 쪽 = MOBSimpleAnimInstance.cpp WEAPON_CROUCH
+		ACLIP_CROUCH_IDLE = ACLIP_ADS_TRANSITION_FIRST + 12,
+		ACLIP_CROUCH_WALK_FWD,
+		ACLIP_CROUCH_WALK_BWD,
+		ACLIP_CROUCH_WALK_LEFT,
+		ACLIP_CROUCH_WALK_RIGHT,
+		ACLIP_CROUCH_TRANSITION_FIRST,						// 앉은 전환 12개 — 허리 전환과 같은 차례
+		ACLIP_CROUCH_ENTRY = ACLIP_CROUCH_TRANSITION_FIRST + 12,	// 서서 앉기(Crouch_Idle_Entry)
+		ACLIP_CROUCH_EXIT,									// 앉았다 일어서기(Crouch_Idle_Exit)
+		ACLIP_CROUCH_OVERRIDE,								// 앉아 쏜 뒤 윗몸 덮기 자세(시각 0 고정)
+		ACLIP_COUNT,										// 67
 	};
-	static_assert(ACLIP_ADS_IDLE == 30 && ACLIP_COUNT == 47, "뽑는 쪽(AppendClipDump)의 번호와 같아야 한다");
+	static_assert(ACLIP_ADS_IDLE == 30 && ACLIP_CROUCH_IDLE == 47 && ACLIP_COUNT == 67, "뽑는 쪽(AppendClipDump)의 번호와 같아야 한다");
 
-	// 쌓기 칸 번호(AnimLayer::clip) → 묶음 클립 번호. 0~16 = 점프 5 · 허리 전환 12(ACLIP_JUMP_START 부터 잇닿음), 17~28 = 조준 전환 12
+	// 쌓기 칸 번호(AnimLayer::clip) → 묶음 클립 번호. 0~16 = 점프 5 · 허리 전환 12(ACLIP_JUMP_START 부터 잇닿음), 17~28 = 조준 전환 12,
+	// 29~42 = 앉은 전환 12 · 서기 안 앉기 · 일어서기 전환(ACLIP_CROUCH_TRANSITION_FIRST 부터 잇닿음, D62 4)
 	inline constexpr int kStackHipClips = (int)(ACLIP_RECOVERY - ACLIP_JUMP_START);		// 17
-	inline constexpr int kStackClipCount = kStackHipClips + 12;							// 29
+	inline constexpr int kStackAdsEnd = kStackHipClips + 12;							// 29
+	inline constexpr int kStackClipCount = kStackAdsEnd + 14;							// 43
 	inline uint32_t StackClipIndex(int stackClip)
 	{
-		return stackClip < kStackHipClips ? (uint32_t)ACLIP_JUMP_START + (uint32_t)stackClip : (uint32_t)ACLIP_ADS_TRANSITION_FIRST + (uint32_t)(stackClip - kStackHipClips);
+		if (stackClip < kStackHipClips) return (uint32_t)ACLIP_JUMP_START + (uint32_t)stackClip;
+		if (stackClip < kStackAdsEnd) return (uint32_t)ACLIP_ADS_TRANSITION_FIRST + (uint32_t)(stackClip - kStackHipClips);
+		return (uint32_t)ACLIP_CROUCH_TRANSITION_FIRST + (uint32_t)(stackClip - kStackAdsEnd);
 	}
+	static_assert(ACLIP_CROUCH_EXIT == ACLIP_CROUCH_TRANSITION_FIRST + 13, "앉은 전환 12 바로 뒤에 앉기 · 일어서기 전환이 있어야 쌓기 칸 번호가 잇닿는다");
 
 	struct BoneKey
 	{

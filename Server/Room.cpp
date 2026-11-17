@@ -20,9 +20,15 @@ namespace mo
 
 		// 사격 시작점 허용 범위 — Lyra 기록의 최대(내 위치에서 92.5cm, 수평 60.6cm)에 이동 한 틱(10cm)과 여유를 더한 값
 		// 조준 카메라를 넣어 시선 ±89도를 훑은 판(C-5 `c5sweep`)의 최대는 100.1cm(조준 · 시선 −10~0도) → 한 틱 더해 110.1, 그대로 둔다
-		constexpr double kAimMaxDistance = 120.0;
+		// 앉은 직후 0.25초는 117.8cm(D-6-a `d6asweep2`) — 앉는 순간 캡슐 중심은 25 내려가는데 Lyra 카메라는 받침점을 그대로 두고 0.2초에 걸쳐 앉은 눈높이로 내린다
+		// (LyraCameraMode.cpp GetPivotLocation · LyraCameraMode_ThirdPerson.cpp UpdateCrouchOffset). 그래서 앉은 직후 거리는 「서서 잰 거리 + 25」를 못 넘는다 →
+		// 100.1 + 25 = 125.1, 한 틱 더해 135.1 → 140(D66). 앉은 뒤 0.25초가 지나면 89.7 로 서 있을 때보다 작다
+		constexpr double kAimMaxDistance = 140.0;
 		// 수평만 따로 묶지 않는다 — 72도쯤 내려다보면 정직한 값도 수평 91.8cm 까지 나온다(실측 d6). 간격이 수평으로 눕기 때문
 		constexpr double kAimFallbackHeight = 60.0;		// 범위 밖일 때 쓰는 시작점 — 내 위치에서 이만큼 위
+		// 앉았으면 눈이 내려간 만큼 같이 내린다 — Lyra 눈높이 서기 80 · 앉음 32(0-3 실행 기록, 실측). 앉은 위치는 이미 캡슐 중심이라 눈 아래 20 이라는 거리가 서기와 같다.
+		// 앉아 숨은 채 위조한 시작점으로 선 눈높이에서 쏘지 못하게(제 판단 — 60 자체는 처음부터의 값이고 근거 기록이 없다)
+		constexpr double kAimFallbackCrouchDrop = 80.0 - 32.0;
 		constexpr int kAimStaleInputs = 30;				// 부활 뒤 이만큼은 부활 소식을 듣기 전에 보낸 입력일 수 있다(0.5초치)
 
 		bool IsAimInRange(const Vec3& aim, const Vec3& location)
@@ -101,6 +107,10 @@ namespace mo
 		}
 	}
 
+	static_assert(wire::kWeaponMelee == (uint8_t)EWeapon::Count, "근접 무기 번호 = 무기 셋 뒤");
+	static_assert(wire::MELEE_NONE == (uint8_t)EMeleeHit::None && wire::MELEE_SAME_TEAM == (uint8_t)EMeleeHit::SameTeam
+		&& wire::MELEE_BLOCKED == (uint8_t)EMeleeHit::Blocked && wire::MELEE_HIT == (uint8_t)EMeleeHit::Hit, "S2C_MELEE 결과 = EMeleeHit 차례");
+
 	ERewindKind ClassifyRewind(uint32_t nowTick, uint32_t viewTick, float viewAlpha, uint32_t limitTicks)
 	{
 		if (viewTick == 0) return ERewindKind::NoView;
@@ -109,9 +119,11 @@ namespace mo
 		return ERewindKind::Ok;
 	}
 
-	CRoom::CRoom(const CMapCollision& map, const MoveParams& params, const MatchRules& rules, uint32_t seed, bool allowDebug, IRoomSender& sender, uint32_t roomId, const RewindOptions& rewind, const AnimOptions& anim)
-		: _map(map), _params(params), _rules(rules), _allowDebug(allowDebug), _sender(sender), _roomId(roomId), _rewind(rewind), _anim(anim), _moveSim(map, _params), _spawnRng(seed + 1)
+	CRoom::CRoom(const CMapCollision& map, const MoveParams& params, const MatchRules& rules, uint32_t seed, bool allowDebug, IRoomSender& sender, uint32_t roomId, const RewindOptions& rewind, const AnimOptions& anim,
+		const PickupOptions& pickups)
+		: _map(map), _params(params), _rules(rules), _allowDebug(allowDebug), _sender(sender), _roomId(roomId), _rewind(rewind), _anim(anim), _pickups(pickups), _moveSim(map, _params), _spawnRng(seed + 1)
 	{
+		_padStates.resize(PadCount());
 		if (_anim.clips)
 		{
 			// main 이 시작할 때 같은 초기화로 확인했으므로 여기서 실패하지 않는다
@@ -208,6 +220,8 @@ namespace mo
 			added.anim.Init(*_anim.clips, AnimBundleOf(added.weapon));
 			added.animWeapon = added.weapon;
 		}
+		added.padOverlap.assign(PadCount(), 0);
+		for (size_t i = 0; i < PadCount(); ++i) SendPad(i, wire::PICKUP_SYNC, nullptr, 0.f, &added);	// 늦게 들어와도 꺼진 받침 · 남은 대기를 안다
 		SpawnPlayer(added);
 
 		if (_phase == wire::EMatchPhase::Waiting)
@@ -228,6 +242,12 @@ namespace mo
 		// 측정 전용 — 나간 뒤 도착한 탄은 그 몸이 없어 뒤 벽에 맞는다. 봇 판정 대조가 이 줄 뒤의 탄을 DEADSKIP 처럼 뺀다(C-5:
 		// 판 끝에 봇이 한꺼번에 끊으면 중계가 쏜 쪽 마지막 입력을 흔들림만큼 붙든 사이 맞은 쪽이 먼저 나간다)
 		if (_rewind.bulletLog) std::printf("LEAVE id=%u tick=%u\n", player->id, _tick);
+		// 도움 기록에서 뺀다 — AssistProcessor 는 나간 사람의 PlayerState 가 비어 건너뛴다(AssistProcessor.cpp:49)
+		for (const std::unique_ptr<Player>& other : _players)
+		{
+			uint32_t* const end = other->damagedBy.data() + other->damagedByCount;
+			other->damagedByCount = (int)(std::remove(other->damagedBy.data(), end, player->id) - other->damagedBy.data());
+		}
 		for (StartSlot& slot : _starts)
 		{
 			if (slot.claimedBy == player->id) slot.claimedBy = 0;
@@ -315,9 +335,10 @@ namespace mo
 			_targetScore = (uint16_t)(big ? _rules.bigMatchTargetScore : _rules.smallMatchTargetScore);
 			_phaseEndTick = _tick + SecondsToTicks(big ? _rules.bigMatchSeconds : _rules.smallMatchSeconds);
 			_teamScoreA = _teamScoreB = 0;
+			ResetPads();	// 받침도 새로 생긴다 — 0-3 실행 기록 pads1(경기 시작 초기화가 큰 받침 대기를 끊었다). 사람을 다시 세우기 전에
 			for (const std::unique_ptr<Player>& player : _players)
 			{
-				player->kills = player->deaths = 0;
+				player->kills = player->deaths = player->assists = 0;	// 도움 기록(damagedBy)은 그대로 — AssistProcessor 는 죽을 때만 지운다
 				SpawnPlayer(*player);
 			}
 			break;
@@ -395,6 +416,7 @@ namespace mo
 			out.id = player->id;
 			out.kills = player->kills;
 			out.deaths = player->deaths;
+			out.assists = player->assists;
 			out.team = player->team;
 		}
 		_result.packetSize = (int)(offsetof(wire::Result, players) + sizeof(wire::PlayerResult) * packet.count);
@@ -477,6 +499,7 @@ namespace mo
 		player.jumpHeld = false;
 		player.ads.Reset();
 		player.aimCamera.Reset();
+		player.melee.Reset();		// 죽음이 능력을 끈다 — 새 몸은 꺼진 채
 		player.yaw = slot.point.yawDegrees;
 		player.pitch = 0;
 		player.weapon = 0;
@@ -510,6 +533,7 @@ namespace mo
 		spawn.yaw = player.yaw;
 		spawn.startIndex = (uint8_t)startIndex;
 		SendToAll(&spawn, (int)sizeof(spawn));
+		UpdatePadOverlaps(player);	// 새 몸이 받침 안에 서면 겹침 시작이다
 	}
 
 	void CRoom::TickRespawns()
@@ -544,6 +568,124 @@ namespace mo
 		return _tick < player.immuneUntilTick;
 	}
 
+	// ─── 체력 받침(컨텐츠 B, ALyraWeaponSpawner + B_AbilitySpawner) ───────────
+	// 두 캡슐 모두 서 있다(회전 없음) — 축 선분 사이 거리가 반지름 합보다 작으면 겹침. 받침 캡슐은 반높이 = 반지름(80)이라 공이다.
+	// 경계(딱 닿음)는 엔진 겹침 판정과 다를 수 있다 — 엔진 쪽 여유 값은 옮기지 않았다(원본 확인 안 함)
+	bool CRoom::OverlapsPad(const MoveState& move, const PickupPad& pad) const
+	{
+		const double radius = _params.capsuleRadius;
+		const double segment = std::max(0.0, (double)_moveSim.HalfHeightOf(move) - radius);
+		const double padSegment = std::max(0.0, pad.halfHeight - pad.radius);
+		const double dx = move.location.x - pad.location.x;
+		const double dy = move.location.y - pad.location.y;
+		const double gapZ = std::max(0.0, std::fabs(move.location.z - pad.location.z) - segment - padSegment);
+		const double reach = radius + pad.radius;
+		return dx * dx + dy * dy + gapZ * gapZ < reach * reach;
+	}
+
+	// OnOverlapBegin — 겹침이 새로 시작된 받침만 집기를 시도한다. 이미 서 있던 사람은 다시 켜진 뒤 다시 검사(TickPads)에서만 본다
+	void CRoom::UpdatePadOverlaps(Player& player)
+	{
+		for (size_t i = 0; i < player.padOverlap.size(); ++i)
+		{
+			const bool now = !player.dead && OverlapsPad(player.move, (*_pickups.pads)[i]);
+			const bool began = now && player.padOverlap[i] == 0;
+			player.padOverlap[i] = now ? 1 : 0;
+			if (began) TryPickup(i, player, false);
+		}
+	}
+
+	// AttemptPickUpWeapon + B_AbilitySpawner GiveWeapon — 켜져 있고 체력이 최대보다 낮을 때만(Less_DoubleDouble) 회복하고 꺼진다.
+	// 대기 틱(실측 cprobe_pads2.log, 60프레임/초): 집은 프레임 → 다시 켜짐 = 큰 것 1499 · 작은 것 599 = 정한 시간의 틱 − 1. 이동 중(fromTimer = false)
+	// 건 타이머는 이 틱을 한 칸으로 센다 — 엔진 타이머가 이 프레임 시간을 이 프레임 끝에 먼저 빼서로 짐작(엔진 소스 확인 안 함).
+	// 다시 검사 안에서(fromTimer = true) 건 타이머는 다음 틱부터 센다(다시 검사 +15 = 0.25초 × 60 이 − 1 없이 맞은 것과 같은 까닭)
+	bool CRoom::TryPickup(size_t padIndex, Player& player, bool fromTimer)
+	{
+		PadState& state = _padStates[padIndex];
+		if (!state.available || player.dead) return false;
+		const PickupPad& pad = (*_pickups.pads)[padIndex];
+		const float maxHealth = (float)_rules.maxHealth;
+		if (!(player.hp < maxHealth))
+		{
+			++_stats.pickupsFullHealth;
+			if (_allowDebug) std::printf("PADEV tick=%u room=%u pad=%zu kind=full player=%u hp=%.1f\n", _tick, _roomId, padIndex, player.id, player.hp);
+			return false;
+		}
+		const float before = player.hp;
+		player.hp = std::min(player.hp + (float)pad.heal, maxHealth);	// LyraHealthSet — 회복도 최대에서 잘린다
+		state.available = false;
+		state.readyTick = _tick + SecondsToTicks(pad.respawnSeconds) - (fromTimer ? 0u : 1u);
+		++_stats.pickups;
+		if (fromTimer) ++_stats.pickupsFromRecheck;
+		if (_allowDebug) std::printf("PADEV tick=%u room=%u pad=%zu kind=%s player=%u hp=%.1f>%.1f ready=%u\n", _tick, _roomId, padIndex, fromTimer ? "takeRecheck" : "take", player.id, before, player.hp, state.readyTick);
+		SendPad(padIndex, fromTimer ? wire::PICKUP_TAKE_RECHECK : wire::PICKUP_TAKE, &player, player.hp - before, nullptr);
+		return true;
+	}
+
+	// 받침 타이머 — 이동을 다 돌린 뒤. ResetCoolDown(켜짐 · 다시 검사 타이머) · CheckForExistingOverlaps(겹친 사람마다 집기 시도, 하나가 집으면 꺼져 나머지는 안 봄)
+	void CRoom::TickPads()
+	{
+		for (size_t i = 0; i < _padStates.size(); ++i)
+		{
+			PadState& state = _padStates[i];
+			if (!state.available && _tick >= state.readyTick)
+			{
+				state.available = true;
+				const double recheck = (*_pickups.pads)[i].recheckSeconds;
+				state.recheckPending = recheck > 0;	// 엔진 SetTimer 는 0 이하 간격이면 타이머를 지운다
+				state.recheckTick = _tick + SecondsToTicks(recheck);
+				++_stats.padRespawns;
+				if (_allowDebug) std::printf("PADEV tick=%u room=%u pad=%zu kind=ready recheck=%u\n", _tick, _roomId, i, state.recheckTick);
+				SendPad(i, wire::PICKUP_READY, nullptr, 0.f, nullptr);
+				continue;
+			}
+			if (state.recheckPending && _tick >= state.recheckTick)
+			{
+				state.recheckPending = false;
+				++_stats.padRechecks;
+				if (_allowDebug) std::printf("PADEV tick=%u room=%u pad=%zu kind=recheck available=%d\n", _tick, _roomId, i, state.available ? 1 : 0);
+				for (const std::unique_ptr<Player>& player : _players)
+				{
+					if (!state.available) break;
+					if (player->padOverlap[i] != 0) TryPickup(i, *player, true);
+				}
+			}
+		}
+	}
+
+	void CRoom::ResetPads()
+	{
+		for (PadState& state : _padStates) state = PadState();
+		for (const std::unique_ptr<Player>& player : _players) std::fill(player->padOverlap.begin(), player->padOverlap.end(), (uint8_t)0);
+		for (size_t i = 0; i < PadCount(); ++i) SendPad(i, wire::PICKUP_SYNC, nullptr, 0.f, nullptr);	// 경기 시작 — 꺼져 있던 받침도 켜진다
+	}
+
+	// S2C_PICKUP — only 가 있으면 그 사람에게만(들어올 때 현황), 없으면 방 전원
+	void CRoom::SendPad(size_t padIndex, wire::EPickupReason reason, const Player* picker, float heal, const Player* only)
+	{
+		const PickupPad& pad = (*_pickups.pads)[padIndex];
+		const PadState& state = _padStates[padIndex];
+		wire::Pickup msg = wire::Pickup();
+		msg.h.size = (uint16_t)sizeof(msg);
+		msg.h.type = (uint16_t)wire::Msg::S2C_PICKUP;
+		msg.tick = _tick;
+		msg.readyTick = state.available ? 0 : state.readyTick;
+		msg.cooldownTicks = SecondsToTicks(pad.respawnSeconds);
+		msg.picker = picker ? picker->id : 0;
+		msg.heal = heal;
+		msg.hpAfter = picker ? picker->hp : 0.f;
+		msg.x = (float)pad.location.x;
+		msg.y = (float)pad.location.y;
+		msg.z = (float)pad.location.z;
+		msg.pad = (uint8_t)padIndex;
+		msg.padCount = (uint8_t)PadCount();
+		msg.available = state.available ? 1 : 0;
+		msg.reason = reason;
+		if (_allowDebug && reason == wire::PICKUP_SYNC) std::printf("PADEV tick=%u room=%u pad=%zu kind=sync to=%u available=%d ready=%u\n", _tick, _roomId, padIndex, only ? only->id : 0u, msg.available, msg.readyTick);
+		if (only) _sender.SendToSession(only->session, &msg, (int)sizeof(msg));
+		else SendToAll(&msg, (int)sizeof(msg));
+	}
+
 	// ─── 입력 ──────────────────────────────────────────────
 	// 시험용 — 사망·부활 대기·무적·이동 막음을 모두 지운다
 	void CRoom::ApplyPlace(Player& player, const wire::DebugPlace& place)
@@ -561,6 +703,7 @@ namespace mo
 		player.immuneUntilTick = 0;
 		player.moveLockInputs = 0;
 		player.lastSeq = place.seq;
+		UpdatePadOverlaps(player);	// 순간이동(SetActorLocation)도 겹침을 다시 본다 — 0-3 pads2 는 이렇게 올라서서 그 프레임에 집었다
 		if (_animReady)
 		{
 			// 순간이동 + 멈춤 = 판 시작과 같다 — 자세를 든 무기 묶음으로 처음부터(경로 봇이 무기를 든 뒤 옮기면 서기 시계가 옮긴 틱에서 시작).
@@ -571,7 +714,7 @@ namespace mo
 		}
 	}
 
-	void CRoom::ApplyInput(Player& player, const wire::Input& input)
+	void CRoom::ApplyInput(Player& player, const wire::Input& input, const bool serverMade)
 	{
 		player.lastSeq = input.seq;
 		if (player.dead)
@@ -580,7 +723,10 @@ namespace mo
 			return;
 		}
 		++_stats.inputsApplied;
-		player.fireGate.NextInput();
+		// 서버가 만든 빈 입력(serverMade — 입력이 늦어 TickPlayerInputs 가 채움)은 걸음 물리만 굴린다. 입력 수로 세는 시계(발사 문 · 근접 · 조준 받기 ·
+		// 무기 순환 · 조준 카메라)는 클라 예측이 모르는 입력에 돌리면 서버만 앞서 간다(D84 걸음 잠금 · D87 — 쉬기 봇 판 서버가 한 발 더 쏨, 탄창 6 · 예측 7).
+		// 언리얼 CharacterMovement 의 ForcePositionUpdate 도 이동만 굴린다
+		if (!serverMade) player.fireGate.NextInput();
 
 		if (input.weapon >= (uint8_t)EWeapon::Count)
 		{
@@ -595,9 +741,22 @@ namespace mo
 		}
 
 		const bool jump = (input.buttons & wire::BUTTON_JUMP) != 0;
-		if (jump && !player.jumpHeld) _moveSim.PressJump(player.move);
+		if (jump && !player.jumpHeld)
+		{
+			_moveSim.RequestUnCrouch(player.move);		// Lyra 점프 능력은 점프 전에 일어서기를 부른다(LyraGameplayAbility_Jump.cpp:55) — 이동 대조(MoveCheck)와 같은 차례
+			_moveSim.PressJump(player.move);
+		}
 		else if (!jump && player.jumpHeld) _moveSim.ReleaseJump(player.move);
 		player.jumpHeld = jump;
+		// 앉기 키 — 바람만 바꾸고 실제로 앉고 서는 것은 이 입력의 이동 앞뒤 갱신이다(D-2). 점프 뒤에 넣는다(MoveCheck 와 같은 차례).
+		// 이동 막음 · 경기 끝에도 받는다 — Lyra 앉기는 능력이 아니라 키에 바로 묶인 함수라(LyraHeroComponent.cpp:451) 이동 금지 태그 · 능력 입력 막음을 안 거친다
+		if ((input.buttons & wire::BUTTON_CROUCH) != 0)
+		{
+			_moveSim.ToggleCrouch(player.move);
+			++_stats.crouchPresses;
+		}
+		// 근접(E-3) — 무기 교체 뒤(켜는 무기의 간격 · 몽타주) · 걸음 앞(밀기가 이 걸음부터). 예측(CSelfPrediction::StepMelee)도 같은 자리
+		const bool meleeStarted = serverMade ? false : TryMelee(player, input);	// 빈 입력은 근접 입력 수(melee.NextInput)도 안 센다(D87)
 
 		Vec3 moveInput(input.moveX, input.moveY, 0);
 		const double moveLength = Length(moveInput);
@@ -608,17 +767,57 @@ namespace mo
 		}
 		if (player.moveLockInputs > 0)
 		{
-			--player.moveLockInputs;	// GA_SpawnEffect 의 이동 입력 막음 — 점프·사격은 안 막힌다
+			// GA_SpawnEffect 의 이동 입력 막음 — 점프·사격은 안 막힌다
+			// 서버가 만든 빈 입력은 세지 않는다 — 클라가 모르는 입력이라 세면 서버만 먼저 풀린다(D84 · 쉬기 봇 판 막음 어긋남 500 → 0)
+			if (!serverMade) --player.moveLockInputs;
 			moveInput = Vec3();
 		}
 		player.moveX = (int8_t)std::lround(moveInput.x * 127.0);
 		player.moveY = (int8_t)std::lround(moveInput.y * 127.0);
 		// 조준 — 이 입력의 버튼이 이 입력의 걸음부터 먹는다(D61). 이동 막음 · 경기 끝에도 버튼을 따른다(예측이 단계를 몰라 맞춰 둔다, D61)
-		player.ads.Apply((input.buttons & wire::BUTTON_ADS) != 0);
-		if (player.ads.active) ++_stats.adsInputs;
+		if (!serverMade)	// 빈 입력은 조준 상태를 그대로 둔다 — Apply 는 첫 입력에 granted 를 켜므로 부활 직후 빈 입력이 서버만 먼저 켠다(D87)
+		{
+			player.ads.Apply((input.buttons & wire::BUTTON_ADS) != 0);
+			if (player.ads.active) ++_stats.adsInputs;
+		}
 		player.move.maxSpeed = AdsWalkSpeed(_params.maxWalkSpeed, player.ads.active);
 		const Vec3 locationBeforeMove = player.move.location;
+		// 사람끼리 막기(F-2) — 이 입력을 굴리는 순간의 남 자리(이 틱에 먼저 굴린 사람은 굴린 뒤 자리). Lyra 서버도 받은 이동을 하나씩 바로 굴린다
+		uint64_t pawnHitsBefore = 0, pawnStartBefore = 0, pawnOddBefore = 0, pawnTouchBefore = 0;
+		if (_rules.pawnBlock)
+		{
+			const MoveCounters& countBefore = _moveSim.GetCounters();
+			pawnHitsBefore = countBefore.pawnHits;
+			pawnStartBefore = countBefore.pawnStartPenetrating;
+			pawnOddBefore = countBefore.pawnOddSimplex;
+			pawnTouchBefore = countBefore.pawnTouchStart;
+			_pawnScratch.clear();
+			for (const std::unique_ptr<Player>& other : _players)
+			{
+				if (other.get() == &player || other->dead) continue;
+				PawnCapsule capsule;
+				capsule.center = other->move.location;
+				capsule.radius = _params.capsuleRadius;
+				capsule.halfHeight = _moveSim.HalfHeightOf(other->move);
+				capsule.yaw = other->yaw;
+				_pawnScratch.push_back(capsule);
+			}
+			_moveSim.SetPawns(_pawnScratch.data(), _pawnScratch.size());
+			++_stats.pawnBlockMoves;
+			_stats.pawnBlockOthers += _pawnScratch.size();
+		}
 		_moveSim.Tick(player.move, moveInput, kTickSeconds);
+		if (_rules.pawnBlock)
+		{
+			_moveSim.SetPawns(nullptr, 0);
+			const MoveCounters& countAfter = _moveSim.GetCounters();
+			_stats.pawnHits += countAfter.pawnHits - pawnHitsBefore;
+			_stats.pawnStartPenetrating += countAfter.pawnStartPenetrating - pawnStartBefore;
+			_stats.pawnOddSimplex += countAfter.pawnOddSimplex - pawnOddBefore;
+			_stats.pawnTouchStart += countAfter.pawnTouchStart - pawnTouchBefore;
+		}
+		if (player.move.crouched) ++_stats.crouchedInputs;
+		UpdatePadOverlaps(player);	// 이동이 끝난 자리로 — Lyra 는 움직이는 중 겹침이 시작되면 그 이동 안에서 집는다
 
 		player.yaw = input.yaw;
 		player.pitch = input.pitch;
@@ -629,18 +828,28 @@ namespace mo
 			KillPlayer(player, nullptr, player.weapon, false);
 			return;
 		}
+		if (serverMade) return;		// 빈 입력은 여기까지 — 무기 순환 · 조준 카메라는 안 돌린다(D87)
 
 		WeaponMotion motion;
 		motion.speed = (float)Length(player.move.velocity);
 		motion.falling = player.move.mode == EMoveMode::Falling;
+		motion.crouching = player.move.crouched;		// 이동 뒤 앉음(IsCrouching) — 속도 · 낙하와 같은 이동 뒤 값. Lyra 무기 기록과의 대조는 아직 없다(D-5-a 결과)
 		motion.aimingAlpha = player.aimCamera.GetAimingAlpha();		// 앞 입력의 카메라 갱신 결과 — Lyra 무기 틱은 카메라 갱신보다 먼저 돈다(C-1 실측)
 		WeaponInput weaponInput;
 		weaponInput.fireHeld = (input.buttons & wire::BUTTON_FIRE) != 0;
 		weaponInput.reloadPressed = (input.buttons & wire::BUTTON_RELOAD) != 0;
+		weaponInput.meleeStarted = meleeStarted;
 		if (_phase == wire::EMatchPhase::PostGame)
 		{
 			if (weaponInput.fireHeld) ++_stats.firesBlockedPostGame;
 			weaponInput = WeaponInput();	// GE_BlockAbilityInput
+		}
+		// 근접이 켜져 있으면 발사 · 재장전 입력 · 자동 재장전이 막힌다(근접의 막기 태그). 발사는 간격 검사 · 빈 탄 집계 앞에서 뺀다 — 정직한 누름이 거절로 안 세지게
+		weaponInput.meleeActive = player.melee.IsActive();
+		if (weaponInput.fireHeld && weaponInput.meleeActive)
+		{
+			++_stats.meleeFiresBlocked;
+			weaponInput.fireHeld = false;
 		}
 		CWeaponCycle& cycle = player.weapons[player.weapon];
 		if (weaponInput.fireHeld && player.fireGate.IsBlocked((EWeapon)player.weapon, cycle.IsFireActive()))
@@ -649,6 +858,7 @@ namespace mo
 			weaponInput.fireHeld = false;
 		}
 		const WeaponEvents events = cycle.Tick(kTickSeconds, weaponInput, motion);
+		if (events.reloadCancelledByMelee) ++_stats.meleeReloadCancels;
 		player.aimCamera.Tick(player.ads.active, kTickSeconds);		// 이 입력의 조준으로 카메라를 굴린다 — 다음 입력의 퍼짐이 읽는다
 		if (weaponInput.fireHeld && !events.fired)
 		{
@@ -658,6 +868,7 @@ namespace mo
 		if (events.fired)
 		{
 			if (motion.aimingAlpha > 0.f) ++_stats.shotsAimed;
+			if (motion.crouching) ++_stats.shotsCrouched;
 			PushAnimEvent(player, EAnimEvent::Fire, player.weapon);
 			player.fireGate.OnFired((EWeapon)player.weapon, cycle.GetDef(), kTickSeconds);
 			PendingShot shot;
@@ -675,6 +886,197 @@ namespace mo
 		if (events.reloadStarted) PushAnimEvent(player, EAnimEvent::Reload, player.weapon);		// 손으로 · 탄창이 비어 스스로 둘 다. 무기 순환 차례(쏘기 → 재장전) 그대로
 	}
 
+	// 근접(GA_Melee, 컨텐츠 E-3) — 켜지는 입력에 판정 · 피해 · 밀기 · 몽타주를 다 한다. 걸음 앞에서 불러 밀기가 이 입력 걸음부터 먹는다(E-2-1 · D73).
+	// 손 · 몸 앞 = 앞 프레임(능력은 그 프레임 자세 평가 전에 켜진다, e1g1). 상대 몸 = 사격과 같은 되감기(D8 · D30) —
+	// 사격은 틱 끝(기록 뒤)에 판정하지만 근접은 입력 처리 안이라 이 틱 기록이 아직 없다. 마지막으로 적은 틱(_tick − 1)이 「지금」이다(D74).
+	// 반환 = 이 입력에 근접 능력이 켜졌나
+	bool CRoom::TryMelee(Player& player, const wire::Input& input)
+	{
+		player.melee.NextInput();
+		if ((input.buttons & wire::BUTTON_MELEE) == 0) return false;
+		++_stats.meleePresses;
+		if (_phase == wire::EMatchPhase::PostGame)
+		{
+			++_stats.meleeBlockedPostGame;		// GE_BlockAbilityInput — 쏘기와 같다
+			return false;
+		}
+		if (!player.melee.TryActivate(GetWeaponDef((EWeapon)player.weapon), kTickSeconds))
+		{
+			++_stats.meleeWhileActive;
+			return false;
+		}
+		++_stats.meleeStarts;
+		PushAnimEvent(player, EAnimEvent::Melee, player.weapon);		// 공격자 몽타주는 맞음 · 같은 팀 · 벽 · 빗나감 모두 돈다(0-3)
+
+		const Vec3 forward = AimDirection(player.yaw, 0.f);		// 앞 입력의 요 — player.yaw 는 이 입력 걸음 뒤에 바뀐다
+		Vec3 hand;
+		const bool handFromPose = MeleeHandOf(player, hand);
+		if (!handFromPose) ++_stats.meleeHandFallback;
+
+		const uint32_t nowTick = _tick - 1;
+		uint32_t bodyTick = nowTick;
+		float bodyAlpha = 0.f;
+		switch (ClassifyRewind(nowTick, input.viewTick, input.viewAlpha, _rewind.limitTicks))
+		{
+		case ERewindKind::NoView:
+			++_stats.meleeRewindNoView;
+			break;
+		case ERewindKind::Future:
+			++_stats.meleeRewindFuture;
+			break;
+		case ERewindKind::Clamped:
+			++_stats.meleeRewindClamped;
+			bodyTick = nowTick - _rewind.limitTicks;
+			break;
+		case ERewindKind::Ok:
+			++_stats.meleeRewindOk;
+			bodyTick = input.viewTick;
+			bodyAlpha = input.viewAlpha;
+			break;
+		}
+
+		// 대상 = 지금 살아 있는 남(사격과 같다 — 지금 죽어 있으면 그때 살아 있었어도 안 맞는다). 캡슐 · 메시 몸체 둘 다 본다(e1g1)
+		constexpr double kSqrt3 = 1.7320508075688772;
+		const double reach = _anim.boundRadius + kMeleeRadius * kSqrt3;		// 자세를 구할 몸 — PrepareBodyPoses 와 같은 어림
+		const Vec3 sweepEnd = hand + forward * kMeleeDistance;
+		_meleeTargets.clear();
+		_meleeOwners.clear();
+		for (const std::unique_ptr<Player>& other : _players)
+		{
+			if (other.get() == &player || other->dead) continue;
+			MeleeTarget target;
+			float poseAlpha = 0.f;
+			if (!GetRewoundBody(*other, bodyTick, bodyAlpha, target.body, poseAlpha)) continue;
+			// 캡슐 높이 = 그 틱 앉음. 다음 틱과 섞어 자리가 사이에 와도 높이는 앞 틱 것이다(제 판단 — 앉는 두 틱 사이만 다르다)
+			const RewindSample& sample = other->rewindHistory[bodyTick % other->rewindHistory.size()];
+			target.capsuleRadius = _params.capsuleRadius;
+			target.capsuleHalfHeight = sample.crouched ? _params.capsuleHalfHeight - _moveSim.CrouchMeshLiftZ() : _params.capsuleHalfHeight;
+			target.sameTeam = other->team == player.team;
+			if (_animReady)
+			{
+				if (SegmentPointDistanceSquared(hand, sweepEnd, target.body.center) > reach * reach)
+				{
+					target.body.skip = true;
+					++_stats.meleePoseSkipped;
+				}
+				else
+				{
+					target.body.pose = GetPoseAt(*other, bodyTick, poseAlpha, false);
+					target.body.shapes = _anim.clips->Bodies().data();
+					target.body.shapeCount = (uint32_t)_anim.clips->Bodies().size();
+					++_stats.meleePoses;
+				}
+			}
+			_meleeTargets.push_back(target);
+			_meleeOwners.push_back(other.get());
+		}
+		_stats.meleeTargets += _meleeTargets.size();
+
+		MeleeResult result;
+		ResolveMelee(_map, _meleeTargets.data(), _meleeTargets.size(), hand, forward, result);
+		wire::Melee msg = wire::Melee();
+		msg.h.size = (uint16_t)sizeof(msg);
+		msg.h.type = (uint16_t)wire::Msg::S2C_MELEE;
+		msg.tick = _tick;
+		msg.attacker = player.id;
+		msg.seq = input.seq;
+		msg.result = (uint8_t)result.kind;
+		msg.weapon = player.weapon;
+		Player* const target = result.kind == EMeleeHit::None ? nullptr : _meleeOwners[result.targetIndex];
+		if (target)
+		{
+			msg.target = target->id;
+			msg.distance = (float)result.distance;
+		}
+		switch (result.kind)
+		{
+		case EMeleeHit::None:
+			++_stats.meleeMisses;
+			break;
+		case EMeleeHit::SameTeam:
+			++_stats.meleeSameTeam;		// 피해 · 밀기 · 반응 없음(0-3 같은 팀 칸)
+			break;
+		case EMeleeHit::Blocked:
+			++_stats.meleeBlocked;
+			break;
+		case EMeleeHit::Hit:
+		{
+			++_stats.meleeHits;
+			// 밀기 — 와이어에 싣는 float 값 그대로 넣는다. 공격자 화면이 같은 값으로 다시 돌려 위치가 같게(줄인 차 = 힘의 float 반올림만큼)
+			const Vec3 exact = MeleePushForce(forward, result.distance);
+			msg.forceX = (float)exact.x;
+			msg.forceY = (float)exact.y;
+			_moveSim.ApplyRootForce(player.move, Vec3(msg.forceX, msg.forceY, 0.0), kMeleePushDuration);
+			++_stats.meleePushes;
+			// 맞은 쪽 반응 — 둘 중 무작위(0-3 · D58). 입력 번호 · 맞은 사람으로 정해 같은 입력이면 같은 쪽
+			CSpreadRng react(SpreadSeed(input.seq, target->id));
+			PushAnimEvent(*target, react.NextFloat() < 0.5f ? EAnimEvent::HitBack : EAnimEvent::HitFront, target->weapon);
+			const bool immune = IsImmune(*target);
+			if (immune) ++_stats.meleeHitImmune;
+			msg.damage = immune ? 0.f : kMeleeDamage;		// 거리 · 부위 보정 없음(0-3)
+			break;
+		}
+		}
+		if (_allowDebug)
+		{
+			// 시험판(ServerProbe --melee)이 Lyra 연습장 기록의 손 · 맞은 거리와 견준다
+			std::printf("MELEEEV tick=%u room=%u attacker=%u seq=%u weapon=%u hand=%.4f,%.4f,%.4f fromPose=%d fwd=%.6f,%.6f,%.6f result=%u target=%u dist=%.4f capsule=%d force=%.4f,%.4f damage=%.1f\n",
+				_tick, _roomId, player.id, input.seq, (unsigned)player.weapon, hand.x, hand.y, hand.z, handFromPose ? 1 : 0, forward.x, forward.y, forward.z,
+				(unsigned)msg.result, msg.target, result.distance, result.capsule ? 1 : 0, msg.forceX, msg.forceY, msg.damage);
+		}
+		SendToAll(&msg, (int)sizeof(msg));		// 근접 → 피해 → 처치 차례로 받게 먼저 보낸다
+
+		if (target && msg.damage > 0.f)
+		{
+			target->hp = std::max(target->hp - msg.damage, 0.f);
+			NoteDamage(*target, player.id);
+			wire::Damage damage = wire::Damage();
+			damage.h.size = (uint16_t)sizeof(wire::Damage);
+			damage.h.type = (uint16_t)wire::Msg::S2C_DAMAGE;
+			damage.tick = _tick;
+			damage.attacker = player.id;
+			damage.target = target->id;
+			damage.amount = msg.damage;
+			damage.hpAfter = target->hp;
+			damage.weapon = wire::kWeaponMelee;
+			damage.weakSpot = 0;
+			SendToAll(&damage, (int)sizeof(damage));
+			++_stats.damageEvents;
+			++_stats.meleeDamageEvents;
+			if (target->hp <= 0.f)
+			{
+				++_stats.meleeKills;
+				KillPlayer(*target, &player, wire::kWeaponMelee, false);
+			}
+		}
+		return true;
+	}
+
+	// 공격자 손(hand_r) — 마지막으로 적은 틱의 자세로 몸 기준 손 자리를 구해, 걸음 앞 자리 · 앞 입력의 요로 놓는다.
+	// 애니가 없거나 그 틱 기록이 없으면(부활 첫 입력 등) false — 권총 기본 자세 손(앉았으면 앉은 기본 자세 손)으로 놓는다
+	bool CRoom::MeleeHandOf(const Player& player, Vec3& out)
+	{
+		double local[3];
+		bool fromPose = false;
+		const uint32_t lastTick = _tick - 1;
+		const RewindSample& last = player.rewindHistory[lastTick % player.rewindHistory.size()];
+		if (_animReady && last.tick == lastTick && last.alive)
+		{
+			AnimPoseInput input;
+			_animCodecs[last.animWeapon].FromWire(last.anim, last.pitch, last.crouched, input);
+			CAnimPoseEvaluator& evaluator = _poseEvaluators[last.animWeapon];
+			evaluator.EvaluateLocal(input, _localFrom.data());
+			evaluator.HandRightFromLocal(_localFrom.data(), local, last.crouched ? _moveSim.CrouchMeshLiftZ() : 0.0);
+			fromPose = true;
+		}
+		else
+		{
+			MeleeRestHandLocal(player.move.crouched, _moveSim.CrouchMeshLiftZ(), local);
+		}
+		out = MeleeHandWorld(player.move.location, player.yaw, local);
+		return fromPose;
+	}
+
 	// 사격 시작점은 클라가 보내지만 믿지는 않는다. 쏜 사실 자체는 안 물리고(탄·연사는 같은 입력이면 클라와 같아야 한다) 시작점만 바꾼다 —
 	// 위조해도 내 몸 근처에서 나가니 이득이 없다.
 	// - 범위는 움직이기 전·후 둘 다 본다: 클라는 움직이기 전 자리로 계산해 보내는데 낙하 중엔 한 틱에 67cm 까지 움직인다
@@ -685,7 +1087,7 @@ namespace mo
 		Vec3 start = aim;
 		if (!IsAimInRange(aim, locationBeforeMove) && !IsAimInRange(aim, location))
 		{
-			start = location + Vec3(0, 0, kAimFallbackHeight);
+			start = location + Vec3(0, 0, player.move.crouched ? kAimFallbackHeight - kAimFallbackCrouchDrop : kAimFallbackHeight);
 			if ((int)player.fireGate.GetInputIndex() <= kAimStaleInputs) ++_stats.shotsAimStaleAfterSpawn;
 			else ++_stats.shotsAimReplaced;
 		}
@@ -741,8 +1143,9 @@ namespace mo
 			idle.weapon = player.weapon;
 			idle.seq = player.lastSeq;
 			if (player.jumpHeld) idle.buttons |= wire::BUTTON_JUMP;
-			if (player.ads.held) idle.buttons |= wire::BUTTON_ADS;		// 끊긴 틱에 조준이 풀렸다 다시 켜지지 않게
-			ApplyInput(player, idle);
+			if (player.ads.held) idle.buttons |= wire::BUTTON_ADS;		// 끊긴 틱에 조준이 풀렸다 다시 켜지지 않게 — D87 뒤로는 빈 입력이 ads.Apply 를 안 불러 조준 상태가 그대로 남는다. 이 줄은 버튼 값만 맞춰 둔다
+			// 앉기는 누른 입력 하나에만 켜는 버튼이라 채우지 않는다 — 앉음은 이동 상태(wantsToCrouch · crouched)에 남는다
+			ApplyInput(player, idle, true);
 			--_stats.inputsApplied;
 		}
 	}
@@ -755,6 +1158,7 @@ namespace mo
 		target.ads.Reset();		// Lyra 죽음 능력이 다른 능력을 끈다 — 카메라는 새 몸에서 다시 시작한다(SpawnPlayer)
 		target.respawnTick = _tick + SecondsToTicks(_rules.respawnSeconds);
 		target.move.velocity = Vec3();
+		std::fill(target.padOverlap.begin(), target.padOverlap.end(), (uint8_t)0);	// 죽으면 충돌이 꺼져 겹침이 끝난다
 		++target.deaths;
 
 		// B_ShooterGameScoring_Base — 죽은 쪽은 늘 +1, 다른 팀이 죽였을 때만 처치와 팀 점수 +1
@@ -767,8 +1171,22 @@ namespace mo
 		}
 		if (attacker) ++_stats.kills;
 
+		// AssistProcessor::OnEliminationMessage — 피해를 준 사람 중 처치자를 뺀 전원이 +1, 문턱 없음. 떨어져 죽으면 처치자가 없어 전원이 받는다.
+		// 그 사람 기록은 지운다(AssistProcessor.cpp:40-71)
 		wire::Kill kill = wire::Kill();
-		kill.h.size = (uint16_t)sizeof(kill);
+		for (int i = 0; i < target.damagedByCount; ++i)
+		{
+			if (attacker && target.damagedBy[i] == attacker->id) continue;
+			Player* const assister = FindById(target.damagedBy[i]);
+			if (!assister) continue;
+			++assister->assists;
+			++_stats.assists;
+			if (kill.assistCount < wire::kMaxPlayersInRoom - 1) kill.assisters[kill.assistCount++] = assister->id;
+		}
+		target.damagedByCount = 0;
+
+		const int killSize = (int)(offsetof(wire::Kill, assisters) + sizeof(uint32_t) * kill.assistCount);	// 도움 번호는 수만큼만
+		kill.h.size = (uint16_t)killSize;
 		kill.h.type = (uint16_t)wire::Msg::S2C_KILL;
 		kill.tick = _tick;
 		kill.attacker = attacker ? attacker->id : 0;
@@ -779,7 +1197,7 @@ namespace mo
 		kill.targetDeaths = target.deaths;
 		kill.weapon = weapon;
 		kill.weakSpot = weakSpot ? 1 : 0;
-		SendToAll(&kill, (int)sizeof(kill));
+		SendToAll(&kill, killSize);
 		_sender.OnKillRecorded(kill);
 
 		if (scored)
@@ -787,6 +1205,16 @@ namespace mo
 			const uint16_t score = attacker->team == wire::kTeamA ? _teamScoreA : _teamScoreB;
 			if (score >= _targetScore && _targetScore > 0) HandleVictory(attacker->team);
 		}
+	}
+
+	// AssistProcessor::OnDamageMessage — 때린 사람별로 쌓는다. 자기 피해는 뺀다(AssistProcessor.cpp:25). 피해량은 도움 수에 안 쓰이므로 번호만 든다
+	void CRoom::NoteDamage(Player& target, uint32_t attackerId)
+	{
+		if (attackerId == target.id) return;
+		const uint32_t* const begin = target.damagedBy.data();
+		const uint32_t* const end = begin + target.damagedByCount;
+		if (std::find(begin, end, attackerId) != end) return;
+		if (target.damagedByCount < (int)target.damagedBy.size()) target.damagedBy[target.damagedByCount++] = attackerId;	// 나간 사람은 RemovePlayer 가 빼므로 방 인원 − 1 을 넘지 않는다
 	}
 
 	// 틱마다 입력을 모두 적용한 뒤, 사격 판정 앞에서 적는다 — 상태 패킷으로 나가는 자리와 같은 틱 값이어야 화면 자리와 맞는다
@@ -800,6 +1228,7 @@ namespace mo
 			sample.yaw = player->yaw;
 			sample.pitch = player->pitch;
 			sample.alive = !player->dead;
+			sample.crouched = player->move.crouched;
 			if (_animReady)
 			{
 				player->anim.ToWire(sample.anim);
@@ -828,14 +1257,17 @@ namespace mo
 		out.accelerating = move.acceleration.x * move.acceleration.x + move.acceleration.y * move.acceleration.y > kAccelerationNearlyZero;
 		out.falling = move.mode == EMoveMode::Falling;
 		out.ads = player.ads.active;		// 이 틱 입력이 켠 조준 — Lyra 애니는 능력이 바뀐 뒤 첫 갱신에 본다(D61)
+		out.crouched = move.crouched;		// 이 틱 이동이 끝낸 앉음(bIsCrouched) — Lyra 애니는 바뀐 프레임에 본다(D62 8 · D63 3)
 		out.pitch = std::min(std::max(NormalizeAxis(player.pitch), -90.f), 90.f);
 		if (out.falling)
 		{
+			// 지금 캡슐 반높이 — Lyra GetGroundInfo 는 GetUnscaledCapsuleHalfHeight(앉은 채 떨어지면 65)로 잰다(LyraCharacterMovementComponent.cpp:121)
+			const float halfHeight = _moveSim.HalfHeightOf(move);
 			out.groundDistance = kGroundTraceDistance;
 			Vec3 end = move.location;
-			end.z -= kGroundTraceDistance + _params.capsuleHalfHeight;
+			end.z -= kGroundTraceDistance + halfHeight;
 			RayHit hit;
-			if (_map.Raycast(move.location, end, MAP_BLOCK_MOVE, hit)) out.groundDistance = std::max((float)hit.distance - _params.capsuleHalfHeight, 0.f);
+			if (_map.Raycast(move.location, end, MAP_BLOCK_MOVE, hit)) out.groundDistance = std::max((float)hit.distance - halfHeight, 0.f);
 		}
 		else if (move.floor.blockingHit)
 		{
@@ -934,6 +1366,21 @@ namespace mo
 			case EAnimEvent::Reload:
 				play(MONTAGE_RELOAD, def.reloadRate, bundle);
 				break;
+			case EAnimEvent::Melee:
+			{
+				// 근접 능력은 재장전 능력을 끊는다(TagRelationships_ShooterHero) — 쏘기와 같은 길로 재장전 칸을 먼저 끈다. 속도 1.0(15-b 기록 세 무기, 실측)
+				bool cancelledReload = false;
+				if (anim.PlayMontageCancellingReload(MONTAGE_MELEE, kAnimEventRate, bundle, cancelledReload)) ++_stats.montageStarts[MONTAGE_MELEE];
+				else ++_stats.montageFails;
+				if (cancelledReload) ++_stats.meleeReloadMontageCancels;
+				break;
+			}
+			case EAnimEvent::HitBack:
+				play(MONTAGE_HIT_BACK, kAnimEventRate, bundle);		// 덧붙임 무리라 쏘기 · 재장전 몽타주를 안 끈다(클립 묶음 자산 값). 속도 1.0(15-b, 실측)
+				break;
+			case EAnimEvent::HitFront:
+				play(MONTAGE_HIT_FRONT, kAnimEventRate, bundle);
+				break;
 			case EAnimEvent::Count:
 				break;
 			}
@@ -1012,19 +1459,22 @@ namespace mo
 		CAnimPoseEvaluator& evaluator = _poseEvaluators[from.animWeapon];
 		AnimPoseInput input;
 		wire::AnimStateWire shiftedFrom, shiftedTo;	// 일부러 틀림 때만 쓴다(JudgeAnim)
-		_animCodecs[from.animWeapon].FromWire(JudgeAnim(from.anim, _rewind.montageShiftTicks, shiftedFrom), from.pitch, input);
+		_animCodecs[from.animWeapon].FromWire(JudgeAnim(from.anim, _rewind.montageShiftTicks, shiftedFrom), from.pitch, from.crouched, input);		// 앉음은 되감기 기록에서(D62 8)
 		evaluator.EvaluateLocal(input, _localFrom.data());
 		const BoneTransform* local = _localFrom.data();
+		// 앉은 메시 올림(D62 7) — 다음 틱과 섞으면 자리(캡슐 중심, GetRewoundBody)와 같은 비율로 섞는다. 땅에서 앉은 틱은 중심이 25 내려가고 올림이 25 늘어 섞는 동안에도 메시 세상 자리가 그대로다
+		double meshLift = from.crouched ? _moveSim.CrouchMeshLiftZ() : 0.0;
 		if (alpha > 0.f)
 		{
 			const RewindSample& to = owner.rewindHistory[(tick + 1) % size];
 			AnimPoseInput nextInput;
-			_animCodecs[to.animWeapon].FromWire(JudgeAnim(to.anim, _rewind.montageShiftTicks, shiftedTo), to.pitch, nextInput);
+			_animCodecs[to.animWeapon].FromWire(JudgeAnim(to.anim, _rewind.montageShiftTicks, shiftedTo), to.pitch, to.crouched, nextInput);
 			_poseEvaluators[to.animWeapon].EvaluateLocal(nextInput, _localTo.data());
 			evaluator.BlendLocal(_localFrom.data(), _localTo.data(), alpha, _localBlend.data());
 			local = _localBlend.data();
+			meshLift += ((to.crouched ? _moveSim.CrouchMeshLiftZ() : 0.0) - meshLift) * (double)alpha;
 		}
-		evaluator.BodiesFromLocal(local, cached.bodies.data());
+		evaluator.BodiesFromLocal(local, cached.bodies.data(), meshLift);
 		if (countStats)
 		{
 			++_stats.poseEvals;
@@ -1098,7 +1548,12 @@ namespace mo
 				// ads = 그 자세의 조준 묶음 비중 0~255(같은 식으로 다음 틱과 섞으면 큰 쪽) — 「상대가 조준 중」인 쏨을 따로 센다(C-5)
 				uint8_t poseAds = poseSample.anim.adsBlend;
 				if (poseAlpha > 0.f) poseAds = std::max(poseAds, player->rewindHistory[(poseTick + 1) % historySize].anim.adsBlend);
-				std::printf("REWIND seq=%u shooter=%u target=%u now=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f animWeapon=%u montages=%u ads=%u\n", shot.seq, shot.shooter, player->id, _tick, bodyTick, bodyAlpha, body.center.x, body.center.y, body.center.z, body.yawDegrees, (unsigned)poseSample.animWeapon, (unsigned)poseMontages, (unsigned)poseAds);
+				// crouch = 그 자세의 앉기 묶음 비중 0~255(같은 식) — 「상대가 앉음」인 쏨을 따로 센다(D-6)
+				uint8_t poseCrouch = poseSample.anim.crouchBlend;
+				if (poseAlpha > 0.f) poseCrouch = std::max(poseCrouch, player->rewindHistory[(poseTick + 1) % historySize].anim.crouchBlend);
+				// react = 그 자세에 맞은 쪽 반응 몽타주가 들었나(다음 틱과 섞으면 둘 중 하나라도) — 「상대가 반응 중」인 쏨을 따로 센다(E-3 17-d)
+				const bool poseReact = HasHitReactMontage(poseSample.anim) || (poseAlpha > 0.f && HasHitReactMontage(player->rewindHistory[(poseTick + 1) % historySize].anim));
+				std::printf("REWIND seq=%u shooter=%u target=%u now=%u viewTick=%u alpha=%.4f x=%.3f y=%.3f z=%.3f yaw=%.3f animWeapon=%u montages=%u ads=%u crouch=%u react=%u\n", shot.seq, shot.shooter, player->id, _tick, bodyTick, bodyAlpha, body.center.x, body.center.y, body.center.z, body.yawDegrees, (unsigned)poseSample.animWeapon, (unsigned)poseMontages, (unsigned)poseAds, (unsigned)poseCrouch, poseReact ? 1u : 0u);
 				if (_animReady)
 				{
 					// 화면 MOB_VIEWP 줄과 (seq, 상대, 부위) 로 잇는다. 기록용이라 비용 집계에 넣지 않는다
@@ -1210,6 +1665,7 @@ namespace mo
 				if (amount > 0 && !target.dead)		// 샷건 한 발 안에서 이미 쓰러졌을 수 있다
 				{
 					target.hp = std::max(target.hp - amount, 0.f);
+					NoteDamage(target, shooter->id);		// LyraHealthSet 은 0보다 큰 피해만 알린다(LyraHealthSet.cpp:131) — 같은 팀 · 무적은 amount 0 이라 안 쌓인다
 					wire::Damage damage = wire::Damage();
 					damage.h.size = (uint16_t)sizeof(wire::Damage);
 					damage.h.type = (uint16_t)wire::Msg::S2C_DAMAGE;
@@ -1277,6 +1733,7 @@ namespace mo
 			if (IsImmune(*player)) out.flags |= wire::STATE_IMMUNE;
 			if (player->moveLockInputs > 0) out.flags |= wire::STATE_MOVE_LOCKED;
 			if (player->ads.active) out.flags |= wire::STATE_ADS;
+			if (player->move.crouched) out.flags |= wire::STATE_CROUCHED;
 			out.weapon = player->weapon;
 			out.team = player->team;
 			out.moveX = player->dead ? (int8_t)0 : player->moveX;
@@ -1330,6 +1787,7 @@ namespace mo
 		{
 			TickPlayerInputs(*player);
 		}
+		TickPads();	// Lyra 도 이동(겹침 시작 집기) 뒤에 타이머(다시 켜짐 · 다시 검사)를 돌린다
 		UpdateAnimStates();
 		RecordRewindSamples();
 		const Clock::time_point inputsEnd = Clock::now();

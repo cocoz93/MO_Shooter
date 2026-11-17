@@ -16,6 +16,7 @@
 
 #include "AbilitySystem/LyraAbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
+#include "Character/LyraCharacter.h"
 #include "Character/LyraCharacterMovementComponent.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(MOBMoveRecordSubsystem)
@@ -31,6 +32,10 @@ namespace
 	constexpr int32 START_TRIES = 200;
 	constexpr double STRESS_EMBED = 10.0;		// 시작 겹침 갈래를 지나가게 바닥에 묻는 깊이
 	constexpr float STRESS_LAUNCH_EVERY = 2.f;	// 평균 몇 초에 한 번 발사
+	constexpr int32 LOW_SPOT_COLUMNS = 200000;	// 낮은 천장 찾기 — 세로 줄 수. 한 줄에 위에서부터 바닥을 여러 겹 본다(지붕 밑 바닥까지)
+	constexpr int32 LOW_SPOT_LAYERS = 6;
+	constexpr int32 LOW_SPOT_MAX = 64;
+	constexpr double LOW_SPOT_APART = 150.0;	// 같은 자리를 여러 번 담지 않게
 
 	UMOBMoveRecordSubsystem* GInstance = nullptr;
 }
@@ -53,8 +58,10 @@ void UMOBMoveRecordSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FParse::Value(Cmd, TEXT("MOBMoveSegSec="), SegSeconds);
 	bStress = FParse::Param(Cmd, TEXT("MOBMoveStress"));
 	bAds = FParse::Param(Cmd, TEXT("MOBMoveAds"));
+	bCrouch = FParse::Param(Cmd, TEXT("MOBMoveCrouch"));
 	Rng.Initialize(Seed);
 	AdsRng.Initialize(Seed + 1);
+	CrouchRng.Initialize(Seed + 2);
 	GInstance = this;
 	UE_LOG(LogMOBMove, Log, TEXT("MOB_MOVE_INIT world=%s tag=%s seed=%d segs=%d segSec=%.1f"), *GetNameSafe(GetWorld()), *Tag, Seed, NumSegs, SegSeconds);
 }
@@ -118,7 +125,10 @@ void UMOBMoveRecordSubsystem::BeginRecording(ACharacter* Ch)
 	DumpParams(Ch);
 	Csv += TEXT("frame,seg,ev,dt,ix,iy,iz,px,py,pz,vx,vy,vz,mode,ext,lx,ly,lz,pressed,was,hold,force,count,countPre,maxSpeed,")
 		TEXT("ax,ay,az,avx,avy,avz,amode,fBlock,fWalk,fLine,fDist,fLineDist,aCount");
-	Csv += bAds ? TEXT(",ads\n") : TEXT("\n");
+	if (bAds) Csv += TEXT(",ads");
+	if (bCrouch) Csv += TEXT(",cev,cwant,crouched,half,walk,cwantA,crouchedA,halfA");
+	Csv += TEXT("\n");
+	if (bCrouch) FindLowSpots(Ch);
 
 	ULyraCharacterMovementComponent::MOBPreMoveHook = &UMOBMoveRecordSubsystem::PreMoveThunk;
 	ULyraCharacterMovementComponent::MOBPostMoveHook = &UMOBMoveRecordSubsystem::PostMoveThunk;
@@ -170,7 +180,56 @@ void UMOBMoveRecordSubsystem::DumpParams(ACharacter* Ch)
 	F(TEXT("LedgeCheckThreshold"), M->LedgeCheckThreshold);
 	F(TEXT("CapsuleRadius"), Ch->GetCapsuleComponent()->GetScaledCapsuleRadius());
 	F(TEXT("CapsuleHalfHeight"), Ch->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+	F(TEXT("MaxWalkSpeedCrouched"), M->MaxWalkSpeedCrouched);
+	F(TEXT("CrouchedHalfHeight"), M->GetCrouchedHalfHeight());
+	F(TEXT("bCanWalkOffLedgesWhenCrouching"), M->bCanWalkOffLedgesWhenCrouching ? 1 : 0);
+	F(TEXT("BaseEyeHeight"), Ch->BaseEyeHeight);
+	F(TEXT("CrouchedEyeHeight"), Ch->CrouchedEyeHeight);
 	F(TEXT("Seed"), Seed);
+}
+
+void UMOBMoveRecordSubsystem::FindLowSpots(ACharacter* Ch)
+{
+	// 앉은 캡슐은 들어가고 선 캡슐은 안 들어가는 바닥 — 반지름이 같으니 막는 것은 위쪽 50cm 안의 천장이다.
+	// 하늘에서 내린 광선은 지붕에 먼저 닿으므로, 닿은 점 바로 밑에서 다시 내려 지붕 밑 바닥까지 겹겹이 본다(메시 뒷면은 안 닿는다)
+	UWorld* World = GetWorld();
+	UCharacterMovementComponent* M = Ch->GetCharacterMovement();
+	UCapsuleComponent* Capsule = Ch->GetCapsuleComponent();
+	const float Radius = Capsule->GetScaledCapsuleRadius();
+	const float Stand = Capsule->GetScaledCapsuleHalfHeight();
+	const float Low = M->GetCrouchedHalfHeight();
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBMoveLow), false, Ch);
+	const FCollisionResponseParams Response(Capsule->GetCollisionResponseToChannels());
+	const ECollisionChannel Channel = Capsule->GetCollisionObjectType();
+	FRandomStream LowRng(Seed + 3);
+	int32 Floors = 0;
+	const double T0 = FPlatformTime::Seconds();
+	for (int32 C = 0; C < LOW_SPOT_COLUMNS && LowSpots.Num() < LOW_SPOT_MAX; ++C)
+	{
+		const double X = LowRng.FRandRange(PlayArea.Min.X, PlayArea.Max.X);
+		const double Y = LowRng.FRandRange(PlayArea.Min.Y, PlayArea.Max.Y);
+		double TopZ = PlayArea.Max.Z + 3000.0;
+		for (int32 L = 0; L < LOW_SPOT_LAYERS; ++L)
+		{
+			FHitResult Hit;
+			if (!World->LineTraceSingleByChannel(Hit, FVector(X, Y, TopZ), FVector(X, Y, PlayArea.Min.Z - 3000.0), Channel, Params, Response)) break;
+			TopZ = Hit.ImpactPoint.Z - 1.0;
+			if (Hit.bStartPenetrating || Hit.ImpactNormal.Z < 0.7) continue;
+			++Floors;
+			const FVector LowSpot = Hit.ImpactPoint + FVector(0, 0, Low + START_ABOVE_FLOOR);
+			const FVector StandSpot = Hit.ImpactPoint + FVector(0, 0, Stand + START_ABOVE_FLOOR);
+			if (World->OverlapBlockingTestByChannel(LowSpot, FQuat::Identity, Channel, FCollisionShape::MakeCapsule(Radius, Low), Params, Response)) continue;
+			if (!World->OverlapBlockingTestByChannel(StandSpot, FQuat::Identity, Channel, FCollisionShape::MakeCapsule(Radius, Stand), Params, Response)) continue;
+			bool bNear = false;
+			for (const FVector& S : LowSpots) bNear |= FVector::Dist(S, LowSpot) < LOW_SPOT_APART;
+			if (!bNear) LowSpots.Add(LowSpot);
+		}
+	}
+	UE_LOG(LogMOBMove, Log, TEXT("MOB_MOVE_LOWSPOTS found=%d floors=%d sec=%.2f"), LowSpots.Num(), Floors, FPlatformTime::Seconds() - T0);
+	for (int32 I = 0; I < FMath::Min(LowSpots.Num(), 8); ++I)
+	{
+		UE_LOG(LogMOBMove, Log, TEXT("MOB_MOVE_LOWSPOT %d %s"), I, *LowSpots[I].ToString());
+	}
 }
 
 bool UMOBMoveRecordSubsystem::StartSegment(ULyraCharacterMovementComponent* M, ACharacter* Ch)
@@ -180,6 +239,7 @@ bool UMOBMoveRecordSubsystem::StartSegment(ULyraCharacterMovementComponent* M, A
 	bPrevValid = false;
 	NextDirAt = 0;
 	NextAdsAt = 0;	// 구간 시간 기준이라 구간마다 처음부터. 누른 상태는 이어 간다
+	NextCrouchAt = bCrouch ? CrouchRng.FRandRange(0.2, 2.5) : 0;	// 앉은 상태도 이어 간다(순간 이동한 같은 몸)
 	JumpFramesLeft = 0;
 	CurrentInput = FVector::ZeroVector;
 	if (SegIndex >= NumSegs) return false;
@@ -192,6 +252,15 @@ bool UMOBMoveRecordSubsystem::StartSegment(ULyraCharacterMovementComponent* M, A
 	const FCollisionResponseParams Response(Capsule->GetCollisionResponseToChannels());
 
 	bool bPlaced = false;
+	// 앉기 기록의 셋째 구간마다 — 낮은 천장 밑에 앉은 채 둔다. 낙하 모드에서 앉혀야 캡슐이 중심 그대로 줄어든다(걷기 모드면 바닥 쪽으로 쓸어 내린다)
+	if (bCrouch && LowSpots.Num() > 0 && (SegIndex % 3) == 2)
+	{
+		M->SetMovementMode(MOVE_Falling);
+		Ch->Crouch();
+		M->Crouch(false);
+		M->UpdatedComponent->SetWorldLocation(LowSpots[LowSegs++ % LowSpots.Num()], false, nullptr, ETeleportType::TeleportPhysics);
+		bPlaced = true;
+	}
 	for (int32 Try = 0; Try < START_TRIES && !bPlaced; ++Try)
 	{
 		const double X = Rng.FRandRange(PlayArea.Min.X, PlayArea.Max.X);
@@ -249,6 +318,16 @@ void UMOBMoveRecordSubsystem::OnPreMove(ULyraCharacterMovementComponent* M, FVec
 	}
 	Input = CurrentInput;
 
+	// 앉기 — 이 프레임 누름 · 점프 전의 상태(한 프레임 대조가 여기서 시작한다)
+	if (bCrouch)
+	{
+		bWantsBefore = M->bWantsToCrouch;
+		bCrouchedBefore = Ch->bIsCrouched;
+		HalfBefore = Ch->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+		WalkBefore = M->MaxWalkSpeed;
+		CrouchEv = 0;
+	}
+
 	// 점프 — 평균 1.5초에 한 번, 1~20프레임 누른다
 	int32 Ev = 0;
 	if (JumpFramesLeft > 0)
@@ -261,6 +340,13 @@ void UMOBMoveRecordSubsystem::OnPreMove(ULyraCharacterMovementComponent* M, FVec
 	}
 	else if (Rng.FRand() < Dt / 1.5f)
 	{
+		// Lyra 점프 능력은 점프 전에 일어서기를 부른다(LyraGameplayAbility_Jump.cpp:55) — 앉기 기록에서만 같은 순서로
+		if (bCrouch && (Ch->bIsCrouched || M->bWantsToCrouch))
+		{
+			Ch->UnCrouch();
+			CrouchEv = 2;
+			++JumpUncrouches;
+		}
 		Ch->Jump();
 		Ev = 1;
 		JumpFramesLeft = Rng.RandRange(1, 20);
@@ -270,6 +356,18 @@ void UMOBMoveRecordSubsystem::OnPreMove(ULyraCharacterMovementComponent* M, FVec
 	{
 		const FVector Launch(Rng.FRandRange(-600.0, 600.0), Rng.FRandRange(-600.0, 600.0), Rng.FRandRange(300.0, 900.0));
 		Ch->LaunchCharacter(Launch, true, true);
+	}
+
+	// 앉기 누름 — 키와 같은 길. 점프 누른 프레임은 건너뛰고 다음 프레임에 누른다(한 프레임에 두 사건을 겹치지 않게)
+	if (bCrouch && Ev != 1 && SegTime >= NextCrouchAt)
+	{
+		NextCrouchAt = SegTime + CrouchRng.FRandRange(0.2, 2.5);
+		if (ALyraCharacter* LCh = Cast<ALyraCharacter>(Ch))
+		{
+			LCh->ToggleCrouch();
+			CrouchEv = 1;
+			++CrouchPresses;
+		}
 	}
 
 	// 조준 — 이번 프레임 최대 속도(maxSpeed 칸)는 앞 프레임까지 누른 것으로 정해져 있다. 여기서 바꾼 누름은 다음 프레임에 먹는다
@@ -318,7 +416,20 @@ void UMOBMoveRecordSubsystem::OnPostMove(ULyraCharacterMovementComponent* M, flo
 	Csv += FString::Printf(TEXT("%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%d,%d,%d,%.9g,%.9g,%d"),
 		P.X, P.Y, P.Z, V.X, V.Y, V.Z, (int32)M->MovementMode, Floor.bBlockingHit ? 1 : 0, Floor.bWalkableFloor ? 1 : 0, Floor.bLineTrace ? 1 : 0,
 		Floor.FloorDist, Floor.LineDist, Ch ? Ch->JumpCurrentCount : 0);
-	Csv += bAds ? FString::Printf(TEXT(",%d\n"), bAdsHeld ? 1 : 0) : FString(TEXT("\n"));
+	if (bAds) Csv += FString::Printf(TEXT(",%d"), bAdsHeld ? 1 : 0);
+	if (bCrouch)
+	{
+		const bool bWantsA = M->bWantsToCrouch;
+		const bool bCrouchedA = Ch && Ch->bIsCrouched;
+		const float HalfA = Ch ? Ch->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() : 0.f;
+		Csv += FString::Printf(TEXT(",%d,%d,%d,%.9g,%.9g,%d,%d,%.9g"), CrouchEv, bWantsBefore ? 1 : 0, bCrouchedBefore ? 1 : 0, HalfBefore, WalkBefore,
+			bWantsA ? 1 : 0, bCrouchedA ? 1 : 0, HalfA);
+		CrouchedFrames += bCrouchedA ? 1 : 0;
+		BlockedFrames += (bCrouchedA && !bWantsA) ? 1 : 0;	// 일어서려는데 못 일어선 프레임(엔진은 매 프레임 다시 시도한다)
+		FallCrouchedFrames += (bCrouchedA && M->MovementMode == MOVE_Falling) ? 1 : 0;
+		CrouchChanges += (bCrouchedA != bCrouchedBefore) ? 1 : 0;
+	}
+	Csv += TEXT("\n");
 
 	PrevAfterLocation = P;
 	bPrevValid = true;
@@ -336,5 +447,10 @@ void UMOBMoveRecordSubsystem::Finish()
 	const bool bSaved = FFileHelper::SaveStringToFile(Csv, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 	UE_LOG(LogMOBMove, Log, TEXT("MOB_MOVE_DONE saved=%d path=%s frames=%d segs=%d ext=%d startMiss=%d realSec=%.1f"),
 		bSaved ? 1 : 0, *Path, Frame, FMath::Min(SegIndex + 1, NumSegs), ExtCount, StartMissCount, FPlatformTime::Seconds() - HookedRealAt);
+	if (bCrouch)
+	{
+		UE_LOG(LogMOBMove, Log, TEXT("MOB_MOVE_CROUCH presses=%d jumpUncrouch=%d changes=%d crouchedFrames=%d blockedFrames=%d fallCrouchedFrames=%d lowSpots=%d lowSegs=%d"),
+			CrouchPresses, JumpUncrouches, CrouchChanges, CrouchedFrames, BlockedFrames, FallCrouchedFrames, LowSpots.Num(), LowSegs);
+	}
 	FPlatformMisc::RequestExit(false);
 }

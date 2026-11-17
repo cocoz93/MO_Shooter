@@ -70,6 +70,8 @@
 #include "LyraGameplayTags.h"
 #include "EngineUtils.h"
 #include "Weapons/LyraWeaponSpawner.h"
+#include "Inventory/LyraInventoryItemDefinition.h"
+#include "Components/StaticMeshComponent.h"
 #include "Messages/LyraVerbMessage.h"
 #include "Player/LyraPlayerState.h"
 #include "Teams/LyraTeamSubsystem.h"
@@ -144,6 +146,59 @@ namespace
 	{
 	}
 
+	// 앉음은 다리가 정한다(D-5-c). 이동 컴포넌트는 틱마다 bWantsToCrouch 가 지금 앉음과 다르면 스스로 앉거나 일어서며 캡슐을 옮긴다
+	// (UCharacterMovementComponent::UpdateCharacterStateBeforeMovement — PerformMovement 안, 이 갈고리 뒤). Lyra 앉기 키(ALyraCharacter::ToggleCrouch) ·
+	// 점프 능력의 일어서기(LyraGameplayAbility_Jump.cpp:55)는 바람만 바꾸므로, 이동 직전에 바람을 지금 앉음으로 되돌리면 Lyra 혼자서는 못 앉는다.
+	// 남의 캐릭터도 같은 컴포넌트라 같이 막힌다. 센 수 = Lyra 바람이 지금 앉음과 어긋난 채 이동에 들어간 수(-MOBBreakCrouchBlock 이면 세기만 하고 안 되돌린다)
+	int64 GLyraCrouchBlocked = 0;
+	bool GCrouchCountOnly = false;
+
+	// Lyra 근접 능력(GA_Melee) 칸 — 입력 표식을 뗀 뒤에는 표식으로 못 찾으므로 손잡이로 기억한다(TickAbilityMelee)
+	FGameplayAbilitySpecHandle GMeleeSpecHandle;
+	// 예측이 켠 근접을 Lyra 능력이 아직 켜져 있어 못 켤 때 기다리는 프레임 상한. 능력 길이(0.54초, 0-2 cpb1) < 예측 간격(34입력 0.567초)이라
+	// 보통 안 기다린다 — 여섯 = 다리 판 약 73프레임/초에서 0.08초(제 판단). 넘으면 그 근접은 Lyra 몽타주 없이 지나간다(MeleeDropped)
+	constexpr uint64 kMaxMeleeWaitFrames = 6;
+	void KeepBridgeCrouch(ULyraCharacterMovementComponent* Self, FVector&, float)
+	{
+		const ACharacter* C = Self->GetCharacterOwner();
+		if (!C || Self->bWantsToCrouch == C->IsCrouched()) return;
+		if (GLyraCrouchBlocked < 20)
+		{
+			UE_LOG(LogMOB, Log, TEXT("MOB_CROUCH_MISMATCH self=%d want=%d crouched=%d mode=%d frame=%llu revert=%d"),
+				C->IsPlayerControlled() ? 1 : 0, Self->bWantsToCrouch ? 1 : 0, C->IsCrouched() ? 1 : 0, (int32)Self->MovementMode.GetValue(), (unsigned long long)GFrameCounter, GCrouchCountOnly ? 0 : 1);
+		}
+		++GLyraCrouchBlocked;
+		if (!GCrouchCountOnly) Self->bWantsToCrouch = C->IsCrouched();
+	}
+
+	// 앉음을 서버(·내 예측) 값으로. 앉음 표시를 먼저 바꾼다 — 엔진 눈높이 계산이 이 값을 읽는다(ACharacter::RecalculateBaseEyeHeight).
+	// Crouch(true) · UnCrouch(true) = 캡슐 반높이 · 메시 높이 · 눈높이만 바꾸고 자리를 안 옮기며 막힘도 안 보는 쪽이다. 자리는 부르는 쪽이 서버 값으로 입힌다. 바꿨으면 true
+	bool ApplyCrouchToCharacter(ACharacter* Ch, bool bCrouched)
+	{
+		UCharacterMovementComponent* M = Ch->GetCharacterMovement();
+		if (!M || Ch->IsCrouched() == bCrouched) return false;
+		Ch->SetIsCrouched(bCrouched);
+		M->bWantsToCrouch = bCrouched;
+		if (bCrouched) M->Crouch(true);
+		else M->UnCrouch(true);
+		// 엔진이 메시 자리를 직접 고쳐 쓰고 세상 자리는 안 갱신한다(ACharacter::OnStartCrouch 의 GetRelativeLocation_DirectMutable) — 이번 프레임 화면에 들게 갱신한다
+		if (USkeletalMeshComponent* Mesh = Ch->GetMesh()) Mesh->UpdateComponentToWorld();
+		return true;
+	}
+
+	// 메시 높이 = 클래스 기본 메시 높이 + Lift. 기준은 엔진 OnStartCrouch 와 같은 클래스 기본값이고, Lift 는 서버 판정 몸(CRoom::GetPoseAt)과 같은 값을 넘긴다
+	void SetMeshLift(ACharacter* Ch, double Lift)
+	{
+		USkeletalMeshComponent* Mesh = Ch->GetMesh();
+		const ACharacter* Default = GetDefault<ACharacter>(Ch->GetClass());
+		if (!Mesh || !Default || !Default->GetMesh()) return;
+		FVector Rel = Mesh->GetRelativeLocation();
+		const double Want = Default->GetMesh()->GetRelativeLocation().Z + Lift;
+		if (Rel.Z == Want) return;
+		Rel.Z = Want;
+		Mesh->SetRelativeLocation(Rel);
+	}
+
 	void ApplyMoveToCharacter(ACharacter* Ch, const FVector& Velocity, bool bFalling)
 	{
 		UCharacterMovementComponent* M = Ch->GetCharacterMovement();
@@ -193,6 +248,17 @@ struct FMOBCore
 	mo::CMoveSim Sim;
 	mo::MatchRules Rules;
 	mo::CSelfPrediction Prediction;
+
+	// 사람끼리 막기(D83) — 내 예측이 볼 남 캡슐. 마지막으로 받은 상태의 산 사람만(서버 · 봇 SetPawnsForPrediction 과 같은 식).
+	// 남 자리는 받은 최신 상태라 서버가 내 입력을 굴린 순간의 자리와 다르다 — 그 차이는 Reconcile 보정으로 나온다
+	std::vector<mo::PawnCapsule> Pawns;
+	// 예측이 걸음을 돌리는 동안만 넘긴다 — Sim 을 쓰는 다른 곳(근접 화면 판정 등)에 남지 않게
+	struct FPawnScope
+	{
+		FMOBCore& C;
+		explicit FPawnScope(FMOBCore& InC) : C(InC) { if (C.Rules.pawnBlock) C.Sim.SetPawns(C.Pawns.data(), C.Pawns.size()); }
+		~FPawnScope() { C.Sim.SetPawns(nullptr, 0); }
+	};
 
 	// 서버 애니(-MOBServerAnim) — 게임 스레드에서만 쓴다
 	mo::CAnimClips AnimClips;
@@ -246,7 +312,7 @@ struct FMOBCore
 	}
 
 	// 이 칸의 틱 자세가 든 칸(0·1)을 돌려준다. 없으면 계산해 넣는다. Keep 칸은 덮지 않는다 — 두 틱을 섞을 때 앞 틱 결과를 지키려고
-	int32 PoseSlot(FMOBRemoteAnim& Anim, int32 SnapIndex, uint32 Tick, float Pitch, int32 Keep, int64& Evals, int64* EvalsByWeapon)
+	int32 PoseSlot(FMOBRemoteAnim& Anim, int32 SnapIndex, uint32 Tick, float Pitch, bool bCrouched, int32 Keep, int64& Evals, int64* EvalsByWeapon)
 	{
 		for (int32 I = 0; I < 2; ++I)
 		{
@@ -262,7 +328,7 @@ struct FMOBCore
 		mo::CAnimPoseEvaluator& Evaluator = AnimEvaluators[Weapon];
 		if (Anim.PoseLocal[Slot].size() != Evaluator.BoneCount()) Anim.PoseLocal[Slot].resize(Evaluator.BoneCount());
 		mo::AnimPoseInput Input;
-		AnimCodecs[Weapon].FromWire(Anim.States[SnapIndex], Pitch, Input);
+		AnimCodecs[Weapon].FromWire(Anim.States[SnapIndex], Pitch, bCrouched, Input);		// 앉음 = 그 칸 사람 상태의 STATE_CROUCHED — 서버가 되감기 기록의 앉음으로 푸는 것과 같다(D62 8)
 		Evaluator.EvaluateLocal(Input, Anim.PoseLocal[Slot].data());
 		Anim.PoseTick[Slot] = Tick;
 		Anim.bPoseValid[Slot] = true;
@@ -305,6 +371,7 @@ void UMOBridgeSubsystem::Deinitialize()
 	if (Core)
 	{
 		ULyraCharacterMovementComponent::MOBMoveHook = nullptr;
+		if (ULyraCharacterMovementComponent::MOBPreMoveHook == &KeepBridgeCrouch) ULyraCharacterMovementComponent::MOBPreMoveHook = nullptr;
 		ULyraGameplayAbility_RangedWeapon::MOBBulletDirectionHook = nullptr;
 		ULyraGameplayAbility_RangedWeapon::MOBCanActivateHook = nullptr;
 		GBulletBridge = nullptr;
@@ -336,12 +403,15 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	FParse::Value(Cmd, TEXT("MOBMaxFPS="), MaxFpsTest);
 	FParse::Value(Cmd, TEXT("MOBTag="), Tag);
 	FParse::Value(Cmd, TEXT("MOBBreakPredictAt="), BreakPredictAt);
+	FParse::Value(Cmd, TEXT("MOBSelfBodyDelay="), SelfBodyDelay);
 	bAutoInput = FParse::Param(Cmd, TEXT("MOBAutoInput"));
 	bAutoAim = FParse::Param(Cmd, TEXT("MOBAutoAim"));
 	bAutoPitchSweep = FParse::Param(Cmd, TEXT("MOBAutoPitchSweep"));
 	FParse::Value(Cmd, TEXT("MOBAutoWeapon="), AutoWeaponFixed);
 	bEventShots = FParse::Param(Cmd, TEXT("MOBEventShots"));
 	bKeepPickups = FParse::Param(Cmd, TEXT("MOBKeepPickups"));
+	FParse::Value(Cmd, TEXT("MOBStandHp="), StandHp);
+	FParse::Value(Cmd, TEXT("MOBBreakPadsAt="), BreakPadsAt);
 	if (FParse::Value(Cmd, TEXT("MOBStandAt="), S, false))
 	{
 		const TArray<float> V = ParseFloats(S);
@@ -357,6 +427,9 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bViewLog = FParse::Param(Cmd, TEXT("MOBViewLog"));
 	bRayCheck = FParse::Param(Cmd, TEXT("MOBRayCheck"));
 	bAbilityOwnTimer = FParse::Param(Cmd, TEXT("MOBAbilityOwnTimer"));
+	bBreakCrouchBlock = FParse::Param(Cmd, TEXT("MOBBreakCrouchBlock"));
+	bBreakMeleeBlock = FParse::Param(Cmd, TEXT("MOBBreakMeleeBlock"));
+	bAutoMeleeOn = FParse::Param(Cmd, TEXT("MOBAutoMelee"));
 	FParse::Value(Cmd, TEXT("MOBRayBreak="), RayBreak);
 	bViewClamp = !FParse::Param(Cmd, TEXT("MOBNoViewClamp"));
 	FParse::Value(Cmd, TEXT("MOBBreakAt="), BreakAt);
@@ -410,11 +483,29 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 	if (bAutoInput) TickAutoInput(T);
 	TickInput(Now);
 	TickAbilityFire();
+	TickAbilityMelee();
 	if (Core && BreakPredictAt > 0 && T >= BreakPredictAt)
 	{
 		BreakPredictAt = -1;
 		Core->Prediction.DebugNudge(mo::Vec3(100, 0, 0));
 		UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_PREDICT t=%.1f seq=%u"), T, Seq);
+	}
+	if (BreakPadsAt > 0 && T >= BreakPadsAt)
+	{
+		// 받침(B-3) 일부러 틀림 셋 — 1초 대조가 켜짐 뒤집힘을, 회복 대조가 빠진 회복을, check_pads_bridge.py 가 빠진 소식을 잡아야 한다
+		BreakPadsAt = -1;
+		bBreakPadHeal = true;
+		bBreakPadDrop = true;
+		int32 Flipped = -1;
+		for (int32 i = 0; i < Pads.Num() && Flipped < 0; ++i)
+		{
+			if (ALyraWeaponSpawner* A = Pads[i].Actor.Get())
+			{
+				ApplyPadLook(*A, !Pads[i].bAvailable, false);
+				Flipped = i;
+			}
+		}
+		UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_PADS t=%.1f flipped=%d skipHeal=1 dropMsg=1"), T, Flipped);
 	}
 	if (BreakAt > 0 && T >= BreakAt)
 	{
@@ -432,6 +523,11 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 			BreakItem->AddStatTagStack(FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.MagazineAmmo")), 7);
 		}
 		UE_LOG(LogMOB, Log, TEXT("MOB_BREAK t=%.1f hp-10 score+1 mag+7"), T);
+		// 도움(A-3) — 내 점수판 도움 +2(Lyra 가 틀림 → 처치 때 맞춤이 고쳐야) · 처치 패킷으로 센 내 도움 +1(센 값 틀림 → 결과 대조가 잡아야)
+		static const FGameplayTag BreakAssist = FGameplayTag::RequestGameplayTag(TEXT("ShooterGame.Score.Assists"));
+		if (ALyraPlayerState* BreakPS = Cast<ALyraPlayerState>(FindPlayerState(PlayerId))) BreakPS->AddStatTagStack(BreakAssist, 2);
+		++ServerAssists.FindOrAdd(PlayerId);
+		UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_ASSIST id=%u lyra+2 counted+1"), PlayerId);
 	}
 	TickSelfVisual(Now, DeltaTime);
 	TickRemotes(Now);
@@ -488,6 +584,18 @@ void UMOBridgeSubsystem::Connect()
 		return;
 	}
 	ULyraCharacterMovementComponent::MOBMoveHook = &NoLyraMove;
+	// 이동 앞 갈고리는 이동 기록(-MOBMoveRecord — Lyra 이동을 켠 채 잰다)도 쓴다. 둘은 같이 켜지 않는다 — 이미 걸려 있으면 덮지 않고 알린다
+	GCrouchCountOnly = bBreakCrouchBlock;
+	if (bBreakCrouchBlock) UE_LOG(LogMOB, Warning, TEXT("MOB_CROUCH_BLOCK_OFF"));
+	if (bBreakMeleeBlock) UE_LOG(LogMOB, Warning, TEXT("MOB_MELEE_BLOCK_OFF"));
+	if (!ULyraCharacterMovementComponent::MOBPreMoveHook)
+	{
+		ULyraCharacterMovementComponent::MOBPreMoveHook = &KeepBridgeCrouch;
+	}
+	else
+	{
+		UE_LOG(LogMOB, Error, TEXT("MOB_CROUCH_HOOK_BUSY"));
+	}
 	if (!bAbilityOwnTimer)
 	{
 		GBulletBridge = this;
@@ -624,12 +732,17 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 			}
 			if (Core)
 			{
-				Core->Prediction.OnSpawn(M.x, M.y, M.z, M.lastSeq);
+				{
+					const FMOBCore::FPawnScope PawnScope(*Core);	// 부활 자리에서 다시 돌리는 걸음도 남 캡슐을 본다(봇과 같다)
+					Core->Prediction.OnSpawn(M.x, M.y, M.z, M.lastSeq);
+				}
 				NextStandAt = 0;	// 촬영 전용 — 시작 자리로 돌아갔으면 바로 다시 옮긴다(맵이 달라 시작 자리는 허공이다)
+				bStandPlaced = false;	// 받침 시험(-MOBStandHp) — 새 몸도 다친 채 선다(경기 시작 부활이 체력 100 으로 다시 세웠다, B-3 pb1)
 				SelfCur = ToFVector(Core->Prediction.GetMove().location);
 				SelfPrev = SelfCur;
 				VisualError = FVector::ZeroVector;
 			}
+			if (Core && Core->Prediction.GetSeq() <= M.lastSeq) MeleeYaw = M.yaw;	// 서버 player.yaw 가 시작 자리 요로 바뀐다(봇과 같다)
 			InputsSinceSpawn = 0;
 			UE_LOG(LogMOB, Log, TEXT("MOB_SPAWN me tick=%u lastSeq=%u at=(%.1f,%.1f,%.1f) yaw=%.1f start=%u"), M.tick, M.lastSeq, M.x, M.y, M.z, M.yaw, M.startIndex);
 		}
@@ -641,6 +754,7 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 		++StatesRecv;
 		bool bFoundMe = false;
 		const double TickSample = (double)M.tick - FPlatformTime::Seconds() * wire::kTickRate;
+		LastStateTick = FMath::Max(LastStateTick, M.tick);
 		if (!bHasTickClock || FMath::Abs(TickSample - TickClockOffset) > 30.0)
 		{
 			TickClockOffset = TickSample;
@@ -651,6 +765,8 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 			TickClockOffset += 0.02 * (TickSample - TickClockOffset);
 		}
 		int32 TailAt = (int32)offsetof(wire::State, players) + (int32)sizeof(wire::PlayerState) * FMath::Min<int32>(M.count, wire::kMaxPlayersInRoom);	// 꼬리 = 사람 차례대로 애니 상태
+		if (Core) Core->Pawns.clear();		// 이 상태에 안 실린 사람(나감)은 빠진다
+		int32 MineAt = -1;
 		for (int32 i = 0; i < M.count && i < wire::kMaxPlayersInRoom; ++i)
 		{
 			const wire::PlayerState& P = M.players[i];
@@ -660,8 +776,25 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 			if (P.id != PlayerId)
 			{
 				AddRemoteSnapshot(P, M.tick, bAnim ? &Anim : nullptr);
+				if (Core && !(P.flags & wire::STATE_DEAD))
+				{
+					mo::MoveState Shape;
+					Shape.crouched = (P.flags & wire::STATE_CROUCHED) != 0;
+					mo::PawnCapsule Capsule;
+					Capsule.center = mo::Vec3(P.x, P.y, P.z);
+					Capsule.radius = Core->Params.capsuleRadius;
+					Capsule.halfHeight = Core->Sim.HalfHeightOf(Shape);
+					Capsule.yaw = P.yaw;
+					Core->Pawns.push_back(Capsule);
+				}
 				continue;
 			}
+			MineAt = i;
+		}
+		// 내 줄은 남 자리를 이 상태로 다 갱신한 뒤에 고친다 — 다시 돌리는 걸음도 남 캡슐을 본다(봇 OnState 와 같은 차례)
+		if (MineAt >= 0)
+		{
+			const wire::PlayerState& P = M.players[MineAt];
 			bFoundMe = true;
 			AckSeq = P.lastSeq;
 			ServerHp = P.hp;
@@ -699,15 +832,56 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 	}
 	case wire::Msg::S2C_KILL:
 	{
-		wire::Kill M; FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
+		wire::Kill M = wire::Kill(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));	// 도움 번호는 수만큼만 온다(A-2) — 뒤는 0
 		HandleKill(M);
+		break;
+	}
+	case wire::Msg::S2C_PICKUP:
+	{
+		wire::Pickup M = wire::Pickup(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
+		HandlePickup(M);
+		break;
+	}
+	case wire::Msg::S2C_MELEE:
+	{
+		wire::Melee M = wire::Melee(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
+		HandleMelee(M);
 		break;
 	}
 	case wire::Msg::S2C_RESULT:
 	{
-		wire::Result M; FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
+		wire::Result M = wire::Result(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));	// 사람 칸은 수만큼만 온다 — 뒤는 0
 		ResultAt = FPlatformTime::Seconds();
 		UE_LOG(LogMOB, Log, TEXT("MOB_RESULT tick=%u score=%u:%u winner=%u players=%u"), M.tick, M.teamScoreA, M.teamScoreB, M.winningTeam, M.count);
+		// 도움 대조(A-3) — 결과의 서버 최종값 ↔ 처치 패킷으로 센 값 · Lyra 점수판 값. 다르면 센 값을 서버 값으로 바꾸고 점수판도 맞춘다
+		{
+			static const FGameplayTag AssistTag = FGameplayTag::RequestGameplayTag(TEXT("ShooterGame.Score.Assists"));
+			const int32 Count = FMath::Min<int32>(M.count, wire::kMaxPlayersInRoom);
+			for (int32 i = 0; i < Count; ++i)
+			{
+				const wire::PlayerResult& P = M.players[i];
+				++AssistResultPlayers;
+				int32& Counted = ServerAssists.FindOrAdd(P.id);
+				const int32 Before = Counted;
+				if (Counted != (int32)P.assists) ++AssistResultCountDiff;
+				Counted = P.assists;
+				const ALyraPlayerState* LPS = Cast<ALyraPlayerState>(FindPlayerState(P.id));
+				const int32 Lyra = LPS ? LPS->GetStatTagStackCount(AssistTag) : -1;
+				if (LPS)
+				{
+					++AssistResultLyraSeen;
+					AssistResultLyraSum += Lyra;
+					if (Lyra != (int32)P.assists) ++AssistResultLyraDiff;
+				}
+				if (Before != (int32)P.assists || (LPS && Lyra != (int32)P.assists))
+				{
+					UE_LOG(LogMOB, Log, TEXT("MOB_ASSIST_DIFF id=%u server=%u counted=%d lyra=%d"), P.id, P.assists, Before, Lyra);
+				}
+			}
+			SyncAssists();
+			UE_LOG(LogMOB, Log, TEXT("MOB_ASSIST_RESULT players=%lld countDiff=%lld lyraDiff=%lld lyraSeen=%lld lyraSum=%lld assistsRecv=%lld fixes=%lld"),
+				AssistResultPlayers, AssistResultCountDiff, AssistResultLyraDiff, AssistResultLyraSeen, AssistResultLyraSum, AssistsRecv, AssistFixes);
+		}
 		break;
 	}
 	default:
@@ -744,8 +918,16 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 		const bool bServerAds = (P.flags & wire::STATE_ADS) != 0;
 		if (bServerAds) ++AdsComparedOn;
 		if (bServerAds != S->ads.active) ++AdsFlagDiff;
+		// 앉음 — 같은 식(봇 CompareSelf 의 앉음 비교와 같다, D-5)
+		const bool bServerCrouch = (P.flags & wire::STATE_CROUCHED) != 0;
+		if (bServerCrouch) ++CrouchComparedOn;
+		if (bServerCrouch != S->move.crouched) ++CrouchFlagDiff;
 	}
-	const mo::CSelfPrediction::ReconcileResult R = Core->Prediction.Reconcile(P, kCorrectTolerance);
+	mo::CSelfPrediction::ReconcileResult R;
+	{
+		const FMOBCore::FPawnScope PawnScope(*Core);
+		R = Core->Prediction.Reconcile(P, kCorrectTolerance);
+	}
 	if (R.compared)
 	{
 		++PosDiffCount;
@@ -781,6 +963,7 @@ void UMOBridgeSubsystem::TickSelfVisual(double Now, float DeltaTime)
 	if (!Ch) return;
 	const ULyraHealthComponent* HC = ULyraHealthComponent::FindHealthComponent(Ch);
 	if (HC && HC->IsDeadOrDying()) return;	// 쓰러지는 모습은 Lyra 몫 — 자리를 덮지 않는다
+	EnsureSelfBody(Ch);
 
 	const FName PawnName = Ch->GetFName();
 	if (!LastPawnName.IsNone() && PawnName != LastPawnName)
@@ -797,6 +980,23 @@ void UMOBridgeSubsystem::TickSelfVisual(double Now, float DeltaTime)
 		const double Drift = FVector::Dist(Ch->GetActorLocation(), SelfLastSet);
 		SelfDriftMax = FMath::Max(SelfDriftMax, Drift);
 		if (Drift > 1.0) ++SelfDriftOver1cm;
+		if (Drift > 1.0 && DriftLinesLeft > 0)
+		{
+			// 누가 옮겼나 가르기 — Lyra 근접 능력이 켜져 있었나(GA_Melee 의 밀기 · 몽타주) · 상대 몸이 붙어 있었나(겹침 밀어내기)
+			--DriftLinesLeft;
+			double NearestRemote = -1.0;
+			for (const TPair<uint32, FMOBRemote>& Pair : Remotes)
+			{
+				if (!Pair.Value.Pawn.IsValid()) continue;
+				const double D = FVector::Dist2D(Ch->GetActorLocation(), Pair.Value.Pawn->GetActorLocation());
+				if (NearestRemote < 0.0 || D < NearestRemote) NearestRemote = D;
+			}
+			const FVector Moved = Ch->GetActorLocation() - SelfLastSet;
+			const UCharacterMovementComponent* CMC = Ch->GetCharacterMovement();
+			UE_LOG(LogMOB, Log, TEXT("MOB_SELF_DRIFT frame=%llu seq=%u drift=%.2f moved=(%.2f,%.2f,%.2f) lyraMelee=%d nearestRemote=%.1f mode=%d crouched=%d"),
+				(unsigned long long)GFrameCounter, Seq, Drift, Moved.X, Moved.Y, Moved.Z, bLyraMeleeWasActive ? 1 : 0, NearestRemote,
+				CMC ? (int32)CMC->MovementMode.GetValue() : -1, Ch->IsCrouched() ? 1 : 0);
+		}
 	}
 
 	const mo::MoveState& Move = Core->Prediction.GetMove();
@@ -805,6 +1005,9 @@ void UMOBridgeSubsystem::TickSelfVisual(double Now, float DeltaTime)
 	VisualError *= FMath::Exp(-kVisualErrorDecay * DeltaTime);
 	const FVector Shown = FMath::Lerp(SelfPrev, SelfCur, Alpha) + VisualError;
 
+	// 앉음 = 예측의 지금 값(서버와 같은 코드). 자리는 직전 · 지금 입력 사이를 메우지만 앉음은 섞지 않는다 — 한 입력(1/60초) 안의 차이라 둔다(제 판단).
+	// 캡슐 반높이가 Lyra 카메라 중심 높이에 들어가므로(ULyraCameraMode::GetPivotLocation) 자리 입히기 앞에 바꾼다
+	if (ApplyCrouchToCharacter(Ch, Move.crouched)) ++SelfCrouchChanges;
 	Ch->SetActorLocation(Shown, false, nullptr, ETeleportType::TeleportPhysics);
 	SelfLastSet = Ch->GetActorLocation();
 	bSelfSet = true;
@@ -839,6 +1042,7 @@ void UMOBridgeSubsystem::AddRemoteSnapshot(const wire::PlayerState& P, uint32 Se
 	S.MoveX = P.moveX;
 	S.MoveY = P.moveY;
 	S.bFalling = (P.flags & wire::STATE_FALLING) != 0;
+	S.bCrouched = (P.flags & wire::STATE_CROUCHED) != 0;
 	++R.SnapCount;
 	R.Weapon = P.weapon;
 
@@ -1061,6 +1265,14 @@ void UMOBridgeSubsystem::TickRemotes(double Now)
 		RemoteLagSum += FVector::Dist(Shown.Pos, Newest.Pos);
 		RemoteBehindSum += (double)Newest.Tick - RenderTick;
 
+		// 앉음 · 메시 올림 — 서버 판정 몸(CRoom::GetPoseAt)과 같은 규칙. 앞 틱 앉음으로 잡고, 바로 다음 틱과 자세를 섞을 때만 같은 비율로 섞는다(D64).
+		// 땅에서 앉은 틱은 중심이 25 내려가고 올림이 25 늘어 섞는 동안에도 메시 세상 높이가 그대로다
+		if (ApplyCrouchToCharacter(Ch, PoseFrom->bCrouched)) ++RemoteCrouchChanges;
+		const double LiftZ = Core->Sim.CrouchMeshLiftZ();
+		double Lift = PoseFrom->bCrouched ? LiftZ : 0.0;
+		if (PoseTo) Lift += ((PoseTo->bCrouched ? LiftZ : 0.0) - Lift) * (double)PoseAlpha;
+		SetMeshLift(Ch, Lift);
+		if (Lift > 0.0) ++RemoteLiftFrames;
 		const FRotator Rot(0.f, Shown.Yaw, 0.f);
 		Ch->SetActorLocationAndRotation(Shown.Pos, Rot, false, nullptr, ETeleportType::TeleportPhysics);
 		R.LastSet = Ch->GetActorLocation();
@@ -1096,17 +1308,17 @@ void UMOBridgeSubsystem::ApplyServerAnim(FMOBRemote& R, ACharacter* Ch, const FM
 	}
 	static_assert(UE_ARRAY_COUNT(AnimPoseEvalsByWeapon) == (size_t)mo::EWeapon::Count, "무기별 자세 계산 수 칸 = 무기 수");
 	const uint8 PoseWeapon = Anim->Weapons[FromIndex];	// 앞 틱의 무기 — 섞기와 언리얼 경로(손가락 · 꼬임 뼈) 클립 한 벌을 이 무기로 고른다(서버 GetPoseAt 도 앞 틱 묶음으로 섞는다)
-	const int32 FromSlot = Core->PoseSlot(*Anim, FromIndex, From.Tick, From.Pitch, INDEX_NONE, AnimPoseEvals, AnimPoseEvalsByWeapon);
+	const int32 FromSlot = Core->PoseSlot(*Anim, FromIndex, From.Tick, From.Pitch, From.bCrouched, INDEX_NONE, AnimPoseEvals, AnimPoseEvalsByWeapon);
 	const mo::BoneTransform* Local = Anim->PoseLocal[FromSlot].data();
 	const int32 ToIndex = To ? (int32)(To - R.Snaps) : INDEX_NONE;
 	if (To && Alpha > 0.f && Anim->bHas[ToIndex])
 	{
-		const int32 ToSlot = Core->PoseSlot(*Anim, ToIndex, To->Tick, To->Pitch, FromSlot, AnimPoseEvals, AnimPoseEvalsByWeapon);
+		const int32 ToSlot = Core->PoseSlot(*Anim, ToIndex, To->Tick, To->Pitch, To->bCrouched, FromSlot, AnimPoseEvals, AnimPoseEvalsByWeapon);
 		Core->AnimEvaluators[PoseWeapon].BlendLocal(Anim->PoseLocal[FromSlot].data(), Anim->PoseLocal[ToSlot].data(), Alpha, Core->AnimBlend.data());
 		Local = Core->AnimBlend.data();
 	}
 	mo::AnimPoseInput Input;
-	Core->AnimCodecs[PoseWeapon].FromWire(Anim->States[FromIndex], From.Pitch, Input);
+	Core->AnimCodecs[PoseWeapon].FromWire(Anim->States[FromIndex], From.Pitch, From.bCrouched, Input);
 	// 몽타주 칸마다 무기 번호 — 칸의 묶음은 그 칸을 튼 무기의 것이다(무기를 바꾸는 틱엔 앞 무기 「빼기」와 새 무기 「꺼내기」가 함께 돈다, D51)
 	const auto FillMontageWeapons = [this](const mo::AnimPoseInput& In, int32 (&Out)[mo::kAnimMontageMax])
 	{
@@ -1133,7 +1345,7 @@ void UMOBridgeSubsystem::ApplyServerAnim(FMOBRemote& R, ACharacter* Ch, const FM
 		if (Anim->bNotifyValid ? S.Tick <= Anim->NotifyTick : S.Tick != From.Tick) continue;
 		if (!Anim->bHas[Index]) continue;
 		mo::AnimPoseInput StepInput;
-		Core->AnimCodecs[Anim->Weapons[Index]].FromWire(Anim->States[Index], S.Pitch, StepInput);
+		Core->AnimCodecs[Anim->Weapons[Index]].FromWire(Anim->States[Index], S.Pitch, S.bCrouched, StepInput);
 		int32 StepWeapons[mo::kAnimMontageMax];
 		FillMontageWeapons(StepInput, StepWeapons);
 		MOBStepServerMontages(Ch, StepInput, S.Tick, StepWeapons, Anim->bNotifyValid, Result);
@@ -1147,6 +1359,8 @@ void UMOBridgeSubsystem::ApplyServerAnim(FMOBRemote& R, ACharacter* Ch, const FM
 	AnimMontageMisses += Result.MontageMisses;
 	AnimAdsLayers += Result.AdsLayers;
 	AnimBadLayers += Result.BadLayers;
+	AnimCrouchLayers += Result.CrouchLayers;
+	AnimStanceLayers += Result.StanceLayers;
 	AnimSlotPasses += Result.SlotPasses;
 	AnimMaskMissing += Result.bMaskMissing ? 1 : 0;
 	AnimWeaponNotifies += Result.WeaponNotifies;
@@ -1193,6 +1407,131 @@ void UMOBridgeSubsystem::EnsureRemoteBody(FMOBRemote& R, ACharacter* Ch)
 	++R.BodyTries;
 	const bool bSet = MOBSetBodyPart(Ch, TEXT("/Game/Characters/Cosmetics/B_Quinn.B_Quinn_C"));
 	if (!bSet || R.BodyTries == BODY_TRY_LIMIT) UE_LOG(LogMOB, Error, TEXT("MOB_SERVERANIM_FAIL body id=%u tries=%d set=%d mesh=%s"), R.Id, R.BodyTries, bSet ? 1 : 0, *GetNameSafe(Asset));
+}
+
+// 내 몸도 Quinn 으로 맞춘다(D85 — D33 연장). 서버 클립 · 근접 판정 기록이 Quinn · 여성형 무기 층이라, 내 몸이 Manny 면 내 화면 손이 서버 손과
+// 권총 12.5cm 다르다(17-d 실측 — 판정은 서버라 결과는 같고 보이는 것만 다르다). 남의 몸(EnsureRemoteBody)과 같은 함수 · 같은 재시도.
+// 무기 층은 쥘 때 고르므로 몸만 바꾸면 남성형 층이 남는다(17-d d1q3) — 몸이 Quinn 인데 층이 여성형이 아니면 지금 칸을 다른 칸 → 제 칸으로 다시 쥔다(기록 도구 -MOBCPQuinn 과 같은 길)
+void UMOBridgeSubsystem::EnsureSelfBody(ACharacter* Ch)
+{
+	static const FName QUINN_BODY(TEXT("SKM_Quinn_Invis"));
+	constexpr int32 BODY_TRY_LIMIT = 20;
+	constexpr int32 REEQUIP_TRY_LIMIT = 5;
+	constexpr double BODY_RETRY_SECONDS = 0.5;
+	constexpr double REEQUIP_RETRY_SECONDS = 1.0;	// 쥐기 몽타주(권총 약 1초)가 끝날 만큼
+
+	const double Now = FPlatformTime::Seconds();
+	if (SelfBodyChecking.Get() != Ch)
+	{
+		SelfBodyChecking = Ch;
+		bSelfBodyDone = false;
+		SelfBodyNextTryAt = Now + SelfBodyDelay;	// 시험 -MOBSelfBodyDelay 만 미룬다 — 평소 0
+		SelfBodyTries = 0;
+		SelfReequipTries = 0;
+		SelfEmptyLogs = 0;
+		SelfEmptyLogAt = 0;
+		SelfEmptySince = 0;
+		if (SelfBodyDelay > 0)
+		{
+			// 시험 — 먼저 Manny 로 바꿔 총을 남성형 층으로 쥐게 하고, 미룬 시간이 지나면 아래가 Quinn 으로 바꾼다(총을 쥔 뒤 몸이 바뀌는 경우).
+			// Lyra 가 처음부터 Quinn 을 주면 바꾸기가 안 일어나 시험이 안 된다(첫 판 bodydelay sets=0)
+			const bool bManny = MOBSetBodyPart(Ch, TEXT("/Game/Characters/Cosmetics/B_Manny.B_Manny_C"));
+			UE_LOG(LogMOB, Log, TEXT("MOB_SELFBODY_TEST_MANNY pawn=%s set=%d"), *GetNameSafe(Ch), bManny ? 1 : 0);
+		}
+	}
+	if (bSelfBodyDone) return;
+	if (Now < SelfBodyNextTryAt) return;
+
+	USkeletalMeshComponent* Mesh = Ch->GetMesh();
+	const USkeletalMesh* Asset = Mesh ? Mesh->GetSkeletalMeshAsset() : nullptr;
+	if (!Asset || Asset->GetFName() != QUINN_BODY)
+	{
+		if (SelfBodyTries >= BODY_TRY_LIMIT) return;
+		if (SelfBodyTries == 0 && SelfBodyDelay > 0 && Mesh)
+		{
+			// 시험 — 바꾸기 직전 층(총을 이미 쥐었나)을 남긴다
+			FString Before;
+			const USkeletalMeshComponent* ConstBefore = Mesh;
+			for (const UAnimInstance* L : ConstBefore->GetLinkedAnimInstances()) Before += GetNameSafe(L ? L->GetClass() : nullptr) + TEXT(" ");
+			UE_LOG(LogMOB, Log, TEXT("MOB_SELFBODY_BEFORE pawn=%s body=%s layers=[%s] delay=%.1f"), *GetNameSafe(Ch), *GetNameSafe(Asset), *Before.TrimEnd(), SelfBodyDelay);
+		}
+		SelfBodyNextTryAt = Now + BODY_RETRY_SECONDS;
+		++SelfBodyTries;
+		++SelfBodySets;
+		const bool bSet = MOBSetBodyPart(Ch, TEXT("/Game/Characters/Cosmetics/B_Quinn.B_Quinn_C"));
+		if (!bSet || SelfBodyTries == BODY_TRY_LIMIT)
+		{
+			++SelfBodyFails;
+			UE_LOG(LogMOB, Error, TEXT("MOB_SELFBODY_FAIL body tries=%d set=%d mesh=%s"), SelfBodyTries, bSet ? 1 : 0, *GetNameSafe(Asset));
+		}
+		return;
+	}
+
+	// 몸은 Quinn — 무기 층을 본다. 층이 아직 없으면(무기를 안 쥠) 쥘 때까지 기다린다 — 그때 고르는 층이 여성형이다
+	FString Layers;
+	bool bAnyLayer = false, bFeminine = false;
+	const USkeletalMeshComponent* ConstMesh = Mesh;		// 층 목록은 const 로만 열려 있다(기록 도구 LogBodies 와 같은 부름)
+	for (const UAnimInstance* L : ConstMesh->GetLinkedAnimInstances())
+	{
+		const FString Name = GetNameSafe(L ? L->GetClass() : nullptr);
+		Layers += Name + TEXT(" ");
+		bAnyLayer = true;
+		bFeminine |= Name.Contains(TEXT("Feminine"));
+	}
+	if (!bAnyLayer)
+	{
+		// 층이 빈 채 기다리는 동안을 센다 — 총을 쥔 뒤 몸이 바뀌어 층이 빠진 경우(D88)를 보려고
+		++SelfBodyEmptyFrames;
+		if (SelfEmptySince == 0) SelfEmptySince = Now;
+		const APlayerController* EmptyPC = Cast<APlayerController>(Ch->GetController());
+		const ULyraQuickBarComponent* EmptyBar = EmptyPC ? EmptyPC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+		const int32 EmptySlot = EmptyBar ? EmptyBar->GetActiveSlotIndex() : -2;
+		if (SelfEmptyLogs < 20 && Now >= SelfEmptyLogAt)
+		{
+			SelfEmptyLogAt = Now + 1.0;
+			++SelfEmptyLogs;
+			UE_LOG(LogMOB, Log, TEXT("MOB_SELFBODY_EMPTY pawn=%s body=%s activeSlot=%d bodyTries=%d emptyFor=%.2f log=%d"),
+				*GetNameSafe(Ch), *Asset->GetName(), EmptySlot, SelfBodyTries, Now - SelfEmptySince, SelfEmptyLogs);
+		}
+		// 쥔 칸이 없으면(부활 직후 무기 받기 전) 쥘 때 여성형 층이 붙으므로 기다린다. 쥔 칸이 있는데 1초 넘게 비었으면 총을 쥔 뒤 몸이 바뀌어
+		// 층이 빠진 것이다 — 다른 무기로 바꿀 때까지 안 돌아온다(bodydelay2 실측 7 · 9초) → 아래 다시 쥐기로 넘긴다(D88)
+		if (EmptySlot < 0 || Now - SelfEmptySince < REEQUIP_RETRY_SECONDS) return;
+	}
+	else
+	{
+		SelfEmptySince = 0;
+	}
+	if (bFeminine)
+	{
+		bSelfBodyDone = true;
+		++SelfBodyDonePawns;
+		UE_LOG(LogMOB, Log, TEXT("MOB_SELFBODY pawn=%s body=%s layers=[%s] bodyTries=%d reequipTries=%d"), *GetNameSafe(Ch), *Asset->GetName(), *Layers.TrimEnd(), SelfBodyTries, SelfReequipTries);
+		return;
+	}
+	if (SelfReequipTries >= REEQUIP_TRY_LIMIT)
+	{
+		bSelfBodyDone = true;
+		++SelfBodyFails;
+		UE_LOG(LogMOB, Error, TEXT("MOB_SELFBODY_FAIL layer tries=%d layers=[%s]"), SelfReequipTries, *Layers.TrimEnd());
+		return;
+	}
+	APlayerController* PC = Cast<APlayerController>(Ch->GetController());
+	ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	if (!Bar) return;
+	const int32 Active = Bar->GetActiveSlotIndex();
+	const TArray<ULyraInventoryItemInstance*> Slots = Bar->GetSlots();
+	int32 Other = INDEX_NONE;
+	for (int32 S = 0; S < Slots.Num(); ++S)
+	{
+		if (S != Active && Slots[S]) { Other = S; break; }
+	}
+	if (Active == INDEX_NONE || Other == INDEX_NONE) return;
+	SelfBodyNextTryAt = Now + REEQUIP_RETRY_SECONDS;
+	++SelfReequipTries;
+	++SelfReequips;
+	Bar->SetActiveSlotIndex(Other);
+	Bar->SetActiveSlotIndex(Active);	// 고른 칸은 그대로 — 서버 무기 번호와 같은 칸(SyncSelfWeapon)
+	UE_LOG(LogMOB, Log, TEXT("MOB_SELFBODY_REEQUIP slot=%d via=%d layers=[%s] try=%d"), Active, Other, *Layers.TrimEnd(), SelfReequipTries);
 }
 
 // 진단 — 안 그려지는 캐릭터는 애니가 안 돌 수 있으므로 그려진 프레임만 상태를 센다. 내 캐릭터와 나란히 찍어 대조한다
@@ -1262,7 +1601,9 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		Place.x = StandAt.X;
 		Place.y = StandAt.Y;
 		Place.z = StandAt.Z;
-		Place.hp = 100.f;
+		// 받침 시험(-MOBStandHp)은 부활 뒤 첫 자리 옮김만 그 체력 — 뒤 알림까지 그 값이면 회복된 체력을 조용히 되돌린다
+		Place.hp = StandHp <= 0.f ? 100.f : (!bStandPlaced || ServerHp <= 0.f ? StandHp : ServerHp);
+		bStandPlaced = true;
 		QueuePacket(&Place, sizeof(Place));
 		return;
 	}
@@ -1302,6 +1643,12 @@ void UMOBridgeSubsystem::TickInput(double Now)
 
 	// 시작점 거리 훑기 — 서버가 부활 뒤 낡은 값으로 따로 세는 첫 30입력(Room.cpp kAimStaleInputs)과 죽은 동안은 뺀다.
 	// 조준 칸은 누름 기준이라 카메라가 섞이는 0.22초는 누른 쪽 칸에 든다 — 허용 거리는 두 칸을 합친 최대로 본다
+	const bool bSweepCrouchNow = Ch->IsCrouched();
+	if (bSweepCrouchNow != bSweepCrouched)
+	{
+		bSweepCrouched = bSweepCrouchNow;
+		SweepCrouchChangedAt = Now;
+	}
 	++InputsSinceSpawn;
 	if (InputsSinceSpawn > 30 && !(ServerFlags & wire::STATE_DEAD))
 	{
@@ -1311,10 +1658,22 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		const double CamPitch = FRotator::NormalizeAxis(CamRot.Pitch);
 		const int32 Bin = FMath::Clamp(FMath::FloorToInt((CamPitch + 90.0) / 10.0), 0, 17);
 		const int32 AdsSlot = (bAutoInput ? bAutoAds : PC->IsInputKeyDown(EKeys::RightMouseButton)) ? 1 : 0;
+		// 앉음은 Lyra 캐릭터 상태로 가른다 — 카메라 받침점이 캡슐 반높이를 따르므로(LyraCameraMode) 시작점을 정하는 쪽이 이 값이다(D-6-a)
+		const int32 Slot = AdsSlot + (Ch->IsCrouched() ? 2 : 0);
 		const FVector D = Aim - Location;
-		++AimSweepInputs[AdsSlot][Bin];
-		AimSweepDistMax[AdsSlot][Bin] = FMath::Max(AimSweepDistMax[AdsSlot][Bin], D.Size());
-		AimSweepHorizMax[AdsSlot][Bin] = FMath::Max(AimSweepHorizMax[AdsSlot][Bin], D.Size2D());
+		++AimSweepInputs[Slot][Bin];
+		AimSweepDistMax[Slot][Bin] = FMath::Max(AimSweepDistMax[Slot][Bin], D.Size());
+		AimSweepHorizMax[Slot][Bin] = FMath::Max(AimSweepHorizMax[Slot][Bin], D.Size2D());
+		const int32 CrouchSlot = bSweepCrouchNow ? 1 : 0;
+		if (SweepCrouchChangedAt >= 0 && Now - SweepCrouchChangedAt < 0.25)
+		{
+			++AimSweepFreshInputs[CrouchSlot];
+			AimSweepFreshMax[CrouchSlot] = FMath::Max(AimSweepFreshMax[CrouchSlot], D.Size());
+		}
+		else
+		{
+			AimSweepSteadyMax[CrouchSlot] = FMath::Max(AimSweepSteadyMax[CrouchSlot], D.Size());
+		}
 		AimSweepPitchMin = FMath::Min(AimSweepPitchMin, CamPitch);
 		AimSweepPitchMax = FMath::Max(AimSweepPitchMax, CamPitch);
 	}
@@ -1331,7 +1690,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		const double AimHoriz = AimDelta.Size2D();
 		AimDistMax = FMath::Max(AimDistMax, AimDist);
 		AimHorizMax = FMath::Max(AimHorizMax, AimHoriz);
-		if (AimDist > 120.0 || AimHoriz > 90.0)
+		if (AimDist > 140.0 || AimHoriz > 90.0)	// 거리 = 서버 허용 거리(Room.cpp kAimMaxDistance, D66 에서 120 → 140)
 		{
 			++AimFarLocal;
 			if (AimFarLinesLeft > 0)
@@ -1346,8 +1705,12 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	}
 	const bool bJump = bAutoInput ? bAutoJump : PC->IsInputKeyDown(EKeys::SpaceBar);
 	const bool bReloadDown = bAutoInput ? bAutoReload : PC->IsInputKeyDown(EKeys::R);
+	// 앉기 = LeftControl(IMC_Default 의 IA_Crouch, 원본 기준). IA_Crouch 동작에 Pressed 트리거가 있어 Lyra 도 누를 때 한 번만 바꾼다 — 서버도 누른 입력 하나에만 바꾼다(BUTTON_CROUCH, D-5)
+	const bool bCrouchDown = bAutoInput ? bAutoCrouch : PC->IsInputKeyDown(EKeys::LeftControl);
 	// 조준 = 오른쪽 단추(IA_ADS, 0-1). Lyra 도 같은 키로 제 조준 능력을 그 프레임에 켜 내 카메라 · 조준점 · 시선 감도가 바뀐다 — 서버도 이 입력부터 조준이라 막지 않는다(D61)
 	const bool bAds = bAutoInput ? bAutoAds : PC->IsInputKeyDown(EKeys::RightMouseButton);
+	// 근접 = C · E(IMC_ShooterGame 의 IA_Melee, 0-1 원본 기준). 누르고 있는 동안 입력마다 단추를 싣는다 — 켜지는 것은 능력 간격마다(서버 · 예측 CMeleeAbility)
+	const bool bMelee = bAutoInput ? bAutoMelee : (PC->IsInputKeyDown(EKeys::C) || PC->IsInputKeyDown(EKeys::E));
 	// D61 확인 — 서버는 이 입력부터 조준이다. Lyra 도 같은 프레임에 최대 속도를 바꾸나(0 = 같은 프레임). 이 함수는 그 프레임 Lyra 입력 처리 뒤에 돈다
 	if (const UCharacterMovementComponent* AdsMove = Ch->GetCharacterMovement())
 	{
@@ -1416,11 +1779,32 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		if (bFire) In.buttons |= wire::BUTTON_FIRE;
 		if (bReloadDown && !bReloadWasDown) { In.buttons |= wire::BUTTON_RELOAD; ++InputsReload; }
 		bReloadWasDown = bReloadDown;
+		if (bCrouchDown && !bCrouchWasDown) { In.buttons |= wire::BUTTON_CROUCH; ++InputsCrouch; }
+		bCrouchWasDown = bCrouchDown;
 		if (bAds) { In.buttons |= wire::BUTTON_ADS; ++InputsAds; }
+		if (bMelee) { In.buttons |= wire::BUTTON_MELEE; ++InputsMelee; }
 
 		// 번호를 붙이고 여기서도 돌린다 — 서버 답을 기다리지 않고 바로 움직이려고
-		Core->Prediction.AddInput(In);
+		// 근접(E-3) — 이 입력이 근접을 켜면 넣기 전에 화면 판정을 해, 맞음이면 밀기를 같이 넣는다(봇과 같은 길, D75). Lyra 근접 능력은 TickAbilityMelee 가 켠다
+		const bool bMeleeStarts = Core->Prediction.WillMeleeStart(In);
+		FMOBMeleeGuess MeleeGuess;
+		mo::Vec3 MeleePush;
+		if (bMeleeStarts) MeleeGuess = JudgeMelee(MeleePush);
+		{
+			const FMOBCore::FPawnScope PawnScope(*Core);	// 화면 판정(JudgeMelee) 뒤에 넘긴다 — 봇과 같은 차례
+			Core->Prediction.AddInput(In, bMeleeStarts && MeleeGuess.Kind == wire::MELEE_HIT ? &MeleePush : nullptr);
+		}
 		Seq = In.seq;
+		MeleeYaw = In.yaw;
+		if (bMeleeStarts)
+		{
+			MeleeGuesses.Add(In.seq, MeleeGuess);
+			if (bMeleePending) ++MeleeDropped;	// 앞 근접을 아직 못 켰다 — 능력 간격보다 오래 못 켠 것
+			bMeleePending = true;
+			MeleePendingSeq = In.seq;
+			MeleePendingFrame = GFrameCounter;
+			++MeleeQueued;
+		}
 		const mo::WeaponEvents& PredictedFire = Core->Prediction.GetLastWeaponEvents();
 		if (PredictedFire.fired && !bAbilityOwnTimer)
 		{
@@ -1545,6 +1929,157 @@ bool UMOBridgeSubsystem::AllowAbilityActivation()
 	}
 	++FireGateBlocks;
 	return false;
+}
+
+// 근접 화면 판정(E-3 17-c) — 서버 CRoom::TryMelee 와 같은 식, 봇 JudgeMelee 와 같은 짜임(D75). 손 = 걸음 앞 예측 자리 · 앞 입력의 요 · 기본 자세 손(앉았으면 메시 올림).
+// 상대 = 지난 프레임에 화면에 놓은 자리 · 요 — 이 입력이 싣는 시점(viewTick · viewAlpha)이 그 자리이고 서버가 그 시점으로 되감는다. 캡슐 높이 = 화면 캐릭터 앉음(앞 틱 앉음, D-5-c),
+// 몸 = 서 있는 메시 몸체. 클립을 든 서버는 자세 손 · 자세 몸으로 판정해 갈릴 수 있다 — 갈리면 서버 결과로 고친다(HandleMelee → OnMeleeResult, D74)
+FMOBMeleeGuess UMOBridgeSubsystem::JudgeMelee(mo::Vec3& OutPush)
+{
+	++MeleeJudged;
+	FMOBMeleeGuess Guess;
+	const mo::MoveState& Move = Core->Prediction.GetMove();
+	double Local[3];
+	mo::MeleeRestHandLocal(Move.crouched, Core->Sim.CrouchMeshLiftZ(), Local);
+	const mo::Vec3 Hand = mo::MeleeHandWorld(Move.location, MeleeYaw, Local);
+	const mo::Vec3 Forward = mo::AimDirection(MeleeYaw, 0.f);
+	std::vector<mo::MeleeTarget> Targets;
+	for (const TPair<uint32, FMOBRemote>& Pair : Remotes)
+	{
+		const FMOBRemote& R = Pair.Value;
+		const ACharacter* Shown = R.Pawn.Get();
+		if (!Shown || R.bKilled) continue;		// 서버 — 지금 죽어 있으면 그때 살아 있었어도 안 맞는다
+		const FVector At = Shown->GetActorLocation();
+		mo::MeleeTarget Target;
+		Target.body.id = R.Id;
+		Target.body.center = mo::Vec3(At.X, At.Y, At.Z);
+		Target.body.yawDegrees = Shown->GetActorRotation().Yaw;
+		Target.capsuleRadius = Core->Params.capsuleRadius;
+		Target.capsuleHalfHeight = Shown->IsCrouched() ? Core->Params.capsuleHalfHeight - Core->Sim.CrouchMeshLiftZ() : Core->Params.capsuleHalfHeight;	// 서버 TryMelee 와 같은 식
+		Target.sameTeam = R.ServerTeam == Team;
+		Targets.push_back(Target);
+	}
+	mo::MeleeResult Result;
+	mo::ResolveMelee(Core->Map, Targets.data(), Targets.size(), Hand, Forward, Result);
+	Guess.Kind = (uint8)Result.kind;		// EMeleeHit 차례 = wire::EMeleeResult 차례(Room.cpp static_assert)
+	if (Result.kind != mo::EMeleeHit::None) Guess.Target = Targets[Result.targetIndex].body.id;
+	Guess.Distance = (float)Result.distance;		// 서버도 맞음이 아닐 때 거리를 싣는다(같은 팀 · 벽)
+	++MeleeScreen[FMath::Min<int32>(Guess.Kind, 3)];
+	if (Result.kind == mo::EMeleeHit::Hit)
+	{
+		// 서버와 같이 와이어 float 로 줄인 힘 — 같으면 서버 결과가 와도 다시 돌릴 일이 없다
+		const mo::Vec3 Exact = mo::MeleePushForce(Forward, Result.distance);
+		Guess.ForceX = (float)Exact.x;
+		Guess.ForceY = (float)Exact.y;
+		OutPush = mo::Vec3(Guess.ForceX, Guess.ForceY, 0.0);
+	}
+	return Guess;
+}
+
+// 근접 소식(E-3 17-c) — 내 근접이면 화면 판정과 견주고 예측 밀기를 서버 값으로 맞춘다(OnMeleeResult — 다르면 그 입력부터 걸음을 다시 돌린다).
+// 서버는 이 소식을 그 입력을 돈 틱의 상태보다 먼저 보낸다(같은 연결). 남의 근접 몽타주 · 맞은 쪽 반응은 서버 애니 상태로, 피해 · 처치는 S2C_DAMAGE · S2C_KILL 로 온다
+void UMOBridgeSubsystem::HandleMelee(const wire::Melee& M)
+{
+	if (M.attacker != PlayerId)
+	{
+		++MeleeOthers;
+		return;
+	}
+	const bool bHit = M.result == wire::MELEE_HIT;
+	++MeleeMine[FMath::Min<int32>(M.result, 3)];
+	if (const FMOBMeleeGuess* Guess = MeleeGuesses.Find(M.seq))
+	{
+		if (Guess->Kind != M.result) ++MeleeKindDiff;
+		else if (Guess->Target != M.target) ++MeleeTargetDiff;
+		const double Fx = (double)Guess->ForceX - (bHit ? (double)M.forceX : 0.0);
+		const double Fy = (double)Guess->ForceY - (bHit ? (double)M.forceY : 0.0);
+		const double ForceDiff = FMath::Sqrt(Fx * Fx + Fy * Fy);
+		MeleeForceDiffMax = FMath::Max(MeleeForceDiffMax, ForceDiff);
+		if (MeleeLinesLeft > 0)
+		{
+			--MeleeLinesLeft;
+			UE_LOG(LogMOB, Log, TEXT("MOB_MELEE_ONE seq=%u screen=%u target=%u dist=%.2f server=%u target=%u dist=%.2f forceDiff=%.3f damage=%.0f weapon=%u"),
+				M.seq, Guess->Kind, Guess->Target, Guess->Distance, M.result, M.target, M.distance, ForceDiff, M.damage, M.weapon);
+		}
+		MeleeGuesses.Remove(M.seq);
+	}
+	else
+	{
+		++MeleeNoGuess;
+	}
+	if (Core)
+	{
+		const FMOBCore::FPawnScope PawnScope(*Core);	// 그 입력부터 다시 돌리는 걸음도 남 캡슐을 본다 — 근접은 늘 남 옆이다
+		Core->Prediction.OnMeleeResult(M.seq, bHit, mo::Vec3((double)M.forceX, (double)M.forceY, 0.0));
+	}
+}
+
+// Lyra 근접 능력(GA_Melee)을 예측이 켠 근접 입력에서 켠다(사격 TickAbilityFire 와 같은 꼴, D77). 능력 칸의 입력 표식(InputTag.Ability.Melee)을 떼어
+// C · E 키로는 Lyra 가 혼자 못 켠다(ULyraAbilitySystemComponent::AbilityInputTagPressed 가 이 표식으로 칸을 찾는다). 캐릭터가 새로 생기면 능력 칸을 새로 받으므로 프레임마다 찾아 뗀다.
+// 켠 능력이 내 공격 몽타주 · 소리 · 맞은 연출을 낸다. 피해는 막혀 있고(BlockLyraDamage), 밀기는 Lyra 이동 계산이 쉬어(NoLyraMove) 내 자리를 안 바꾼다 — 자리는 예측 밀기다
+void UMOBridgeSubsystem::TickAbilityMelee()
+{
+	static const FGameplayTag MeleeInputTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.Melee"), false);
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(PC ? PC->GetPawn() : nullptr));
+	const FGameplayAbilitySpec* Spec = nullptr;
+	if (LASC && MeleeInputTag.IsValid())
+	{
+		for (FGameplayAbilitySpec& Each : LASC->GetActivatableAbilities())
+		{
+			if (!Each.Ability || !Each.GetDynamicSpecSourceTags().HasTagExact(MeleeInputTag)) continue;
+			if (!bBreakMeleeBlock || GMeleeSpecHandle != Each.Handle) UE_LOG(LogMOB, Log, TEXT("MOB_MELEE_SPEC ability=%s handle=%s strip=%d"), *GetNameSafe(Each.Ability), *Each.Handle.ToString(), bBreakMeleeBlock ? 0 : 1);
+			GMeleeSpecHandle = Each.Handle;
+			if (!bBreakMeleeBlock)
+			{
+				Each.GetDynamicSpecSourceTags().RemoveTag(MeleeInputTag);
+				LASC->MarkAbilitySpecDirty(Each);
+				++LyraMeleeStripped;
+			}
+			break;
+		}
+		Spec = GMeleeSpecHandle.IsValid() ? LASC->FindAbilitySpecFromHandle(GMeleeSpecHandle) : nullptr;
+	}
+	const bool bActive = Spec && Spec->IsActive();
+	if (bActive && !bLyraMeleeWasActive)
+	{
+		// 지난 프레임 끝엔 꺼져 있었는데 다리가 켜기 전에 켜졌다 = Lyra 가 혼자 켰다(다리가 켠 것은 아래에서 켠 뒤 상태를 적어 여기 안 든다)
+		if (LyraMeleeSelf < 10) UE_LOG(LogMOB, Log, TEXT("MOB_MELEE_LYRA_SELF frame=%llu seq=%u"), (unsigned long long)GFrameCounter, Seq);
+		++LyraMeleeSelf;
+	}
+	if (bMeleePending)
+	{
+		if (!Spec)
+		{
+			bMeleePending = false;
+			++MeleeNoSpec;
+		}
+		else if (bActive)
+		{
+			++MeleeWaitFrames;
+			if (GFrameCounter - MeleePendingFrame > kMaxMeleeWaitFrames)
+			{
+				bMeleePending = false;
+				++MeleeDropped;
+			}
+		}
+		else
+		{
+			bMeleePending = false;
+			if (LASC->TryActivateAbility(GMeleeSpecHandle)) ++MeleeDriven;
+			else ++MeleeActivateFail;
+		}
+	}
+	const FGameplayAbilitySpec* After = LASC && GMeleeSpecHandle.IsValid() ? LASC->FindAbilitySpecFromHandle(GMeleeSpecHandle) : nullptr;
+	bLyraMeleeWasActive = After && After->IsActive();
+	// 결과 없이 지나간 근접의 화면 판정(서버가 안 켬 · 기다리는 중 죽음)은 오래되면 버린다 — 600입력 = 10초(제 판단)
+	if (MeleeGuesses.Num() > 16)
+	{
+		for (auto It = MeleeGuesses.CreateIterator(); It; ++It)
+		{
+			if (It.Key() + 600 < Seq) It.RemoveCurrent();
+		}
+	}
 }
 
 // 화면의 탄 방향 = 서버와 같은 식(D15). 입력 번호 · 조준 · 퍼짐은 다리가 켠 사격(ActiveFire)의 것을 쓴다(D53) — 능력이 잰 조준 · 시작점 · 퍼짐은 견주기로만 남긴다
@@ -1739,6 +2274,7 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 	// 시작점 거리 훑기(C-5) — 시선을 위아래 끝까지 9초 주기로 흔든다. 조준(7초) · 사격(5초) 주기와 엇갈려 각도마다 조준한 입력 · 안 한 입력이 다 나온다.
 	// Lyra 카메라가 높낮이를 ±89 로 자른다(LYRA_CAMERA_DEFAULT_PITCH_MIN/MAX)
 	if (bAutoPitchSweep) AutoRot.Pitch = (float)(89.0 * FMath::Sin(2.0 * UE_DOUBLE_PI * S / 9.0));
+	double AutoNearestEnemy = -1.0;
 	if (bAutoAim)
 	{
 		const FVector From = Ch->GetActorLocation();
@@ -1762,8 +2298,10 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 			}
 		}
 		bAutoSeesEnemy = Best != nullptr;
-		// 안 보이면 다가간다 — 벽을 돌아가지는 않으므로 네 방향 걷기와 번갈아 끼임을 푼다
-		if (Nearest && FMath::Fmod(S, 6.0) >= 2.0 && !(Best && BestDist < 1000000.0))
+		AutoNearestEnemy = Nearest ? FMath::Sqrt(NearestDist) : -1.0;
+		// 안 보이면 다가간다 — 벽을 돌아가지는 않으므로 네 방향 걷기와 번갈아 끼임을 푼다.
+		// 근접(-MOBAutoMelee)이면 10m 안에 보여도 다가간다(봇 --melee 가 옆걸음을 끄는 것과 같다 — 안 그러면 근접 거리 4m 에 거의 안 든다)
+		if (Nearest && FMath::Fmod(S, 6.0) >= 2.0 && (bAutoMeleeOn || !(Best && BestDist < 1000000.0)))
 		{
 			AutoMove = (Nearest->GetActorLocation() - From).GetSafeNormal2D();
 		}
@@ -1786,6 +2324,14 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 	if (bJumpNow && !bAutoJump) Ch->Jump();
 	if (!bJumpNow && bAutoJump) Ch->StopJumping();
 	bAutoJump = bJumpNow;
+	// 앉기 — 3.5초마다 한 번 누름(주기는 제 판단). 사격 · 점프(5초) · 조준(7초) 주기와 엇갈려 앉아 쏜 발 · 앉아 조준 · 앉은 채 점프(일어서며 뜀)가 다 나온다.
+	// 사람 키처럼 Lyra 앉기 함수에도 누름을 넣는다(키에 묶인 ULyraHeroComponent::Input_Crouch → ToggleCrouch). 막기 갈고리가 되돌려야 한다 — MOB_CROUCH lyraBlocked 로 센다
+	const bool bCrouchNow = FMath::Fmod(S, 3.5) < 0.1;
+	if (bCrouchNow && !bAutoCrouch)
+	{
+		if (ALyraCharacter* LyraCh = Cast<ALyraCharacter>(Ch)) LyraCh->ToggleCrouch();
+	}
+	bAutoCrouch = bCrouchNow;
 
 	const bool bImmuneNow = MatchPhase == (uint8)wire::EMatchPhase::Playing && (ServerFlags & wire::STATE_IMMUNE) && !(ServerFlags & wire::STATE_DEAD);
 	const bool bFireNow = bImmuneNow || (bAutoAim ? bAutoSeesEnemy : FMath::Fmod(S, 5.0) >= 2.0 && FMath::Fmod(S, 5.0) < 4.0);
@@ -1813,6 +2359,19 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 		}
 	}
 	bAutoAds = bAdsNow;
+	// 근접(-MOBAutoMelee) — 적이 4m 안이면 누르고 있고(봇 --melee 와 같은 거리), 아니면 6초마다 0.1초(빗나감도 나오게, 제 판단).
+	// 사람 키처럼 Lyra 입력 표식에도 누름을 넣는다 — 다리가 표식을 뗐으면 아무 일도 없어야 하고, 안 뗐으면(-MOBBreakMeleeBlock) Lyra 가 혼자 켠다
+	const bool bMeleeNow = bAutoMeleeOn && ((AutoNearestEnemy >= 0.0 && AutoNearestEnemy < 400.0) || FMath::Fmod(S, 6.0) < 0.1);
+	{
+		static const FGameplayTag MeleeTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.Melee"), false);
+		ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch));
+		if (LASC && MeleeTag.IsValid())
+		{
+			if (bMeleeNow) LASC->AbilityInputTagPressed(MeleeTag);
+			else if (bAutoMelee) LASC->AbilityInputTagReleased(MeleeTag);
+		}
+	}
+	bAutoMelee = bMeleeNow;
 	bAutoReload = FMath::Fmod(S, 20.0) >= 19.0 || (bAutoAim && ServerMagazine == 0);
 	if (bAutoReload != bAutoReloadPressed)
 	{
@@ -1934,6 +2493,30 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 		PosDiffCount, PosDiffCount ? PosDiffSum / PosDiffCount : 0.0, PosDiffMax);
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY3 posNonZero=%lld velMax=%.3f corrections=%lld correctionAvg=%.2f correctionMax=%.2f visualSnaps=%lld pawnChanges=%lld selfDriftMax=%.3f selfDriftOver1cm=%lld maxFrameGap=%.3f"),
 		PosDiffNonZero, VelDiffMax, Corrections, Corrections ? CorrectionSum / Corrections : 0.0, CorrectionMax, VisualSnaps, PawnChanges, SelfDriftMax, SelfDriftOver1cm, MaxFrameGap);
+	UE_LOG(LogMOB, Log, TEXT("MOB_CROUCH presses=%lld comparedOn=%lld flagDiff=%lld selfChanges=%lld remoteChanges=%lld remoteLiftFrames=%lld lyraBlocked=%lld"),
+		InputsCrouch, CrouchComparedOn, CrouchFlagDiff, SelfCrouchChanges, RemoteCrouchChanges, RemoteLiftFrames, GLyraCrouchBlocked);
+	// 내 몸 Quinn(D85) — donePawns = 몸 Quinn · 여성형 층으로 닫은 내 캐릭터 수(부활마다 하나). sets = 몸 바꾸기 부른 수 · reequips = 층 때문에 다시 쥔 수
+	UE_LOG(LogMOB, Log, TEXT("MOB_SELFBODY_SUMMARY donePawns=%lld sets=%lld reequips=%lld fails=%lld selfRespawns=%lld emptyFrames=%lld lastDone=%d delay=%.1f"),
+		SelfBodyDonePawns, SelfBodySets, SelfReequips, SelfBodyFails, (int64)SelfRespawns, SelfBodyEmptyFrames, bSelfBodyDone ? 1 : 0, SelfBodyDelay);
+	// 사람끼리 막기(D83) — 내 예측이 남 캡슐에 닿은 수. 0 이면 보정이 적어도 막기 갈래가 안 돈 것이다(봇 BOT pawn predHits 와 같은 계수)
+	if (Core)
+	{
+		const mo::MoveCounters& MCount = Core->Sim.GetCounters();
+		UE_LOG(LogMOB, Log, TEXT("MOB_PAWN predHits=%llu predStartPen=%llu predOdd=%llu predTouch=%llu pawnsLast=%d corrections=%lld"),
+			(unsigned long long)MCount.pawnHits, (unsigned long long)MCount.pawnStartPenetrating, (unsigned long long)MCount.pawnOddSimplex, (unsigned long long)MCount.pawnTouchStart,
+			(int32)Core->Pawns.size(), Corrections);
+	}
+	if (Core)
+	{
+		const mo::CSelfPrediction::MeleeCounters& MC = Core->Prediction.GetMeleeCounters();
+		UE_LOG(LogMOB, Log, TEXT("MOB_MELEE presses=%lld judged=%lld screen=%lld/%lld/%lld/%lld mine=%lld/%lld/%lld/%lld kindDiff=%lld targetDiff=%lld noGuess=%lld forceDiffMax=%.3f others=%lld"),
+			InputsMelee, MeleeJudged, MeleeScreen[0], MeleeScreen[1], MeleeScreen[2], MeleeScreen[3], MeleeMine[0], MeleeMine[1], MeleeMine[2], MeleeMine[3], MeleeKindDiff, MeleeTargetDiff, MeleeNoGuess, MeleeForceDiffMax, MeleeOthers);
+		UE_LOG(LogMOB, Log, TEXT("MOB_MELEE2 started=%llu results=%llu resultsNoSlot=%llu startMismatches=%llu pushesGiven=%llu pushesIgnored=%llu hitFixes=%llu forceFixes=%llu unconfirmed=%llu rerunsMissed=%llu"),
+			(unsigned long long)MC.started, (unsigned long long)MC.results, (unsigned long long)MC.resultsNoSlot, (unsigned long long)MC.startMismatches, (unsigned long long)MC.pushesGiven,
+			(unsigned long long)MC.pushesIgnored, (unsigned long long)MC.pushHitFixes, (unsigned long long)MC.pushForceFixes, (unsigned long long)MC.unconfirmed, (unsigned long long)MC.rerunsMissed);
+		UE_LOG(LogMOB, Log, TEXT("MOB_MELEE3 queued=%lld driven=%lld activateFail=%lld noSpec=%lld dropped=%lld waitFrames=%lld lyraSelf=%lld stripped=%lld"),
+			MeleeQueued, MeleeDriven, MeleeActivateFail, MeleeNoSpec, MeleeDropped, MeleeWaitFrames, LyraMeleeSelf, LyraMeleeStripped);
+	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY4 remotes=%d remoteFail=%d frames=%lld underrun=%lld teleports=%lld driftMax=%.3f driftOver1cm=%lld yawDiffMax=%.3f lagAvg=%.1f behindTicksAvg=%.2f"),
 		RemoteSpawned, RemoteSpawnFail, RemoteFrames, RemoteUnderrun, RemoteTeleports, RemoteDriftMax, RemoteDriftOver1cm, RemoteYawDiffMax, RemoteFrames ? RemoteLagSum / RemoteFrames : 0.0, RemoteFrames ? RemoteBehindSum / RemoteFrames : 0.0);
 
@@ -1942,8 +2525,9 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_SUMMARY tailPlayers=%lld tailBad=%lld noState=%lld poseEvals=%lld poseFrames=%lld poseFail=%lld"), AnimTailPlayers, AnimTailBad, AnimNoState, AnimPoseEvals, AnimPoseFrames, AnimPoseFail);
 		// 무기별(9단계) — 무기별 자세 계산 수의 합 = poseEvals. setChanges = 언리얼 경로 클립 한 벌을 갈아 넣은 수, setMisses = 그 무기 한 벌이 없던 프레임, badWeapon = 모르는 무기 번호로 받은 칸
 		// adsLayers = 언리얼 경로에서 조준 전환 층을 허리 전환으로 바꿔 튼 수, badLayers = 칸 밖이라 버린 층(0 이어야 함, C-5)
-		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_WEAPON poseEvals pistol=%lld rifle=%lld shotgun=%lld setChanges=%lld setMisses=%lld badWeapon=%lld adsLayers=%lld badLayers=%lld"),
-			AnimPoseEvalsByWeapon[0], AnimPoseEvalsByWeapon[1], AnimPoseEvalsByWeapon[2], AnimSetChanges, AnimSetMisses, AnimBadWeapon, AnimAdsLayers, AnimBadLayers);
+		// crouchLayers = 앉은 전환 층을 허리 전환으로 바꿔 튼 수, stanceLayers = 서기 안 앉기 · 일어서기 전환 층을 걷기 · 서기 자리로 돌린 수(D-3)
+		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_WEAPON poseEvals pistol=%lld rifle=%lld shotgun=%lld setChanges=%lld setMisses=%lld badWeapon=%lld adsLayers=%lld badLayers=%lld crouchLayers=%lld stanceLayers=%lld"),
+			AnimPoseEvalsByWeapon[0], AnimPoseEvalsByWeapon[1], AnimPoseEvalsByWeapon[2], AnimSetChanges, AnimSetMisses, AnimBadWeapon, AnimAdsLayers, AnimBadLayers, AnimCrouchLayers, AnimStanceLayers);
 		// 몽타주(9단계 5-a) — cellsIn = 받은 칸 수의 합(프레임마다), cells = 언리얼 경로에 넣은 칸, misses = 무기 · 자산이 없어 못 넣은 칸(cellsIn = cells + misses).
 		// frames = 칸이 하나라도 든 프레임, noSlot = 칸을 넣었는데 끼움 자리를 하나도 안 거친 프레임, maskMissing = 윗몸 뼈 가림을 못 찾은 프레임.
 		// weaponNotifies = 튼 무기 메시 몽타주 알림(남의 사격 · 재장전 시작마다 하나), weaponPlaying = 그중 튼 직후 무기 메시에 몽타주가 돌던 수, soundNotifies = 튼 소리 알림
@@ -1963,6 +2547,8 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 		}
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_PICKUPS hidden=%d hpFixes=%lld"), PickupsHidden, HpFixes);
+	UE_LOG(LogMOB, Log, TEXT("MOB_PADS pads=%d msgs=%lld takes=%lld readies=%lld syncs=%lld badIndex=%lld noActor=%lld bound=%lld heals=%lld healBeforeFix=%lld healMismatch=%lld healNoPawn=%lld stateChecks=%lld stateDiff=%lld lastStateTick=%u"),
+		Pads.Num(), PadMsgs, PadTakes, PadReadies, PadSyncs, PadBadIndex, PadNoActor, PadBound, PadHeals, PadHealBeforeFix, PadHealMismatch, PadHealNoPawn, PadStateChecks, PadStateDiff, LastStateTick);
 	if (!bAbilityOwnTimer)
 	{
 		// 내 사격 능력 구동(D53) — 칸 뜻은 MOBridgeSubsystem.h 의 FireQueued 주석. pending = 끝날 때 아직 쌓여 있던 발
@@ -1978,21 +2564,24 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY6 inputRawMax=%.3f inputSentMax=%.6f diagonal=%lld bulletsLyra=%lld bulletsServer=%lld bulletsLyraImmune=%lld bulletsServerImmune=%lld bulletsLyraOther=%lld bulletsServerOther=%lld magDiffMax=%d myShots=%lld,%lld,%lld reloadStart=%lld,%lld,%lld reloadDone=%lld,%lld,%lld aimFarLocal=%lld aimDistMax=%.1f aimHorizMax=%.1f"),
 		InputRawMax, InputSentMax, InputsDiagonal, BulletsLyra, BulletsServer, BulletsLyraImmune, BulletsServerImmune, BulletsLyraOther, BulletsServerOther, MagDiffMax, MyShots[0], MyShots[1], MyShots[2], ReloadStarts[0], ReloadStarts[1], ReloadStarts[2], ReloadDones[0], ReloadDones[1], ReloadDones[2], AimFarLocal, AimDistMax, AimHorizMax);
-	for (int32 AdsSlot = 0; AdsSlot < 2; ++AdsSlot)
+	for (int32 Slot = 0; Slot < 4; ++Slot)
 	{
 		int64 Inputs = 0;
 		double DistMax = 0, HorizMax = 0;
 		FString Bins;
 		for (int32 B = 0; B < 18; ++B)
 		{
-			if (AimSweepInputs[AdsSlot][B] == 0) continue;
-			Inputs += AimSweepInputs[AdsSlot][B];
-			DistMax = FMath::Max(DistMax, AimSweepDistMax[AdsSlot][B]);
-			HorizMax = FMath::Max(HorizMax, AimSweepHorizMax[AdsSlot][B]);
-			Bins += FString::Printf(TEXT("%d:%lld:%.1f/%.1f "), B * 10 - 90, AimSweepInputs[AdsSlot][B], AimSweepDistMax[AdsSlot][B], AimSweepHorizMax[AdsSlot][B]);
+			if (AimSweepInputs[Slot][B] == 0) continue;
+			Inputs += AimSweepInputs[Slot][B];
+			DistMax = FMath::Max(DistMax, AimSweepDistMax[Slot][B]);
+			HorizMax = FMath::Max(HorizMax, AimSweepHorizMax[Slot][B]);
+			Bins += FString::Printf(TEXT("%d:%lld:%.1f/%.1f "), B * 10 - 90, AimSweepInputs[Slot][B], AimSweepDistMax[Slot][B], AimSweepHorizMax[Slot][B]);
 		}
-		UE_LOG(LogMOB, Log, TEXT("MOB_AIMSWEEP ads=%d inputs=%lld skipped=%lld pitch=%.1f~%.1f distMax=%.1f horizMax=%.1f bins(pitch:n:dist/horiz)=[%s]"), AdsSlot, Inputs, AimSweepSkipped, AimSweepPitchMin, AimSweepPitchMax, DistMax, HorizMax, *Bins);
+		UE_LOG(LogMOB, Log, TEXT("MOB_AIMSWEEP ads=%d crouch=%d inputs=%lld skipped=%lld pitch=%.1f~%.1f distMax=%.1f horizMax=%.1f bins(pitch:n:dist/horiz)=[%s]"), Slot % 2, Slot / 2, Inputs, AimSweepSkipped, AimSweepPitchMin, AimSweepPitchMax, DistMax, HorizMax, *Bins);
 	}
+	// 선 직후 · 앉은 직후 0.25초(입력:거리 최대)와 그 뒤 — 앉은 직후는 카메라가 아직 선 높이라 거리가 늘고, 선 직후는 아직 앉은 높이라 줄어야 한다(D-6-a)
+	UE_LOG(LogMOB, Log, TEXT("MOB_AIMFRESH standFresh=%lld:%.1f standSteady=%.1f crouchFresh=%lld:%.1f crouchSteady=%.1f"),
+		AimSweepFreshInputs[0], AimSweepFreshMax[0], AimSweepSteadyMax[0], AimSweepFreshInputs[1], AimSweepFreshMax[1], AimSweepSteadyMax[1]);
 	// 조준 키 → Lyra 최대 속도 늦음(D61). lag0 = 같은 프레임 · none = 3프레임 안에 안 바뀜
 	UE_LOG(LogMOB, Log, TEXT("MOB_ADSKEY_SUMMARY press lag0=%lld lag1=%lld lag2=%lld none=%lld | release lag0=%lld lag1=%lld lag2=%lld none=%lld"),
 		AdsKeyLag[1][0], AdsKeyLag[1][1], AdsKeyLag[1][2], AdsKeyLag[1][3], AdsKeyLag[0][0], AdsKeyLag[0][1], AdsKeyLag[0][2], AdsKeyLag[0][3]);
@@ -2127,7 +2716,7 @@ void UMOBridgeSubsystem::CompareHp(const AActor* Actor, float ServerValue)
 	}
 }
 
-// 맵의 줍기 받침 — Lyra 혼자 체력·무기를 주면 서버와 어긋난다. 서버에 줍기가 생기기 전까지 숨긴다(월드 파티션이 나중에 올리는 것도 있어 계속 본다)
+// 맵의 줍기 받침 — Lyra 혼자 체력·무기를 주면 서버와 어긋난다. 서버 받침(체력, B-3)은 묶어 서버 소식으로 그리고, 나머지(무기 받침)는 서버에 줍기가 생기기 전까지 숨긴다(월드 파티션이 나중에 올리는 것도 있어 계속 본다)
 void UMOBridgeSubsystem::TickPickups(double Now)
 {
 	if (!bNamedSelf && PlayerId != 0)
@@ -2140,16 +2729,178 @@ void UMOBridgeSubsystem::TickPickups(double Now)
 			bNamedSelf = true;
 		}
 	}
-	if (bKeepPickups || Now < NextPickupCheckAt) return;
+	if (bKeepPickups) return;
+
+	// 대기 표시 — Lyra Tick 은 자기 대기 타이머가 돌 때만 CoolDownPercentage 를 쓴다. 다리는 그 타이머를 안 거니 같은 식(1 - 남은 시간 / CoolDownTime)을 서버 틱으로 쓴다
+	if (bHasTickClock)
+	{
+		static FFloatProperty* PercentProp = FindFProperty<FFloatProperty>(ALyraWeaponSpawner::StaticClass(), TEXT("CoolDownPercentage"));
+		const double ServerTickNow = Now * wire::kTickRate + TickClockOffset;
+		for (const FMOBPad& Pad : Pads)
+		{
+			ALyraWeaponSpawner* A = Pad.Actor.Get();
+			if (!A || !PercentProp || Pad.bAvailable || Pad.CooldownTicks == 0) continue;
+			PercentProp->SetPropertyValue_InContainer(A, (float)FMath::Clamp(1.0 - ((double)Pad.ReadyTick - ServerTickNow) / Pad.CooldownTicks, 0.0, 1.0));
+		}
+	}
+
+	// 묶인 받침 액터가 없어졌으면(경기 시작에 Lyra 가 받침을 새로 놓는다 — 0-3 pads1 · 월드 파티션이 늦게 올림) 이 프레임에 다시 찾는다.
+	// 새 액터는 충돌이 켜져 있어, 1초를 기다리면 그사이 Lyra 가 혼자 집을 수 있다
+	bool bLost = false;
+	for (const FMOBPad& Pad : Pads) bLost |= Pad.bKnown && !Pad.Actor.IsValid();
+	if (!bLost && Now < NextPickupCheckAt) return;
 	NextPickupCheckAt = Now + 1.0;
+	for (int32 i = 0; i < Pads.Num(); ++i)
+	{
+		if (Pads[i].bKnown && !Pads[i].Actor.IsValid()) BindPad(i);
+	}
 	for (TActorIterator<ALyraWeaponSpawner> It(GetWorld()); It; ++It)
 	{
-		if (It->IsHidden()) continue;
+		bool bBound = false;
+		for (const FMOBPad& Pad : Pads) bBound |= Pad.Actor.Get() == *It;
+		if (bBound || It->IsHidden()) continue;
+		// 서버 받침이 아닌 것(무기 받침 · 서버를 받침 없이 띄운 판) — 서버에 없는 줍기라 숨긴다
 		It->SetActorEnableCollision(false);
 		It->SetActorHiddenInGame(true);
 		It->SetActorTickEnabled(false);
 		++PickupsHidden;
 	}
+
+	// 1초마다 — 묶인 받침의 Lyra 상태가 서버 상태와 같은가. Lyra 자기 겹침 · 타이머 · 새로 놓기가 끼어들면 여기서 드러난다
+	static FBoolProperty* AvailableProp = FindFProperty<FBoolProperty>(ALyraWeaponSpawner::StaticClass(), TEXT("bIsWeaponAvailable"));
+	for (int32 i = 0; i < Pads.Num(); ++i)
+	{
+		ALyraWeaponSpawner* A = Pads[i].Actor.Get();
+		if (!A || !AvailableProp) continue;
+		++PadStateChecks;
+		const bool bLyraAvailable = AvailableProp->GetPropertyValue_InContainer(A);
+		const bool bShown = A->WeaponMesh && A->WeaponMesh->IsVisible();
+		const bool bCollision = A->GetActorEnableCollision();
+		if (bLyraAvailable == Pads[i].bAvailable && bShown == Pads[i].bAvailable && !bCollision) continue;
+		++PadStateDiff;
+		if (PadDiffLinesLeft > 0)
+		{
+			--PadDiffLinesLeft;
+			UE_LOG(LogMOB, Warning, TEXT("MOB_PAD_DIFF pad=%d server=%d lyra=%d shown=%d collision=%d"), i, Pads[i].bAvailable ? 1 : 0, bLyraAvailable ? 1 : 0, bShown ? 1 : 0, bCollision ? 1 : 0);
+		}
+		A->SetActorEnableCollision(false);
+		ApplyPadLook(*A, Pads[i].bAvailable, false);
+	}
+}
+
+// 체력 받침(B-3) — 서버가 정한 상태를 맵의 받침 액터에 그린다. Lyra 자기 겹침 · 대기 타이머는 쓰지 않는다(묶을 때 충돌을 끔).
+// 집음이면 집은 사람에게 받침 자기 회복을 건다(B_AbilitySpawner GiveWeapon 그래프 = 효과 GameplayEffectToApply + 줍기 신호, content0 pad_flow.txt:10-54)
+void UMOBridgeSubsystem::HandlePickup(const wire::Pickup& M)
+{
+	if (bBreakPadDrop)
+	{
+		bBreakPadDrop = false;
+		UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_PADS dropped tick=%u pad=%u reason=%u"), M.tick, M.pad, M.reason);
+		return;
+	}
+	++PadMsgs;
+	const bool bTake = M.reason == wire::PICKUP_TAKE || M.reason == wire::PICKUP_TAKE_RECHECK;
+	if (bTake) ++PadTakes;
+	else if (M.reason == wire::PICKUP_READY) ++PadReadies;
+	else ++PadSyncs;
+	if (Pads.Num() < M.padCount) Pads.SetNum(M.padCount);
+	if (M.pad >= Pads.Num())
+	{
+		++PadBadIndex;
+		return;
+	}
+	FMOBPad& Pad = Pads[M.pad];
+	Pad.bKnown = true;
+	Pad.bAvailable = M.available != 0;
+	Pad.ReadyTick = M.readyTick;
+	Pad.CooldownTicks = M.cooldownTicks;
+	Pad.Location = FVector(M.x, M.y, M.z);
+	ALyraWeaponSpawner* Actor = bKeepPickups ? nullptr : Pad.Actor.Get();
+	if (!Actor && !bKeepPickups) Actor = BindPad(M.pad);	// 묶을 때 지금 상태로 그린다
+	if (!Actor) ++PadNoActor;
+	// 효과는 집음 · 다시 켜짐만 — 현황(들어올 때 · 경기 시작)은 상태만 맞춘다. Lyra 도 새로 놓은 받침은 효과 없이 켜진다
+	if (Actor) ApplyPadLook(*Actor, Pad.bAvailable, M.reason != wire::PICKUP_SYNC);
+	const float LyraHp = bTake && !bKeepPickups ? ApplyPadHeal(M, Actor) : -1.f;
+	static const TCHAR* ReasonNames[] = { TEXT("take"), TEXT("takeRecheck"), TEXT("ready"), TEXT("sync") };
+	UE_LOG(LogMOB, Log, TEXT("MOB_PAD tick=%u pad=%u reason=%s avail=%u ready=%u picker=%u heal=%.1f hpAfter=%.1f lyraHp=%.1f actor=%d"), M.tick, M.pad,
+		M.reason < UE_ARRAY_COUNT(ReasonNames) ? ReasonNames[M.reason] : TEXT("?"), M.available, M.readyTick, M.picker, M.heal, M.hpAfter, LyraHp, Actor ? 1 : 0);
+}
+
+// 서버 받침 자리에 있는 맵 받침을 찾아 묶는다. 받침 파일 자리는 make_pads.py 가 맵 액터 자리와 0.05 안인 것만 낸다 — 5 는 받침 사이(1086 이상)에 견주면 0 이다
+ALyraWeaponSpawner* UMOBridgeSubsystem::BindPad(int32 Index)
+{
+	FMOBPad& Pad = Pads[Index];
+	if (!Pad.bKnown) return nullptr;
+	constexpr double kBindReach = 5.0;
+	for (TActorIterator<ALyraWeaponSpawner> It(GetWorld()); It; ++It)
+	{
+		if (FVector::Dist(It->GetActorLocation(), Pad.Location) > kBindReach) continue;
+		bool bTaken = false;
+		for (const FMOBPad& Other : Pads) bTaken |= Other.Actor.Get() == *It;
+		if (bTaken) continue;
+		ALyraWeaponSpawner* A = *It;
+		A->SetActorEnableCollision(false);	// Lyra 자기 겹침 집기를 끈다 — 집기는 서버 몫
+		A->SetActorHiddenInGame(false);		// 서버 소식 전에 숨긴 판이면 다시 보이게
+		A->SetActorTickEnabled(true);		// 구슬 돌기. Lyra Tick 은 자기 대기 타이머가 없으면 대기 표시를 안 건드린다
+		Pad.Actor = A;
+		++PadBound;
+		ApplyPadLook(*A, Pad.bAvailable, false);
+		UE_LOG(LogMOB, Log, TEXT("MOB_PAD_BIND pad=%d actor=%s at=(%.1f,%.1f,%.1f) avail=%d"), Index, *GetNameSafe(A), A->GetActorLocation().X, A->GetActorLocation().Y, A->GetActorLocation().Z, Pad.bAvailable ? 1 : 0);
+		return A;
+	}
+	return nullptr;
+}
+
+// Lyra 가 집음(AttemptPickUpWeapon) · 다시 켜짐(ResetCoolDown)에서 하는 화면 쪽만 — 켜짐 값 · 구슬 보임 · 효과. 대기 타이머 · 다시 검사 타이머는 안 건다
+void UMOBridgeSubsystem::ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects)
+{
+	static FBoolProperty* AvailableProp = FindFProperty<FBoolProperty>(ALyraWeaponSpawner::StaticClass(), TEXT("bIsWeaponAvailable"));
+	static FFloatProperty* PercentProp = FindFProperty<FFloatProperty>(ALyraWeaponSpawner::StaticClass(), TEXT("CoolDownPercentage"));
+	if (AvailableProp) AvailableProp->SetPropertyValue_InContainer(&Actor, bAvailable);
+	Actor.SetWeaponPickupVisibility(bAvailable);
+	if (bAvailable && PercentProp) PercentProp->SetPropertyValue_InContainer(&Actor, 0.f);
+	if (!bEffects) return;
+	if (bAvailable) Actor.PlayRespawnEffects();
+	else Actor.PlayPickupEffects();
+}
+
+// 회복 — 받침 자기 그래프(GiveWeapon)를 그대로 부른다: 체력 < 최대면 받침 효과를 걸고 줍기 신호를 낸다. 체력은 서버 값이라 앞뒤를 서버 값과 견준다.
+// 돌려주는 값 = 끝난 뒤 Lyra 체력(-1 = 몸 없음)
+float UMOBridgeSubsystem::ApplyPadHeal(const wire::Pickup& M, ALyraWeaponSpawner* Actor)
+{
+	APawn* Pawn = FindPlayerPawn(M.picker);
+	ULyraHealthComponent* HC = ULyraHealthComponent::FindHealthComponent(Pawn);
+	UAbilitySystemComponent* ASC = FindASC(Pawn);
+	if (!Pawn || !HC || !ASC || HC->IsDeadOrDying())
+	{
+		++PadHealNoPawn;
+		return -1.f;
+	}
+	// 회복 전 체력이 서버와 다르면(시험 순간이동이 체력을 바꾼 바로 그 틱에 집은 때 등) 먼저 맞춘다 — 회복 효과 하나만 따로 보려고
+	const float Before = M.hpAfter - M.heal;
+	if (!FMath::IsNearlyEqual(HC->GetHealth(), Before, 0.01f))
+	{
+		++PadHealBeforeFix;
+		UE_LOG(LogMOB, Log, TEXT("MOB_PAD_HEAL_BEFORE tick=%u pad=%u picker=%u lyra=%.2f server=%.2f"), M.tick, M.pad, M.picker, HC->GetHealth(), Before);
+		ASC->SetNumericAttributeBase(ULyraHealthSet::GetHealthAttribute(), Before);
+	}
+	if (bBreakPadHeal)
+	{
+		bBreakPadHeal = false;
+		UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_PADS skippedHeal tick=%u pad=%u picker=%u"), M.tick, M.pad, M.picker);
+	}
+	else if (Actor)
+	{
+		Actor->GiveWeapon(TSubclassOf<ULyraInventoryItemDefinition>(), Pawn);
+		++PadHeals;
+	}
+	if (!FMath::IsNearlyEqual(HC->GetHealth(), M.hpAfter, 0.01f))
+	{
+		++PadHealMismatch;
+		UE_LOG(LogMOB, Warning, TEXT("MOB_PAD_HEAL_DIFF tick=%u pad=%u picker=%u lyra=%.2f server=%.2f before=%.2f actor=%d"), M.tick, M.pad, M.picker, HC->GetHealth(), M.hpAfter, Before, Actor ? 1 : 0);
+		ASC->SetNumericAttributeBase(ULyraHealthSet::GetHealthAttribute(), M.hpAfter);
+	}
+	return HC->GetHealth();
 }
 
 void UMOBridgeSubsystem::HandleKill(const wire::Kill& M)
@@ -2194,8 +2945,34 @@ void UMOBridgeSubsystem::HandleKill(const wire::Kill& M)
 	if (M.attacker != 0) SetStat(FindPlayerState(M.attacker), ElimTag, M.attackerKills);
 	SetStat(FindPlayerState(M.target), DeathTag, M.targetDeaths);
 
+	// 도움 — 서버가 보낸 번호만큼 센다(떨어져 죽으면 처치자가 없어 죽은 사람 빼고 전원). Lyra 가 혼자 준 도움도 여기서 서버 값으로 돌린다
+	const int32 AssistCount = FMath::Min<int32>(M.assistCount, wire::kMaxPlayersInRoom - 1);
+	for (int32 i = 0; i < AssistCount; ++i) ++ServerAssists.FindOrAdd(M.assisters[i]);
+	AssistsRecv += AssistCount;
+	SyncAssists();
+
 	UE_LOG(LogMOB, Log, TEXT("MOB_KILL tick=%u attacker=%u target=%u weapon=%u weak=%u score=%u:%u kills=%u deaths=%u"),
 		M.tick, M.attacker, M.target, M.weapon, M.weakSpot, M.teamScoreA, M.teamScoreB, M.attackerKills, M.targetDeaths);
+}
+
+// 점수판 도움을 처치 패킷으로 센 값에 맞춘다 — 나 · 남 모두. 센 적 없는 사람은 0. 고친 횟수 = Lyra 가 혼자 센 값과 달랐던 횟수(기록만)
+void UMOBridgeSubsystem::SyncAssists()
+{
+	static const FGameplayTag AssistTag = FGameplayTag::RequestGameplayTag(TEXT("ShooterGame.Score.Assists"));
+	const auto Sync = [this](uint32 Id)
+	{
+		ALyraPlayerState* LPS = Cast<ALyraPlayerState>(FindPlayerState(Id));
+		if (!LPS) return;
+		const int32* Found = ServerAssists.Find(Id);
+		const int32 Want = Found ? *Found : 0;
+		const int32 Have = LPS->GetStatTagStackCount(AssistTag);
+		if (Have == Want) return;
+		++AssistFixes;
+		if (Have < Want) LPS->AddStatTagStack(AssistTag, Want - Have);
+		else LPS->RemoveStatTagStack(AssistTag, Have - Want);
+	};
+	Sync(PlayerId);
+	for (const TPair<uint32, FMOBRemote>& R : Remotes) Sync(R.Key);
 }
 
 void UMOBridgeSubsystem::SyncTeamScores()
@@ -2276,6 +3053,7 @@ void UMOBridgeSubsystem::ApplyMatch(const wire::Match& M)
 		++PhaseChanges;
 		UE_LOG(LogMOB, Log, TEXT("MOB_MATCH tick=%u phase %u->%u left=%.1f target=%u score=%u:%u lyraBefore=%d:%d"), M.tick, MatchPhase, M.phase, M.secondsLeft, M.targetScore, M.teamScoreA, M.teamScoreB, LyraScoreA, LyraScoreB);
 	}
+	if (M.phase != MatchPhase && M.phase == (uint8)wire::EMatchPhase::Playing) ServerAssists.Reset();	// 서버도 경기 시작에 도움 수를 0 으로(Room.cpp) — 대기 중엔 피해가 없다
 	MatchPhase = M.phase;
 	ScoreA = M.teamScoreA;
 	ScoreB = M.teamScoreB;

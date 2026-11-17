@@ -11,7 +11,10 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 6;		// 6 = 애니 꼬리에 조준 묶음 비중 · 겹침 칸 번호에 조준 전환 12개(컨텐츠 C-3, D60) · 조준 버튼 BUTTON_ADS · 상태 STATE_ADS(C-4, D61)
+		constexpr uint32_t kProtocolVersion = 10;		// 10 = 근접 단추 BUTTON_MELEE · 근접 결과 S2C_MELEE · 피해 · 처치 소식의 무기 번호 근접 kWeaponMelee(컨텐츠 E-3)
+														// 9 = 체력 받침 상태 S2C_PICKUP(컨텐츠 B-3)
+														// 7 = 애니 꼬리에 앉기 묶음 비중 · 겹침 칸 번호에 앉은 전환 14개(컨텐츠 D-3, D62) · 앉기 버튼 BUTTON_CROUCH · 상태 STATE_CROUCHED(D-5)
+														// 6 = 애니 꼬리에 조준 묶음 비중 · 겹침 칸 번호에 조준 전환 12개(컨텐츠 C-3, D60) · 조준 버튼 BUTTON_ADS · 상태 STATE_ADS(C-4, D61)
 														// 5 = 애니 꼬리에 몽타주 칸 · 덮기 · 왼손 비중(9단계 조각 4, D51)과 대기 몸짓 칸 눈금 1/3000초(D47)
 		constexpr int kTickRate = 60;
 		constexpr int kMaxPlayersInRoom = 10;
@@ -34,6 +37,8 @@ namespace mo
 			S2C_KILL = 105,			// 잃으면 안 됨 — 처치 기록
 			S2C_SPAWN = 106,		// 잃으면 안 됨 — 시작 자리. 클라는 여기서 위치를 다시 잡는다
 			S2C_RESULT = 107,		// 잃으면 안 됨 — 경기 끝의 점수 기록
+			S2C_PICKUP = 108,		// 잃으면 안 됨 — 체력 받침 상태. 집음 · 다시 켜짐 때와, 들어올 때 · 경기 시작에 받침마다 하나(컨텐츠 B-3)
+			S2C_MELEE = 109,		// 잃으면 안 됨 — 근접 결과. 서버가 근접 능력을 켤 때마다 방 전원에게. 공격자 화면은 이것으로 제 밀기 예측을 고친다(컨텐츠 E-3)
 		};
 
 		enum EButton : uint8_t
@@ -42,6 +47,17 @@ namespace mo
 			BUTTON_FIRE = 1 << 1,	// 누르는 동안 켠다
 			BUTTON_RELOAD = 1 << 2,	// 누른 입력 하나에만 켠다
 			BUTTON_ADS = 1 << 3,	// 누르는 동안 켠다 — 그 입력부터 조준(C-4, D61)
+			BUTTON_CROUCH = 1 << 4,	// 누른 입력 하나에만 켠다 — 앉기 키 한 번 = ALyraCharacter::ToggleCrouch 한 번(D-5)
+			BUTTON_MELEE = 1 << 5,	// Lyra 근접 입력이 눌림을 낸 입력에 켠다 — 근접 능력이 꺼져 있으면 그 입력에 켜지고, 켜진 동안의 누름은 버린다(E-3)
+		};
+
+		// S2C_PICKUP 의 까닭 — 화면 효과를 낼지 다리가 이것으로 가른다
+		enum EPickupReason : uint8_t
+		{
+			PICKUP_TAKE = 0,			// 겹침이 시작돼 집음(ALyraWeaponSpawner::OnOverlapBegin)
+			PICKUP_TAKE_RECHECK = 1,	// 다시 켜진 0.25초 뒤 이미 서 있던 사람이 집음(CheckForExistingOverlaps)
+			PICKUP_READY = 2,			// 대기가 끝나 다시 켜짐(ResetCoolDown)
+			PICKUP_SYNC = 3,			// 지금 상태만 — 들어올 때 · 경기 시작(받침을 새로 놓음). 화면 효과 없음
 		};
 
 		enum EStateFlag : uint8_t
@@ -52,6 +68,7 @@ namespace mo
 			STATE_IMMUNE = 1 << 3,		// 경기 전 대기·부활 직후·경기 끝 — 맞아도 피해 없음
 			STATE_MOVE_LOCKED = 1 << 4,	// 부활 직후 — 이동 입력을 안 받는다
 			STATE_ADS = 1 << 5,			// 조준 능력이 켜져 있다(GA_ADS) — 걸음 속도 · 퍼짐 · 조준 자세가 이 값을 따른다
+			STATE_CROUCHED = 1 << 6,	// 앉아 있다(bIsCrouched) — 캡슐 반높이 · 앉은 걸음 · 퍼짐 · 앉은 자세 · 메시 올림이 이 값을 따른다. 받는 쪽 애니도 앉음을 여기서 읽는다(D62 8)
 		};
 
 		enum class EMatchPhase : uint8_t { Waiting, Warmup, Playing, PostGame, Finished };
@@ -59,6 +76,18 @@ namespace mo
 		constexpr uint8_t kTeamNone = 0;	// 무승부·아직 안 끝남
 		constexpr uint8_t kTeamA = 1;		// 번호는 Lyra 와 같다(B_TeamSetup_TwoTeams 1·2)
 		constexpr uint8_t kTeamB = 2;
+
+		// 피해 · 처치 소식의 무기 번호 — 0~2 = EWeapon, 이 값 = 근접(무기 셋 뒤 번호, 컨텐츠 E-3). EWeapon::Count 와 같은지는 서버가 검사한다
+		constexpr uint8_t kWeaponMelee = 3;
+
+		// S2C_MELEE 의 결과 — Shared EMeleeHit 와 같은 차례(서버가 검사한다)
+		enum EMeleeResult : uint8_t
+		{
+			MELEE_NONE = 0,		// 아무 몸에도 안 닿음
+			MELEE_SAME_TEAM = 1,	// 처음 닿은 몸이 같은 팀 — 피해 · 밀기 · 반응 없음
+			MELEE_BLOCKED = 2,		// 손 → 닿은 점 선이 벽에 막힘
+			MELEE_HIT = 3,
+		};
 
 		enum class EShotHit : uint8_t { None, Map, Body };
 
@@ -126,7 +155,7 @@ namespace mo
 		};
 
 		// 애니 상태 한 사람치. S2C_STATE 의 players[count] 바로 뒤에 같은 차례로 붙는다(꼬리, 클립 파일을 준 서버만).
-		// - 머리 뒤에 겹침 칸 layerCount 개, 그 뒤에 몽타주 칸 montageCount 개만 싣는다 — 사람마다 22 + 4 × layerCount + 4 × montageCount 바이트, 최대 50(D35 · D51 · D60).
+		// - 머리 뒤에 겹침 칸 layerCount 개, 그 뒤에 몽타주 칸 montageCount 개만 싣는다 — 사람마다 23 + 4 × layerCount + 4 × montageCount 바이트, 최대 51(D35 · D51 · D60 · D62).
 		//   쓰고 읽는 식은 아래 WriteAnimTail · ReadAnimTail 한 벌이다(서버가 쓰고 봇 · 다리가 읽는다)
 		// - 앞부분(State)만 읽는 쪽은 count 로 끝을 정하므로 꼬리를 무시해도 깨지지 않는다
 		inline constexpr int kAnimLayersOnWire = 4;
@@ -136,7 +165,7 @@ namespace mo
 
 		struct AnimLayerWire
 		{
-			int8_t clip;			// 쌓기 칸 번호 0~28 = 점프 5 · 허리 전환 12 · 조준 전환 12(AnimClips.h StackClipIndex), -1 = 걷기 · 서기 자리
+			int8_t clip;			// 쌓기 칸 번호 0~42 = 점프 5 · 허리 전환 12 · 조준 전환 12 · 앉은 전환 12 · 서기 안 앉기 · 일어서기(AnimClips.h StackClipIndex), -1 = 걷기 · 서기 자리
 			uint16_t time;			// 1/6000초 칸
 			uint8_t fade;			// 아래 칸을 덮은 정도 0~255
 		};
@@ -157,6 +186,7 @@ namespace mo
 			uint16_t idleTime;		// 서기 클립 시각, 1/6000초 칸
 			uint8_t aimBlend;		// 255 = 허리 사격 조준만, 0 = 느슨한 조준만
 			uint8_t adsBlend;		// 조준 묶음 비중 0~255(D60) — 0 = 허리 서기 · 걸음 클립만, 255 = 조준 클립만. 걸음 번호 · 진행률 · 서기 시각은 두 묶음이 같이 쓴다
+			uint8_t crouchBlend;	// 앉기 묶음 비중 0~255(D62 2) — 조준보다 먼저 나눈다. 앉음 자체는 사람 상태 칸에서 읽는다(D62 8)
 			uint16_t fidgetTime;	// 대기 몸짓 시각, 1/3000초 칸(권총 몸짓 13.8초가 1/6000초 칸 최대 10.92초를 넘어서 — D47). kAnimTimeNone = 안 함
 			uint16_t recoveryTime;	// 착지 충격 시각. kAnimTimeNone = 안 함
 			int16_t plantDrop;		// 발 디딤 내림 0.01cm 칸
@@ -232,6 +262,8 @@ namespace mo
 			uint16_t targetDeaths;
 			uint8_t weapon;
 			uint8_t weakSpot;
+			uint8_t assistCount;		// 도움 받은 사람 수(ShooterCore AssistProcessor — 이 사람에게 피해를 준 사람 중 처치자를 뺀 전원)
+			uint32_t assisters[kMaxPlayersInRoom - 1];	// 보낼 때는 assistCount 만큼만 잘라 보낸다. 떨어져 죽으면 처치자가 없어 죽은 사람 빼고 전원까지
 		};
 
 		struct Spawn
@@ -250,6 +282,7 @@ namespace mo
 			uint32_t id;
 			uint16_t kills;
 			uint16_t deaths;
+			uint16_t assists;		// 처치 도움(A-2) — kills · deaths 와 같이 경기 시작에 0
 			uint8_t team;
 		};
 
@@ -264,13 +297,45 @@ namespace mo
 			uint8_t count;
 			PlayerResult players[kMaxPlayersInRoom];
 		};
+
+		// 받침 하나의 상태. 받침 파일(--pads=)은 서버만 읽는다 — 자리를 같이 실어 다리는 맵의 받침 액터를, 봇은 갈 곳을 이것으로 안다
+		struct Pickup
+		{
+			Header h;
+			uint32_t tick;			// 이 일이 난 틱
+			uint32_t readyTick;		// 다시 켜지는 틱. 켜져 있으면 0
+			uint32_t cooldownTicks;	// 정한 대기(초) × 틱 수 — Lyra 대기 표시 CoolDownPercentage 의 분모(CoolDownTime)
+			uint32_t picker;		// 집은 사람. 0 = 집음이 아님
+			float heal;				// 실제로 오른 체력(최대에서 잘린 뒤). 집음이 아니면 0
+			float hpAfter;			// 집은 사람의 회복 뒤 체력. 집음이 아니면 0
+			float x, y, z;			// 받침 자리(받침 파일 값)
+			uint8_t pad;			// 받침 번호 = 서버 받침 파일의 줄 차례
+			uint8_t padCount;		// 서버 받침 수 — 받는 쪽이 칸을 미리 잡는다(kMaxPickupPads 255 라 한 바이트)
+			uint8_t available;		// 1 = 켜짐
+			uint8_t reason;			// EPickupReason
+		};
+
+		// 근접 한 번(E-3) — 맞음 · 같은 팀 · 벽 · 빗나감 모두 보낸다(공격자 몽타주는 늘 돈다). 피해는 따로 S2C_DAMAGE(무기 번호 kWeaponMelee)로도 간다
+		struct Melee
+		{
+			Header h;
+			uint32_t tick;
+			uint32_t attacker;
+			uint32_t seq;			// 공격자 입력 번호 — 공격자 화면은 이 입력의 밀기 예측을 서버 값으로 바꾼다
+			uint32_t target;		// 처음 닿은 몸의 주인. 0 = 안 닿음
+			float distance;			// 쓸기 시작 → 처음 닿은 때 구 중심. 맞음이면 밀기 세기가 이것에 비례한다
+			float forceX, forceY;	// 서버가 넣은 밀기 힘(맞음일 때만, 아니면 0). 서버도 이 float 값 그대로 넣는다 — 공격자 화면이 같은 값으로 다시 돌린다
+			float damage;			// 준 피해. 무적이면 0
+			uint8_t result;			// EMeleeResult
+			uint8_t weapon;			// 근접을 켠 무기(몽타주 묶음)
+		};
 #pragma pack(pop)
 
 		static_assert(sizeof(Header) == 4, "ServerCore MsgHeader 와 같아야 한다");
 		static_assert(sizeof(State) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
-		static_assert(sizeof(AnimStateWire) == 50, "패킷 크기 어림(D35 · D51 · D60)과 같아야 한다");
+		static_assert(sizeof(AnimStateWire) == 51, "패킷 크기 어림(D35 · D51 · D60 · D62)과 같아야 한다");
 		inline constexpr size_t kAnimStateHeadSize = offsetof(AnimStateWire, layers);
-		static_assert(kAnimStateHeadSize == 22, "머리 = 18 + 덮기 · 왼손 · 몽타주 칸 수(D51) + 조준 묶음 비중(D60)");
+		static_assert(kAnimStateHeadSize == 23, "머리 = 18 + 덮기 · 왼손 · 몽타주 칸 수(D51) + 조준 묶음 비중(D60) + 앉기 묶음 비중(D62)");
 		inline constexpr size_t kMaxStatePacketSize = sizeof(State) + sizeof(AnimStateWire) * kMaxPlayersInRoom;		// 꼬리까지 넣은 최대
 		static_assert(kMaxStatePacketSize <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 
@@ -308,5 +373,7 @@ namespace mo
 		}
 		static_assert(sizeof(Shot) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 		static_assert(sizeof(Result) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
+		static_assert(sizeof(Pickup) == 44, "받침 소식 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
+		static_assert(sizeof(Melee) == 38, "근접 소식 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 	}
 }
