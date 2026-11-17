@@ -8,6 +8,8 @@
 # 형식은 Shared/AnimClips.h 의 주석과 짝이다. 고치면 kClipPackVersion 을 같이 올린다.
 # 버전 2 = 뼈별 비중 표 · 끼움 자리 표(부위 뒤)와 묶음마다 몽타주 표 · 쏜 뒤 윗몸 덮기 자세(클립 뒤). 몽타주 클립과 덮기 자세 클립은 묶음 클립 30개 뒤에 붙는다(9단계 3-a).
 # 버전 3 = 묶음 클립이 47개 — 30~46 이 조준 서기 · 걸음 넷 · 전환 12(컨텐츠 C-3, D60). 몽타주 · 덮기 자세 클립은 그 뒤.
+# 버전 4 = 묶음 클립이 67개 — 47~66 이 앉은 서기 · 걸음 넷 · 전환 12 · 앉기 · 일어서기 전환 · 앉아 쏜 뒤 덮기 자세(컨텐츠 D-3).
+# 버전 5 = 몽타주 종류가 8개 — 근접 · 맞은 쪽 반응 뒤 · 앞(컨텐츠 E-2). 칸 꼴은 버전 4 와 같다.
 #   뼈별 비중 표 = 골격의 블렌드 프로파일(1-a 기록 animcmp_ev_<무기>_blendprofiles.csv, 세 무기가 같은 골격). 표에 없는 뼈는 엔진 기본값(뼈 가림 0, 그 밖 1)으로 채운다.
 #   몽타주 곡선은 PACK_CURVES 이름만 넣는다 — 나머지 이름은 화면이 엔진 몽타주로 직접 트는 쪽 몫이라 버리고, 버린 이름을 찍는다.
 #
@@ -17,25 +19,29 @@ import struct
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
-VERSION = 3                                     # 3 = 묶음 클립 30개 뒤에 조준 클립 17개(컨텐츠 C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
+VERSION = 5                                     # 5 = 몽타주 종류 8(근접 · 반응 둘, E-2). 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3). 3 = 묶음 클립 30개 뒤에 조준 클립 17개(C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
 KINDS = {'sphere': 0, 'sphyl': 1, 'box': 2}     # Shared/Weapon.h EBodyShape 값
 SCALE_LIMIT = 1e-4
-CLIPS_PER_BUNDLE = 47                           # Shared/AnimClips.h ACLIP_COUNT — 앞 47개(조준 17개 포함). 그 뒤는 몽타주 · 덮기 자세 클립
+CLIPS_PER_BUNDLE = 67                           # Shared/AnimClips.h ACLIP_COUNT — 앞 67개(조준 17개 · 앉기 20개 포함). 그 뒤는 몽타주 · 덮기 자세 클립
 ADS_IDLE_INDEX = 30                             # Shared/AnimClips.h ACLIP_ADS_IDLE
-MONTAGE_KINDS = ('fire', 'reload', 'equip', 'unequip', 'spawn')    # Shared/AnimClips.h EMontageKind 차례 = 뽑는 쪽 WEAPON_MONTAGES 차례
+CROUCH_IDLE_INDEX = 47                          # Shared/AnimClips.h ACLIP_CROUCH_IDLE
+MONTAGE_KINDS = ('fire', 'reload', 'equip', 'unequip', 'spawn', 'melee', 'hit_back', 'hit_front')    # Shared/AnimClips.h EMontageKind 차례 = 뽑는 쪽 WEAPON_MONTAGES 차례
 SLOT_MODES = {'replace': 0, 'additive': 1, 'perbone': 2}           # Shared/AnimClips.h ESlotMode
 BLEND_OPTION_MAX = 2                            # Shared/AnimClips.h kBlendOptionMax — 몽타주 넣기 · 빼기 곡선은 선형 · Cubic · HermiteCubic 만 옮긴다
 # 끼움 자리 표. 방식은 슬롯 이름에서 읽은 것이고(이름 짐작) 아래에서 줄 클립의 덧붙임 종류와 맞는지 막는다 — 덧붙임 자리엔 덧붙임 클립만, 나머지엔 일반 클립만.
 # 뼈별 비중 표는 플랜 9-1 의 짐작(윗몸/아랫몸 나눔 표)이다. 어느 표가 Lyra 와 맞는지는 3-b 대조로 고른다(1-c — 비중 표 5개 중 어느 것인지 기록 칸에 없다).
 # 3-b 대조로 고른 표 = 세 자리 모두 UpperBodyMask(D50) — 뼈 가림 넷을 자리마다 바꿔 Lyra 원본 기록과의 22부위 차이를 쟀고, 나눔 표보다 세 무기 모두 꺼내기 · 재장전 · 교체에서 작다.
 # 그래프를 읽은 값이 아니라 가장 가까운 후보다(제 판단)
+# 컨텐츠 E-2-b 에서 그래프를 읽었다(D72, 원본 기준) — 윗몸 자리는 LayeredBoneBlend_2 의 가림 UpperBodyLowerBodySplitMask 로 바꿨다.
+# 윗몸 덧붙임 자리는 그래프에서 가림 없이 더해지고(ApplyAdditive_1) Shared 실제 경로도 이 표를 안 쓴다 — 옛 차례(D50) 시험 판을 다시 만들 때만 쓰여 그대로 둔다
 # MOB_ 로 시작하는 자리는 엔진 슬롯이 아니다 — 쏜 뒤 윗몸 덮기(D45)가 덮는 범위
 SLOTS = (
     ('FullBody', 'replace', None),
     ('FullBodyAdditivePreAim', 'additive', None),
-    ('UpperBody', 'perbone', 'UpperBodyMask'),
+    ('UpperBody', 'perbone', 'UpperBodyLowerBodySplitMask'),
     ('UpperBodyAdditive', 'additive', 'UpperBodyMask'),
     ('MOB_HipfireOverride', 'perbone', 'UpperBodyMask'),
+    ('AdditiveHitReact', 'additive', None),     # 맞은 쪽 반응(E-2). 그래프의 그냥 끼움 노드라 비중 표가 없다(ABP_Mannequin_Base 덤프, 원본 기준)
 )
 OVERRIDE_SLOT = 'MOB_HipfireOverride'
 PACK_CURVES = ('DisableLHandIK',)               # 판정 몸에 닿는 곡선 = 손 붙이기 끄기(1-c). ScaleDownWeaponR 은 무기 메시 크기라 화면 몫(이름 짐작)
@@ -119,6 +125,9 @@ def parse(name, src):
     # 버전 2 때 뽑은 자료(조준 클립 없음)는 30번부터 몽타주 클립이라 클립 수만으로는 못 가른다 — 조준 서기 자리 이름으로 본다
     if not d['clips'][ADS_IDLE_INDEX]['name'].endswith('_Idle_ADS'):
         fail(f'bundle={name} 클립 {ADS_IDLE_INDEX} = {d["clips"][ADS_IDLE_INDEX]["name"]} — 조준 서기(*_Idle_ADS)가 아니다. 조준 클립 전에 뽑은 자료다({src})')
+    # 버전 3 때 뽑은 자료(앉기 클립 없음)도 47번부터 몽타주 클립이다 — 앉은 서기 자리 이름으로 가른다
+    if not d['clips'][CROUCH_IDLE_INDEX]['name'].endswith('_Crouch_Idle'):
+        fail(f'bundle={name} 클립 {CROUCH_IDLE_INDEX} = {d["clips"][CROUCH_IDLE_INDEX]["name"]} — 앉은 서기(*_Crouch_Idle)가 아니다. 앉기 클립 전에 뽑은 자료다({src})')
     d['hz'] = int(d['info']['hz'])
     return d
 

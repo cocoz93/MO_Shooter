@@ -22,6 +22,16 @@ move_expanse_stress RUN segments=12 over1cm=0 over10cm=0 worst=0.327 (seg 10) re
 move_expanse_stress COUNT ticks=4264 walkIter=1867 fallIter=2457 | floorSweep=1883 second=0 line=2 lineWalk=0 supplied=47 adjust=114 popOut=0
 move_expanse_stress COUNT perchTry=1 perchOk=0 perchOverride=0 perchFail=1
 move_expanse_stress COUNT ramp2=0 stepTry=47 stepOk=47 stepReject=0 slide=47 twoWall=10 ledgeFall=4 | landed=31 landedEdge=0 fallWall2=11 fallStuck=0 apex=29 | jump=19 launch=23 | startPen=6 resolveTeleport=6 resolveSweep=0
+move_expanse_crouch PARAM crouch canCrouch=1 maxWalkCrouched=300 crouchedHalf=65
+move_expanse_crouch ONE frames=23584 (walk=11174 fall=12410) posMax=0.3144 p50=0.00000 p99=0.0003 over0.01=24 over0.1=10 over1=0 | velMax=18.863 velOver1=10 | modeMismatch=0
+move_expanse_crouch ONE crouch crouchedFrames=5202 crouchedMismatch=0 wantMismatch=0 halfMismatch=0
+move_expanse_crouch RUN frames=23584 (walk=11174 fall=12410) posMax=7.2816 p50=0.00012 p99=0.7431 over0.01=2753 over0.1=729 over1=112 | velMax=80.974 velOver1=160 | modeMismatch=0
+move_expanse_crouch RUN segments=40 over1cm=1 over10cm=0 worst=7.282 (seg 32) resync=0 firstOver1 median=4.87s
+move_expanse_crouch RUN crouch crouchedFrames=5202 crouchedMismatch=0 wantMismatch=0 halfMismatch=0
+move_expanse_crouch COUNT ticks=23584 walkIter=11185 fallIter=12654 | floorSweep=10950 second=0 line=412 lineWalk=403 supplied=887 adjust=1677 popOut=0
+move_expanse_crouch COUNT perchTry=356 perchOk=344 perchOverride=0 perchFail=12
+move_expanse_crouch COUNT ramp2=0 stepTry=1917 stepOk=861 stepReject=561 slide=2316 twoWall=1352 ledgeFall=16 | landed=146 landedEdge=0 fallWall2=359 fallStuck=0 apex=114 | jump=119 launch=0 | startPen=0 resolveTeleport=0 resolveSweep=0
+move_expanse_crouch CROUCH_COUNT crouchGround=87 crouchAir=0 uncrouchGround=36 lowered=0 uncrouchAir=61 airShifted=56 blocked=457
 weapon TABLE   pistol   items=59 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001
 weapon TABLE   rifle    items=68 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001
 weapon TABLE   shotgun  items=65 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001
@@ -75,6 +85,134 @@ weapon RAYS    state=3 r=6.0 n=1200 lyra[none/map/body]=248/574/378 mine=241/583
 weapon CONE    samples=200000 meanDeg=2.498 (기대 2.5) overHalf=0.000000
 weapon SEEDED  samples=200000 meanDeg=2.497 (기대 2.5) overHalf=0.000000 사분면 49890~50117 (기대 50000) 다음번호같음=0 다음탄같음=0 이웃상관 1칸=0.0007 9칸=-0.0034
 weapon RESULT PASS
+melee PUSH ok step=melee_150 dist=0.0000 force=0.000 frames=1 input=0 fall=0 blocked=0 maxPosDiff=0.0000 maxVelDiff=0.0000 slideLyra=0.00 slideMine=0.00
+melee PUSH ok step=melee_300 dist=103.1938 force=648.647 frames=20 input=0 fall=0 blocked=0 maxPosDiff=0.0006 maxVelDiff=0.0015 slideLyra=105.73 slideMine=105.73
+melee PUSH ok step=melee_400 dist=203.5219 force=1279.280 frames=29 input=0 fall=0 blocked=0 maxPosDiff=0.0012 maxVelDiff=0.0036 slideLyra=269.04 slideMine=269.04
+melee PUSH ok step=melee_450 dist=253.5094 force=1593.488 frames=32 input=0 fall=0 blocked=0 maxPosDiff=0.0008 maxVelDiff=0.0015 slideLyra=359.12 slideMine=359.12
+melee PUSH ok step=melee_480 dist=283.2701 force=1780.555 frames=28 input=0 fall=0 blocked=1 maxPosDiff=0.0006 maxVelDiff=0.0008 slideLyra=408.81 slideMine=408.81
+melee PUSH ok step=melee_500 dist=303.5429 force=1907.984 frames=24 input=0 fall=0 blocked=1 maxPosDiff=0.0008 maxVelDiff=0.0020 slideLyra=427.95 slideMine=427.95
+melee PUSH ok step=melee_520 dist=323.2604 force=2031.923 frames=22 input=0 fall=0 blocked=1 maxPosDiff=0.0005 maxVelDiff=0.0006 slideLyra=446.47 slideMine=446.47
+melee PUSH ok step=melee_back_200 dist=26.0836 force=163.954 frames=9 input=0 fall=0 blocked=0 maxPosDiff=0.0005 maxVelDiff=0.0006 slideLyra=14.48 slideMine=14.48
+melee PUSH ok step=side_p100 dist=87.7249 force=551.414 frames=18 input=0 fall=0 blocked=0 maxPosDiff=0.0010 maxVelDiff=0.0029 slideLyra=83.85 slideMine=83.85
+melee PUSH ok step=side_p115 dist=99.7006 force=626.690 frames=20 input=0 fall=0 blocked=0 maxPosDiff=0.0010 maxVelDiff=0.0033 slideLyra=100.74 slideMine=100.73
+melee PUSH ok step=side_p130 dist=147.5493 force=927.453 frames=24 input=0 fall=0 blocked=0 maxPosDiff=0.0006 maxVelDiff=0.0012 slideLyra=174.03 slideMine=174.03
+melee PUSH ok step=side_m100 dist=140.0587 force=880.369 frames=24 input=0 fall=0 blocked=0 maxPosDiff=0.0005 maxVelDiff=0.0009 slideLyra=162.11 slideMine=162.11
+melee PUSH ok step=side_m115 dist=178.0667 force=1119.277 frames=27 input=0 fall=0 blocked=0 maxPosDiff=0.0005 maxVelDiff=0.0006 slideLyra=224.93 slideMine=224.93
+melee PUSH ok step=melee_shotgun_300 dist=138.4515 force=870.267 frames=24 input=0 fall=0 blocked=0 maxPosDiff=0.0005 maxVelDiff=0.0014 slideLyra=159.55 slideMine=159.55
+melee PUSH ok step=melee_rifle_300 dist=133.3174 force=837.995 frames=23 input=0 fall=0 blocked=0 maxPosDiff=0.0005 maxVelDiff=0.0006 slideLyra=151.36 slideMine=151.36
+melee PUSH ok step=melee_crouch_300 dist=127.0803 force=798.791 frames=23 input=0 fall=0 blocked=0 maxPosDiff=0.0005 maxVelDiff=0.0004 slideLyra=141.67 slideMine=141.67
+melee PUSH ok step=melee_crouch_500 dist=326.8601 force=2054.549 frames=19 input=0 fall=0 blocked=1 maxPosDiff=0.0005 maxVelDiff=0.0005 slideLyra=425.28 slideMine=425.28
+melee HAND weapon=pistol lift=0 hand=37.792,21.166,52.242 partDist=8.082233 offset=8.082234
+melee HAND weapon=pistol lift=25 hand=37.792,21.166,77.242 partDist=8.082233 offset=8.082234
+melee HAND weapon=pistol crouch=1 lift=0 hand=41.229,16.321,-14.304
+melee REST stand=0.000405 crouch=0.000713
+melee HAND weapon=rifle lift=0 hand=11.244,17.358,50.887 partDist=8.082233 offset=8.082234
+melee HAND weapon=rifle lift=25 hand=11.244,17.358,75.887 partDist=8.082233 offset=8.082234
+melee HAND weapon=rifle crouch=1 lift=0 hand=18.408,15.986,-13.052
+melee HAND weapon=shotgun lift=0 hand=11.244,17.358,50.887 partDist=8.082233 offset=8.082234
+melee HAND weapon=shotgun lift=25 hand=11.244,17.358,75.887 partDist=8.082233 offset=8.082234
+melee HAND weapon=shotgun crouch=1 lift=0 hand=18.408,15.986,-13.052
+melee REPLAY ok ack=9 corrected=1 endDiff=0.000007 slide=105.726
+melee REPLAY ok ack=10 corrected=1 endDiff=0.000012 slide=105.726
+melee REPLAY ok ack=11 corrected=1 endDiff=0.000020 slide=105.726
+melee REPLAY ok ack=12 corrected=1 endDiff=0.000030 slide=105.726
+melee REPLAY ok ack=13 corrected=1 endDiff=0.000011 slide=105.726
+melee REPLAY ok ack=20 corrected=1 endDiff=0.000008 slide=105.726
+melee MELEE predictReplay compared=6 fails=0 maxEndDiff=0.000030 slideStraight=105.726 pushAt=10 inputs=40 pushApplied=8
+melee FIX ok serverPush seq=10 ack=12 before=105.7257 afterResult=0.0000 after=0.000000 corrected=0 hitFixes=1 forceFixes=0 unconfirmed=0 ignored=0 rerunsMissed=0
+melee FIX ok serverMiss seq=10 ack=12 before=105.7257 afterResult=0.0000 after=0.000000 corrected=0 hitFixes=1 forceFixes=0 unconfirmed=0 ignored=0 rerunsMissed=0
+melee FIX ok serverForce seq=10 ack=12 before=66.8942 afterResult=0.0000 after=0.000000 corrected=0 hitFixes=0 forceFixes=1 unconfirmed=0 ignored=0 rerunsMissed=0
+melee FIX ok unconfirmed seq=10 ack=12 before=105.7257 afterResult=105.7257 after=0.000000 corrected=0 hitFixes=0 forceFixes=0 unconfirmed=1 ignored=0 rerunsMissed=0
+melee FIX ok spawnBase seq=1 ack=3 before=102.2014 afterResult=0.0000 after=0.000000 corrected=0 hitFixes=1 forceFixes=0 unconfirmed=0 ignored=0 rerunsMissed=0
+melee FIX ok pushWithoutPress seq=10 ack=12 before=0.0000 afterResult=0.0000 after=0.000000 corrected=0 hitFixes=0 forceFixes=0 unconfirmed=0 ignored=1 rerunsMissed=0
+melee MELEE predictFix compared=6 fails=0
+melee SPAM ok weapon=pistol inputs=34 frames=179 starts lyra=6 mine=6 diffs=0 firstDiffFrame=-
+melee SPAM ok weapon=rifle inputs=35 frames=179 starts lyra=6 mine=6 diffs=0 firstDiffFrame=-
+melee SPAM ok weapon=shotgun inputs=46 frames=179 starts lyra=4 mine=4 diffs=0 firstDiffFrame=-
+melee MELEE abilitySpam weapons=3 fails=0 starts=16 frames=537
+melee RULE ok fireBlockedWhileMelee
+melee RULE ok fireControl
+melee RULE ok reloadInputBlockedWhileMelee
+melee RULE ok reloadInputControl
+melee RULE ok reloadCancelledByMeleeStart
+melee RULE ok reloadControl
+melee RULE ok autoReloadBlockedWhileMelee
+melee RULE ok autoReloadControl
+melee MELEE rules compared=8 fails=0
+melee MELEE ability compared=41 fails=0 (damage 17 · sameTeam 1 · none 23, first touch capsule 6 · mesh 12) maxDistDiff=0.0006 walkCells=0
+melee MELEE tracePrev compared=41 fails=0 maxDistDiff=0.0014 maxImpactDiff=0.0066
+melee MELEE traceNow compared=41 fails=0 maxDistDiff=0.0024 maxImpactDiff=0.0087
+melee MELEE handSelf compared=6 fails=0 maxDiff=0.000000547
+melee MELEE restHand fails=0
+melee MELEE push compared=17 fails=0 frames=367 blocked=4 maxPosDiff=0.0012 maxVelDiff=0.0036 walkCells=0 fallCells=0 inputFrames=0 fallingIterations=0
+melee MELEE pushCount applied=17 replaced=0 prepared=49 finished=16 restores=48 adds=49 external=0 apexRefund=0
+melee MELEECHECK PASS events=41 inputFails=0 fails=0
+melee_q PUSH ok step=melee_150 dist=0.0000 force=0.000 frames=1 input=0 fall=0 blocked=0 maxPosDiff=0.0000 maxVelDiff=0.0000 slideLyra=0.00 slideMine=0.00
+melee_q PUSH ok step=melee_300 dist=118.2756 force=743.447 frames=22 input=0 fall=0 blocked=0 maxPosDiff=0.0008 maxVelDiff=0.0021 slideLyra=128.16 slideMine=128.16
+melee_q PUSH ok step=melee_400 dist=218.4098 force=1372.861 frames=30 input=0 fall=0 blocked=0 maxPosDiff=0.0008 maxVelDiff=0.0015 slideLyra=295.43 slideMine=295.43
+melee_q PUSH ok step=melee_450 dist=268.7267 force=1689.139 frames=26 input=0 fall=0 blocked=1 maxPosDiff=0.0009 maxVelDiff=0.0022 slideLyra=378.42 slideMine=378.42
+melee_q PUSH ok step=melee_480 dist=298.6156 force=1877.012 frames=22 input=0 fall=0 blocked=1 maxPosDiff=0.0005 maxVelDiff=0.0006 slideLyra=408.18 slideMine=408.18
+melee_q PUSH ok step=melee_500 dist=318.5461 force=2002.289 frames=20 input=0 fall=0 blocked=1 maxPosDiff=0.0008 maxVelDiff=0.0016 slideLyra=422.83 slideMine=422.83
+melee_q PUSH ok step=melee_520 dist=338.0383 force=2124.812 frames=19 input=0 fall=0 blocked=1 maxPosDiff=0.0005 maxVelDiff=0.0007 slideLyra=441.25 slideMine=451.53
+melee_q PUSH ok step=melee_back_200 dist=35.6651 force=224.180 frames=11 input=0 fall=0 blocked=0 maxPosDiff=0.0005 maxVelDiff=0.0008 slideLyra=22.76 slideMine=22.76
+melee_q PUSH ok step=side_p100 dist=63.3508 force=398.205 frames=15 input=0 fall=0 blocked=0 maxPosDiff=0.0010 maxVelDiff=0.0039 slideLyra=52.45 slideMine=52.45
+melee_q PUSH ok step=side_p115 dist=90.0534 force=566.050 frames=19 input=0 fall=0 blocked=0 maxPosDiff=0.0010 maxVelDiff=0.0037 slideLyra=87.15 slideMine=87.15
+melee_q PUSH ok step=side_p130 dist=108.5312 force=682.196 frames=21 input=0 fall=0 blocked=0 maxPosDiff=0.0019 maxVelDiff=0.0071 slideLyra=113.58 slideMine=113.58
+melee_q PUSH ok step=side_p145 dist=170.9881 force=1074.782 frames=26 input=0 fall=0 blocked=0 maxPosDiff=0.0005 maxVelDiff=0.0010 slideLyra=212.83 slideMine=212.83
+melee_q PUSH ok step=side_m100 dist=166.6140 force=1047.288 frames=26 input=0 fall=0 blocked=0 maxPosDiff=0.0004 maxVelDiff=0.0008 slideLyra=205.56 slideMine=205.56
+melee_q PUSH ok step=melee_walk_300 dist=75.2966 force=473.293 frames=14 input=14 fall=0 blocked=1 maxPosDiff=0.0009 maxVelDiff=0.0034 slideLyra=162.44 slideMine=162.44
+melee_q PUSH ok step=melee_walk_520 dist=295.4951 force=1857.397 frames=13 input=14 fall=0 blocked=1 maxPosDiff=0.0007 maxVelDiff=0.0025 slideLyra=383.77 slideMine=402.01
+melee_q PUSH ok step=melee_jump_300 dist=199.3405 force=1252.998 frames=14 input=0 fall=1 blocked=1 maxPosDiff=0.0006 maxVelDiff=0.0004 slideLyra=227.81 slideMine=227.81
+melee_q PUSH ok step=melee_jump_400 dist=299.2829 force=1881.207 frames=13 input=0 fall=1 blocked=1 maxPosDiff=0.0005 maxVelDiff=0.0007 slideLyra=323.72 slideMine=323.72
+melee_q PUSH ok step=melee_shotgun_300 dist=159.8299 force=1004.645 frames=25 input=0 fall=0 blocked=0 maxPosDiff=0.0005 maxVelDiff=0.0006 slideLyra=194.14 slideMine=194.14
+melee_q PUSH ok step=melee_rifle_300 dist=141.9538 force=892.281 frames=24 input=0 fall=0 blocked=0 maxPosDiff=0.0007 maxVelDiff=0.0016 slideLyra=165.12 slideMine=165.12
+melee_q PUSH ok step=melee_crouch_300 dist=129.3292 force=812.926 frames=23 input=0 fall=0 blocked=0 maxPosDiff=0.0005 maxVelDiff=0.0005 slideLyra=145.17 slideMine=145.17
+melee_q PUSH ok step=melee_crouch_500 dist=329.1133 force=2068.712 frames=19 input=0 fall=0 blocked=1 maxPosDiff=0.0005 maxVelDiff=0.0006 slideLyra=428.50 slideMine=428.50
+melee_q HAND weapon=pistol lift=0 hand=37.792,21.166,52.242 partDist=8.082233 offset=8.082234
+melee_q HAND weapon=pistol lift=25 hand=37.792,21.166,77.242 partDist=8.082233 offset=8.082234
+melee_q HAND weapon=pistol crouch=1 lift=0 hand=41.229,16.321,-14.304
+melee_q REST stand=0.000405 crouch=0.000713
+melee_q HAND weapon=rifle lift=0 hand=11.244,17.358,50.887 partDist=8.082233 offset=8.082234
+melee_q HAND weapon=rifle lift=25 hand=11.244,17.358,75.887 partDist=8.082233 offset=8.082234
+melee_q HAND weapon=rifle crouch=1 lift=0 hand=18.408,15.986,-13.052
+melee_q HAND weapon=shotgun lift=0 hand=11.244,17.358,50.887 partDist=8.082233 offset=8.082234
+melee_q HAND weapon=shotgun lift=25 hand=11.244,17.358,75.887 partDist=8.082233 offset=8.082234
+melee_q HAND weapon=shotgun crouch=1 lift=0 hand=18.408,15.986,-13.052
+melee_q REPLAY ok ack=9 corrected=1 endDiff=0.000007 slide=128.162
+melee_q REPLAY ok ack=10 corrected=1 endDiff=0.000012 slide=128.162
+melee_q REPLAY ok ack=11 corrected=1 endDiff=0.000020 slide=128.162
+melee_q REPLAY ok ack=12 corrected=1 endDiff=0.000029 slide=128.162
+melee_q REPLAY ok ack=13 corrected=1 endDiff=0.000026 slide=128.162
+melee_q REPLAY ok ack=20 corrected=1 endDiff=0.000020 slide=128.162
+melee_q MELEE predictReplay compared=6 fails=0 maxEndDiff=0.000029 slideStraight=128.162 pushAt=10 inputs=40 pushApplied=8
+melee_q FIX ok serverPush seq=10 ack=12 before=128.1619 afterResult=0.0000 after=0.000000 corrected=0 hitFixes=1 forceFixes=0 unconfirmed=0 ignored=0 rerunsMissed=0
+melee_q FIX ok serverMiss seq=10 ack=12 before=128.1619 afterResult=0.0000 after=0.000000 corrected=0 hitFixes=1 forceFixes=0 unconfirmed=0 ignored=0 rerunsMissed=0
+melee_q FIX ok serverForce seq=10 ack=12 before=80.6517 afterResult=0.0000 after=0.000000 corrected=0 hitFixes=0 forceFixes=1 unconfirmed=0 ignored=0 rerunsMissed=0
+melee_q FIX ok unconfirmed seq=10 ack=12 before=128.1619 afterResult=128.1619 after=0.000000 corrected=0 hitFixes=0 forceFixes=0 unconfirmed=1 ignored=0 rerunsMissed=0
+melee_q FIX ok spawnBase seq=1 ack=3 before=123.8907 afterResult=0.0000 after=0.000000 corrected=0 hitFixes=1 forceFixes=0 unconfirmed=0 ignored=0 rerunsMissed=0
+melee_q FIX ok pushWithoutPress seq=10 ack=12 before=0.0000 afterResult=0.0000 after=0.000000 corrected=0 hitFixes=0 forceFixes=0 unconfirmed=0 ignored=1 rerunsMissed=0
+melee_q MELEE predictFix compared=6 fails=0
+melee_q SPAM ok weapon=pistol inputs=34 frames=179 starts lyra=6 mine=6 diffs=0 firstDiffFrame=-
+melee_q SPAM ok weapon=rifle inputs=35 frames=179 starts lyra=6 mine=6 diffs=0 firstDiffFrame=-
+melee_q SPAM ok weapon=shotgun inputs=46 frames=179 starts lyra=4 mine=4 diffs=0 firstDiffFrame=-
+melee_q MELEE abilitySpam weapons=3 fails=0 starts=16 frames=537
+melee_q RULE ok fireBlockedWhileMelee
+melee_q RULE ok fireControl
+melee_q RULE ok reloadInputBlockedWhileMelee
+melee_q RULE ok reloadInputControl
+melee_q RULE ok reloadCancelledByMeleeStart
+melee_q RULE ok reloadControl
+melee_q RULE ok autoReloadBlockedWhileMelee
+melee_q RULE ok autoReloadControl
+melee_q MELEE rules compared=8 fails=0
+melee_q MELEE ability compared=45 fails=0 (damage 21 · sameTeam 1 · none 23, first touch capsule 8 · mesh 14) maxDistDiff=0.0011 walkCells=2
+melee_q MELEE tracePrev compared=45 fails=0 maxDistDiff=0.0008 maxImpactDiff=0.0144
+melee_q MELEE traceNow compared=45 fails=0 maxDistDiff=0.0009 maxImpactDiff=0.0261
+melee_q MELEE handSelf compared=6 fails=0 maxDiff=0.000000547
+melee_q MELEE restHand fails=0
+melee_q MELEE push compared=21 fails=0 frames=403 blocked=9 maxPosDiff=0.0019 maxVelDiff=0.0071 walkCells=2 fallCells=2 inputFrames=28 fallingIterations=29
+melee_q MELEE pushCount applied=21 replaced=0 prepared=61 finished=20 restores=60 adds=61 external=0 apexRefund=0
+melee_q MELEECHECK PASS events=45 inputFails=0 fails=0
 map_expanse CHECK kind=A total=15000 bothHit=9225 bothMiss=5775 onlyLyra=0 onlyMine=0 lyraPen=4351 penMismatch=0 maxDiff=0.0910 p99Diff=0.00074 over0.1=0 over1=0
 map_expanse NORMAL kind=A compared=4874 over0.01=91 over0.1=90 max=1.4142 | startPen compared=4351 over0.1=663
 map_expanse CHECK kind=C total=15000 bothHit=9213 bothMiss=5772 onlyLyra=15 onlyMine=0 lyraPen=6125 penMismatch=0 maxDiff=451.8685 p99Diff=0.00566 over0.1=38 over1=20

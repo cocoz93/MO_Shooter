@@ -7,6 +7,7 @@ param(
     [switch]$FreeDt,
     [switch]$Stress,
     [switch]$Ads,
+    [switch]$Crouch,
     [int]$TimeoutSec = 580
 )
 # Replays a fixed random input on Lyra movement and writes Saved/MOB/move_<Tag>.csv (answer sheet for Tools/MoveCheck).
@@ -24,6 +25,8 @@ if (-not $FreeDt) { $a += @('-benchmark', '-fps=60', '-UseFixedTimeStep') }
 if ($Stress) { $a += '-MOBMoveStress' }
 # -Ads: presses/releases aim-down-sights at random (step C, walk speed x0.5). Separate random stream, so the movement input is the same as without it.
 if ($Ads) { $a += '-MOBMoveAds' }
+# -Crouch: presses crouch every 0.2-2.5 s through ToggleCrouch (step D); every third segment starts crouched under a low ceiling. Separate random stream.
+if ($Crouch) { $a += '-MOBMoveCrouch' }
 $t0 = Get-Date
 $p = Start-Process -FilePath $ue -ArgumentList $a -PassThru
 if (-not $p.WaitForExit($TimeoutSec * 1000)) { "TIMEOUT after $TimeoutSec s - killing"; Stop-Process -Id $p.Id -Force }

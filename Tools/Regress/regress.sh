@@ -28,6 +28,7 @@ mkdir -p "$OUT"
 
 DATA="C:/Users/USER/Desktop/MyGit/MO_Shooter/Client/Lyra/Saved/MOB"
 MAP="$DATA/map_expanse.mocl"
+PADS="$DATA/pads_expanse.txt"	# 받침 자료(컨텐츠 B) — Epic 맵 값이라 맵처럼 리포 밖
 SRV="$BIN/Server/Release/Server.exe"
 BOT="$BIN/BotClient/Release/BotClient.exe"
 PROBE="$BIN/Tools/ServerProbe/Release/ServerProbe.exe"
@@ -43,14 +44,21 @@ run_checks() {
 	local tools="$BIN/Tools" g="$OUT/checks.txt" limit=""
 	[ "$BREAK" = 1 ] && limit="--limit 5000"
 	: > "$g"
-	for t in gym_fixed expanse_fixed expanse_free expanse_stress; do
+	# expanse_crouch = 앉기 기록(컨텐츠 D). 앉기 줄(ONE crouch · RUN crouch · CROUCH_COUNT · PARAM crouch)은 앉기 기록에만 나온다
+	for t in gym_fixed expanse_fixed expanse_free expanse_stress expanse_crouch; do
 		local m=map_expanse.mocl
 		[ "$t" = gym_fixed ] && m=map_gym.mocl
 		"$tools/MoveCheck/Release/MoveCheck.exe" "$DATA/$m" "$DATA/move_$t.csv" $limit > "$OUT/move_$t.log" 2>&1
-		grep -E '^(ONE frames|RUN frames|RUN segments|COUNT )' "$OUT/move_$t.log" | sed "s/^/move_$t /" >> "$g"
+		grep -E '^(ONE frames|RUN frames|RUN segments|COUNT |ONE crouch|RUN crouch|CROUCH_COUNT|PARAM crouch)' "$OUT/move_$t.log" | sed "s/^/move_$t /" >> "$g"
 	done
 	"$tools/WeaponCheck/Release/WeaponCheck.exe" "$DATA/weaponrec_gym.csv" "$DATA/map_gym.mocl" > "$OUT/weapon.log" 2>&1
 	grep -v '^TIME' "$OUT/weapon.log" | sed 's/^/weapon /' >> "$g"
+	# 근접(컨텐츠 E) — Lyra 연습장 근접 기록(cprobe_e1g3)과 Shared ResolveMelee 대조. 어긋난 줄(DIFF)도 그대로 기준선에 들어가 다르면 잡힌다
+	"$tools/MeleeCheck/Release/MeleeCheck.exe" "$DATA/cprobe_e1g3.log" "$DATA/cprobe_e1g3.csv" "$DATA/clips.bin" "$DATA/map_gym.mocl" > "$OUT/melee.log" 2>&1
+	sed 's/^/melee /' "$OUT/melee.log" >> "$g"
+	# Quinn 몸 근접 기록(17-d) — 걸으며 · 뛰며 칸(밀기 중 입력 · 낙하 재생)은 이 기록에만 있다. 판 시험(run_melee)도 같은 기록을 쓴다
+	"$tools/MeleeCheck/Release/MeleeCheck.exe" "$DATA/cprobe_d3f2.log" "$DATA/cprobe_d3f2.csv" "$DATA/clips.bin" "$DATA/map_gym.mocl" > "$OUT/melee_q.log" 2>&1
+	sed 's/^/melee_q /' "$OUT/melee_q.log" >> "$g"
 	for t in expanse gym; do
 		local m="map_$t.mocl"
 		"$tools/MapCheck/Release/MapCheck.exe" "$DATA/$m" "$DATA/trace_$t.csv" > "$OUT/map_$t.log" 2>&1
@@ -66,9 +74,11 @@ run_checks() {
 run_bots() {
 	local break_arg=""
 	[ "$BREAK" = 1 ] && break_arg="--breakMirror"
-	"$SRV" "--map=$MAP" --port=7953 --exitWhenEmpty "--record=$OUT_W/bots_srv.csv" --warmup=2 --matchSeconds=40 --seed=21 > "$OUT/bots_srv.log" 2>&1 &
+	# 받침을 켠다(컨텐츠 B) — 기록은 처치 · 결과 줄뿐이라 받침이 있어도 서버 ↔ 봇 바이트 비교는 그대로다
+	# 사람끼리 막기는 끈다(시험 전용 --testNoPawnBlock, D83) — 봇끼리 부딪히면 남 자리를 늦게 알아 위치가 갈려, 서버 ↔ 같은 코드 위치 차이 0 을 못 본다. 막기 판은 run_block
+	"$SRV" "--map=$MAP" --port=7953 --exitWhenEmpty "--record=$OUT_W/bots_srv.csv" --warmup=2 --matchSeconds=40 --seed=21 "--pads=$PADS" --testNoPawnBlock > "$OUT/bots_srv.log" 2>&1 &
 	local spid=$!
-	"$BOT" "--map=$MAP" --port=7953 "--record=$OUT_W/bots_bot.csv" --seed=21 $break_arg > "$OUT/bots_bot.log" 2>&1
+	"$BOT" "--map=$MAP" --port=7953 "--record=$OUT_W/bots_bot.csv" --seed=21 --testNoPawnBlock $break_arg > "$OUT/bots_bot.log" 2>&1
 	local brc=$?
 	wait $spid
 	local src=$? ok=1
@@ -85,6 +95,102 @@ run_bots() {
 	ok=1
 	[ -n "$shots" ] && [ "$shots" -gt 0 ] && [ "$shots" = "$noview" ] || ok=0
 	verdict 시점없음갈래 $ok "shots=$shots noView=$noview"
+
+	# 받침 갈래(컨텐츠 B-4) — 봇이 센 자기 회복 합 = 서버 회복 수, 찾아가던 중에 받은 회복이 한 번 이상(갈래가 실제로 받침에 닿았다)
+	local pk mine sought
+	pk="$(grep -a '^SERVER pickups' "$OUT/bots_srv.log" | sed -E 's/^SERVER pickups=([0-9]+).*/\1/')"
+	mine="$(grep -a '^BOT pads' "$OUT/bots_bot.log" | sed -E 's/.* healsMine=([0-9]+).*/\1/')"
+	sought="$(grep -a '^BOT pads' "$OUT/bots_bot.log" | sed -E 's/.* healsSought=([0-9]+).*/\1/')"
+	ok=1
+	[ -n "$pk" ] && [ "$pk" = "$mine" ] && [ -n "$sought" ] && [ "$sought" -gt 0 ] || ok=0
+	verdict 받침갈래 $ok "서버 회복=$pk 봇 자기 회복 합=$mine 찾아가 닿음=$sought"
+}
+
+# 사람끼리 막기(컨텐츠 F, D83 늘 켬) — 봇이 안 쏘고 가장 가까운 사람 쪽으로 걸어(--push) 계속 부딪힌다. 예측도 남 캡슐을 보고 서버와 다르면 고친다.
+# 봇 RESULT PASS = 고친 수를 본 비교가 있고 · 예측이 한 번 이상 닿고 · 예측 단체 이상 0 · 탄 · 깃발 차이 0(떨어짐은 따로 센다)
+# 같은 판에서 부활 직후 40틱 쉰다(--testPauseAfterSpawn, D84) — 서버가 빈 입력으로 움직여도 이동 막음이 클라와 같은 입력 수로 풀려야 한다(BOT moveLock diff=0)
+run_block() {
+	"$SRV" "--map=$MAP" --port=7964 --exitWhenEmpty "--record=$OUT_W/block_srv.csv" --warmup=2 --matchSeconds=40 --seed=21 > "$OUT/block_srv.log" 2>&1 &
+	local spid=$!
+	"$BOT" "--map=$MAP" --port=7964 --bots=10 --seed=21 --push --testPauseAfterSpawn=40 "--record=$OUT_W/block_bot.csv" > "$OUT/block_bot.log" 2>&1
+	local brc=$?
+	wait $spid
+	local src=$? ok=1
+	[ $brc = 0 ] && [ $src = 0 ] || ok=0
+	cmp -s "$OUT/block_srv.csv" "$OUT/block_bot.csv" || ok=0
+	grep -q '^RESULT PASS' "$OUT/block_bot.log" || ok=0
+	local pawn moves odd lock idle
+	pawn="$(grep -a '^SERVER pawn' "$OUT/block_srv.log")"
+	moves="$(echo "$pawn" | sed -E 's/.* blockMoves=([0-9]+).*/\1/')"
+	odd="$(echo "$pawn" | sed -E 's/.* oddSimplex=([0-9]+).*/\1/')"
+	lock="$(grep -a '^BOT moveLock' "$OUT/block_bot.log" | sed -E 's/.* diff=([0-9]+).*/\1/')"
+	idle="$(grep -a '^SERVER inputs' "$OUT/block_srv.log" | sed -E 's/.* idleMoves=([0-9]+).*/\1/')"
+	[ -n "$moves" ] && [ "$moves" -gt 0 ] && [ "$odd" = 0 ] || ok=0
+	[ -n "$idle" ] && [ "$idle" -gt 0 ] && [ "$lock" = 0 ] || ok=0
+	verdict 막기판 $ok "봇 rc=$brc 서버 rc=$src 서버 막기입력=$moves 단체이상=$odd 빈입력이동=$idle 막음어긋남=$lock $(grep -a '^BOT pawn' "$OUT/block_bot.log" | grep -oE '(corrected|correctMax|predHits)=[0-9.]+' | tr '\n' ' ')"
+}
+
+# 렉 때 서버가 만든 빈 입력(D87) — 봇이 쏘며 돌아다니다 부활 직후 40틱 쉰다(--testPauseAfterSpawn). 서버는 빈 입력으로 걸음만 굴리고
+# 무기 · 근접 · 조준 시계는 안 돌려야 한다 — 돌리면 서버가 한 발 더 쏜다(고치기 전 같은 판 ammoDiff=1358).
+# 막기는 켠 채(봇이 서버 상태로 고친다) — 막기를 끄면 렉 동안 서버가 캐릭터를 떨어뜨린 만큼 봇이 못 따라가 위치 · 떨어짐 차이가 남는다(빈 입력의 몫, 고칠 것 아님)
+run_pause() {
+	"$SRV" "--map=$MAP" --port=7965 --exitWhenEmpty "--record=$OUT_W/pause_srv.csv" --warmup=2 --matchSeconds=40 --seed=21 > "$OUT/pause_srv.log" 2>&1 &
+	local spid=$!
+	"$BOT" "--map=$MAP" --port=7965 --bots=10 --seed=21 --testPauseAfterSpawn=40 "--record=$OUT_W/pause_bot.csv" > "$OUT/pause_bot.log" 2>&1
+	local brc=$?
+	wait $spid
+	local src=$? ok=1
+	[ $brc = 0 ] && [ $src = 0 ] || ok=0
+	cmp -s "$OUT/pause_srv.csv" "$OUT/pause_bot.csv" || ok=0
+	grep -q '^RESULT PASS' "$OUT/pause_bot.log" || ok=0
+	local same ammo flag lock idle
+	same="$(grep -a '^BOT 서버 ↔' "$OUT/pause_bot.log")"
+	ammo="$(echo "$same" | sed -E 's/.* ammoDiff=([0-9]+).*/\1/')"
+	flag="$(echo "$same" | sed -E 's/.* flagDiff=([0-9]+).*/\1/')"
+	lock="$(grep -a '^BOT moveLock' "$OUT/pause_bot.log" | sed -E 's/.* diff=([0-9]+).*/\1/')"
+	idle="$(grep -a '^SERVER inputs' "$OUT/pause_srv.log" | sed -E 's/.* idleMoves=([0-9]+).*/\1/')"
+	[ -n "$idle" ] && [ "$idle" -gt 0 ] || ok=0
+	[ "$ammo" = 0 ] && [ "$flag" = 0 ] && [ "$lock" = 0 ] || ok=0
+	verdict 쉬기판 $ok "봇 rc=$brc 서버 rc=$src 빈입력이동=$idle 탄어긋남=$ammo 깃발어긋남=$flag 막음어긋남=$lock"
+}
+
+# 사람끼리 막기 대조(컨텐츠 F-1) — Lyra 연습장에서 두 사람이 부딪힌 기록을 Shared 이동으로 다시 돌려 위치 · 속도가 0.01 안이어야 한다.
+# 기록 = F-1 에서 PASS(cells=40)를 낸 네 벌 그대로(f1a · f1b · f1c · f1e)
+run_bump() {
+	"$BIN/Tools/BumpCheck/Release/BumpCheck.exe" "$DATA/map_gym.mocl" "$DATA/cprobe_f1a.csv" "$DATA/cprobe_f1b.csv" "$DATA/cprobe_f1c.csv" "$DATA/cprobe_f1e.csv" > "$OUT/bump.log" 2>&1
+	local rc=$? ok=1
+	[ $rc = 0 ] || ok=0
+	grep -q '^BUMPCHECK PASS' "$OUT/bump.log" || ok=0
+	verdict 부딪힘대조 $ok "rc=$rc $(grep -a '^BUMPCHECK' "$OUT/bump.log" | cut -c1-90)"
+}
+
+# 받침 상태 · 겹침 · 대기(컨텐츠 B-2) — 프로브가 받침 각본을 걷고, 서버 받침 사건을 Lyra 단독 기록과 프레임 단위로 견준다
+run_pads() {
+	"$SRV" "--map=$MAP" --port=7958 --debug --warmup=0 --exitWhenEmpty "--pads=$PADS" > "$OUT/pads_srv.log" 2>&1 &
+	local spid=$!
+	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --pads --port=7958 "--serverLog=$OUT_W/pads_srv.log" > "$OUT/pads_probe.log" 2>&1
+	local prc=$?
+	wait $spid
+	local src=$? ok=1
+	python "$REPO/Tools/LyraPilot/check_pads.py" "--lyra=$DATA/cprobe_pads3.log" "--probe=$OUT_W/pads_probe.log" > "$OUT/pads_check.log" 2>&1
+	local crc=$?
+	[ $prc = 0 ] && [ $src = 0 ] && [ $crc = 0 ] || ok=0
+	grep -q '^PADS PASS' "$OUT/pads_check.log" || ok=0
+	verdict 받침 $ok "프로브 rc=$prc 서버 rc=$src $(tail -1 "$OUT/pads_check.log" | cut -c1-40)"
+}
+
+# 근접 시험판(컨텐츠 E-3) — Lyra 연습장 근접 칸(cprobe_d3f2, Quinn 몸)을 클립 실은 서버에 다시 세워 결과 · 대상 · 피해 · 따라간 자리를 견준다.
+# 클립 없는 서버는 몸 판정이 상자라 칸 몇 개가 Lyra 와 갈린다(17-d d2) — 사람 판과 같은 클립 실은 서버로 본다
+run_melee() {
+	"$SRV" "--map=$DATA/map_gym.mocl" --port=7959 --debug --warmup=0 --exitWhenEmpty "--clips=$DATA/clips.bin" > "$OUT/melee_srv.log" 2>&1 &
+	local spid=$!
+	"$PROBE" "$DATA/map_gym.mocl" "$DATA/move_expanse_fixed.csv" "--melee=$DATA/cprobe_d3f2.log" --port=7959 "--serverLog=$OUT_W/melee_srv.log" > "$OUT/melee_probe.log" 2>&1
+	local prc=$?
+	wait $spid
+	local src=$? ok=1
+	[ $prc = 0 ] && [ $src = 0 ] || ok=0
+	grep -q '^RESULT PASS' "$OUT/melee_probe.log" || ok=0
+	verdict 근접 $ok "프로브 rc=$prc 서버 rc=$src $(grep -a '^MELEEPROBE cells=' "$OUT/melee_probe.log" | grep -oE '(cells|kindDiff|targetDiff|damageDiff|runMeasured|runFails)=[0-9]+' | tr '\n' ' ')"
 }
 
 run_rules() {
@@ -189,13 +295,17 @@ echo "출력 $OUT"
 if [ "$ONLY" = multi ]; then
 	run_multi
 else
-	if [ "$ONLY" != play ]; then run_checks; fi
+	if [ "$ONLY" != play ]; then run_checks; run_bump; fi
 	if [ "$ONLY" != checks ]; then
 		run_bots
+		run_block
+		run_pause
 		run_rules
 		run_replay
 		run_authority
 		run_rewind
+		run_pads
+		run_melee
 		run_multi
 	fi
 fi

@@ -1,7 +1,8 @@
 param(
     [string]$Tag = 'probe',
-    [ValidateSet('gym', 'pads')][string]$Mode = 'gym',
-    [int]$TimeoutSec = 420
+    [ValidateSet('gym', 'pads', 'bump')][string]$Mode = 'gym',
+    [int]$TimeoutSec = 420,
+    [string]$ExtraArgs = ''
 )
 # Runs Lyra alone (no server) through a fixed script and records what Lyra itself does for aim (ADS), crouch, melee and health pads.
 # Needs the MOBridge plugin mode -MOBContentProbe (MOBContentProbeSubsystem). gym = L_ShooterGym with one bot (aim, crouch, melee);
@@ -18,6 +19,8 @@ if ($Mode -eq 'pads') { $map = '/ShooterMaps/Maps/L_Expanse?NumBots=0' } else { 
 $a = @("`"$proj\Lyra.uproject`"", $map, '-game', '-RenderOffScreen', '-ResX=1280', '-ResY=720',
        '-unattended', '-nosplash', '-nosound', '-log', "-abslog=`"$log`"",
        "-MOBContentProbe=$Tag", "-MOBCPMode=$Mode", '-benchmark', '-fps=60', '-UseFixedTimeStep')
+# Extra Lyra args, e.g. -ExtraArgs '-MOBCPQuinn' (force Quinn body on me and the bot, like the server clips - D33)
+if ($ExtraArgs) { $a += $ExtraArgs.Split(' ', [StringSplitOptions]::RemoveEmptyEntries) }
 $t0 = Get-Date
 $p = Start-Process -FilePath $ue -ArgumentList $a -PassThru
 if (-not $p.WaitForExit($TimeoutSec * 1000)) { "TIMEOUT after $TimeoutSec s - killing"; Stop-Process -Id $p.Id -Force }

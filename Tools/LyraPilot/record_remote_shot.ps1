@@ -6,7 +6,7 @@ param(
     [string]$Weapon = 'rifle',   # bot weapon (BotClient --scriptWeapon: pistol, rifle, shotgun); the screen poses it with that weapon's clips
     [double]$HoldSec = -1,   # longer than the 4 s the shot waits before filming; route must start before the idle fidget, as the passed video did. -1 = by weapon (below)
     [string]$Res = '1280x720',
-    [string]$Script = 'startstop',   # BotClient --script: startstop (passed start/stop video) or events (fire, reload, swap; record_anim_compare.ps1 -Script events)
+    [string]$Script = 'startstop',   # BotClient --script: startstop (passed start/stop video), events (fire, reload, swap; record_anim_compare.ps1 -Script events) or crouch (content D-6; record_anim_compare.ps1 -Script crouch)
     [int]$TimeoutSec = 400
 )
 # The route starts at hold + 2.02 s (first script piece = stand 121 ticks). The fidget comes at stop clip seconds + 6 s after the bot is placed:
@@ -30,6 +30,10 @@ $log    = "$outDir\remoteshot_$Tag.log"
 $relayPort = $Port + 1
 $resX, $resY = $Res -split 'x'
 $botSeconds = [int]($HoldSec + 48.9 + 25)
+# The crouch route is longer: 4820 ticks with the first sideways move at tick 607 (c_fwd; crouching alone moves the capsule only up and down),
+# so the film runs (4820 - 607) / 60 = 70.22 s after the first move (MOBRemoteShotSubsystem -MOBRemoteShotAfterMove) and the bot stays for the whole route.
+$afterMove = ''
+if ($Script -eq 'crouch') { $botSeconds = [int]($HoldSec + 4820 / 60 + 25); $afterMove = '-MOBRemoteShotAfterMove=70.22' }
 
 $srv = Start-Process -FilePath "$repo\build\Server\Release\Server.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", "--clips=`"$clips`"", '--debug', '--exitWhenEmpty', '--warmup=1', '--matchSeconds=500') -RedirectStandardOutput $srvOut -PassThru -WindowStyle Hidden
 $null = $srv.Handle   # without this ExitCode stays empty after the process ends
@@ -37,14 +41,20 @@ Start-Sleep -Milliseconds 800
 $relay = Start-Process -FilePath "$repo\build\Tools\LagRelay\Release\LagRelay.exe" -ArgumentList @("--listen=$relayPort", "--target=$Port", "--delayMs=$DelayMs", "--jitterMs=$JitterMs", "--seconds=$TimeoutSec") -RedirectStandardOutput $relayOut -PassThru -WindowStyle Hidden
 Start-Sleep -Milliseconds 300
 
+# The viewer stands on Lyra's own start spot (MOB_READY at=(-720,-170,142)); the crouch route comes no closer than 3.4 m to it.
+# It used to stand on the bot's home: on the server both bodies overlapped there, and the crouch route's shotgun shot (c_fire, 9 pellets) killed the viewer,
+# so FindTarget lost its own pawn and the film stopped at 54 s (content D-6-d). The camera follows the target, so the viewer's spot is not in the film.
 $lyraArgs = @("`"$proj\Lyra.uproject`"", '/ShooterCore/Maps/L_ShooterGym?NumBots=0', '-game', '-RenderOffScreen', "-ResX=$resX", "-ResY=$resY",
               '-unattended', '-nosplash', '-nosound', '-log', "-abslog=`"$log`"",
-              "-MOBServer=127.0.0.1:$relayPort", '-MOBServerAnim', '-MOBStandAt=-1020,-1070,142', "-MOBRemoteShot=$Tag", "-MOBTag=remoteshot_$Tag", '-ExecCmds="t.MaxFPS 60"')
+              "-MOBServer=127.0.0.1:$relayPort", '-MOBServerAnim', '-MOBStandAt=-720,-170,142', "-MOBRemoteShot=$Tag", "-MOBTag=remoteshot_$Tag", '-ExecCmds="t.MaxFPS 60"')
+if ($afterMove) { $lyraArgs += $afterMove }
 $t0 = Get-Date
 $lyra = Start-Process -FilePath $ue -ArgumentList $lyraArgs -PassThru
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 while ((Get-Date) -lt $deadline -and -not $lyra.HasExited) {
-    if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'MOB_WELCOME' -Quiet)) { break }
+    # Only a log this Lyra run has written counts: a log left by an earlier run of the same tag already holds MOB_WELCOME,
+    # and then the bot joined before Lyra and ran the route while Lyra was still loading (content D-6-d, MOB_REMOTESHOT_FAIL target not at home).
+    if ((Test-Path $log) -and (Get-Item $log).LastWriteTime -ge $t0 -and (Select-String -Path $log -Pattern 'MOB_WELCOME' -Quiet)) { break }
     Start-Sleep -Milliseconds 500
 }
 Start-Sleep -Seconds 3   # the 1 s warmup ends and the match starts before the bot joins

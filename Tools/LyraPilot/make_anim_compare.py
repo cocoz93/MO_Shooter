@@ -38,6 +38,20 @@ SEGMENT_LABELS = {
     "run_reload": "오른쪽으로 달리며 재장전", "stop_r": "멈춤", "swap_out": "무기 바꾸기", "swap_back": "원래 무기로",
     "swap_fire": "바꾸자마자 쏘기", "swap_back2": "원래 무기로", "run_swap": "왼쪽으로 달리며 바꾸고 돌아오기", "stop_s": "멈춤",
     "spawn": "부활 동작", "idle_end": "서 있기",
+    # -Script crouch (컨텐츠 D-3 · D-6 앉기 경로, MOBAnimCompareSubsystem CROUCH_SCRIPT · BotClient kCrouchScript — idle · stop_end · idle_end 는 위와 같다).
+    # 조준 경로(-Script ads)도 run_on · run_off · stop_a · start_toggle · stop_toggle · piv_toggle_a/b · ret_left 이름을 쓰지만 뜻이 조준이다 — 그 영상을 만들 땐 따로 나눠야 한다
+    "c_on": "서서 앉기", "c_up": "앉아 위로 (0 → 45도)", "c_down": "앉아 아래로 (45 → -45도)", "c_mid": "앉아 가운데로", "c_off": "일어서기", "c_on2": "다시 앉기",
+    "c_fwd": "앉아 앞으로", "c_stop_fwd": "앉은 걸음 멈춤", "c_bwd": "앉아 뒤로", "c_stop_bwd": "앉은 걸음 멈춤",
+    "c_left": "앉아 왼쪽으로", "c_stop_left": "앉은 걸음 멈춤", "c_right": "앉아 오른쪽으로", "c_stop_right": "앉은 걸음 멈춤",
+    "c_piv_bf_a": "앉아 뒤로", "c_piv_bf_b": "앉아 뒤 → 앞 돌아서기", "c_stop_bf": "멈춤",
+    "c_piv_fb_a": "앉아 앞으로", "c_piv_fb_b": "앉아 앞 → 뒤 돌아서기", "c_stop_fb": "멈춤",
+    "c_piv_lr_a": "앉아 왼쪽으로", "c_piv_lr_b": "앉아 왼쪽 → 오른쪽 돌아서기", "c_stop_lr": "멈춤",
+    "c_piv_rl_a": "앉아 오른쪽으로", "c_piv_rl_b": "앉아 오른쪽 → 왼쪽 돌아서기", "c_stop_rl": "멈춤",
+    "c_fire": "앉아 한 발", "c_ads_on": "앉아 조준", "c_ads_fwd": "앉아 조준하고 앞으로", "c_ads_stop": "멈춤", "c_ads_bwd": "앉아 조준하고 뒤로",
+    "c_ads_off": "조준 풀기", "c_jump": "앉은 데서 점프 (일어서며 뜀)", "c_settle": "서 있기",
+    "run_on": "앞으로 달리다 앉기", "run_off": "앉아 뒤로 가다 일어서기", "stop_a": "멈춤",
+    "start_toggle": "출발하며 앉기", "stop_toggle": "멈추며 일어서기", "piv_toggle_a": "앉아 왼쪽으로", "piv_toggle_b": "돌아서며 앉기",
+    "ret_left": "제자리로",
 }
 RECORD_FPS = 60.0
 VIDEO_FPS = 30

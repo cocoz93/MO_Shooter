@@ -6,6 +6,8 @@
 #    머리 = 약점에 맞은 탄 기준, 몸 = 어디든 맞은 탄 기준. 100발당 오탈 = 화면에서 맞고 서버에서 안 맞은 발 수
 # ③ 상대가 몽타주 중인 쏨을 따로 센다 — 서버 REWIND 줄의 montages(그 자세에 든 몽타주 칸 수). 판정 줄 VIEWPOSE 는 전부를 본다
 # ④ 상대가 조준 중인 쏨도 같은 식으로 따로 센다 — 서버 REWIND 줄의 ads(조준 묶음 비중 0~255, C-5). 0 이면 조준 자세를 안 본 것
+# ⑥ 상대가 맞은 쪽 반응 몽타주 중인 쏨도 따로 센다 — 서버 REWIND 줄의 react(1 = 반응 몽타주 칸이 실림, E-3 17-d). 반응은 근접에 맞을 때만 켜져 근접 판에서만 분모가 생긴다
+# ⑤ 상대가 앉은 쏨도 따로 센다 — 서버 REWIND 줄의 crouch(앉기 묶음 비중 0~255, D-6). 다 앉음(255) · 섞이는 중(1~254) · 서기(0) 셋으로 나눈다 — 앉으면 메시가 25 올라가 다 앉은 쪽이 따로 맞아야 한다
 # rc=0 기준 안 · rc=1 기준 밖이거나 이은 줄이 0 (0 은 「맞다」가 아니라 「못 읽었다」)
 import math
 import re
@@ -36,10 +38,19 @@ TRI = NUM + ',' + NUM + ',' + NUM
 VIEWP = re.compile(r'MOB_VIEWP seq=(\d+) target=(\d+) bone=(\S+) p=' + TRI + ' x=' + TRI + ' y=' + TRI + ' z=' + TRI)
 SRVP = re.compile(r'REWINDP seq=(\d+) shooter=(\d+) target=(\d+) bone=(\S+) kind=(\d) weak=(\d) p=' + TRI + ' x=' + TRI + ' y=' + TRI + ' z=' + TRI + ' s=' + TRI)
 VIEW = re.compile(r'MOB_VIEW seq=(\d+) target=(\d+) viewTick=(\d+) alpha=([\d.]+) x=' + NUM + ' y=' + NUM + ' z=' + NUM + ' yaw=' + NUM)
-REW = re.compile(r'REWIND seq=(\d+) shooter=(\d+) target=(\d+) now=(\d+) viewTick=(\d+) alpha=([\d.]+) x=' + NUM + ' y=' + NUM + ' z=' + NUM + ' yaw=' + NUM + r'(?: animWeapon=(\d+))?(?: montages=(\d+))?(?: ads=(\d+))?')
+REW = re.compile(r'REWIND seq=(\d+) shooter=(\d+) target=(\d+) now=(\d+) viewTick=(\d+) alpha=([\d.]+) x=' + NUM + ' y=' + NUM + ' z=' + NUM + ' yaw=' + NUM + r'(?: animWeapon=(\d+))?(?: montages=(\d+))?(?: ads=(\d+))?(?: crouch=(\d+))?(?: react=(\d+))?')
 WEAPON_NAMES = {0: '권총', 1: '소총', 2: '샷건', -1: '무기칸없음'}    # 서버 EWeapon 차례. -1 = 9단계 전 서버 기록(REWIND 에 animWeapon 이 없다)
 MONTAGE_GROUPS = {1: '몽타주 중', 0: '몽타주 없음', -1: '몽타주칸없음'}    # -1 = 5-c 전 서버 기록(REWIND 에 montages 가 없다)
 ADS_GROUPS = {1: '조준 중', 0: '조준 안 함', -1: '조준칸없음'}    # -1 = C-5 전 서버 기록(REWIND 에 ads 가 없다)
+CROUCH_GROUPS = {2: '다 앉음', 1: '앉기 섞임', 0: '서기', -1: '앉기칸없음'}    # -1 = D-6 전 서버 기록(REWIND 에 crouch 가 없다)
+REACT_GROUPS = {1: '반응 중', 0: '반응 없음', -1: '반응칸없음'}    # -1 = 17-d 전 서버 기록(REWIND 에 react 가 없다)
+
+
+def crouch_group(raw):
+    if raw is None:
+        return -1
+    v = int(raw)
+    return 2 if v >= 255 else (1 if v > 0 else 0)
 
 me = None
 screen = {}
@@ -77,7 +88,8 @@ for line in open(srv_path, encoding='utf-8', errors='replace'):
     if m and int(m.group(2)) == me:
         g = m.groups()
         server_at[(int(g[0]), int(g[2]))] = (int(g[4]), float(g[5]), np.array(g[6:9], float), float(g[9]), int(g[3]), int(g[10]) if g[10] is not None else -1,
-                                             min(int(g[11]), 1) if g[11] is not None else -1, min(int(g[12]), 1) if g[12] is not None else -1)
+                                             min(int(g[11]), 1) if g[11] is not None else -1, min(int(g[12]), 1) if g[12] is not None else -1, crouch_group(g[13]),
+                                             min(int(g[14]), 1) if g[14] is not None else -1)
 
 
 def angle(a, b):
@@ -99,6 +111,8 @@ worst_a = (0.0, None)
 per_weapon = {}     # 서버가 그 자세를 푼 무기 묶음별 [쏨, 부위행, 중심 최대, 각도 최대] — 권총 · 샷건 상대를 실제로 대조했는지 센다
 per_montage = {}    # 상대가 몽타주 중인가(MONTAGE_GROUPS)별 같은 칸
 per_ads = {}        # 상대가 조준 중인가(ADS_GROUPS)별 같은 칸
+per_crouch = {}     # 상대가 앉았나(CROUCH_GROUPS)별 같은 칸
+per_react = {}      # 상대가 반응 중인가(REACT_GROUPS)별 같은 칸
 for key in keys:
     s, v = server[key], screen[key]
     if len(s) != 22 or len(v) != 22 or set(s) != set(v):
@@ -110,6 +124,10 @@ for key in keys:
     pm[0] += 1
     pa = per_ads.setdefault(server_at[key][7] if key in server_at else -1, [0, 0, 0.0, 0.0])
     pa[0] += 1
+    pc = per_crouch.setdefault(server_at[key][8] if key in server_at else -1, [0, 0, 0.0, 0.0])
+    pc[0] += 1
+    pr = per_react.setdefault(server_at[key][9] if key in server_at else -1, [0, 0, 0.0, 0.0])
+    pr[0] += 1
     for bone, (kind, _weak, sv, _size) in s.items():
         w = v[bone]
         rows += 1
@@ -131,6 +149,12 @@ for key in keys:
         pa[1] += 1
         pa[2] = max(pa[2], dc)
         pa[3] = max(pa[3], da)
+        pc[1] += 1
+        pc[2] = max(pc[2], dc)
+        pc[3] = max(pc[3], da)
+        pr[1] += 1
+        pr[2] = max(pr[2], dc)
+        pr[3] = max(pr[3], da)
         if dc > worst_c[0]:
             worst_c = (dc, key + (bone,))
         if da > worst_a[0]:
@@ -142,6 +166,10 @@ print('몽타주별(서버 자세): ' + (' | '.join('%s 쏨=%d 부위행=%d 중�
                                     for g, p in sorted(per_montage.items(), reverse=True)) or '없음'))
 print('조준별(서버 자세): ' + (' | '.join('%s 쏨=%d 부위행=%d 중심최대=%.4fcm 각도최대=%.4f도 %s' % (ADS_GROUPS.get(g, str(g)), p[0], p[1], p[2], p[3], 'PASS' if p[2] <= limit_cm and p[3] <= limit_deg else 'FAIL')
                                   for g, p in sorted(per_ads.items(), reverse=True)) or '없음'))
+print('앉기별(서버 자세): ' + (' | '.join('%s 쏨=%d 부위행=%d 중심최대=%.4fcm 각도최대=%.4f도 %s' % (CROUCH_GROUPS.get(g, str(g)), p[0], p[1], p[2], p[3], 'PASS' if p[2] <= limit_cm and p[3] <= limit_deg else 'FAIL')
+                                  for g, p in sorted(per_crouch.items(), reverse=True)) or '없음'))
+print('반응별(서버 자세): ' + (' | '.join('%s 쏨=%d 부위행=%d 중심최대=%.4fcm 각도최대=%.4f도 %s' % (REACT_GROUPS.get(g, str(g)), p[0], p[1], p[2], p[3], 'PASS' if p[2] <= limit_cm and p[3] <= limit_deg else 'FAIL')
+                                  for g, p in sorted(per_react.items(), reverse=True)) or '없음'))
 ok = rows > 0
 if rows:
     c = np.array(cms)
@@ -239,6 +267,8 @@ def rays(c, n, ball):
 head_hit = head_lost = head_gain = body_hit = body_lost = body_gain = 0
 group_bullets = {}  # 몽타주 묶음별 [머리 분모, 머리 오탈, 몸 분모, 몸 오탈]
 ads_bullets = {}    # 조준 묶음별 같은 칸
+crouch_bullets = {} # 앉기 묶음별 같은 칸
+react_bullets = {}  # 반응 묶음별 같은 칸
 place_max = 0.0
 bullet_rows = 0
 for key in keys:
@@ -255,6 +285,8 @@ for key in keys:
     spos, syaw = server_at[key][2], server_at[key][3]
     gb = group_bullets.setdefault(server_at[key][6], [0, 0, 0, 0])
     ab = ads_bullets.setdefault(server_at[key][7], [0, 0, 0, 0])
+    cb = crouch_bullets.setdefault(server_at[key][8], [0, 0, 0, 0])
+    rb = react_bullets.setdefault(server_at[key][9], [0, 0, 0, 0])
     _, _, vpos, vyaw = screen_at[key]
     bullet_rows += 1
     place_max = max(place_max, float(np.linalg.norm(vpos - spos)))
@@ -273,6 +305,10 @@ for key in keys:
             gb[1] += int((a & ~b).sum())
             ab[0] += int(a.sum())
             ab[1] += int((a & ~b).sum())
+            cb[0] += int(a.sum())
+            cb[1] += int((a & ~b).sum())
+            rb[0] += int(a.sum())
+            rb[1] += int((a & ~b).sum())
             head_gain += int((~a & b).sum())
         else:
             a, b = hv >= 0, hs >= 0
@@ -282,6 +318,10 @@ for key in keys:
             gb[3] += int((a & ~b).sum())
             ab[2] += int(a.sum())
             ab[3] += int((a & ~b).sum())
+            cb[2] += int(a.sum())
+            cb[3] += int((a & ~b).sum())
+            rb[2] += int(a.sum())
+            rb[3] += int((a & ~b).sum())
             body_gain += int((~a & b).sum())
 
 if bullet_rows:
@@ -293,6 +333,10 @@ if bullet_rows:
                                        for g, b in sorted(group_bullets.items(), reverse=True)))
     print('조준별 오탈(100발당): ' + ' | '.join('%s 머리 %.3f (분모 %d) 몸 %.3f (분모 %d)' % (ADS_GROUPS.get(g, str(g)), 100.0 * b[1] / max(1, b[0]), b[0], 100.0 * b[3] / max(1, b[2]), b[2])
                                      for g, b in sorted(ads_bullets.items(), reverse=True)))
+    print('앉기별 오탈(100발당): ' + ' | '.join('%s 머리 %.3f (분모 %d) 몸 %.3f (분모 %d)' % (CROUCH_GROUPS.get(g, str(g)), 100.0 * b[1] / max(1, b[0]), b[0], 100.0 * b[3] / max(1, b[2]), b[2])
+                                     for g, b in sorted(crouch_bullets.items(), reverse=True)))
+    print('반응별 오탈(100발당): ' + ' | '.join('%s 머리 %.3f (분모 %d) 몸 %.3f (분모 %d)' % (REACT_GROUPS.get(g, str(g)), 100.0 * b[1] / max(1, b[0]), b[0], 100.0 * b[3] / max(1, b[2]), b[2])
+                                     for g, b in sorted(react_bullets.items(), reverse=True)))
     good_head = head_rate <= LIMIT_HEAD
     print('머리 기준 %.1f발: %s' % (LIMIT_HEAD, 'PASS' if good_head else 'FAIL'))
     ok = ok and good_head
