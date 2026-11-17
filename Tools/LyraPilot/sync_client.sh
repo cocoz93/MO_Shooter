@@ -2,7 +2,8 @@
 # Lyra 원본 수정분을 이 리포 Client/lyra_changes.diff 로 뜬다. Client/Lyra 는 깃이 무시하므로 거기만 두면 유일본이다.
 #   Tools/LyraPilot/sync_client.sh
 # 다리 플러그인은 Client/Lyra/Plugins/MOBridge 자리에서 바로 추적하므로 복사하지 않는다. diff = 백업(수정 전 원본) 대비 Source/ 차이
-# 비공개 전제: diff 에 Lyra 원본 줄이 들어간다. 리포를 공개하기 전에 언리얼 라이선스 허용 범위를 먼저 볼 것
+# 공개 리포다(2026-11-17 공개): diff 에 Lyra 원본 줄이 앞뒤 문맥으로 들어간다. 언리얼 라이선스는 30줄 이하 조각을 패치 · 플러그인 지원용으로
+# 배포하는 것을 허용한다 — 파일마다 원본 줄(문맥 + 지운 줄)을 30줄 아래로 둘 것(공개 때 최대 19줄). 넘으면 공개 전에 다시 볼 것
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 LYRA="/c/Users/USER/Desktop/MyGit/MO_Shooter/Client/Lyra"
