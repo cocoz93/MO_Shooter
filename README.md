@@ -29,3 +29,8 @@ git clone --recursive <이 리포>
 ## 상태
 
 1단계(서버가 쓸 판정 계산) 진행 중입니다.
+
+## 라이선스
+
+© 2026 주우진 · 저작권 보유. 열람용으로 공개합니다. 허락 없이 복사 · 수정 · 재배포하거나 다른 곳에 쓸 수 없습니다.
+`Client/lyra_changes.diff` 안의 Lyra 원본 줄은 Epic Games 의 것이며 언리얼 엔진 EULA 를 따릅니다. 서브모듈 ServerCore · LockFree 는 각 리포의 고지를 따릅니다.
