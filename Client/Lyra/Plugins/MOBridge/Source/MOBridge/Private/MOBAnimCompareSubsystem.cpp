@@ -242,6 +242,19 @@ namespace
 	};
 	constexpr int32 NUM_ADS_SEGMENTS = UE_ARRAY_COUNT(ADS_SCRIPT);
 
+	// 오래 조준한 채 서 있다 풀기(-MOBACScript=adslong, content-add-progress.md 미결 (마)) — 허리 서기 클립 길이(소총 6.67초)를 넘긴 시각에 조준을 뗀다.
+	// 서기 시계는 하나이고 지금 쪽 서기 클립 길이로 접힌다(소총 허리 6.667 · 조준 8.0초, 11-18 adsl_rifle 기록). 그래서 「시계가 허리 길이를 넘은 채 뗀다」는 시계가 6.667~8.0초일 때만 생긴다.
+	// 첫 조준 8초 = 조준 길이로 한 바퀴(뗄 때 시계 4.8 — 허리 길이 안). 둘째 조준 6.1초 = 같은 기록의 판 시작 시계(0판 2.883 · 1판 2.767)로 셈하면 뗄 때 7.35 · 7.23초 — 칸 양끝에서 0.56초 넘게 떨어진다(계산값).
+	// 권총은 그 칸이 8.733~9.033초뿐이라 이 각본으로는 안 밟는다(엔진 규칙은 무기와 무관). 뗀 뒤 3초는 대기 몸짓 시계(멈춘 뒤 6초 + 멈춤 클립, AnimState kIdleBreakDelay)가 다 차기 전이라 몸짓 없이 허리 서기만 본다
+	const FScriptSegment ADSLONG_SCRIPT[] = {
+		{ TEXT("idle"),          2.0f, false,   0.f, 0.f, 0.f },
+		{ TEXT("ads_hold"),      8.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOn, 0.f },
+		{ TEXT("ads_release"),   3.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOff, 0.f },
+		{ TEXT("ads_hold2"),     6.1f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOn, 0.f },
+		{ TEXT("ads_release2"),  3.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::AdsOff, 0.f },
+	};
+	constexpr int32 NUM_ADSLONG_SEGMENTS = UE_ARRAY_COUNT(ADSLONG_SCRIPT);
+
 	// 앉기 경로(-MOBACScript=crouch, content-add-progress.md D-3). ads 경로와 같은 짜임에 조준 누름을 앉기 누름으로 바꿨다. 앉음이 바뀌는 자리를 한 번씩 —
 	// 서서 앉고 일어섬(서기 상태 안 전환 클립 Crouch_Idle_Entry · _Exit) · 앉아 위아래 · 앉은 걸음 네 방향 출발 · 멈춤 · 돌아서기 넷 · 앉아 쏘기(쏜 뒤 덮기 자세의 앉은 판) ·
 	// 앉아 조준(서기 클립은 앉음이 조준보다 먼저) · 앉은 데서 점프(점프 능력처럼 일어선 뒤 뛴다, DriveFoe) · 달리기 · 출발 · 멈춤 · 돌아서기 도중 앉음 바꿈(ABP_Mannequin_Base 전환 9 · 10 · 23 은 CrouchStateChange 를 조준 바뀜과 같은 자리에 둔다).
@@ -340,6 +353,7 @@ namespace
 		case EMOBACScript::StartStop: return STARTSTOP_SCRIPT[I];
 		case EMOBACScript::Events: return EVENTS_SCRIPT[I];
 		case EMOBACScript::Ads: return ADS_SCRIPT[I];
+		case EMOBACScript::AdsLong: return ADSLONG_SCRIPT[I];
 		case EMOBACScript::Crouch: return CROUCH_SCRIPT[I];
 		case EMOBACScript::Melee: return MELEE_SCRIPT[I];
 		case EMOBACScript::Run: break;
@@ -354,6 +368,7 @@ namespace
 		case EMOBACScript::StartStop: return NUM_STARTSTOP_SEGMENTS;
 		case EMOBACScript::Events: return NUM_EVENTS_SEGMENTS;
 		case EMOBACScript::Ads: return NUM_ADS_SEGMENTS;
+		case EMOBACScript::AdsLong: return NUM_ADSLONG_SEGMENTS;
 		case EMOBACScript::Crouch: return NUM_CROUCH_SEGMENTS;
 		case EMOBACScript::Melee: return NUM_MELEE_SEGMENTS;
 		case EMOBACScript::Run: break;
@@ -405,7 +420,8 @@ void UMOBAnimCompareSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FParse::Value(Cmd, TEXT("MOBACScript="), ScriptName);
 	Script = ScriptName == TEXT("aimjump") ? EMOBACScript::AimJump : ScriptName == TEXT("startstop") ? EMOBACScript::StartStop
 		: ScriptName == TEXT("events") ? EMOBACScript::Events : ScriptName == TEXT("ads") ? EMOBACScript::Ads
-		: ScriptName == TEXT("crouch") ? EMOBACScript::Crouch : ScriptName == TEXT("melee") ? EMOBACScript::Melee : EMOBACScript::Run;
+		: ScriptName == TEXT("crouch") ? EMOBACScript::Crouch : ScriptName == TEXT("melee") ? EMOBACScript::Melee
+		: ScriptName == TEXT("adslong") ? EMOBACScript::AdsLong : EMOBACScript::Run;
 	bAimJump = Script != EMOBACScript::Run;
 	FString WeaponName = WEAPON_KEYS[1];
 	FParse::Value(Cmd, TEXT("MOBACWeapon="), WeaponName);
@@ -927,7 +943,7 @@ void UMOBAnimCompareSubsystem::DriveFoe(float DeltaTime)
 		else Target->StopJumping();
 	}
 	if (S.bMove) Target->AddMovementInput(FRotator(0.f, BodyYaw + MoveAngle, 0.f).Vector(), 1.f);
-	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee) RunEvents(DeltaTime);
+	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::AdsLong || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee) RunEvents(DeltaTime);
 }
 
 // 사건 경로 — 조각 안의 사건 시각이 이 프레임 [SegmentTime, SegmentTime + DeltaTime) 에 들면 일으킨다. 대기(DeltaTime 0)에는 안 일으킨다.
@@ -1402,7 +1418,7 @@ void UMOBAnimCompareSubsystem::Finish()
 		const bool bProfSaved = !BlendProfileCsv.IsEmpty() && FFileHelper::SaveStringToFile(BlendProfileCsv, *ProfilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP montages seen=%d maxLive=%d saved=%d profilesSaved=%d"), SeenMontages.Num(), MaxLiveMontages, bMontSaved ? 1 : 0, bProfSaved ? 1 : 0);
 	}
-	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee)
+	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::AdsLong || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee)
 	{
 		// 종류마다 센 값 — 경로 표에 적힌 수(판 둘 × 조각의 사건 수)와 대조한다
 		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP events weapon=%s fire=%d hold=%d release=%d reload=%d swap=%d swapFail=%d spawn=%d spawnFail=%d adsOn=%d adsOff=%d noAsc=%d"),

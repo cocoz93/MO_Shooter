@@ -24,6 +24,7 @@ class UPhysicalMaterial;
  *   -MOBACScript=aimjump  달리기 경로 대신 위아래 시선과 점프를 섞은 경로로 찍는다(2차 화면 시험). 조각마다 「MOB_ACOMP seg」 줄로 실제 시선 각 · 뜬 높이 · 단순 재생이 받은 값을 남긴다
  *   -MOBACScript=startstop 네 방향 출발 · 멈춤 · 돌아서기를 한 번씩 찍는다(3차 화면 시험, start-stop-pivot-test.md)
  *   -MOBACScript=crouch  앉기 · 일어서기를 경로 안에서 누른다 — 서서 앉고 일어섬 · 앉은 걸음 네 방향 출발 · 멈춤 · 돌아서기 · 앉아 쏘기 · 앉아 조준 · 앉은 데서 점프 · 달리기 · 출발 · 멈춤 · 돌아서기 도중 앉음 바꿈(content-add-progress.md D-3)
+ *   -MOBACScript=adslong 서서 조준을 오래 잡았다 뗀다 — 서기 시계가 허리 서기 클립 길이를 넘은 채 떼는 경우(content-add-progress.md 미결 (마), D90)
  *   -MOBACScript=events  쏘기 · 재장전 · 재장전 중 쏘기 · 무기 바꾸기 · 부활 효과를 경로 안에서 일으킨다(9단계 Lyra 원본 기록, candidate1-step9-plan.md 9-1).
  *                       -MOBACProbe 와 같이 주면 probe 에 사건 · 재생 중 몽타주 전부 칸이 붙고, _montages.csv(처음 본 몽타주 자산 값) · _blendprofiles.csv(골격의 뼈별 비중 표)를 남긴다
  *   -MOBACWeapon=pistol|rifle|shotgun  상대에게 쥐여 줄 무기(기본 rifle)
@@ -32,7 +33,7 @@ class UPhysicalMaterial;
  * 판정에 쓰는 줄은 전부 「MOB_ACOMP」 로 시작한다.
  * 데디 서버(-server)에 주면 서버의 봇을 같은 경로로 움직인다. 카메라와 촬영은 건너뛴다(candidate1-impl-plan.md 0단계)
  */
-enum class EMOBACScript : uint8 { Run, AimJump, StartStop, Events, Ads, Crouch, Melee };
+enum class EMOBACScript : uint8 { Run, AimJump, StartStop, Events, Ads, Crouch, Melee, AdsLong };
 
 UCLASS()
 class UMOBAnimCompareSubsystem : public UTickableWorldSubsystem

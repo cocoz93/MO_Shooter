@@ -25,6 +25,7 @@ param(
 #   -EventDelay <s> shifts every event of that script (tool check). -VideoPass <n> records only that pass to video.
 #   with -Probe it also writes animcmp_<Tag>_montages.csv (montage asset values) and _blendprofiles.csv (per-bone blend tables of the skeleton).
 # -Script ads presses/releases aim-down-sights along the path: standing toggles, aimed starts/stops/pivots in four directions, an aimed jump, and toggles mid-run/start/stop/pivot (content-add C-3).
+# -Script adslong stands hip 2 s, aims 8 s, stands 3 s, aims 6.1 s, stands 3 s: the second release comes while the stand clock is past the hip idle clip length (rifle 6.667 of 8.0 s), open item (ma) of content-add.
 # -Script melee presses melee and plays the two melee hit reactions (same call as the damage cue) standing, running, stopping, overlapping, while firing and crouched (content-add E-2).
 # -Script crouch presses crouch along the path the same way: standing crouch/stand, crouched starts/stops/pivots in four directions, crouched fire and aim, a jump from crouch, and toggles mid-run/start/stop/pivot (content-add D-3).
 # -Probe also writes animcmp_<Tag>_probe.csv: per frame anim blueprint variables, state machine states, curves and body-space bone positions.
