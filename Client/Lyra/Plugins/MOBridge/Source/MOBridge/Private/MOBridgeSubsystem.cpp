@@ -14,6 +14,8 @@
 
 #include "AIController.h"
 #include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
+#include "Components/CapsuleComponent.h"
 #include "Animation/AnimNode_StateMachine.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
@@ -76,6 +78,8 @@
 #include "Player/LyraPlayerState.h"
 #include "Teams/LyraTeamSubsystem.h"
 #include "Weapons/LyraWeaponStateComponent.h"
+#include "NavigationSystem.h"
+#include "NavigationPath.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(MOBridgeSubsystem)
 
@@ -96,6 +100,37 @@ namespace
 
 	constexpr double kAutoStart = 6.0;
 	constexpr double kAutoLeg = 1.2;
+
+	// 사람 확인 각본(-MOBHumanCheck, human-check-auto-plan.md) — 칸마다 할 일 · 길이(산 채 초) · 무기(EWeapon). bBlock = 죽으면 다시 시작할 구역의 첫 칸,
+	// bSample = 카메라 · 발 높이를 재는 칸. 길이는 제 판단: 쥐는 시간 · 조준 섞기(0.22초) · 샷건 사격 간격(fireDelay 0.5초)보다 넉넉하게
+	enum class EHcAct : uint8 { Face, AdsHold, AdsFire, Reload, HipFire, Still, CrouchPress, CrouchWalk, CrouchJump, StandUp, Approach, MeleeHold };
+	struct FHcStep { const TCHAR* Name; EHcAct Act; double Seconds; uint8 Weapon; bool bBlock; bool bSample; };
+	const FHcStep kHumanSteps[] = {
+		{ TEXT("face"),          EHcAct::Face,        2.5, 2, true,  false },	// 샷건을 쥐고 벽 방향을 고른다
+		{ TEXT("ads_hold"),      EHcAct::AdsHold,     0.6, 2, false, false },
+		{ TEXT("ads_fire"),      EHcAct::AdsFire,    11.0, 2, false, false },	// 조준한 채 8발(탄창 8) — 1.3초마다 누름
+		{ TEXT("reload"),        EHcAct::Reload,      3.5, 2, false, false },
+		{ TEXT("hip_fire"),      EHcAct::HipFire,    11.0, 2, false, false },	// 허리로 8발 — 조준 칸과 같은 간격(같은 열 흐름)
+		{ TEXT("stand"),         EHcAct::Still,       2.5, 1, true,  true  },	// 소총으로 바꿔 선 채
+		{ TEXT("crouch"),        EHcAct::CrouchPress, 2.0, 1, false, true  },
+		{ TEXT("crouch_walk"),   EHcAct::CrouchWalk,  1.5, 1, false, false },
+		{ TEXT("crouch_jump"),   EHcAct::CrouchJump,  1.5, 1, false, false },
+		{ TEXT("stand_up"),      EHcAct::StandUp,     1.0, 1, false, false },
+		// 다가가기 — 가장 가까운 살아 있는 적에게 맵 길찾기로 걸어가 몸이 닿으면 일찍 끝(최대 40초). 미는 봇은 곧장만 걸어 구조물에 막힌다 —
+		// 파일럿 ha3 은 각본 50초 동안 한 번도 안 닿아 각본 근접 19번이 전부 허공이었다. 끝 조건을 1.5m 로 둔 판(ha4 · hb1 · hb2)은 근접이 닿기 전에
+		// 적을 쓰러뜨려 몸이 한 번도 안 닿은 판(hb1 닿음 0)이 나왔고, 첫 다가가기는 네 판 모두 20초에 35m 남아 못 닿았다 — 다음 다가가기는 14초에 닿음. 40초는 제 판단
+		{ TEXT("approach_pistol"),  EHcAct::Approach, 40.0, 0, true,  false },
+		{ TEXT("melee_pistol"),     EHcAct::MeleeHold, 4.5, 0, false, false },	// 1초 쥐고 3.5초 누른 채
+		{ TEXT("approach_rifle"),   EHcAct::Approach, 40.0, 1, true,  false },
+		{ TEXT("melee_rifle"),      EHcAct::MeleeHold, 4.5, 1, false, false },
+		{ TEXT("approach_shotgun"), EHcAct::Approach, 40.0, 2, true,  false },
+		{ TEXT("melee_shotgun"),    EHcAct::MeleeHold, 4.5, 2, false, false },
+	};
+	constexpr int32 kHumanStepCount = UE_ARRAY_COUNT(kHumanSteps);
+	constexpr double kHcFireEvery = 1.3;
+	constexpr double kHcMeleeFrom = 1.0;
+	constexpr double kHcApproachStraight = 300.0;	// 이 거리(cm, 수평) 안이면 길찾기 없이 곧장 밀고 들어간다 — 몸이 닿을 때까지
+	constexpr double kHcSettle = 0.5;	// 앉음이 바뀐 뒤 재기 시작 — 카메라 섞기 0.2초(LyraCameraMode_ThirdPerson 배율 5)보다 넉넉히
 
 	TArray<float> ParseFloats(const FString& S)
 	{
@@ -409,6 +444,7 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bAutoPitchSweep = FParse::Param(Cmd, TEXT("MOBAutoPitchSweep"));
 	FParse::Value(Cmd, TEXT("MOBAutoWeapon="), AutoWeaponFixed);
 	bEventShots = FParse::Param(Cmd, TEXT("MOBEventShots"));
+	bHumanCheck = FParse::Param(Cmd, TEXT("MOBHumanCheck"));
 	bKeepPickups = FParse::Param(Cmd, TEXT("MOBKeepPickups"));
 	FParse::Value(Cmd, TEXT("MOBStandHp="), StandHp);
 	FParse::Value(Cmd, TEXT("MOBBreakPadsAt="), BreakPadsAt);
@@ -480,10 +516,11 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 
 	PumpSocket();
 	if (bQuitting) return;
-	if (bAutoInput) TickAutoInput(T);
+	if (bAutoInput && !(bHumanCheck && TickHumanScript(T))) TickAutoInput(T);
 	TickInput(Now);
 	TickAbilityFire();
 	TickAbilityMelee();
+	if (bHumanCheck) SampleHumanCheck(T);
 	if (Core && BreakPredictAt > 0 && T >= BreakPredictAt)
 	{
 		BreakPredictAt = -1;
@@ -545,7 +582,8 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 			T, InputsSent, AckSeq, StatesRecv, ServerHp, ServerMagazine, ServerSpare, ServerWeapon, ServerFlags, MatchPhase, ScoreA, ScoreB, LastServerPosX, LastServerPosY, LastServerPosZ, LyraAt.X, LyraAt.Y, LyraAt.Z, *GetNameSafe(LogPawn), PosDiffCount, Corrections, RemoteSpawned, InputsSkipped);
 	}
 
-	if (ResultAt > 0 && bAutoInput && Now - ResultAt > 1.5) FinishAndQuit(TEXT("result"));	// 사람이면 결과 화면을 볼 수 있게 둔다
+	// 사람이면 결과 화면을 볼 수 있게 둔다. -MOBHumanCheck 는 결과 뒤 점수판을 열고 1.2초에 찍으므로 3초(제 판단)
+	if (ResultAt > 0 && bAutoInput && Now - ResultAt > (bHumanCheck ? 3.0 : 1.5)) FinishAndQuit(TEXT("result"));
 	else if (QuitAt > 0 && T > QuitAt) FinishAndQuit(TEXT("quit-at"));
 }
 
@@ -945,6 +983,26 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 	++Corrections;
 	CorrectionSum += Distance;
 	CorrectionMax = FMath::Max(CorrectionMax, Distance);
+	// 처음 80줄 + 3cm 이상은 늘 — 상한만 두면 판 뒤쪽 큰 보정이 안 남는다(판 hc1 최대 15.85cm 가 80줄 밖이었다)
+	const uint64 HitsNow = Core->Sim.GetCounters().pawnHits;
+	if (CorrLinesLeft > 0 || Distance >= 3.0)
+	{
+		if (CorrLinesLeft > 0) --CorrLinesLeft;
+		const double NowSec = FPlatformTime::Seconds();
+		double NearestRemote = -1.0;	// 고친 내 자리에서 가장 가까운 남 몸(화면에 그려진 자리, 수평 cm)
+		for (const TPair<uint32, FMOBRemote>& Pair : Remotes)
+		{
+			if (!Pair.Value.Pawn.IsValid()) continue;
+			const double D = FVector::Dist2D(After, Pair.Value.Pawn->GetActorLocation());
+			if (NearestRemote < 0.0 || D < NearestRemote) NearestRemote = D;
+		}
+		// 크기 · 방향 · 서버 깃발 · 남이 나를 친 근접 / 내가 친 근접 뒤 몇 초(-1 = 없음) · 지난 보정 뒤 남 캡슐에 새로 닿은 수 · 가장 가까운 남
+		UE_LOG(LogMOB, Log, TEXT("MOB_CORR t=%.2f seq=%u dist=%.2f d=(%.2f,%.2f,%.2f) flags=%u meleeOnMeAgo=%.2f myMeleeHitAgo=%.2f pawnHitsNew=%llu nearestRemote=%.1f"),
+			NowSec - ReadyAt, P.lastSeq, Distance, Delta.X, Delta.Y, Delta.Z, P.flags,
+			LastMeleeOnMeAt > 0 ? NowSec - LastMeleeOnMeAt : -1.0, LastMyMeleeHitAt > 0 ? NowSec - LastMyMeleeHitAt : -1.0,
+			(unsigned long long)(HitsNow - CorrLastPawnHits), NearestRemote);
+	}
+	CorrLastPawnHits = HitsNow;
 	SelfCur = After;
 	SelfPrev -= Delta;
 	VisualError += Delta;
@@ -1344,6 +1402,13 @@ void UMOBridgeSubsystem::ApplyServerAnim(FMOBRemote& R, ACharacter* Ch, const FM
 		if (S.Tick > From.Tick) break;
 		if (Anim->bNotifyValid ? S.Tick <= Anim->NotifyTick : S.Tick != From.Tick) continue;
 		if (!Anim->bHas[Index]) continue;
+		if (mo::HasHitReactMontage(Anim->States[Index]))
+		{
+			++AnimHitReactTicks;
+			// 사람 확인 — 내 가까이(8m, 제 판단: 화면에서 움찔이 보일 거리)에서 맞은 반응이 든 남을 찍는다
+			const APawn* MyPawn = GetWorld()->GetFirstPlayerController() ? GetWorld()->GetFirstPlayerController()->GetPawn() : nullptr;
+			if (bHumanCheck && MyPawn && FVector::Dist(MyPawn->GetActorLocation(), Ch->GetActorLocation()) < 800.0) RequestEventShot(TEXT("react"), 0.05, 3);
+		}
 		mo::AnimPoseInput StepInput;
 		Core->AnimCodecs[Anim->Weapons[Index]].FromWire(Anim->States[Index], S.Pitch, S.bCrouched, StepInput);
 		int32 StepWeapons[mo::kAnimMontageMax];
@@ -1804,6 +1869,9 @@ void UMOBridgeSubsystem::TickInput(double Now)
 			MeleePendingSeq = In.seq;
 			MeleePendingFrame = GFrameCounter;
 			++MeleeQueued;
+			// 각본 근접 칸이면 시작 입력 번호를 무기별로 — 누른 채 다시 켜지는 간격(입력 수)을 Lyra 기록 34 · 35 · 46 프레임과 견준다
+			const uint8 MeleeWeapon = (uint8)Core->Prediction.GetWeaponIndex();
+			if (bHumanCheck && HcStep < kHumanStepCount && kHumanSteps[HcStep].Act == EHcAct::MeleeHold && MeleeWeapon < 3) HcMeleeSeqs[MeleeWeapon].Add(In.seq);
 		}
 		const mo::WeaponEvents& PredictedFire = Core->Prediction.GetLastWeaponEvents();
 		if (PredictedFire.fired && !bAbilityOwnTimer)
@@ -1983,9 +2051,16 @@ void UMOBridgeSubsystem::HandleMelee(const wire::Melee& M)
 	if (M.attacker != PlayerId)
 	{
 		++MeleeOthers;
+		if (M.target == PlayerId && M.result == wire::MELEE_HIT) LastMeleeOnMeAt = FPlatformTime::Seconds();	// 남이 나를 밀었다 — 내 예측은 모르는 밀기(MOB_CORR)
 		return;
 	}
 	const bool bHit = M.result == wire::MELEE_HIT;
+	if (bHit) LastMyMeleeHitAt = FPlatformTime::Seconds();
+	if (bHit && bHumanCheck)
+	{
+		++HcMeleeHits;
+		HcMeleeTarget = M.target;
+	}
 	++MeleeMine[FMath::Min<int32>(M.result, 3)];
 	if (const FMOBMeleeGuess* Guess = MeleeGuesses.Find(M.seq))
 	{
@@ -2066,7 +2141,17 @@ void UMOBridgeSubsystem::TickAbilityMelee()
 		else
 		{
 			bMeleePending = false;
-			if (LASC->TryActivateAbility(GMeleeSpecHandle)) ++MeleeDriven;
+			if (LASC->TryActivateAbility(GMeleeSpecHandle))
+			{
+				++MeleeDriven;
+				if (bHumanCheck)
+				{
+					const uint8 W = (uint8)Core->Prediction.GetWeaponIndex();
+					if (HcStep < kHumanStepCount && kHumanSteps[HcStep].Act == EHcAct::MeleeHold && W < 3) ++HcMeleeDriven[W];
+					HcMontageReadFrame = GFrameCounter + 2;	// 능력이 몽타주를 튼 뒤 — 같은 프레임엔 아직 안 돈다
+					RequestEventShot(TEXT("melee"), 0.25, 3);
+				}
+			}
 			else ++MeleeActivateFail;
 		}
 	}
@@ -2388,6 +2473,403 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 }
 
 // ─────────────────────────────────────────────────────────────
+//  사람 확인 자동화(-MOBHumanCheck) — human-check-auto-plan.md
+// ─────────────────────────────────────────────────────────────
+
+// 각본 — 자동 입력과 같은 깃발(bAutoFire · bAutoAds · bAutoMelee · bAutoCrouch · bAutoJump · bAutoReload)과 같은 Lyra 입력 표식을 쓴다. 끝나면 자동 입력이 그대로 이어받는다
+bool UMOBridgeSubsystem::TickHumanScript(double T)
+{
+	if (HcStep >= kHumanStepCount) return false;
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ACharacter* Ch = PC ? Cast<ACharacter>(PC->GetPawn()) : nullptr;
+	const double Dt = HcLastT < 0 ? 0.0 : T - HcLastT;
+	HcLastT = T;
+	if (!Ch || !bHasSpawn || T < kAutoStart) return true;
+
+	ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch));
+	// bEveryFrame = 누른 동안 매 프레임 넣는다(조준 · 근접 — 자동 입력과 같음). 아니면 바뀔 때만(사격 · 재장전)
+	auto SetTag = [LASC](const TCHAR* Name, bool bNow, bool bWas, bool bEveryFrame)
+	{
+		const FGameplayTag InputTag = FGameplayTag::RequestGameplayTag(Name, false);
+		if (!LASC || !InputTag.IsValid()) return;
+		if (bNow && (bEveryFrame || !bWas)) LASC->AbilityInputTagPressed(InputTag);
+		else if (!bNow && bWas) LASC->AbilityInputTagReleased(InputTag);
+	};
+	auto Apply = [&](bool bFire, bool bAds, bool bMelee, bool bReload)
+	{
+		SetTag(TEXT("InputTag.Weapon.Fire"), bFire, bAutoFire, false);
+		SetTag(TEXT("InputTag.Weapon.ADS"), bAds, bAutoAds, true);
+		SetTag(TEXT("InputTag.Ability.Melee"), bMelee, bAutoMelee, true);
+		SetTag(TEXT("InputTag.Weapon.Reload"), bReload, bAutoReloadPressed, false);
+		bAutoFire = bFire;
+		bAutoAds = bAds;
+		bAutoMelee = bMelee;
+		bAutoReload = bReload;
+		bAutoReloadPressed = bReload;
+	};
+	auto PressCrouch = [&]()
+	{
+		HcCrouchUntil = 0.1;	// 이 칸 시계 0.1초까지 BUTTON_CROUCH 를 누른 채(누름 순간은 TickInput 이 bCrouchWasDown 으로 가른다)
+		if (ALyraCharacter* LyraCh = Cast<ALyraCharacter>(Ch)) LyraCh->ToggleCrouch();	// 사람 키와 같은 길(막기 갈고리가 되돌린다)
+	};
+
+	const ULyraHealthComponent* HC = ULyraHealthComponent::FindHealthComponent(Ch);
+	const bool bDead = (ServerFlags & wire::STATE_DEAD) || (HC && HC->IsDeadOrDying());
+	if (bDead)
+	{
+		if (!bHcDead && bHcStepBegun)
+		{
+			// 죽음 — 이 구역 첫 칸부터 다시(부활 자리가 바뀌므로 벽도 다시 고른다)
+			int32 Back = HcStep;
+			while (Back > 0 && !kHumanSteps[Back].bBlock) --Back;
+			UE_LOG(LogMOB, Log, TEXT("MOB_HC_RESTART t=%.2f step=%s back=%s"), T, kHumanSteps[HcStep].Name, kHumanSteps[Back].Name);
+			HcStep = Back;
+			++HcRestarts;
+		}
+		bHcDead = true;
+		bHcStepBegun = false;
+		HcCJumpPressFrame = 0;
+		if (bAutoJump) Ch->StopJumping();
+		bAutoJump = false;
+		bAutoCrouch = false;
+		HcCrouchUntil = -1;
+		Apply(false, false, false, false);
+		return true;
+	}
+	bHcDead = false;
+
+	const FHcStep& St = kHumanSteps[HcStep];
+	if (!bHcStepBegun)
+	{
+		bHcStepBegun = true;
+		HcStepClock = 0;
+		HcStepShots = 0;
+		HcNextShotAt = 0;
+		HcFireUntil = -1;
+		HcCrouchUntil = -1;
+		HcNextPathAt = 0;
+		HcPath.Reset();
+		HcNavPaths = 0;
+		HcApproachDist = -1;
+		HcApproachHits0 = Core ? Core->Sim.GetCounters().pawnHits : 0;
+		if (St.bBlock || HcWallDist < 0)
+		{
+			// 벽 고르기 — 눈높이에서 16 방향으로 30m 광선, 맞은 거리가 4~25m 인 것 중 10m 에 가장 가까운 방향(제 판단: 산탄 자국이 화면에 들어오는 거리).
+			// 없으면 맞은 것 중 가장 가까운 방향
+			const FVector Eye = Ch->GetPawnViewLocation();
+			FCollisionQueryParams Q(SCENE_QUERY_STAT(MOBHumanWall), false, Ch);
+			double BestScore = -1, BestDist = -1, Nearest = -1;
+			float BestYaw = 0.f, NearestYaw = 0.f;
+			for (int32 i = 0; i < 16; ++i)
+			{
+				const float Yaw = i * 22.5f;
+				FHitResult Hit;
+				if (!GetWorld()->LineTraceSingleByChannel(Hit, Eye, Eye + FRotator(0.f, Yaw, 0.f).Vector() * 3000.0, ECC_Visibility, Q)) continue;
+				const double D = Hit.Distance;
+				if (Nearest < 0 || D < Nearest) { Nearest = D; NearestYaw = Yaw; }
+				if (D < 400.0 || D > 2500.0) continue;
+				const double Score = 1.0 / (1.0 + FMath::Abs(D - 1000.0));
+				if (Score > BestScore) { BestScore = Score; BestYaw = Yaw; BestDist = D; }
+			}
+			HcYaw = BestScore > 0 ? BestYaw : NearestYaw;
+			HcWallDist = BestScore > 0 ? BestDist : Nearest;
+		}
+		HcHipYawOffset = 0.f;
+		if (St.Act == EHcAct::HipFire)
+		{
+			// 허리 사격은 8° 옆을 겨눈다 — 조준 자국 무리와 안 겹치게. 알 각 최대 조준 2.33° + 허리 2.69° = 5.0°(파일럿 ha2 72알씩)에 3° 틈(10m 에서 약 50cm).
+			// 4° 는 ha2 확대 사진에서 두 무리가 겹쳤다
+			// 양쪽 중 벽 거리가 가운데와 가까운 쪽(같은 벽일 가능성이 큰 쪽)
+			const FVector Eye = Ch->GetPawnViewLocation();
+			FCollisionQueryParams Q(SCENE_QUERY_STAT(MOBHumanWall), false, Ch);
+			double BestGap = -1;
+			for (const float Side : { 8.f, -8.f })
+			{
+				FHitResult Hit;
+				if (!GetWorld()->LineTraceSingleByChannel(Hit, Eye, Eye + FRotator(0.f, HcYaw + Side, 0.f).Vector() * 3000.0, ECC_Visibility, Q)) continue;
+				const double Gap = FMath::Abs(Hit.Distance - HcWallDist);
+				if (BestGap < 0 || Gap < BestGap) { BestGap = Gap; HcHipYawOffset = Side; }
+			}
+		}
+		if (St.Act == EHcAct::CrouchPress && !Ch->bIsCrouched) PressCrouch();
+		if (St.Act == EHcAct::StandUp && Ch->bIsCrouched) PressCrouch();
+		if (St.Act == EHcAct::CrouchJump)
+		{
+			HcCJumpPressFrame = GFrameCounter;
+			HcCJumpPressT = T;
+			bHcCJumpCrouched = Ch->bIsCrouched;
+			HcCJumpUncrouch = HcCJumpLift = -1;
+		}
+		UE_LOG(LogMOB, Log, TEXT("MOB_HC_STEP begin step=%s t=%.2f frame=%llu seq=%u yaw=%.1f wall=%.0f hipYaw=%.1f crouched=%d weapon=%u"), St.Name, T, (unsigned long long)GFrameCounter, Seq, HcYaw, HcWallDist,
+			HcHipYawOffset, Ch->bIsCrouched ? 1 : 0, (uint32)Core->Prediction.GetWeaponIndex());
+	}
+	else
+	{
+		HcStepClock += Dt;
+	}
+
+	PC->SetControlRotation(FRotator(0.f, HcYaw + HcHipYawOffset, 0.f));	// 높낮이 0 — 기록 도구(MOBContentProbeSubsystem Prepare)와 같은 시선
+	if (St.Act == EHcAct::MeleeHold)
+	{
+		// 근접 칸은 4m 안 가장 가까운 살아 있는 적을 바라본다 — 붙어 있는 적을 쳐 밀림 · 맞은 반응이 나게(파일럿 ha1 · ha2 는 근접이 적에 한 번도 안 닿았다. 4m 는 제 판단)
+		double Nearest = 400.0;
+		for (const TPair<uint32, FMOBRemote>& Pair : Remotes)
+		{
+			const FMOBRemote& R = Pair.Value;
+			if (R.ServerTeam == Team || R.bKilled || !R.Pawn.IsValid()) continue;
+			const FVector To = R.Pawn->GetActorLocation() - Ch->GetActorLocation();
+			if (To.Size2D() >= Nearest) continue;
+			Nearest = To.Size2D();
+			PC->SetControlRotation(FRotator(0.f, (float)To.Rotation().Yaw, 0.f));
+		}
+	}
+	bool bApproachDone = false;
+	if (St.Act == EHcAct::Approach)
+	{
+		// 가장 가까운 살아 있는 적에게 걷는다 — 길찾기 경로를 0.5초마다 내 자리에서 다시 구해 다음 굽이 쪽으로(경로가 없으면 곧장), 3m 안이면 곧장 밀고 들어간다.
+		// 이 칸에서 내 예측이 남 캡슐에 새로 닿으면(pawnHits 가 늘면) 끝. 적이 없으면(죽어 다시 나오는 중) 선다
+		const FMOBRemote* Best = nullptr;
+		double BestD = 0;
+		for (const TPair<uint32, FMOBRemote>& Pair : Remotes)
+		{
+			const FMOBRemote& R = Pair.Value;
+			if (R.ServerTeam == Team || R.bKilled || !R.Pawn.IsValid()) continue;
+			const double D = FVector::Dist2D(R.Pawn->GetActorLocation(), Ch->GetActorLocation());
+			if (!Best || D < BestD) { Best = &R; BestD = D; }
+		}
+		if (Best)
+		{
+			const FVector Me = Ch->GetActorLocation();
+			const FVector Goal = Best->Pawn->GetActorLocation();
+			HcApproachDist = BestD;
+			if (Core && Core->Sim.GetCounters().pawnHits > HcApproachHits0)
+			{
+				bApproachDone = true;
+			}
+			else
+			{
+				if (BestD >= kHcApproachStraight && HcStepClock >= HcNextPathAt)
+				{
+					HcNextPathAt = HcStepClock + 0.5;
+					HcPath.Reset();
+					const UNavigationPath* Path = UNavigationSystemV1::FindPathToLocationSynchronously(GetWorld(), Me, Goal, Ch);
+					if (Path && Path->IsValid())
+					{
+						HcPath = Path->PathPoints;
+						++HcNavPaths;
+					}
+				}
+				FVector Next = Goal;
+				if (BestD >= kHcApproachStraight) for (const FVector& Point : HcPath)
+				{
+					if (FVector::Dist2D(Point, Me) > 60.0) { Next = Point; break; }	// 첫 점은 내 발밑 — 60cm 넘게 떨어진 첫 굽이
+				}
+				const FVector Dir = (Next - Me).GetSafeNormal2D();
+				Ch->AddMovementInput(FVector::ForwardVector, (float)Dir.X);
+				Ch->AddMovementInput(FVector::RightVector, (float)Dir.Y);
+				PC->SetControlRotation(FRotator(0.f, (float)(Goal - Me).Rotation().Yaw, 0.f));
+			}
+		}
+	}
+	AutoWeapon = St.Weapon;
+	bAutoCrouch = HcStepClock < HcCrouchUntil;
+	if (St.Act == EHcAct::CrouchWalk)
+	{
+		const FVector Side = FRotator(0.f, HcYaw + 90.f, 0.f).Vector();	// 벽과 나란히
+		Ch->AddMovementInput(FVector::ForwardVector, (float)Side.X);
+		Ch->AddMovementInput(FVector::RightVector, (float)Side.Y);
+	}
+	const bool bJumpNow = St.Act == EHcAct::CrouchJump && HcStepClock < 0.1;	// 0.1초 누름(자동 입력과 같은 길이)
+	if (bJumpNow && !bAutoJump) Ch->Jump();
+	if (!bJumpNow && bAutoJump) Ch->StopJumping();
+	bAutoJump = bJumpNow;
+
+	const bool bFireStep = St.Act == EHcAct::AdsFire || St.Act == EHcAct::HipFire;
+	if (bFireStep && HcStepShots < 8 && HcStepClock >= HcNextShotAt)
+	{
+		HcFireUntil = HcStepClock + 0.1;
+		HcNextShotAt = HcStepClock + kHcFireEvery;
+		++HcStepShots;
+		RequestEventShot(St.Act == EHcAct::AdsFire ? TEXT("adsshot") : TEXT("hipshot"), 0.2, 2);
+	}
+	const bool bAdsNow = St.Act == EHcAct::AdsHold || St.Act == EHcAct::AdsFire;
+	const bool bMeleeNow = St.Act == EHcAct::MeleeHold && HcStepClock >= kHcMeleeFrom;
+	const bool bReloadNow = St.Act == EHcAct::Reload && HcStepClock < 0.2;
+	Apply(bFireStep && HcStepClock < HcFireUntil, bAdsNow, bMeleeNow, bReloadNow);
+
+	// 칸 시계가 이 프레임에 그 시각을 넘었나 — 사진을 칸마다 한 번만
+	auto Crossed = [&](double At) { return HcStepClock >= At && HcStepClock - Dt < At; };
+	// 재는 칸 끝 0.1초 전에 한 장
+	if (St.bSample && Crossed(St.Seconds - 0.1)) RequestEventShot(Ch->bIsCrouched ? TEXT("crouched") : TEXT("standing"), 0.0, 2);
+	// 자국 — 연기가 걷힌 뒤 허리 시야에서 찍는다(쏜 직후는 연기가 가리고, 조준 중엔 화면이 확대돼 크기를 못 견준다 — 파일럿 ha1).
+	// 조준 자국 = 재장전 1.5초(마지막 조준 발 3.4초 뒤) · 허리 자국 = 허리 사격 끝 0.4초 전(마지막 발 1.4초 뒤)
+	if (St.Act == EHcAct::Reload && Crossed(1.5)) RequestEventShot(TEXT("adsmarks"), 0.0, 2);
+	if (St.Act == EHcAct::HipFire && Crossed(St.Seconds - 0.4)) RequestEventShot(TEXT("hipmarks"), 0.0, 2);
+	if (HcStepClock < St.Seconds && !bApproachDone) return true;
+
+	if (St.Act == EHcAct::Approach)
+	{
+		UE_LOG(LogMOB, Log, TEXT("MOB_HC_APPROACH step=%s contact=%d dist=%.0f sec=%.2f navPaths=%d"), St.Name, bApproachDone ? 1 : 0, HcApproachDist, HcStepClock, HcNavPaths);
+	}
+	UE_LOG(LogMOB, Log, TEXT("MOB_HC_STEP end step=%s t=%.2f frame=%llu seq=%u shots=%d crouched=%d weapon=%u"), St.Name, T, (unsigned long long)GFrameCounter, Seq, HcStepShots,
+		Ch->bIsCrouched ? 1 : 0, (uint32)Core->Prediction.GetWeaponIndex());
+	++HcStep;
+	bHcStepBegun = false;
+	if (HcStep < kHumanStepCount) return true;
+	Apply(false, false, false, false);
+	UE_LOG(LogMOB, Log, TEXT("MOB_HC_SCRIPT_DONE t=%.2f restarts=%d"), T, HcRestarts);
+	return false;
+}
+
+// 매 프레임 — 각본이 끝난 뒤에도 돈다(부딪힘 · 맞은 반응 사진 · 끝 점수판)
+void UMOBridgeSubsystem::SampleHumanCheck(double T)
+{
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ACharacter* Ch = PC ? Cast<ACharacter>(PC->GetPawn()) : nullptr;
+	if (!Ch || !bHasSpawn) return;
+	// 받침 판(-MOBStandAt, 자동 입력 없음) — 발밑 받침이 화면에 들어오게 거의 바로 위에서 내려다본다(파일럿 ha1 은 받침이 내 몸에 가려 대기 표시가 안 보였고,
+	// −55°(ha5)도 받침이 몸 바로 밑이라 가렸다 — 바로 위면 몸보다 넓은 받침판 둘레가 드러난다. −85° 는 제 판단)
+	if (bStandOnly) PC->SetControlRotation(FRotator(-85.f, PC->GetControlRotation().Yaw, 0.f));
+	const UCharacterMovementComponent* M = Ch->GetCharacterMovement();
+	if (Ch->bIsCrouched != bHcLastCrouched)
+	{
+		bHcLastCrouched = Ch->bIsCrouched;
+		HcCrouchChangedAt = T;
+	}
+
+	// 카메라 · 낮은 발 높이 − 바닥(캡슐 밑). 정답지 = 같은 값의 Lyra 기록(기록 도구 camZ · footZ 열)과 식(앉으면 카메라 −48, 조각 1)
+	if (HcStep < kHumanStepCount && bHcStepBegun && !bHcDead && kHumanSteps[HcStep].bSample && M && M->IsMovingOnGround() && T - HcCrouchChangedAt >= kHcSettle && PC->PlayerCameraManager)
+	{
+		const double Floor = Ch->GetActorLocation().Z - Ch->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+		const int32 K = Ch->bIsCrouched ? 1 : 0;
+		HcCam[K].Add(PC->PlayerCameraManager->GetCameraLocation().Z - Floor);
+		const USkeletalMeshComponent* Mesh = Ch->GetMesh();
+		double Foot = 0;
+		bool bFoot = false;
+		for (const TCHAR* Bone : { TEXT("ball_l"), TEXT("ball_r") })
+		{
+			if (!Mesh || Mesh->GetBoneIndex(Bone) == INDEX_NONE) continue;
+			const double Z = Mesh->GetBoneLocation(Bone).Z;
+			Foot = bFoot ? FMath::Min(Foot, Z) : Z;
+			bFoot = true;
+		}
+		if (bFoot) HcFoot[K].Add(Foot - Floor);
+		else ++HcFootMissing;
+	}
+
+	// 앉은 채 점프 — 누른 뒤 몇 프레임에 일어서고 몇 프레임에 떠오르나(서버 · 예측은 같은 입력에서 일어서기 → 점프, D-5)
+	if (HcCJumpPressFrame)
+	{
+		const int32 Since = (int32)(GFrameCounter - HcCJumpPressFrame);
+		if (HcCJumpUncrouch < 0 && !Ch->bIsCrouched) HcCJumpUncrouch = Since;
+		if (HcCJumpLift < 0 && M && M->Velocity.Z > 1.0) HcCJumpLift = Since;
+		if ((HcCJumpUncrouch >= 0 && HcCJumpLift >= 0) || Since > 60)
+		{
+			UE_LOG(LogMOB, Log, TEXT("MOB_HC_CJUMP crouchedAtPress=%d uncrouchFrames=%d liftFrames=%d sec=%.3f"), bHcCJumpCrouched ? 1 : 0, HcCJumpUncrouch, HcCJumpLift, T - HcCJumpPressT);
+			RequestEventShot(TEXT("cjump"), 0.2, 2);
+			HcCJumpPressFrame = 0;
+			++HcCJumps;
+		}
+	}
+
+	// 내 근접 능력을 켠 두 프레임 뒤 내 메시에서 도는 몽타주
+	if (HcMontageReadFrame && GFrameCounter >= HcMontageReadFrame)
+	{
+		HcMontageReadFrame = 0;
+		const UAnimInstance* AI = Ch->GetMesh() ? Ch->GetMesh()->GetAnimInstance() : nullptr;
+		const UAnimMontage* Montage = AI ? AI->GetCurrentActiveMontage() : nullptr;
+		++HcMyMontages.FindOrAdd(Montage ? Montage->GetName() : FString(TEXT("none")));
+	}
+
+	// 남 메시에서 도는 몽타주 — 바뀌어 새로 돌기 시작하면 이름별로 센다. 이름에 Hit 이 든 것(맞은 반응)이 내 8m 안 · 화면 가운데 30° 안이고
+	// 내가 살아 있으면 사진(제 판단 — 파일럿 ha1 은 조건이 거리뿐이라 내가 맞는 중 · 죽은 뒤 · 화면 밖 반응을 찍었다)
+	const ULyraHealthComponent* MyHC = ULyraHealthComponent::FindHealthComponent(Ch);
+	const bool bAlive = !(ServerFlags & wire::STATE_DEAD) && !(MyHC && MyHC->IsDeadOrDying());
+	const FVector CamLoc = PC->PlayerCameraManager ? PC->PlayerCameraManager->GetCameraLocation() : Ch->GetActorLocation();
+	const FVector CamDir = PC->PlayerCameraManager ? PC->PlayerCameraManager->GetCameraRotation().Vector() : Ch->GetActorForwardVector();
+	for (const TPair<uint32, FMOBRemote>& Pair : Remotes)
+	{
+		const ACharacter* Other = Pair.Value.Pawn.Get();
+		const UAnimInstance* OtherAnim = Other && Other->GetMesh() ? Other->GetMesh()->GetAnimInstance() : nullptr;
+		const UAnimMontage* OtherMontage = OtherAnim ? OtherAnim->GetCurrentActiveMontage() : nullptr;
+		const FString Name = OtherMontage ? OtherMontage->GetName() : FString();
+		const float Pos = OtherMontage ? OtherAnim->Montage_GetPosition(OtherMontage) : 0.f;
+		FString& Last = HcRemoteMontageNow.FindOrAdd(Pair.Key);
+		float& LastPos = HcRemoteMontagePos.FindOrAdd(Pair.Key);
+		if (!Name.IsEmpty() && (Name != Last || Pos < LastPos))
+		{
+			++HcRemoteMontageStarts.FindOrAdd(Name);
+			const bool bInView = FVector::DotProduct(CamDir, (Other->GetActorLocation() - CamLoc).GetSafeNormal()) > 0.866;	// cos 30°
+			const bool bNear = FVector::Dist(Other->GetActorLocation(), Ch->GetActorLocation()) < 800.0;
+			if (Name.Contains(TEXT("Hit")) && bAlive && bInView && bNear) RequestEventShot(TEXT("react"), 0.05, 3);
+			// 내 근접이 맞힌 그 상대가 1초 안에 맞은 반응을 시작했나(맞힘 하나에 한 번)
+			if (Name.Contains(TEXT("Hit")) && Pair.Key == HcMeleeTarget && LastMyMeleeHitAt > 0 && FPlatformTime::Seconds() - LastMyMeleeHitAt < 1.0)
+			{
+				++HcMeleeReacts;
+				HcMeleeTarget = 0;
+				if (bAlive && bInView && bNear) RequestEventShot(TEXT("meleereact"), 0.05, 3);
+			}
+		}
+		Last = Name;
+		LastPos = Pos;
+	}
+
+	// 부딪힘 — 예측이 남 캡슐에 새로 닿으면 0.2초 뒤 사진(세 장까지)
+	if (Core)
+	{
+		const uint64 Hits = Core->Sim.GetCounters().pawnHits;
+		if (Hits > HcLastPawnHits) RequestEventShot(TEXT("bump"), 0.2, 3);
+		HcLastPawnHits = Hits;
+	}
+
+	// 점수판 — 경기 결과가 오면(도움 대조 MOB_ASSIST_RESULT 뒤) 또는 -MOBQuitAt 3초 전에 Lyra 점수판 능력 입력(InputTag.Ability.ShowLeaderboard,
+	// IA_ShowScoreboard = Tab)을 누른 채 두고 1.2초 뒤 찍는다. 줄마다 Lyra 점수판이 읽는 값(ShooterGame.Score.*)을 같이 남긴다 — 사진의 숫자와 견줄 것
+	if (!bHcBoardPressed && (ResultAt > 0 || (QuitAt > 0 && T > QuitAt - 3.0)))
+	{
+		bHcBoardPressed = true;
+		const FGameplayTag BoardTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.ShowLeaderboard"), false);
+		ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch));
+		if (LASC && BoardTag.IsValid()) LASC->AbilityInputTagPressed(BoardTag);
+		UE_LOG(LogMOB, Log, TEXT("MOB_HC_BOARD t=%.2f tag=%d asc=%d afterResult=%d"), T, BoardTag.IsValid() ? 1 : 0, LASC ? 1 : 0, ResultAt > 0 ? 1 : 0);
+		RequestEventShot(TEXT("board"), 1.2, 1);
+		static const FGameplayTag ElimTag = FGameplayTag::RequestGameplayTag(TEXT("ShooterGame.Score.Eliminations"), false);
+		static const FGameplayTag DeathTag = FGameplayTag::RequestGameplayTag(TEXT("ShooterGame.Score.Deaths"), false);
+		static const FGameplayTag AssistTag = FGameplayTag::RequestGameplayTag(TEXT("ShooterGame.Score.Assists"), false);
+		// id = 서버 번호(서버 SCORE id= 와 잇는다). 나 + 지금 아는 남 전부
+		TArray<uint32> Ids;
+		Remotes.GetKeys(Ids);
+		Ids.Insert(PlayerId, 0);
+		for (const uint32 Id : Ids)
+		{
+			const ALyraPlayerState* LPS = Cast<ALyraPlayerState>(FindPlayerState(Id));
+			if (!LPS) { UE_LOG(LogMOB, Log, TEXT("MOB_HC_BOARDROW id=%u noState=1"), Id); continue; }
+			UE_LOG(LogMOB, Log, TEXT("MOB_HC_BOARDROW id=%u name=%s team=%d elims=%d deaths=%d assists=%d"), Id, *LPS->GetPlayerName(), LPS->GetTeamId(),
+				LPS->GetStatTagStackCount(ElimTag), LPS->GetStatTagStackCount(DeathTag), LPS->GetStatTagStackCount(AssistTag));
+		}
+	}
+}
+
+void UMOBridgeSubsystem::LogHumanCheck()
+{
+	auto Range = [](const FHcRange& R) { return FString::Printf(TEXT("%lld,%.2f,%.2f,%.2f"), R.N, R.N ? R.Sum / R.N : 0.0, R.Min, R.Max); };
+	const double CamDiff = HcCam[0].N && HcCam[1].N ? HcCam[1].Sum / HcCam[1].N - HcCam[0].Sum / HcCam[0].N : 0.0;
+	// cam · foot = 프레임 수,평균,최소,최대(바닥 위 cm). camDiff = 앉은 평균 − 선 평균
+	UE_LOG(LogMOB, Log, TEXT("MOB_HC_SUMMARY steps=%d/%d restarts=%d camStand=%s camCrouch=%s camDiff=%.2f footStand=%s footCrouch=%s footMissing=%lld cjumps=%d hitReactTicks=%lld padPickupFx=%lld padRespawnFx=%lld board=%d"),
+		HcStep, kHumanStepCount, HcRestarts, *Range(HcCam[0]), *Range(HcCam[1]), CamDiff, *Range(HcFoot[0]), *Range(HcFoot[1]), HcFootMissing, HcCJumps, AnimHitReactTicks,
+		PadPickupEffects, PadRespawnEffects, bHcBoardPressed ? 1 : 0);
+	static const TCHAR* WeaponNames[] = { TEXT("pistol"), TEXT("rifle"), TEXT("shotgun") };
+	for (int32 W = 0; W < 3; ++W)
+	{
+		FString Gaps;
+		for (int32 i = 1; i < HcMeleeSeqs[W].Num(); ++i) Gaps += FString::Printf(TEXT("%u "), HcMeleeSeqs[W][i] - HcMeleeSeqs[W][i - 1]);
+		UE_LOG(LogMOB, Log, TEXT("MOB_HC_MELEE weapon=%s starts=%d driven=%lld gaps=[%s]"), WeaponNames[W], HcMeleeSeqs[W].Num(), HcMeleeDriven[W], *Gaps.TrimEnd());
+	}
+	for (const TPair<FString, int32>& Pair : HcMyMontages) UE_LOG(LogMOB, Log, TEXT("MOB_HC_MYMONTAGE name=%s count=%d"), *Pair.Key, Pair.Value);
+	for (const TPair<FString, int32>& Pair : HcRemoteMontageStarts) UE_LOG(LogMOB, Log, TEXT("MOB_HC_REMOTEMONTAGE name=%s starts=%d"), *Pair.Key, Pair.Value);
+	UE_LOG(LogMOB, Log, TEXT("MOB_HC_MELEEREACT hits=%d reacts=%d"), HcMeleeHits, HcMeleeReacts);
+}
+
+// ─────────────────────────────────────────────────────────────
 //  캡처
 // ─────────────────────────────────────────────────────────────
 
@@ -2549,6 +3031,7 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	UE_LOG(LogMOB, Log, TEXT("MOB_PICKUPS hidden=%d hpFixes=%lld"), PickupsHidden, HpFixes);
 	UE_LOG(LogMOB, Log, TEXT("MOB_PADS pads=%d msgs=%lld takes=%lld readies=%lld syncs=%lld badIndex=%lld noActor=%lld bound=%lld heals=%lld healBeforeFix=%lld healMismatch=%lld healNoPawn=%lld stateChecks=%lld stateDiff=%lld lastStateTick=%u"),
 		Pads.Num(), PadMsgs, PadTakes, PadReadies, PadSyncs, PadBadIndex, PadNoActor, PadBound, PadHeals, PadHealBeforeFix, PadHealMismatch, PadHealNoPawn, PadStateChecks, PadStateDiff, LastStateTick);
+	if (bHumanCheck) LogHumanCheck();
 	if (!bAbilityOwnTimer)
 	{
 		// 내 사격 능력 구동(D53) — 칸 뜻은 MOBridgeSubsystem.h 의 FireQueued 주석. pending = 끝날 때 아직 쌓여 있던 발
@@ -2742,6 +3225,18 @@ void UMOBridgeSubsystem::TickPickups(double Now)
 			if (!A || !PercentProp || Pad.bAvailable || Pad.CooldownTicks == 0) continue;
 			PercentProp->SetPropertyValue_InContainer(A, (float)FMath::Clamp(1.0 - ((double)Pad.ReadyTick - ServerTickNow) / Pad.CooldownTicks, 0.0, 1.0));
 		}
+		// 사람 확인 — 꺼진 받침의 대기 표시 값(Lyra 가 읽는 CoolDownPercentage)을 1초마다. 정답지 = Lyra 기록 pads3 의 padBigPct · padSmallPct 흐름
+		if (bHumanCheck && PercentProp && Now >= HcNextPadLogAt)
+		{
+			HcNextPadLogAt = Now + 1.0;
+			for (int32 i = 0; i < Pads.Num(); ++i)
+			{
+				const ALyraWeaponSpawner* A = Pads[i].Actor.Get();
+				if (!A || Pads[i].bAvailable) continue;
+				UE_LOG(LogMOB, Log, TEXT("MOB_HC_PADPCT t=%.2f pad=%d pct=%.4f shown=%d serverLeft=%.2f cool=%u"), Now - ReadyAt, i, PercentProp->GetPropertyValue_InContainer(A),
+					A->WeaponMesh && A->WeaponMesh->IsVisible() ? 1 : 0, ((double)Pads[i].ReadyTick - ServerTickNow) / wire::kTickRate, Pads[i].CooldownTicks);
+			}
+		}
 	}
 
 	// 묶인 받침 액터가 없어졌으면(경기 시작에 Lyra 가 받침을 새로 놓는다 — 0-3 pads1 · 월드 파티션이 늦게 올림) 이 프레임에 다시 찾는다.
@@ -2824,6 +3319,17 @@ void UMOBridgeSubsystem::HandlePickup(const wire::Pickup& M)
 	static const TCHAR* ReasonNames[] = { TEXT("take"), TEXT("takeRecheck"), TEXT("ready"), TEXT("sync") };
 	UE_LOG(LogMOB, Log, TEXT("MOB_PAD tick=%u pad=%u reason=%s avail=%u ready=%u picker=%u heal=%.1f hpAfter=%.1f lyraHp=%.1f actor=%d"), M.tick, M.pad,
 		M.reason < UE_ARRAY_COUNT(ReasonNames) ? ReasonNames[M.reason] : TEXT("?"), M.available, M.readyTick, M.picker, M.heal, M.hpAfter, LyraHp, Actor ? 1 : 0);
+	// 사람 확인 — 내가 집은 받침: 집은 순간 · 대기 중 셋(대기의 1/4 · 2/4 · 3/4) · 다시 생긴 순간을 찍는다.
+	// 준비 뒤 6초 안은 Lyra 로딩 화면이 남아 있어 안 찍는다(파일럿 ha1 — 2.28 · 3.10초 집음 사진이 로딩 화면. 6 은 제 판단)
+	const bool bHcShotOk = bHumanCheck && ReadyAt > 0 && FPlatformTime::Seconds() - ReadyAt >= 6.0;
+	if (bHumanCheck && bTake && M.picker == PlayerId)
+	{
+		HcMyPad = (int32)M.pad;
+		const double Cool = (double)M.cooldownTicks / wire::kTickRate;
+		if (bHcShotOk) RequestEventShot(TEXT("padtake"), 0.15, 2);
+		if (bHcShotOk) for (int32 q = 1; q <= 3; ++q) RequestEventShot(TEXT("padcool"), Cool * q / 4.0, 6);
+	}
+	if (bHcShotOk && M.reason == wire::PICKUP_READY && (int32)M.pad == HcMyPad) RequestEventShot(TEXT("padready"), 0.3, 2);
 }
 
 // 서버 받침 자리에 있는 맵 받침을 찾아 묶는다. 받침 파일 자리는 make_pads.py 가 맵 액터 자리와 0.05 안인 것만 낸다 — 5 는 받침 사이(1086 이상)에 견주면 0 이다
@@ -2860,8 +3366,16 @@ void UMOBridgeSubsystem::ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable
 	Actor.SetWeaponPickupVisibility(bAvailable);
 	if (bAvailable && PercentProp) PercentProp->SetPropertyValue_InContainer(&Actor, 0.f);
 	if (!bEffects) return;
-	if (bAvailable) Actor.PlayRespawnEffects();
-	else Actor.PlayPickupEffects();
+	if (bAvailable)
+	{
+		Actor.PlayRespawnEffects();
+		++PadRespawnEffects;
+	}
+	else
+	{
+		Actor.PlayPickupEffects();
+		++PadPickupEffects;
+	}
 }
 
 // 회복 — 받침 자기 그래프(GiveWeapon)를 그대로 부른다: 체력 < 최대면 받침 효과를 걸고 줍기 신호를 낸다. 체력은 서버 값이라 앞뒤를 서버 값과 견준다.

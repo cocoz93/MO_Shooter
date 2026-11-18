@@ -469,7 +469,7 @@ bool UMOBContentProbeSubsystem::Prepare()
 
 	Csv += TEXT("frame,t,step,ev,px,py,pz,vx,vy,vz,speed2d,maxSpeed,crouched,capHH,eyeH,camW,camAds,fov,montage,montagePos,meleeActive,adsActive,")
 		TEXT("foeX,foeY,foeYaw,foeHp,foeMontage,foeMontagePos,hp,padBigAvail,padBigPct,padSmallAvail,padSmallPct,")
-		TEXT("handX,handY,handZ,yaw,foeZ,foeHH,walk,mode,foeWalk,foeVx,foeVy\n");
+		TEXT("handX,handY,handZ,yaw,foeZ,foeHH,walk,mode,foeWalk,foeVx,foeVy,camZ,footZ\n");
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_READY pawn=%s home=%s steps=%d"), *GetNameSafe(Ch), *Home.ToString(), StepCount(ScriptIdx()));
 	return true;
 }
@@ -937,10 +937,22 @@ void UMOBContentProbeSubsystem::WriteRow()
 	// foeWalk = 이 프레임에 상대에게 -X 누름을 넣었나, foeVx · foeVy = 상대 속도(F-1 부딪힘)
 	const UCharacterMovementComponent* FM = F ? F->GetCharacterMovement() : nullptr;
 	const FVector FV = FM ? FM->Velocity : FVector::ZeroVector;
-	Csv += FString::Printf(TEXT("%.3f,%.3f,%.3f,%.4f,%.5f,%.3f,%d,%d,%d,%.5f,%.5f\n"), Hand.X, Hand.Y, Hand.Z, Ch->GetActorRotation().Yaw,
+	// camZ · footZ = 카메라 높이 · 낮은 발(ball_l · ball_r) 높이 — 사람 확인 자동화(human-check-auto-plan.md)의 앉기 카메라 · 몸 높이 정답지. 뼈가 없으면 -1e6
+	double FootZ = -1e6;
+	if (const USkeletalMeshComponent* Mesh = Ch->GetMesh())
+	{
+		for (const TCHAR* Bone : { TEXT("ball_l"), TEXT("ball_r") })
+		{
+			if (Mesh->GetBoneIndex(Bone) == INDEX_NONE) continue;
+			const double Z = Mesh->GetBoneLocation(Bone).Z;
+			FootZ = FootZ < -1e5 ? Z : FMath::Min(FootZ, Z);
+		}
+	}
+	Csv += FString::Printf(TEXT("%.3f,%.3f,%.3f,%.4f,%.5f,%.3f,%d,%d,%d,%.5f,%.5f,%.3f,%.3f\n"), Hand.X, Hand.Y, Hand.Z, Ch->GetActorRotation().Yaw,
 		F ? F->GetActorLocation().Z : 0.0, F ? F->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 0.f,
 		StepAt(ScriptIdx(), Step).bWalk ? 1 : 0, M ? (int32)M->MovementMode.GetValue() : -1,
-		FoeWalks(StepAt(ScriptIdx(), Step).Act) ? 1 : 0, FV.X, FV.Y);
+		FoeWalks(StepAt(ScriptIdx(), Step).Act) ? 1 : 0, FV.X, FV.Y,
+		PC && PC->PlayerCameraManager ? PC->PlayerCameraManager->GetCameraLocation().Z : -1e6, FootZ);
 	PrevHand = Hand;
 	bPrevHandValid = true;
 	CollectParts(F, PrevFoeParts, PrevFoePartNames);

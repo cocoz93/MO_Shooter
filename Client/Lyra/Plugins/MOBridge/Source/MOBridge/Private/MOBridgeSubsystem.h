@@ -95,6 +95,8 @@ struct FMOBMeleeGuess
  *   -MOBAutoMelee               자동 입력에 근접을 더한다 — 적이 4m 안이면 누르고 있고, 아니면 6초마다 0.1초 누른다. -MOBAutoAim 과 같이 켜면 적이 10m 안에 보여도 다가간다(6초 중 4초). 없으면 기존 자동 입력 그대로
  *   -MOBBreakMeleeBlock         일부러 틀리기 — Lyra 근접 능력의 입력 표식을 안 떼어 Lyra 가 키로 혼자 근접을 켠다(MOB_MELEE lyraSelf 가 늘어야 한다)
  *   -MOBBreakPadsAt=N           일부러 틀리기 — 준비된 뒤 N초에 묶인 받침 하나의 Lyra 켜짐을 뒤집고 · 다음 회복 효과를 건너뛰고 · 다음 받침 소식 하나를 버린다(check_pads_bridge.py 가 잡는지 보려고)
+ *   -MOBHumanCheck              사람 확인 자동화(MyDocs human-check-auto-plan.md) — 자동 입력 앞에 각본(샷건 조준 · 허리 사격, 앉기 · 앉은 채 점프, 무기별 근접 누른 채)을 돌리고
+ *                               카메라 · 발 높이 · 앉은 채 점프 차례 · 근접 시작 간격 · 받침 대기 표시 · 받침 효과 줄(MOB_HC_*)을 남긴다. -MOBEventShots 면 그 순간마다 사진, -MOBQuitAt 이면 끝 3초 전 점수판을 연다
  * 판정에 쓰는 줄은 전부 「MOB_」 로 시작한다.
  */
 UCLASS()
@@ -152,6 +154,9 @@ private:
 	void TickAbilityMelee();
 	FMOBMeleeGuess JudgeMelee(mo::Vec3& OutPush);
 	void TickAutoInput(double T);
+	bool TickHumanScript(double T);		// -MOBHumanCheck 각본 — 이 프레임 입력을 맡았으면 true(끝났으면 false = 자동 입력으로)
+	void SampleHumanCheck(double T);	// 매 프레임 — 각본 재는 칸의 카메라 · 발 높이, 앉은 채 점프 차례, 근접 뒤 내 몽타주, 끝 점수판
+	void LogHumanCheck();				// 요약 — MOB_HC_* 줄
 	void TickCapture(double T);
 	void TickPickups(double Now);
 	void HandlePickup(const mo::wire::Pickup& M);
@@ -198,6 +203,58 @@ private:
 	FRandomStream RayRng{ 7 };
 	float BreakAt = -1;
 	float BreakPredictAt = -1;
+	bool bHumanCheck = false;		// -MOBHumanCheck — 사람 확인 자동화 각본 · 기록 줄
+
+	// -MOBHumanCheck 상태(human-check-auto-plan.md). 각본 칸 표 = .cpp kHumanSteps
+	int32 HcStep = 0;				// 지금 칸. 칸 수와 같으면 각본 끝 — 자동 입력으로 넘어간다
+	double HcStepClock = 0;			// 이 칸에서 산 채 지난 초(죽은 동안은 안 센다)
+	double HcLastT = -1;
+	bool bHcStepBegun = false;
+	bool bHcDead = false;
+	int32 HcStepShots = 0;			// 이 칸에서 누른 사격 수
+	double HcNextShotAt = 0;		// 이 칸 시계로 다음 사격 누름
+	double HcFireUntil = -1;		// 이 칸 시계로 사격을 누르고 있을 끝
+	double HcCrouchUntil = -1;		// 이 칸 시계로 앉기 단추를 누르고 있을 끝(입력은 고정 간격으로 나가 한 프레임 누름은 빠질 수 있다 — 자동 입력과 같은 0.1초)
+	float HcHipYawOffset = 0.f;		// 허리 사격 칸만 벽 요에서 비켜 겨누는 각 — 조준 자국 무리와 안 겹치게(±8°, 벽 거리가 가운데와 가까운 쪽)
+	// 다가가기 칸 — 길찾기 경로(0.5초마다 다시) · 경로를 얻은 수 · 적까지 거리(끝 줄 MOB_HC_APPROACH) · 칸 시작 때 남 캡슐 닿음 수(늘면 끝)
+	uint64 HcApproachHits0 = 0;
+	double HcNextPathAt = 0;
+	TArray<FVector> HcPath;
+	int32 HcNavPaths = 0;
+	double HcApproachDist = -1;
+	float HcYaw = 0.f;				// 벽을 보는 방향 — 구역 첫 칸에서 고른다
+	double HcWallDist = -1;
+	int32 HcRestarts = 0;			// 죽어서 구역을 다시 한 수
+	struct FHcRange
+	{
+		int64 N = 0;
+		double Sum = 0, Min = 0, Max = 0;
+		void Add(double V) { Min = N ? FMath::Min(Min, V) : V; Max = N ? FMath::Max(Max, V) : V; Sum += V; ++N; }
+	};
+	FHcRange HcCam[2], HcFoot[2];	// [0] 선 채 · [1] 앉은 채 — 재는 칸에서 땅 위 · 앉음이 바뀐 지 0.5초 넘은 프레임의 (카메라 · 낮은 발) 높이 − 바닥
+	int64 HcFootMissing = 0;		// 발 뼈(ball_l · ball_r)를 못 찾은 프레임
+	bool bHcLastCrouched = false;
+	double HcCrouchChangedAt = 0;
+	uint64 HcCJumpPressFrame = 0;	// 앉은 채 점프를 누른 프레임(0 = 지켜보는 중 아님)
+	double HcCJumpPressT = 0;
+	int32 HcCJumps = 0;
+	bool bHcCJumpCrouched = false;	// 누를 때 앉아 있었나
+	int32 HcCJumpUncrouch = -1, HcCJumpLift = -1;	// 누른 뒤 몇 프레임에 일어섰나 · 떠올랐나(위 속도 > 0)
+	TArray<uint32> HcMeleeSeqs[3];	// 각본 근접 칸에서 예측이 근접을 켠 입력 번호 — 무기(EWeapon)별
+	int64 HcMeleeDriven[3] = {};	// 같은 칸에서 내 Lyra 근접 능력을 켠 수
+	TMap<FString, int32> HcMyMontages;	// 내 근접 능력을 켜고 두 프레임 뒤 내 메시에서 돈 몽타주 이름별 수
+	uint64 HcMontageReadFrame = 0;
+	int64 AnimHitReactTicks = 0;		// 남의 상태 중 맞은 반응 몽타주 칸이 든 틱 수(mo::HasHitReactMontage)
+	int64 PadPickupEffects = 0, PadRespawnEffects = 0;	// 받침 집음 · 다시 생김 효과를 튼 수(ApplyPadLook)
+	double HcNextPadLogAt = 0;
+	int32 HcMyPad = -1;				// 내가 마지막으로 집은 받침(다시 생김 사진용)
+	uint64 HcLastPawnHits = 0;		// 예측이 남 캡슐에 닿은 수(Sim pawnHits) — 늘면 부딪힘 사진
+	TMap<uint32, FString> HcRemoteMontageNow;
+	TMap<uint32, float> HcRemoteMontagePos;	// 지난 프레임 몽타주 위치 — 같은 이름이 처음부터 다시 돌면(위치가 줄면) 새로 시작으로 센다
+	uint32 HcMeleeTarget = 0;		// 내 근접이 맞힌 상대(서버 번호) — 1초 안에 그 상대 몽타주가 맞은 반응으로 새로 돌면 센다
+	int32 HcMeleeHits = 0, HcMeleeReacts = 0;	// 남마다 지난 프레임 메시에서 돌던 몽타주(기본 모드의 맞은 반응은 Lyra 맞음 신호 GameplayCue.Character.DamageTaken 이 튼다)
+	TMap<FString, int32> HcRemoteMontageStarts;	// 남 메시에서 새로 돌기 시작한 몽타주 이름별 수
+	bool bHcBoardPressed = false;
 
 	// 상태
 	double ReadyAt = -1;
@@ -360,6 +417,10 @@ private:
 	bool bLyraMeleeWasActive = false;
 	float MeleeYaw = 0.f;		// 서버 player.yaw = 마지막으로 적용한 입력의 요(부활 직후는 시작 자리 요) — 다음 근접의 몸 앞(봇 _meleeYaw 와 같다)
 	int32 MeleeLinesLeft = 60;	// 근접 하나씩 줄(MOB_MELEE_ONE) 남은 수
+	// 보정 하나씩 줄(MOB_CORR) — 보정이 무엇 뒤에 났나 가르려고: 남이 나를 친 근접 · 내가 친 근접 · 남 캡슐 닿음(사람 확인 자동화 ha2 의 보정 최대 6.00cm)
+	int32 CorrLinesLeft = 80;
+	double LastMeleeOnMeAt = -1, LastMyMeleeHitAt = -1;
+	uint64 CorrLastPawnHits = 0;
 	int32 DriftLinesLeft = 20;	// 내 밀림 1cm 넘는 프레임 줄(MOB_SELF_DRIFT) 남은 수
 	TMap<uint32, FMOBMeleeGuess> MeleeGuesses;	// 입력 번호 → 화면 판정
 	int64 InputsCrouch = 0, CrouchComparedOn = 0, CrouchFlagDiff = 0;	// 앉기를 누른 입력 · 서버가 앉음으로 보낸 비교 줄 · 그중 내 예측과 어긋남(D-5-c)
