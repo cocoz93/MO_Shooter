@@ -19,6 +19,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Equipment/LyraEquipmentDefinition.h"
+#include "Character/LyraCharacter.h"
 #include "Equipment/LyraEquipmentInstance.h"
 #include "Equipment/LyraEquipmentManagerComponent.h"
 #include "Equipment/LyraQuickBarComponent.h"
@@ -136,6 +137,7 @@ void UMOBWeaponRecordSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FParse::Value(Cmd, TEXT("MOBWeaponRaySec="), RaySeconds);
 	bPoseOnly = FParse::Param(Cmd, TEXT("MOBPoseOnly"));
 	bAds = FParse::Param(Cmd, TEXT("MOBWeaponAds"));
+	bCrouchMix = FParse::Param(Cmd, TEXT("MOBWeaponCrouch"));
 	Rng.Initialize(Seed);
 }
 
@@ -572,6 +574,15 @@ void UMOBWeaponRecordSubsystem::SetAds(bool bHeld)
 	else A->AbilityInputTagReleased(AdsTag());
 }
 
+// 구간 끝 · 맞힘 단계 앞 — 서서 시작한다(WeaponCheck 가 구간 첫 줄을 「앉기 몫 1」로 놓는다). 서기까지 장착 대기 1.5초라 앉기 몫(FInterpTo 5)은 문턱 안으로 붙는다
+void UMOBWeaponRecordSubsystem::StandUp()
+{
+	ACharacter* Me = Mine.Get();
+	if (!Me) return;
+	const UCharacterMovementComponent* M = Me->GetCharacterMovement();
+	if (Me->bIsCrouched || (M && M->bWantsToCrouch)) Me->UnCrouch();
+}
+
 void UMOBWeaponRecordSubsystem::TickScript(float Dt)
 {
 	ACharacter* Me = Mine.Get();
@@ -584,6 +595,7 @@ void UMOBWeaponRecordSubsystem::TickScript(float Dt)
 	// 이 프레임의 결과를 먼저 적고, 다음 프레임 입력을 정한다
 	const float Mult = W->GetCalculatedSpreadAngleMultiplier();
 	const float Speed = (float)Me->GetVelocity().Size();
+	const int32 Crouched = M && M->IsCrouching() ? 1 : 0;		// 무기 Tick 이 읽는 값(LyraRangedWeaponInstance.cpp:184)
 	const int32 Mag = ReadStack(TEXT("Lyra.ShooterGame.Weapon.MagazineAmmo"));
 	const int32 Spare = ReadStack(TEXT("Lyra.ShooterGame.Weapon.SpareAmmo"));
 
@@ -606,6 +618,12 @@ void UMOBWeaponRecordSubsystem::TickScript(float Dt)
 	{
 		NextAdsAt = Now + Rng.FRandRange(0.05f, 1.2f);
 		SetAds(Rng.FRand() < 0.5f);
+	}
+	// 앉기는 사람 키와 같은 길 — Lyra 앉기 키는 능력이 아니라 영웅 컴포넌트가 ToggleCrouch 를 부른다(LyraCharacter.cpp:426). 서 있다 · 앉았다를 다 길게 보게 0.3~2초
+	if (bCrouchMix && Now >= NextCrouchAt)
+	{
+		NextCrouchAt = Now + Rng.FRandRange(0.3f, 2.0f);
+		if (ALyraCharacter* L = Cast<ALyraCharacter>(Me)) L->ToggleCrouch();
 	}
 	if (bJumpWanted) { Me->Jump(); bJumpThisFrame = true; bJumpWanted = false; }
 	else Me->StopJumping();
@@ -635,8 +653,8 @@ void UMOBWeaponRecordSubsystem::TickScript(float Dt)
 	MOBLyraCamera::Read(Me, Cam);
 	int32 AdsTagCount = 0;
 	if (UAbilitySystemComponent* A = FindASC(Me)) AdsTagCount = A->GetGameplayTagCount(FGameplayTag::RequestGameplayTag(TEXT("Event.Movement.ADS")));
-	Csv += FString::Printf(TEXT("FRAME,%s,%d,%d,%.6f,%.6f,%d,%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%d,%.6f,%d,%d,%d,%.6f\n"), WEAPON_NAMES[WeaponIdx], SegIdx, Frame, Now, Dt, bFireHeld ? 1 : 0, bPulseThisFrame ? 1 : 0, bJumpThisFrame ? 1 : 0, Mag, Spare, ReadHeat(W), W->GetCalculatedSpreadAngle(), Mult, Speed, M && M->IsFalling() ? 1 : 0, W->HasFirstShotAccuracy() ? 1 : 0, FireActive, ReloadActive,
-		bAdsHeld ? 1 : 0, Cam.AimingAlpha, AdsTagCount, Cam.Count, Cam.bTopAds ? 1 : 0, Cam.TopWeight);
+	Csv += FString::Printf(TEXT("FRAME,%s,%d,%d,%.6f,%.6f,%d,%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%d,%.6f,%d,%d,%d,%.6f,%d\n"), WEAPON_NAMES[WeaponIdx], SegIdx, Frame, Now, Dt, bFireHeld ? 1 : 0, bPulseThisFrame ? 1 : 0, bJumpThisFrame ? 1 : 0, Mag, Spare, ReadHeat(W), W->GetCalculatedSpreadAngle(), Mult, Speed, M && M->IsFalling() ? 1 : 0, W->HasFirstShotAccuracy() ? 1 : 0, FireActive, ReloadActive,
+		bAdsHeld ? 1 : 0, Cam.AimingAlpha, AdsTagCount, Cam.Count, Cam.bTopAds ? 1 : 0, Cam.TopWeight, Crouched);
 	++Frame;
 }
 
@@ -947,6 +965,7 @@ void UMOBWeaponRecordSubsystem::Tick(float DeltaTime)
 		{
 			SetFire(false);
 			SetAds(false);
+			StandUp();
 			MoveDir = FVector::ZeroVector;
 			++SegIdx;
 			if (SegIdx >= SegsPerWeapon)

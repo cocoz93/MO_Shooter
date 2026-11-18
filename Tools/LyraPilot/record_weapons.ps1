@@ -8,6 +8,7 @@ param(
     [switch]$FreeDt,
     [switch]$PoseOnly,
     [switch]$Ads,
+    [switch]$Crouch,
     [int]$TimeoutSec = 590
 )
 # Records weapon table, damage samples, scripted firing, real hits and body rays to Saved/MOB/weaponrec_<Tag>.csv (answer sheet for Tools/WeaponCheck).
@@ -23,6 +24,8 @@ $a = @("`"$proj\Lyra.uproject`"", "$MapPath`?NumBots=2", '-game', '-RenderOffScr
 if ($PoseOnly) { $a += '-MOBPoseOnly' }
 # -Ads: mixes aim-down-sights press/release into the script and aims during the hit phase (step C). Without it the script is unchanged for the same seed.
 if ($Ads) { $a += '-MOBWeaponAds' }
+# -Crouch: mixes the crouch key (ToggleCrouch) into the script and stands up at each segment end (D-5-a crouched spread). Without it the script is unchanged for the same seed.
+if ($Crouch) { $a += '-MOBWeaponCrouch' }
 if (-not $FreeDt) { $a += @('-benchmark', '-fps=60', '-UseFixedTimeStep') }
 $t0 = Get-Date
 $p = Start-Process -FilePath $ue -ArgumentList $a -PassThru

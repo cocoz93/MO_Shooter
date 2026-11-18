@@ -112,6 +112,11 @@ private:
 	bool bAdsHeld = false;
 	double NextAdsAt = 0;
 
+	// -MOBWeaponCrouch — 각본에 앉기 키(ToggleCrouch)를 섞는다(D-5-a 앉은 퍼짐 대조). 없으면 옛 각본 그대로(같은 씨앗 = 같은 기록)
+	bool bCrouchMix = false;
+	double NextCrouchAt = 0;
+	void StandUp();
+
 	float LastEnemyHealth = 0.f;
 	FDelegateHandle EffectHandle;
 	int32 HitShots = 0;

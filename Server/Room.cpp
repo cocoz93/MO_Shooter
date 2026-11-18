@@ -833,7 +833,7 @@ namespace mo
 		WeaponMotion motion;
 		motion.speed = (float)Length(player.move.velocity);
 		motion.falling = player.move.mode == EMoveMode::Falling;
-		motion.crouching = player.move.crouched;		// 이동 뒤 앉음(IsCrouching) — 속도 · 낙하와 같은 이동 뒤 값. Lyra 무기 기록과의 대조는 아직 없다(D-5-a 결과)
+		motion.crouching = player.move.crouched;		// 이동 뒤 앉음(IsCrouching) — 속도 · 낙하와 같은 이동 뒤 값. Lyra 무기 기록 weaponrec_crouch1 과 대조해 같다(11-18, 한 프레임 앞 값이면 배율이 0.03~0.05 어긋난다)
 		motion.aimingAlpha = player.aimCamera.GetAimingAlpha();		// 앞 입력의 카메라 갱신 결과 — Lyra 무기 틱은 카메라 갱신보다 먼저 돈다(C-1 실측)
 		WeaponInput weaponInput;
 		weaponInput.fireHeld = (input.buttons & wire::BUTTON_FIRE) != 0;

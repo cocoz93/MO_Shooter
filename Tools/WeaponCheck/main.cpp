@@ -7,6 +7,7 @@
 //   CURVE,무기,곡선,시간,값      엔진 곡선 계산 결과
 //   DMG,무기,거리,부위,팀,피해   같은 거리·부위 피해(체력 차)
 //   FRAME,무기,구간,프레임,시각,dt,발사,재장전,점프,탄창,여분,열,퍼짐,배수,속도,낙하,첫발   프레임 끝 상태. 입력은 다음 프레임에 적용된다
+//         …,사격 능력,재장전 능력,조준 칸 6개,앉음(26번째 칸 — 이동 컴포넌트 IsCrouching = 무기가 읽는 값. 11-18 기록부터)
 //   HIT,무기,프레임,뼈,재질,시작xyz,맞은점xyz,거리,내위치xyz   실제 맞힘
 //   HPDELTA,무기,프레임,체력차
 //   SHAPEBASE / SHAPE            몸 모양(Shared/BodyPose.inl 원본)
@@ -101,6 +102,8 @@ namespace
 		bool hasAds = false;
 		int ads = 0, adsTag = 0, camCount = 0, topAds = 0;
 		float aimAlpha = 0, topWeight = 1;
+		bool hasCrouch = false;
+		int crouched = 0;		// 앉음 칸(-Crouch 기록부터 · 칸이 없는 옛 기록은 0 = 앉기 없음)
 	};
 
 	struct EquipRow
@@ -323,6 +326,11 @@ int main(int argc, char** argv)
 				r.topAds = I(c[23]);
 				r.topWeight = (float)D(c[24]);
 			}
+			if (c.size() >= 26)
+			{
+				r.hasCrouch = true;
+				r.crouched = I(c[25]);
+			}
 			segments.back().rows.push_back(r);
 		}
 		else if ((t == "HIT" && c.size() >= 15) || (t == "HPDELTA" && c.size() >= 4))
@@ -403,6 +411,9 @@ int main(int argc, char** argv)
 		double aimAlphaMax = 0, aimTopWeightMax = 0;
 		int aimFirstBadSeg = -1, aimFirstBadFrame = -1;
 		int multFirstBadSeg = -1, multFirstBadFrame = -1;	// 퍼짐 배율이 0.01 넘게 어긋난 첫 줄
+		// 앉기(앉음 칸이 있는 기록만) — 앉은 프레임 · 앉음 바뀜 · 바뀐 뒤 30프레임(앉기 몫이 FInterpTo 5 로 따라가는 중) · 앉아서 나간 탄. 배율 차는 앉은 프레임 · 바뀐 뒤 30프레임만 따로
+		int crouchRows = 0, crouchFrames = 0, crouchToggles = 0, crouchNearToggle = 0, crouchShots = 0;
+		double crouchMultMax = 0, crouchNearMultMax = 0;
 	} cycle[kWeaponCount];
 
 	// 프레임 안 차례(ads1 기록, 실측): 컨트롤러 입력(조준 능력 켜고 끄기) → 무기 틱(퍼짐) → 기록 도구 → 카메라 갱신.
@@ -444,6 +455,7 @@ int main(int argc, char** argv)
 			WeaponMotion motion;
 			motion.speed = cur.speed;
 			motion.falling = cur.falling != 0;
+			motion.crouching = cur.crouched != 0;		// 무기 Tick 이 읽는 IsCrouching — 속도 · 낙하와 같은 프레임 끝 값
 			const float dt = std::fabs((float)cur.dt - 1.f / 60.f) < 1e-5f ? 1.f / 60.f : (float)cur.dt;
 			if (hasAds)
 			{
@@ -472,6 +484,7 @@ int main(int argc, char** argv)
 
 		int lastShot = -1;
 		int lastSimShot = -1;
+		int lastCrouchToggle = -1000;
 		int pendingReload = -1;
 		int prevMag = r0.mag;
 		for (size_t i = startRow + 1; i < s.rows.size(); ++i)
@@ -484,6 +497,7 @@ int main(int argc, char** argv)
 			WeaponMotion motion;
 			motion.speed = cur.speed;
 			motion.falling = cur.falling != 0;
+			motion.crouching = cur.crouched != 0;		// 무기 Tick 이 읽는 IsCrouching — 속도 · 낙하와 같은 프레임 끝 값
 			const float dt = std::fabs((float)cur.dt - 1.f / 60.f) < 1e-5f ? 1.f / 60.f : (float)cur.dt;
 			if (hasAds)
 			{
@@ -558,6 +572,27 @@ int main(int argc, char** argv)
 				cc.multFirstBadSeg = s.seg;
 			}
 			if ((sp.HasFirstShotAccuracy() ? 1 : 0) != cur.first) ++cc.firstDiff;
+			if (cur.hasCrouch)
+			{
+				const double multDiff = std::fabs(sp.GetCalculatedMultiplier() - cur.mult);
+				++cc.crouchRows;
+				if (cur.crouched != prev.crouched)
+				{
+					++cc.crouchToggles;
+					lastCrouchToggle = (int)i;
+				}
+				if (cur.crouched)
+				{
+					++cc.crouchFrames;
+					if (cur.mag < prev.mag) cc.crouchShots += prev.mag - cur.mag;
+					cc.crouchMultMax = std::max(cc.crouchMultMax, multDiff);
+				}
+				if ((int)i - lastCrouchToggle < 30)
+				{
+					++cc.crouchNearToggle;
+					cc.crouchNearMultMax = std::max(cc.crouchNearMultMax, multDiff);
+				}
+			}
 		}
 	}
 	for (int w = 0; w < kWeaponCount; ++w)
@@ -572,6 +607,9 @@ int main(int argc, char** argv)
 		for (const auto& g : cc.reloadFrames) std::printf(" %d:%d", g.first, g.second);
 		std::printf("\n");
 		if (cc.lyraShots == 0 || cc.magDiff != 0 || cc.spareDiff != 0 || cc.heatMax > 0.01 || cc.spreadMax > 0.01 || cc.multMax > 0.01 || cc.firstDiff != 0) failed = true;
+		// 앉음 칸이 있는 기록에만 찍는다(옛 기록 출력은 그대로). 앉기를 안 섞은 기록은 앉은 프레임 0 이 정상이라 개수로 실패시키지 않는다 — 배율 차는 위 multMax 가 이미 본다
+		if (cc.crouchRows > 0)
+			std::printf("CROUCH  %-8s rows=%d crouched=%d toggles=%d nearToggle=%d crouchedShots=%d | multMax crouched=%.4f nearToggle=%.4f\n", local.defs[w].name, cc.crouchRows, cc.crouchFrames, cc.crouchToggles, cc.crouchNearToggle, cc.crouchShots, cc.crouchMultMax, cc.crouchNearMultMax);
 		if (cc.aimFrames > 0)
 		{
 			std::printf("AIM     %-8s lag=%d frames=%d alpha>0=%d blending=%d presses=%d quickRelease=%d | countDiff=%d topDiff=%d tagDiff=%d alphaMax=%.6f topWeightMax=%.6f firstBad=seg%d:f%d | multFirstBad=seg%d:f%d\n", local.defs[w].name, aimLag, cc.aimFrames, cc.aimPositive, cc.aimBlending, cc.aimPress, cc.aimQuickRelease, cc.aimCountDiff, cc.aimTopDiff, cc.aimTagDiff, cc.aimAlphaMax, cc.aimTopWeightMax, cc.aimFirstBadSeg, cc.aimFirstBadFrame, cc.multFirstBadSeg, cc.multFirstBadFrame);
