@@ -12,7 +12,8 @@ param(
 	[int]$Port = 7951,
 	[string]$Tag = "",
 	[string]$OutDir = "",
-	[string]$Map = "$env:USERPROFILE\Desktop\MyGit\MO_Shooter\Client\Lyra\Saved\MOB\map_expanse.mocl"
+	[string]$Map = "$env:USERPROFILE\Desktop\MyGit\MO_Shooter\Client\Lyra\Saved\MOB\map_expanse.mocl",
+	[switch]$NoPawnBlock		# 시험 전용 — 사람끼리 막기를 서버 · 더미 둘 다 끈다(--testNoPawnBlock, D83). 위치 어긋남 0 을 엄격히 볼 때
 )
 $ErrorActionPreference = 'Stop'
 
@@ -50,6 +51,7 @@ $serverArgs = @(
 	"--warmup=2", "--matchSeconds=36000", "--targetScore=1000000",
 	"--measureFrom=$SettleSeconds", "--measureSeconds=$MeasureSeconds"
 )
+if ($NoPawnBlock) { $serverArgs += "--testNoPawnBlock" }
 $server = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -PassThru -WindowStyle Hidden `
 	-RedirectStandardOutput "$runDir\server.txt" -RedirectStandardError "$runDir\server_err.txt"
 $null = $server.Handle
@@ -75,6 +77,7 @@ for ($i = 0; $i -lt $processCount; ++$i) {
 		"`"--map=$Map`"", "--port=$Port", "--bots=$count", "--seed=$($Seed + 1000 * ($i + 1))",
 		"--seconds=$botSeconds", "--measureFrom=$botMeasureFrom", "--measureSeconds=$MeasureSeconds"
 	)
+	if ($NoPawnBlock) { $botArgs += "--testNoPawnBlock" }
 	$bot = Start-Process -FilePath $botExe -ArgumentList $botArgs -PassThru -WindowStyle Hidden `
 		-RedirectStandardOutput "$runDir\bot$i.txt" -RedirectStandardError "$runDir\bot${i}_err.txt"
 	$null = $bot.Handle

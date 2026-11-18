@@ -1868,7 +1868,7 @@ int main(int argc, char** argv)
 	}
 	if (args.seconds > 0)
 	{
-		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0;
+		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, pawnReconciles = 0;
 		for (const std::unique_ptr<CBot>& bot : bots)
 		{
 			compared += bot->GetCompared();
@@ -1877,6 +1877,7 @@ int main(int argc, char** argv)
 			ammoDiff += bot->GetAmmoDiff();
 			flagDiff += bot->GetFlagDiff();
 			states += bot->GetStates();
+			pawnReconciles += bot->GetPawnReconciles();
 		}
 		if (judging)
 		{
@@ -1907,10 +1908,15 @@ int main(int argc, char** argv)
 		std::sort(stateGapsMs.begin(), stateGapsMs.end());
 		std::sort(loopGapsMs.begin(), loopGapsMs.end());
 		const auto percentile = [](const std::vector<float>& sorted, double p) { return sorted.empty() ? 0.f : sorted[(size_t)((sorted.size() - 1) * p)]; };
-		const bool pass = compared > 0 && posDiff == 0 && velDiff == 0 && ammoDiff == 0 && flagDiff == 0 && botsOpen == bots.size();
-		std::printf("LOADBOT bots=%d open=%zu compared=%llu posDiff=%llu velDiff=%llu ammoDiff=%llu flagDiff=%llu states=%llu stateGaps=%zu stateGapP50Ms=%.2f stateGapP99Ms=%.2f stateGapMaxMs=%.2f loopP99Ms=%.2f loopMaxMs=%.2f cpuPercent=%.1f\n",
+		// 위치 · 속도 기준은 아래 「맞춰 보기」 판정과 같다 — 사람끼리 막기를 켠 판은 어긋남이 재는 대상(남 자리를 늦게 안다)이라 빼고,
+		// 대신 맞춰 본 줄이 있어야 하고 예측의 이상한 겹침은 0. 막기를 끈 판(--testNoPawnBlock)만 위치 · 속도 차이 0 을 엄격히 본다
+		const MoveCounters& predCount = sim.GetCounters();
+		const bool moveOk = args.pawnBlock ? (pawnReconciles > 0 && predCount.pawnOddSimplex == 0) : (posDiff == 0 && velDiff == 0);
+		const bool pass = compared > 0 && moveOk && ammoDiff == 0 && flagDiff == 0 && botsOpen == bots.size();
+		std::printf("LOADBOT bots=%d open=%zu compared=%llu posDiff=%llu velDiff=%llu ammoDiff=%llu flagDiff=%llu states=%llu stateGaps=%zu stateGapP50Ms=%.2f stateGapP99Ms=%.2f stateGapMaxMs=%.2f loopP99Ms=%.2f loopMaxMs=%.2f cpuPercent=%.1f pawnBlock=%d pawnReconciles=%llu predOdd=%llu\n",
 			args.bots, botsOpen, (unsigned long long)compared, (unsigned long long)posDiff, (unsigned long long)velDiff, (unsigned long long)ammoDiff, (unsigned long long)flagDiff, (unsigned long long)states, stateGapsMs.size(),
-			percentile(stateGapsMs, 0.5), percentile(stateGapsMs, 0.99), percentile(stateGapsMs, 1.0), percentile(loopGapsMs, 0.99), percentile(loopGapsMs, 1.0), args.measureSeconds > 0 ? (cpuEnd - cpuBegin) / args.measureSeconds * 100.0 : 0.0);
+			percentile(stateGapsMs, 0.5), percentile(stateGapsMs, 0.99), percentile(stateGapsMs, 1.0), percentile(loopGapsMs, 0.99), percentile(loopGapsMs, 1.0), args.measureSeconds > 0 ? (cpuEnd - cpuBegin) / args.measureSeconds * 100.0 : 0.0,
+			args.pawnBlock ? 1 : 0, (unsigned long long)pawnReconciles, (unsigned long long)predCount.pawnOddSimplex);
 		std::printf("RESULT %s\n", pass ? "PASS" : "FAIL");
 		return pass ? 0 : 1;
 	}
