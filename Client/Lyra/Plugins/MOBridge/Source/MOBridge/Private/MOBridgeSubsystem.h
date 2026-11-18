@@ -91,10 +91,12 @@ struct FMOBMeleeGuess
  *   -MOBSelfBodyDelay=N         시험 옵션. 내 몸 Quinn 바꾸기(D85)를 캐릭터를 처음 본 뒤 N초 미룬다 — 총을 쥔 뒤 몸이 바뀌는 경우를 만든다(층이 빠진 채 남는지 보려고)
  *   -MOBSimpleAnim              화면 시험 — 상대를 Lyra 애니 대신 소총 클립 단순 재생으로 움직인다(MOBSimpleAnimInstance.h)
  *   -MOBStandAt=x,y,z           촬영 전용 — 내 입력을 보내지 않고 서버에 이 자리에 서 있겠다고만 알린다. 서버 --debug 필요(MOBRemoteShotSubsystem.h)
+ *   -MOBStandLyra               -MOBStandAt 시험 전용 — 내 Lyra 몸도 그 자리에 둔다(평소엔 서버 몸만 옮겨지고 Lyra 몸은 시작 자리에 남는다). 점프대 · 순간이동 겹침을 내 몸으로 세려고(D91)
  *   -MOBStandHp=N               -MOBStandAt 의 부활 뒤 첫 자리 옮김 체력(받침 시험 — 다친 채 받침 위에 선다). 준 때만 그 뒤 20초마다 알림은 서버가 본 지금 체력으로 보낸다(조용히 체력을 바꾸지 않게)
  *   -MOBAutoMelee               자동 입력에 근접을 더한다 — 적이 4m 안이면 누르고 있고, 아니면 6초마다 0.1초 누른다. -MOBAutoAim 과 같이 켜면 적이 10m 안에 보여도 다가간다(6초 중 4초). 없으면 기존 자동 입력 그대로
  *   -MOBBreakMeleeBlock         일부러 틀리기 — Lyra 근접 능력의 입력 표식을 안 떼어 Lyra 가 키로 혼자 근접을 켠다(MOB_MELEE lyraSelf 가 늘어야 한다)
  *   -MOBBreakPadsAt=N           일부러 틀리기 — 준비된 뒤 N초에 묶인 받침 하나의 Lyra 켜짐을 뒤집고 · 다음 회복 효과를 건너뛰고 · 다음 받침 소식 하나를 버린다(check_pads_bridge.py 가 잡는지 보려고)
+ *   -MOBBreakDevices            일부러 틀리기 — 점프대 · 순간이동의 겹침을 안 끈다(MOB_DEVICES overlap 이 늘어야 한다 — 끈 판의 0 이 「못 셌다」가 아님을 보려고)
  *   -MOBHumanCheck              사람 확인 자동화(MyDocs human-check-auto-plan.md) — 자동 입력 앞에 각본(샷건 조준 · 허리 사격, 앉기 · 앉은 채 점프, 무기별 근접 누른 채)을 돌리고
  *                               카메라 · 발 높이 · 앉은 채 점프 차례 · 근접 시작 간격 · 받침 대기 표시 · 받침 효과 줄(MOB_HC_*)을 남긴다. -MOBEventShots 면 그 순간마다 사진, -MOBQuitAt 이면 끝 3초 전 점수판을 연다
  * 판정에 쓰는 줄은 전부 「MOB_」 로 시작한다.
@@ -159,6 +161,8 @@ private:
 	void LogHumanCheck();				// 요약 — MOB_HC_* 줄
 	void TickCapture(double T);
 	void TickPickups(double Now);
+	void FindDevices();		// 1초마다(Tick — 몸을 놓기 전) — 새로 올라온 점프대 · 순간이동을 찾아 겹침을 끈다(월드 파티션이 늦게 올리는 것까지)
+	void TickDevices(double Now);		// 매 프레임 — 몸이 장치 겹침 칸에 든 프레임 · 그중 Lyra 가 겹침으로 본 프레임을 센다
 	void HandlePickup(const mo::wire::Pickup& M);
 	void HandleMelee(const mo::wire::Melee& M);
 	ALyraWeaponSpawner* BindPad(int32 Index);
@@ -181,6 +185,7 @@ private:
 	bool bBlockDamage = true;
 	bool bAutoInput = false;
 	bool bStandOnly = false;
+	bool bStandLyra = false;		// -MOBStandLyra
 	FVector StandAt = FVector::ZeroVector;
 	double NextStandAt = 0;
 	bool bAutoAim = false;
@@ -311,6 +316,22 @@ private:
 	bool bNamedSelf = false;
 	double NextPickupCheckAt = 0;
 	int32 PickupsHidden = 0;
+	// 점프대(B_Launcher_*) · 순간이동(B_Teleport) — 서버에 안 넣고 Lyra 동작만 끈다(사용자 결정 11-18, design-decisions.md D91).
+	// 장치 그래프는 겹침 시작에서만 돈다(LaunchCharacter · K2_TeleportTo · 효과 큐) → 장치 쪽 겹침을 끄면 안 돈다. 바닥 · 불빛 · 막는 충돌은 그대로
+	struct FMOBDevice
+	{
+		TWeakObjectPtr<AActor> Actor;
+		bool bTeleport = false;
+		TArray<TWeakObjectPtr<class UPrimitiveComponent>> Shapes;		// 겹침을 켜고 있던 칸(구 · 상자) — 몸이 든 프레임을 셀 자리
+	};
+	TArray<FMOBDevice> Devices;
+	bool bBreakDevices = false;		// -MOBBreakDevices — 일부러 틀림: 겹침을 안 끈다
+	double NextDeviceCheckAt = 0;
+	int32 DeviceShapesOff = 0;		// 겹침을 끈 칸 수
+	int64 DeviceInsideSelf = 0;		// 내 몸 캡슐이 장치 칸 상자에 닿은 프레임(지나간 양)
+	int64 DeviceInsideRemote = 0;	// 남의 몸 — 같은 셈(몸 하나 × 프레임)
+	int64 DeviceOverlapSelf = 0;	// 그중 Lyra 가 겹침으로 본 프레임 — 끈 판은 0 이어야 한다
+	int64 DeviceOverlapRemote = 0;
 	// 체력 받침(B-3) — 칸 = 서버 받침 번호. 상태는 서버 소식 그대로, 액터는 자리로 찾아 묶는다
 	struct FMOBPad
 	{

@@ -457,6 +457,7 @@ void UMOBridgeSubsystem::ParseCommandLine()
 			StandAt = FVector(V[0], V[1], V[2]);
 		}
 	}
+	bStandLyra = bStandOnly && FParse::Param(Cmd, TEXT("MOBStandLyra"));
 	bServerAnim = FParse::Param(Cmd, TEXT("MOBServerAnim"));
 	bSimpleAnim = bServerAnim || FParse::Param(Cmd, TEXT("MOBSimpleAnim"));
 	bAnimLog = FParse::Param(Cmd, TEXT("MOBAnimLog"));
@@ -465,6 +466,7 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bAbilityOwnTimer = FParse::Param(Cmd, TEXT("MOBAbilityOwnTimer"));
 	bBreakCrouchBlock = FParse::Param(Cmd, TEXT("MOBBreakCrouchBlock"));
 	bBreakMeleeBlock = FParse::Param(Cmd, TEXT("MOBBreakMeleeBlock"));
+	bBreakDevices = FParse::Param(Cmd, TEXT("MOBBreakDevices"));
 	bAutoMeleeOn = FParse::Param(Cmd, TEXT("MOBAutoMelee"));
 	FParse::Value(Cmd, TEXT("MOBRayBreak="), RayBreak);
 	bViewClamp = !FParse::Param(Cmd, TEXT("MOBNoViewClamp"));
@@ -566,9 +568,16 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 		++ServerAssists.FindOrAdd(PlayerId);
 		UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_ASSIST id=%u lyra+2 counted+1"), PlayerId);
 	}
+	// 장치 찾아 끄기는 몸을 놓기 전에 — 같은 프레임에 놓인 몸이 아직 켜진 장치와 먼저 겹치지 않게(D91, 내 몸 서기 판 stdev_Lup_off 에서 겹침 58프레임)
+	if (Now >= NextDeviceCheckAt)
+	{
+		NextDeviceCheckAt = Now + 1.0;
+		FindDevices();
+	}
 	TickSelfVisual(Now, DeltaTime);
 	TickRemotes(Now);
 	TickPickups(Now);
+	TickDevices(Now);
 	FlushSend();
 	TickCapture(T);
 
@@ -777,6 +786,7 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 				NextStandAt = 0;	// 촬영 전용 — 시작 자리로 돌아갔으면 바로 다시 옮긴다(맵이 달라 시작 자리는 허공이다)
 				bStandPlaced = false;	// 받침 시험(-MOBStandHp) — 새 몸도 다친 채 선다(경기 시작 부활이 체력 100 으로 다시 세웠다, B-3 pb1)
 				SelfCur = ToFVector(Core->Prediction.GetMove().location);
+				if (bStandLyra) SelfCur = StandAt;	// 서기 판은 입력이 없어 이 자리가 그대로 매 프레임 내 몸 자리가 된다(TickSelfVisual)
 				SelfPrev = SelfCur;
 				VisualError = FVector::ZeroVector;
 			}
@@ -3029,6 +3039,12 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 		}
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_PICKUPS hidden=%d hpFixes=%lld"), PickupsHidden, HpFixes);
+	{
+		int32 Teleports = 0;
+		for (const FMOBDevice& D : Devices) Teleports += D.bTeleport ? 1 : 0;
+		UE_LOG(LogMOB, Log, TEXT("MOB_DEVICES found=%d launchers=%d teleports=%d shapesOff=%d break=%d insideSelf=%lld insideRemote=%lld overlapSelf=%lld overlapRemote=%lld"),
+			Devices.Num(), Devices.Num() - Teleports, Teleports, DeviceShapesOff, bBreakDevices ? 1 : 0, DeviceInsideSelf, DeviceInsideRemote, DeviceOverlapSelf, DeviceOverlapRemote);
+	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_PADS pads=%d msgs=%lld takes=%lld readies=%lld syncs=%lld badIndex=%lld noActor=%lld bound=%lld heals=%lld healBeforeFix=%lld healMismatch=%lld healNoPawn=%lld stateChecks=%lld stateDiff=%lld lastStateTick=%u"),
 		Pads.Num(), PadMsgs, PadTakes, PadReadies, PadSyncs, PadBadIndex, PadNoActor, PadBound, PadHeals, PadHealBeforeFix, PadHealMismatch, PadHealNoPawn, PadStateChecks, PadStateDiff, LastStateTick);
 	if (bHumanCheck) LogHumanCheck();
@@ -3280,6 +3296,73 @@ void UMOBridgeSubsystem::TickPickups(double Now)
 		}
 		A->SetActorEnableCollision(false);
 		ApplyPadLook(*A, Pads[i].bAvailable, false);
+	}
+}
+
+// 점프대 · 순간이동 찾기 — 청사진 클래스라 C++ 헤더가 없다. 부모 줄을 따라 이름으로 가른다(B_Launcher_Up · B_Launcher_Push 는 B_Launcher_C 자식,
+// ShooterCore 청사진 이름표 · L_Expanse 바깥 배우 = 위로 4 · 날리기 4 · 순간이동 6, 11-18 원본 기준)
+void UMOBridgeSubsystem::FindDevices()
+{
+	static const FName LauncherName(TEXT("B_Launcher_C"));
+	static const FName TeleportName(TEXT("B_Teleport_C"));
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		AActor* A = *It;
+		int Kind = 0;		// 1 = 점프대 · 2 = 순간이동
+		for (const UClass* C = A->GetClass(); C && !Kind; C = C->GetSuperClass())
+		{
+			if (C->GetFName() == LauncherName) Kind = 1;
+			else if (C->GetFName() == TeleportName) Kind = 2;
+		}
+		if (!Kind) continue;
+		bool bKnown = false;
+		for (const FMOBDevice& D : Devices) bKnown |= D.Actor.Get() == A;
+		if (bKnown) continue;
+
+		FMOBDevice& D = Devices.AddDefaulted_GetRef();
+		D.Actor = A;
+		D.bTeleport = Kind == 2;
+		TInlineComponentArray<UPrimitiveComponent*> Prims(A);
+		for (UPrimitiveComponent* P : Prims)
+		{
+			if (!P->GetGenerateOverlapEvents()) continue;
+			D.Shapes.Add(P);
+			if (bBreakDevices) continue;
+			// 겹침은 두 쪽이 다 켜야 난다 — 장치 쪽만 끄면 몸 캡슐은 그대로 두고 장치 그래프만 멈춘다
+			P->SetGenerateOverlapEvents(false);
+			// 끄기 전에 이미 든 겹침은 칸이 다음에 겹침을 다시 셀 때에야 끝난다(PrimitiveComponent.cpp UpdateOverlapsImpl 「just turned off」 갈래) — 장치는 안 움직여 그때가 안 오니 지금 센다
+			P->UpdateOverlaps();
+			++DeviceShapesOff;
+		}
+		UE_LOG(LogMOB, Log, TEXT("MOB_DEVICE name=%s class=%s shapes=%d at=(%.0f,%.0f,%.0f) off=%d"), *A->GetName(), *A->GetClass()->GetName(), D.Shapes.Num(),
+			A->GetActorLocation().X, A->GetActorLocation().Y, A->GetActorLocation().Z, bBreakDevices ? 0 : 1);
+	}
+}
+
+// 끈 판의 「겹침 0」이 「아무도 안 밟음」이 아님을 보이려고 지나간 양을 같이 센다 — 몸 캡슐(원기둥 반지름 · 반높이)이 장치 칸 상자에 닿은 프레임.
+// 겹침 = 그 프레임에 Lyra 가 장치 칸 겹침 목록에 그 몸을 넣었나(IsOverlappingActor). 끈 판은 0, -MOBBreakDevices 판은 밟을 때마다 늘어야 한다
+void UMOBridgeSubsystem::TickDevices(double Now)
+{
+	if (Devices.Num() == 0) return;
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	const APawn* Self = PC ? PC->GetPawn() : nullptr;
+	for (TActorIterator<ACharacter> It(GetWorld()); It; ++It)
+	{
+		const ACharacter* Body = *It;
+		float Radius = 0, HalfHeight = 0;
+		Body->GetSimpleCollisionCylinder(Radius, HalfHeight);
+		const FVector Where = Body->GetActorLocation();
+		const bool bSelf = Body == Self;
+		for (const FMOBDevice& D : Devices)
+		{
+			for (const TWeakObjectPtr<UPrimitiveComponent>& Weak : D.Shapes)
+			{
+				const UPrimitiveComponent* Shape = Weak.Get();
+				if (!Shape || !Shape->Bounds.GetBox().ExpandBy(FVector(Radius, Radius, HalfHeight)).IsInsideOrOn(Where)) continue;
+				++(bSelf ? DeviceInsideSelf : DeviceInsideRemote);
+				if (Shape->IsOverlappingActor(Body)) ++(bSelf ? DeviceOverlapSelf : DeviceOverlapRemote);
+			}
+		}
 	}
 }
 
