@@ -30,16 +30,8 @@ $botMask = [IntPtr]0xFFC00
 $botTotal = $Rooms * $PlayersInRoom
 $processCount = [int][math]::Ceiling($botTotal / [double]$BotsPerProcess)
 
-# 내 것이 아닌 프로세스가 쓴 CPU — 조용했는지의 근거
-function Get-OtherCpuSeconds {
-	param([int[]]$MineIds)
-	$sum = 0.0
-	foreach ($p in Get-Process) {
-		if ($MineIds -contains $p.Id) { continue }
-		try { if ($p.TotalProcessorTime) { $sum += $p.TotalProcessorTime.TotalSeconds } } catch {}
-	}
-	return $sum
-}
+# 내 것이 아닌 프로세스가 쓴 CPU — 조용했는지의 근거(Get-CpuMark · Measure-CpuWindow)
+. "$PSScriptRoot\cpu_window.ps1"
 
 function Read-KeyValues {
 	param([string]$Line)
@@ -92,11 +84,10 @@ for ($i = 0; $i -lt $processCount; ++$i) {
 
 $mine = @($server.Id) + @($botProcesses | ForEach-Object { $_.Id })
 Start-Sleep -Seconds ($SettleSeconds - 2)
-$otherBegin = Get-OtherCpuSeconds $mine
-$otherBeginTime = Get-Date
+$cpuBegin = Get-CpuMark $mine
 Start-Sleep -Seconds $MeasureSeconds
-$otherEnd = Get-OtherCpuSeconds $mine
-$otherPercent = ($otherEnd - $otherBegin) / ((Get-Date) - $otherBeginTime).TotalSeconds / 20.0 * 100.0
+$cpuEnd = Get-CpuMark $mine
+$cpu = Measure-CpuWindow $cpuBegin $cpuEnd
 
 foreach ($bot in $botProcesses) {
 	if (-not $bot.WaitForExit(60000)) { $bot.Kill(); Write-Output "더미가 안 끝나 강제 종료 pid=$($bot.Id)" }
@@ -106,7 +97,7 @@ if (-not $server.WaitForExit(60000)) { $server.Kill(); Write-Output "서버가 �
 # 합치기
 $serverLine = Select-String -Path "$runDir\server.txt" -Pattern '^LOAD ' | Select-Object -First 1
 if (-not $serverLine) { throw "서버 LOAD 줄 없음 — $runDir\server.txt" }
-$row = [ordered]@{ tag = $Tag; requestedRooms = $Rooms; otherCpuPercent = [math]::Round($otherPercent, 2); botProcesses = $processCount }
+$row = [ordered]@{ tag = $Tag; requestedRooms = $Rooms; otherCpuPercent = [math]::Round($cpu.otherPercent, 2); mineCpuPercent = [math]::Round($cpu.minePercent, 2); botProcesses = $processCount }
 $load = Read-KeyValues $serverLine.Line
 foreach ($key in $load.Keys) { $row[$key] = $load[$key] }
 
@@ -136,6 +127,12 @@ $row['worstBotLoopP99Ms'] = $loopP99; $row['worstBotLoopMaxMs'] = $loopMax
 $row['botCpuSumPercent'] = [math]::Round($botCpuSum, 1); $row['botCpuMaxPercent'] = [math]::Round($botCpuMax, 1)
 
 $csv = Join-Path $OutDir 'load.csv'
+# 열이 다른 옛 csv 에 덧붙이면 sweep.ps1 의 Import-Csv 가 칸을 엇갈려 읽는다 — 옛 파일은 이름을 바꿔 두고 새로 시작
+if ((Test-Path $csv) -and ((Get-Content -Path $csv -TotalCount 1 -Encoding UTF8) -ne ($row.Keys -join ','))) {
+	$old = Join-Path $OutDir ('load-cols-{0}.csv' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+	Move-Item -Path $csv -Destination $old
+	Write-Output "열이 달라 옛 csv 를 옮김 → $old"
+}
 if (-not (Test-Path $csv)) { Set-Content -Path $csv -Value ($row.Keys -join ',') -Encoding UTF8 }
 Add-Content -Path $csv -Value (($row.Values | ForEach-Object { "$_" }) -join ',') -Encoding UTF8
 
