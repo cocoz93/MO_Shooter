@@ -42,7 +42,9 @@ namespace mo
 		// 덤 1e-4 = 1/60초 간격 시각의 float 더하기 어긋남이 문턱을 넘나들지 않게(한 프레임 앞 0.2667 과는 0.0166 떨어져 있다, 제 판단)
 		constexpr float kStanceExitRemaining = 0.25f;
 		constexpr float kStanceExitSlack = 1.e-4f;
-		constexpr float kStepLeaderWeight = 0.5f;
+		// 빠지는 시각 표(kBundleTimings)는 Lyra 실행값을 소수 셋째 자리로 반올림한 값이다 — 반 칸(0.0005)만큼 이른 시각도 그 프레임으로 본다. 덤 1e-4 는 kStanceExitSlack 과 같은 까닭.
+		// 없으면 소총 멈춤 → 서기가 한 프레임 늦었다(우리 클립 시각 2.17954 < 표 2.180, 조준 기록 「그 밖」 12줄 — content-add-progress.md 미결 (가))
+		constexpr float kExitTimeSlack = 0.0005f + 1.e-4f;
 		constexpr float kPivotMinSpeed = 10.f;
 		constexpr float kDistanceRateMin = 0.25f;
 		constexpr float kDistanceRateMax = 5.f;
@@ -475,6 +477,44 @@ namespace mo
 		_montageCount = kept;
 	}
 
+	// 통째(FullBody) 자리 바탕 비중 = 1 − 그 자리에 줄이 있는 몽타주 비중의 합(엔진 FAnimInstanceProxy::GetSlotWeight — 덧붙임 아닌 줄만, 합이 1 을 넘으면 나눠 맞춤).
+	// 바탕 비중이 ZERO_ANIMWEIGHT_THRESH 이하이면 엔진 슬롯 노드는 바탕(걸음 상태 기계 · 무기 층)을 안 넘긴다(AnimNode_Slot.cpp:79 bUpdateSource, 원본 기준).
+	// 엔진은 몽타주를 먼저 넘기고 그래프를 갱신하므로, 넘기기 전 칸을 베껴 이번 갱신만큼 넘긴 비중으로 본다(실제 칸은 Update 끝 UpdateMontages 가 넘긴다)
+	bool CAnimState::FullBodyCoversSource(float deltaSeconds)
+	{
+		if (_fullBodySlot < 0) return false;
+		const std::vector<ClipSlot>& slots = _clips->Slots();
+		float total = 0.f;
+		float replace = 0.f;
+		for (int i = 0; i < _montageCount; ++i)
+		{
+			MontageInstance next = _montages[i];
+			next.blend.Update(deltaSeconds);
+			if (!AdvanceMontage(next, deltaSeconds)) continue;
+			bool onSlot = false;
+			for (const MontageTrack& track : next.montage->tracks) onSlot = onSlot || track.slot == _fullBodySlot;
+			if (!onSlot) continue;
+			total += next.blend.blended;
+			if (slots[(size_t)_fullBodySlot].mode != ESlotMode::Additive) replace += next.blend.blended;
+		}
+		if (total > 1.f) replace /= total;
+		return 1.f - replace <= kZeroWeight;
+	}
+
+	// 엔진 상태 기계는 앞 프레임에 갱신을 못 받았으면 다시 초기화한다(AnimNode_StateMachine.cpp:385 bReinitializeOnBecomingRelevant, 원본 기준) —
+	// 걸음 상태는 첫 상태(서기)로 섞기 없이 가고, 서기 클립 · 대기 몸짓 상태 기계도 처음부터다.
+	// 기록: 부활 몽타주 비중이 1 아래로 내려간 첫 프레임에 멈춤 → 서기, 서기 클립 시각은 그 다음 프레임 0.033(= 0 에서 두 프레임) · 근접 권총은 7.383 → 0.033 (animcmp_ev_rifle · melee_pistol probe, 실측)
+	void CAnimState::ReinitLocomotion()
+	{
+		_count = 0;
+		_moveState = EMoveState::Idle;
+		_followClip = -1;
+		_beforePivot = false;
+		_idleTime = 0.f;
+		_fidgetTime = -1.f;
+		_fidgetLeaving = false;
+	}
+
 	// 이번 자세에 들어갈 목록과 그 자세가 내는 DisableLHandIK. 엔진은 비중이 ZERO_ANIMWEIGHT_THRESH 이하인 몽타주를 자세 계산에 안 넣는다
 	void CAnimState::SnapshotMontages()
 	{
@@ -648,6 +688,7 @@ namespace mo
 		if (!bundle || bundle->clips.size() < ACLIP_COUNT) return false;		// 67개 뒤는 몽타주 · 덮기 자세 클립(9단계 3-a, 조준 17개는 C-3, 앉기 20개는 D-3)
 		_clips = &clips;
 		_bundleIndex = (int)(bundle - clips.Bundles().data());
+		_fullBodySlot = clips.FindSlot("FullBody");
 		const BundleTiming* timing = nullptr;
 		for (const BundleTiming& candidate : kBundleTimings)
 		{
@@ -757,6 +798,7 @@ namespace mo
 		_pivotAccelDirection[0] = _pivotAccelDirection[1] = 0.0;
 		_beforePivot = false;
 		_followClip = -1;
+		_sourceFrozen = false;
 		// 판 시작 = 새 몸 — 몽타주 없음 · 아직 안 쏨(제 판단. Lyra 의 새 폰은 쏜 뒤 시간이 0 에서 셀 수 있는데 기록에서 보지 않았다 — 미확인)
 		_montageCount = 0;
 		_poseMontageCount = 0;
@@ -904,6 +946,9 @@ namespace mo
 		return a + (position - (float)index) * (b - a);
 	}
 
+	// 전환 클립 시각 — 클립 종류(출발 · 멈춤 · 꺾기)의 갱신 함수대로. 맨 위가 아니어도(걸음 상태로 넘어가 섞여 빠지는 중에도) 같은 함수다 —
+	// Lyra 는 섞여 빠지는 상태의 갱신 함수(UpdateStartAnim · UpdateStopAnim · UpdatePivotAnim)도 계속 부른다(원본 기준). 맨 위 층의 종류는 늘 지금 상태와 같아 맨 위 결과는 전과 같다.
+	// 없으면 권총 MM_Pistol_Walk_Left_Start 가 빠지는 동안 배속 1 로 돌아 걸음 위상이 0.16초 밀렸다(content-add-progress.md 미결 (나), 실측)
 	float CAnimState::TransitionClipTime(const Layer& layer, float deltaSeconds) const
 	{
 		const int transition = layer.clip - kAnimJumpClips;
@@ -913,17 +958,16 @@ namespace mo
 			const float rate = deltaSeconds > 0.f ? Clamp((target - layer.time) / deltaSeconds, kDistanceRateMin, kDistanceRateMax) : 1.f;
 			return layer.time + rate * deltaSeconds;
 		};
-		switch (_moveState)
+		switch ((transition % kAnimTransitions) / 4)
 		{
-		case EMoveState::Start:
+		case kTransitionStart:
 			return advanceByTravel();
-		case EMoveState::Stop:
-			return _stopDistance > 0.f ? std::max(layer.time, TimeFromDistance(transition, -_stopDistance)) : layer.time + deltaSeconds;
-		case EMoveState::Pivot:
+		case kTransitionStop:
+			// ShouldDistanceMatchStop = HasVelocity && !HasAcceleration(ABP_ItemAnimLayersBase, 원본 기준) — 아니면 배속 1. 맨 위 멈춤은 가속하면 바로 출발로 넘어가 늘 가속이 없다
+			return !_accelerating && _stopDistance > 0.f ? std::max(layer.time, TimeFromDistance(transition, -_stopDistance)) : layer.time + deltaSeconds;
+		case kTransitionPivot:
 			return _beforePivot ? std::max(layer.time, TimeFromDistance(transition, -_pivotDistance)) : advanceByTravel();
-		case EMoveState::Idle:
-		case EMoveState::Cycle:
-		case EMoveState::Air:
+		default:
 			break;
 		}
 		return layer.time + deltaSeconds;
@@ -986,12 +1030,14 @@ namespace mo
 		if (_followClip == -1) return false;
 		float layers[kAnimLayerMax] = {};
 		JumpWeights(layers);
+		// 출발 · 꺾기 클립이 쌓기 칸에 남아 있는 동안은 비중과 상관없이 이끈다 — Lyra 걸음 동기 묶음에서 거리 맞추기 평가기는 「늘 이끎」(점수 2.0 > 섞기 비중,
+		// UE_5.8 AnimationAsset.cpp:90-93 TestTickRecordForLeadership, 원본 기준). 옛 판은 비중 0.5 아래면 놓아 앉은 출발 뒤 0.14초 앞섰다(미결 (사), 실측).
+		// 따르는 시각 = 이끄는 클립이 이번 갱신에 갈 시각(엔진은 이끄는 쪽을 먼저 넘긴다) — UpdateJump 와 같은 TransitionClipTime
 		for (int i = 0; i < _count; ++i)
 		{
 			if (_stack[i].clip != _followClip) continue;
-			if (layers[i] < kStepLeaderWeight) break;
 			const int transition = _followClip - kAnimJumpClips;
-			const float time = _stack[i].time + deltaSeconds;
+			const float time = TransitionClipTime(_stack[i], deltaSeconds);
 			const int marker = StepMarkerAt(transition, time);
 			if (marker == -1) break;
 			const std::vector<ClipMarker>& markers = *_transitionMarkers[transition];
@@ -1035,8 +1081,35 @@ namespace mo
 		return (float)std::sqrt(x * x + y * y);
 	}
 
+	// 엔진 FVector2D::GetSafeNormal
+	static void SafeNormal2D(const double* v, double out[2])
+	{
+		out[0] = out[1] = 0.0;
+		const double squareSum = v[0] * v[0] + v[1] * v[1];
+		if (squareSum <= (double)kSmallNumber) return;
+		const double scale = 1.0 / std::sqrt(squareSum);
+		out[0] = v[0] * scale;
+		out[1] = v[1] * scale;
+	}
+
+	// 전환 상태 판정 앞에서 — 이끄는 전환 클립의 이번 시각(FollowStepsOfTransition)이 이 값을 쓴다. 땅에 있을 때만 갱신한다(공중에선 전 값 그대로 — 옛 판과 같다)
+	void CAnimState::UpdateMotion(const AnimMoveInput& input, float deltaSeconds)
+	{
+		if (input.falling) return;
+		const double* velocity = input.velocity;
+		const float speed = (float)std::sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1]);
+		double accelDirection[2];
+		SafeNormal2D(input.acceleration, accelDirection);
+		_accelerating = input.accelerating;
+		_frameTravel = speed * deltaSeconds;
+		_beforePivot = _accelerating && velocity[0] * accelDirection[0] + velocity[1] * accelDirection[1] < 0.0;
+		_stopDistance = PredictStopDistance(speed);
+		_pivotDistance = _beforePivot ? PredictPivotDistance(input.acceleration, velocity) : 0.f;
+	}
+
 	void CAnimState::UpdateTransitions(const AnimMoveInput& input, float deltaSeconds)
 	{
+		(void)deltaSeconds;
 		if (input.falling)
 		{
 			_moveState = EMoveState::Air;
@@ -1048,21 +1121,8 @@ namespace mo
 		const double* velocity = input.velocity;
 		const double* acceleration = input.acceleration;
 		const float speed = (float)std::sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1]);
-		_frameTravel = speed * deltaSeconds;
-
-		// 엔진 FVector2D::GetSafeNormal
-		double accelDirection[2] = {};
-		const double squareSum = acceleration[0] * acceleration[0] + acceleration[1] * acceleration[1];
-		if (squareSum > (double)kSmallNumber)
-		{
-			const double scale = 1.0 / std::sqrt(squareSum);
-			accelDirection[0] = acceleration[0] * scale;
-			accelDirection[1] = acceleration[1] * scale;
-		}
-
-		_beforePivot = accelerating && velocity[0] * accelDirection[0] + velocity[1] * accelDirection[1] < 0.0;
-		_stopDistance = PredictStopDistance(speed);
-		_pivotDistance = _beforePivot ? PredictPivotDistance(acceleration, velocity) : 0.f;
+		double accelDirection[2];
+		SafeNormal2D(acceleration, accelDirection);
 
 		const bool pivotNeeded = _beforePivot && speed > kPivotMinSpeed;
 		const float topTime = _count > 0 ? _stack[_count - 1].time : 0.f;
@@ -1090,7 +1150,7 @@ namespace mo
 			}
 			else if (!accelerating) enterStop();
 			else if (pivotNeeded) enterPivot();
-			else if (topTime >= exitTimes[kTransitionStart][_moveDirection]) EnterLocomotion(EMoveState::Cycle, kStartToCycleSeconds);
+			else if (topTime >= exitTimes[kTransitionStart][_moveDirection] - kExitTimeSlack) EnterLocomotion(EMoveState::Cycle, kStartToCycleSeconds);
 			else if (setChanged) EnterLocomotion(EMoveState::Cycle, kAdsChangeSeconds);
 			break;
 		case EMoveState::Cycle:
@@ -1100,12 +1160,13 @@ namespace mo
 		case EMoveState::Stop:
 			if (accelerating) EnterTransition(EMoveState::Start, CardinalFromAngle(AngleOf(acceleration)), kStopToStartSeconds);
 			else if (setChanged) EnterLocomotion(EMoveState::Idle, kAdsChangeSeconds);
-			else if (speed < 1.f && topTime >= exitTimes[kTransitionStop][_moveDirection]) EnterLocomotion(EMoveState::Idle, kStopToIdleSeconds);
+			// 아직 움직이는 중이어도 빠진다 — Lyra 전환 조건은 TransitionToLocomotion 알림 구간뿐이다(원본 기준, 권총 앉기 기록은 225.2cm/s 에서 빠짐 · 실측, 미결 (바))
+			else if (topTime >= exitTimes[kTransitionStop][_moveDirection] - kExitTimeSlack) EnterLocomotion(EMoveState::Idle, kStopToIdleSeconds);
 			break;
 		case EMoveState::Pivot:
 			if (!accelerating) enterStop();
 			else if (pivotNeeded && accelDirection[0] * _pivotAccelDirection[0] + accelDirection[1] * _pivotAccelDirection[1] < 0.0) enterPivot();
-			else if (topTime >= exitTimes[kTransitionPivot][_moveDirection]) EnterLocomotion(EMoveState::Cycle, kPivotToCycleSeconds);
+			else if (topTime >= exitTimes[kTransitionPivot][_moveDirection] - kExitTimeSlack) EnterLocomotion(EMoveState::Cycle, kPivotToCycleSeconds);
 			else if (setChanged) EnterLocomotion(EMoveState::Cycle, kAdsChangeSeconds);
 			break;
 		case EMoveState::Air:
@@ -1181,7 +1242,7 @@ namespace mo
 		for (int i = 0; i < _count; ++i)
 		{
 			Layer& layer = _stack[i];
-			if (i == _count - 1 && layer.clip >= kAnimJumpClips && layer.clip < kAnimStanceEntry) layer.time = TransitionClipTime(layer, deltaSeconds);
+			if (layer.clip >= kAnimJumpClips && layer.clip < kAnimStanceEntry) layer.time = TransitionClipTime(layer, deltaSeconds);
 			else layer.time = layer.clip == kJumpLand && !land.empty() ? std::max(layer.time, LandTimeFromDistance(groundDistance)) : layer.time + deltaSeconds;
 			if (layer.fadeSeconds > 0.f) layer.fade = std::min(layer.fade + deltaSeconds / layer.fadeSeconds, 1.f);
 		}
@@ -1208,6 +1269,12 @@ namespace mo
 		const double* velocity = input.velocity;
 		const float speed = (float)std::sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1]);
 		SettleStance();		// 서기 시계를 넘기기 전에(되돌린 시계가 이번 갱신에 한 프레임 간다)
+		// 통째 자리 몽타주(부활)가 몸을 다 덮는 동안 Lyra 는 걸음 쪽(상태 · 걸음 비중 · 걸음 · 서기 시계 · 전환 클립)을 안 넘긴다 — 부활 몽타주 내내 상태가 멈춤으로 148프레임 남았다가
+		// 비중이 1 아래로 내려간 첫 프레임에 서기로 갔다(animcmp_ev_rifle_probe.csv 2169~2316 · 4639~4786, 실측. content-add-progress.md 미결 (다)). 그 첫 프레임은 ReinitLocomotion
+		const bool frozen = FullBodyCoversSource(deltaSeconds);
+		const bool reinit = !frozen && _sourceFrozen;
+		_sourceFrozen = frozen;
+		if (reinit) ReinitLocomotion();
 
 		float targets[kAnimWalkClips] = {};
 		const float moveAlpha = Clamp(speed / kMoveFullSpeed, 0.f, 1.f);
@@ -1231,10 +1298,11 @@ namespace mo
 		}
 
 		const float follow = 1.f - std::exp(-deltaSeconds / kBlendSeconds);
+		const float walkFollow = frozen ? 0.f : reinit ? 1.f : follow;		// 다시 초기화한 서기 상태는 섞기 없이 선다
 		float sum = 0.f;
 		for (int i = 0; i < kAnimWalkClips; ++i)
 		{
-			_weights[i] += (targets[i] - _weights[i]) * follow;
+			_weights[i] += (targets[i] - _weights[i]) * walkFollow;
 			sum += _weights[i];
 		}
 		if (sum > kSmallNumber)
@@ -1273,8 +1341,9 @@ namespace mo
 				stepSeconds += weight * (end - start);
 			}
 		}
-		const bool stepsFollow = FollowStepsOfTransition(deltaSeconds);
-		if (!stepsFollow && directionWeight > 0.001f && stepSeconds > kSmallNumber)
+		if (!frozen) UpdateMotion(input, deltaSeconds);
+		const bool stepsFollow = !frozen && FollowStepsOfTransition(deltaSeconds);
+		if (!frozen && !stepsFollow && directionWeight > 0.001f && stepSeconds > kSmallNumber)
 		{
 			rootSpeed /= directionWeight;
 			stepSeconds /= directionWeight;
@@ -1287,8 +1356,10 @@ namespace mo
 			}
 		}
 		// 서기 시계는 하나 — 조준을 바꿔도 이어 간다(Lyra 허리 4.900 → 조준 4.917, 실측). 도는 길이는 지금 고른 쪽(앉음 > 조준 > 허리) 서기 클립이다
+		// 더하기 전에 지금 쪽 길이로 자른다 — 엔진 재생기가 매 갱신 시각을 지금 클립 길이로 자른 뒤 넘긴다(AnimNode_SequencePlayer.cpp:102, 원본 기준).
+		// 그래서 시계가 허리 길이를 넘은 채 조준을 떼면 허리 클립은 나머지가 아니라 처음부터 돈다(소총 7.367 → 0.017, 11-18 adsl_rifle 기록 · 미결 (마))
 		const float idleLength = _lengths[(_crouch ? 2 * kAnimWalkClips : _ads ? kAnimWalkClips : 0) + kClipIdle];
-		_idleTime = idleLength > 0.f ? std::fmod(_idleTime + deltaSeconds, idleLength) : 0.f;
+		if (!frozen) _idleTime = idleLength > 0.f ? std::fmod(std::min(_idleTime, idleLength) + deltaSeconds, idleLength) : 0.f;
 
 		_times[kClipIdle] = WrapIdle(_idleTime, _lengths[kClipIdle]);
 		_adsTimes[kClipIdle] = WrapIdle(_idleTime, _lengths[kAnimWalkClips + kClipIdle]);
@@ -1333,12 +1404,16 @@ namespace mo
 		// 서기 상태에서 앉음이 바뀌면 앉기 · 일어서기 전환(D62 4). 서기였으면 이번 갱신의 출발 · 점프보다 아래에, 멈춤 · 공중에서 이번에 서기로 왔으면 그 위에 얹는다
 		// (멈춘 채 일어서기 기록 — 멈춤 클립이 그 프레임에 빠지고 일어서기 전환이 바로 섰다, 실측)
 		const bool wasIdle = _moveState == EMoveState::Idle;
-		if (crouchChanged && wasIdle) PushStance(_crouch);
-		UpdateTransitions(input, deltaSeconds);
-		if (crouchChanged && !wasIdle && _moveState == EMoveState::Idle) PushStance(_crouch);
-		UpdateJump(falling, accelerating, (float)velocity[2], timeToApex, groundDistance, deltaSeconds);
+		if (!frozen)
+		{
+			if (crouchChanged && wasIdle) PushStance(_crouch);
+			UpdateTransitions(input, deltaSeconds);
+			if (crouchChanged && !wasIdle && _moveState == EMoveState::Idle) PushStance(_crouch);
+			UpdateJump(falling, accelerating, (float)velocity[2], timeToApex, groundDistance, deltaSeconds);
+		}
 		// 몽타주 칸은 이번 갱신에서 넘기기 전 것이다 — 엔진은 몽타주를 먼저 넘기고 이 판정을 하므로 끝나는 프레임에서 한 프레임 갈린다(시계 6초 앞에선 16ms, 제 판단)
 		// 사격 태그(GameplayTag_IsFiring)는 안 넣었다 — 사격 몽타주가 그 시간을 덮는다고 본다(짐작)
+		// 덮인 동안 Lyra 몸짓 시계는 멈췄다가(13.93 그대로) 다시 갱신될 때 15 로 돌아갔다(melee_pistol probe 1428~1577, 실측) — 몽타주가 있으면 아래 줄이 매 프레임 되돌리므로 따로 멈추지 않는다
 		UpdateIdleBreak(!falling && !accelerating && speed < 1.f && !HasJumpLayer(), _ads || _crouch || _montageCount > 0, deltaSeconds);
 
 		// 왼손 비중은 앞 자세의 곡선으로 — 기록에서 HandIK_Left_Alpha 가 곡선보다 한 프레임 늦다(실측). 그다음 몽타주를 넘기고 이번 자세 목록을 뜬다

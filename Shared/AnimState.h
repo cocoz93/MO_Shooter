@@ -168,6 +168,7 @@ namespace mo
 		bool LoadBundle(const CAnimClips& clips, const char* bundleName);		// 표만 읽는다 — 재생 상태는 안 건드린다
 		void StepSpan(int clip, int step, float& outStart, float& outEnd) const;
 		bool FollowStepsOfTransition(float deltaSeconds);
+		void UpdateMotion(const AnimMoveInput& input, float deltaSeconds);		// 전환 클립 시각 공식이 쓰는 이번 프레임 이동 값(_frameTravel 등)
 		void UpdateTransitions(const AnimMoveInput& input, float deltaSeconds);
 		void UpdateJump(bool falling, bool accelerating, float velocityZ, float timeToApex, float groundDistance, float deltaSeconds);
 		void UpdateIdleBreak(bool still, bool noIdleBreak, float deltaSeconds);
@@ -191,11 +192,14 @@ namespace mo
 		void StopMontage(MontageInstance& instance, uint8_t option, float blendSeconds);
 		void DropMontage();
 		void SnapshotMontages();
+		bool FullBodyCoversSource(float deltaSeconds);		// 이번 갱신에 통째(FullBody) 자리 몽타주가 몸을 다 덮나 — 그러면 걸음 쪽 그래프를 안 넘긴다
+		void ReinitLocomotion();							// 덮였던 걸음 쪽이 다시 갱신되는 첫 프레임 — 엔진 상태 기계 다시 초기화
 		float LeftHandCurve() const;
 
 		// 클립에서 읽어 둔 값
 		const CAnimClips* _clips = nullptr;
 		int _bundleIndex = -1;
+		int _fullBodySlot = -1;			// 끼움 자리 표의 FullBody 번호(-1 = 없음)
 		float _lengths[kAnimBaseClips] = {};				// 허리 서기 · 걸음 넷, 조준 서기 · 걸음 넷, 앉은 서기 · 걸음 넷
 		float _rootSpeeds[kAnimBaseClips] = {};
 		std::vector<float> _stepTimes[kAnimBaseClips];		// 왼발 표시부터 차례로. 클립 끝을 넘어가면 길이를 더해 계속 커진다
@@ -256,11 +260,13 @@ namespace mo
 		float _frameTravel = 0.f;
 		float _stopDistance = 0.f;
 		float _pivotDistance = 0.f;
+		bool _accelerating = false;		// 이번 프레임 가속 입력 — 빠지는 멈춤 클립의 거리 맞추기 조건(ShouldDistanceMatchStop)
 		float _plantDrop = 0.f;
 		float _groundTime = 0.f;
 		float _airTime = 0.f;
 		float _plantOffset[3] = {};
 		int _stackOverflows = 0;
+		bool _sourceFrozen = false;		// 앞 갱신에 통째 자리 몽타주가 몸을 다 덮어 걸음 쪽을 안 넘겼다
 
 		// 몽타주 · 쏜 뒤 덮기(9단계 3-b)
 		MontageInstance _montages[kAnimMontageMax];
