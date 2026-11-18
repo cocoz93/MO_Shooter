@@ -7,7 +7,8 @@ param(
     [int]$QuitAt = 95,               # after the probe's last step (3 s wait + 81 s script) and before its 20 s wait for the server log runs out
     [string]$ShotAt = '5,40',        # pad 2 off (taken at the first place) and on again (full health refuses the 30.75 s recheck)
     [int]$TimeoutSec = 400,
-    [string]$Res = '640x360'
+    [string]$Res = '640x360',
+    [string]$LyraExtra = ''          # extra bridge options, e.g. '-MOBHumanCheck -MOBEventShots' (record_human_auto.ps1 pads run)
 )
 # Content B-3: one Lyra (the bridge) stands hurt on a health pad while ServerProbe --pads, a second player, walks the pad script on pads 0 and 1.
 # The bridge must draw every pad as the server says (S2C_PICKUP), heal itself and the probe's body with the pad's own effect up to the server's health,
@@ -32,6 +33,7 @@ $lyraArgs = @("`"$proj\Lyra.uproject`"", '/ShooterMaps/Maps/L_Expanse?NumBots=0'
               '-unattended', '-nosplash', '-nosound', '-log', "-abslog=`"$log`"", "-MOBServer=127.0.0.1:$Port", "-MOBTag=padsb_$Tag",
               "-MOBStandAt=$Stand", "-MOBStandHp=$StandHp", "-MOBQuitAt=$QuitAt", "-MOBShotAt=$ShotAt")
 if ($BreakPadsAt -gt 0) { $lyraArgs += "-MOBBreakPadsAt=$BreakPadsAt" }
+$lyraArgs += ($LyraExtra -split ' ' | Where-Object { $_ })
 $t0 = Get-Date
 $lyra = Start-Process -FilePath $ue -ArgumentList $lyraArgs -PassThru
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
