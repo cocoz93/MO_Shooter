@@ -74,6 +74,10 @@
 #include "Weapons/LyraWeaponSpawner.h"
 #include "Inventory/LyraInventoryItemDefinition.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/AudioComponent.h"
+#include "Components/LightComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Particles/ParticleSystemComponent.h"
 #include "Messages/LyraVerbMessage.h"
 #include "Player/LyraPlayerState.h"
 #include "Teams/LyraTeamSubsystem.h"
@@ -3042,8 +3046,8 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	{
 		int32 Teleports = 0;
 		for (const FMOBDevice& D : Devices) Teleports += D.bTeleport ? 1 : 0;
-		UE_LOG(LogMOB, Log, TEXT("MOB_DEVICES found=%d launchers=%d teleports=%d shapesOff=%d break=%d insideSelf=%lld insideRemote=%lld overlapSelf=%lld overlapRemote=%lld"),
-			Devices.Num(), Devices.Num() - Teleports, Teleports, DeviceShapesOff, bBreakDevices ? 1 : 0, DeviceInsideSelf, DeviceInsideRemote, DeviceOverlapSelf, DeviceOverlapRemote);
+		UE_LOG(LogMOB, Log, TEXT("MOB_DEVICES found=%d launchers=%d teleports=%d shapesOff=%d lightsOff=%d glowOff=%d sounds=%d fx=%d break=%d insideSelf=%lld insideRemote=%lld overlapSelf=%lld overlapRemote=%lld"),
+			Devices.Num(), Devices.Num() - Teleports, Teleports, DeviceShapesOff, DeviceLightsOff, DeviceGlowOff, DeviceSounds, DeviceFx, bBreakDevices ? 1 : 0, DeviceInsideSelf, DeviceInsideRemote, DeviceOverlapSelf, DeviceOverlapRemote);
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_PADS pads=%d msgs=%lld takes=%lld readies=%lld syncs=%lld badIndex=%lld noActor=%lld bound=%lld heals=%lld healBeforeFix=%lld healMismatch=%lld healNoPawn=%lld stateChecks=%lld stateDiff=%lld lastStateTick=%u"),
 		Pads.Num(), PadMsgs, PadTakes, PadReadies, PadSyncs, PadBadIndex, PadNoActor, PadBound, PadHeals, PadHealBeforeFix, PadHealMismatch, PadHealNoPawn, PadStateChecks, PadStateDiff, LastStateTick);
@@ -3333,6 +3337,48 @@ void UMOBridgeSubsystem::FindDevices()
 			// 끄기 전에 이미 든 겹침은 칸이 다음에 겹침을 다시 셀 때에야 끝난다(PrimitiveComponent.cpp UpdateOverlapsImpl 「just turned off」 갈래) — 장치는 안 움직여 그때가 안 오니 지금 센다
 			P->UpdateOverlaps();
 			++DeviceShapesOff;
+		}
+		// 점프대 겉모습도 끈다(사용자 「노란불빛 기능 이펙트 소리같은거 다 꺼」, 11-18). 노란 빛 = 바닥 조명(PointLight) + 발판 빛 재질
+		// (MI_InternalShapeGlow 의 Intensity · Color — 청사진 짓기 그래프가 Light Color · Glow Intensity 로 채움, 에셋 이름표 기준).
+		// 밟을 때 소리 · 번쩍임은 GameplayCue.World.Launcher.Activate 에서만 나서 위에서 겹침을 끈 것으로 이미 안 난다
+		if (!D.bTeleport && !bBreakDevices)
+		{
+			static const FName GlowParam(TEXT("Intensity"));
+			TInlineComponentArray<UActorComponent*> Parts(A);
+			for (UActorComponent* Part : Parts)
+			{
+				if (ULightComponent* Light = Cast<ULightComponent>(Part))
+				{
+					Light->SetVisibility(false);
+					++DeviceLightsOff;
+				}
+				else if (UAudioComponent* Sound = Cast<UAudioComponent>(Part))
+				{
+					Sound->Stop();
+					Sound->SetAutoActivate(false);
+					++DeviceSounds;
+				}
+				else if (UFXSystemComponent* Fx = Cast<UFXSystemComponent>(Part))
+				{
+					Fx->Deactivate();
+					Fx->SetVisibility(false);
+					++DeviceFx;
+				}
+				else if (UMeshComponent* Mesh = Cast<UMeshComponent>(Part))
+				{
+					for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
+					{
+						float Before = 0.f;
+						const UMaterialInterface* Mat = Mesh->GetMaterial(Slot);
+						if (!Mat || !Mat->GetScalarParameterValue(FHashedMaterialParameterInfo(GlowParam), Before)) continue;
+						UMaterialInstanceDynamic* Mid = Mesh->CreateDynamicMaterialInstance(Slot);
+						if (!Mid) continue;
+						Mid->SetScalarParameterValue(GlowParam, 0.f);
+						++DeviceGlowOff;
+						UE_LOG(LogMOB, Log, TEXT("MOB_DEVICE_GLOW name=%s slot=%d mat=%s before=%.2f after=%.2f"), *A->GetName(), Slot, *Mat->GetName(), Before, Mid->K2_GetScalarParameterValue(GlowParam));
+					}
+				}
+			}
 		}
 		UE_LOG(LogMOB, Log, TEXT("MOB_DEVICE name=%s class=%s shapes=%d at=(%.0f,%.0f,%.0f) off=%d"), *A->GetName(), *A->GetClass()->GetName(), D.Shapes.Num(),
 			A->GetActorLocation().X, A->GetActorLocation().Y, A->GetActorLocation().Z, bBreakDevices ? 0 : 1);

@@ -328,6 +328,10 @@ private:
 	bool bBreakDevices = false;		// -MOBBreakDevices — 일부러 틀림: 겹침을 안 끈다
 	double NextDeviceCheckAt = 0;
 	int32 DeviceShapesOff = 0;		// 겹침을 끈 칸 수
+	int32 DeviceLightsOff = 0;		// 점프대 바닥 조명(PointLight)을 끈 수
+	int32 DeviceGlowOff = 0;		// 점프대 발판 빛 재질(Intensity 칸이 있는 재질)을 0 으로 둔 수
+	int32 DeviceSounds = 0;			// 점프대에 붙은 소리 · 효과 부품 수 — 원본 청사진엔 없다(0 이어야 한다). 있으면 끄고 센다
+	int32 DeviceFx = 0;
 	int64 DeviceInsideSelf = 0;		// 내 몸 캡슐이 장치 칸 상자에 닿은 프레임(지나간 양)
 	int64 DeviceInsideRemote = 0;	// 남의 몸 — 같은 셈(몸 하나 × 프레임)
 	int64 DeviceOverlapSelf = 0;	// 그중 Lyra 가 겹침으로 본 프레임 — 끈 판은 0 이어야 한다
