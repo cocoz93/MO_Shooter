@@ -27,6 +27,8 @@ class UPhysicalMaterial;
  *   -MOBACScript=adslong 서서 조준을 오래 잡았다 뗀다 — 서기 시계가 허리 서기 클립 길이를 넘은 채 떼는 경우(content-add-progress.md 미결 (마), D90)
  *   -MOBACScript=events  쏘기 · 재장전 · 재장전 중 쏘기 · 무기 바꾸기 · 부활 효과를 경로 안에서 일으킨다(9단계 Lyra 원본 기록, candidate1-step9-plan.md 9-1).
  *                       -MOBACProbe 와 같이 주면 probe 에 사건 · 재생 중 몽타주 전부 칸이 붙고, _montages.csv(처음 본 몽타주 자산 값) · _blendprofiles.csv(골격의 뼈별 비중 표)를 남긴다
+ *   -MOBACNoPostProcess  상대 메시의 후처리 애니(ABP_Quinn/Manny_PostProcess — 제어 장치 CR_Mannequin_Procedural)를 끈다. 발 붙이기만 따로 재려고(11-18)
+ *   -MOBACNoControlRig   엔진 변수 ControlRig.DisableExecutionInAnimNode=1 — 애니 그래프 안의 제어 장치(발 붙이기 CR_Mannequin_FootPlant 포함)를 모두 멈춘다(11-18)
  *   -MOBACWeapon=pistol|rifle|shotgun  상대에게 쥐여 줄 무기(기본 rifle)
  *   -MOBACEventDelay=<초>  사건 경로의 사건을 모두 늦춘다(도구 확인용)
  * 산출물 = Saved/MOB/animcmp_<tag>.csv(프레임별 머리·골반 자리) · rec_animcmp_<tag>.bgra(원시 영상, 바깥에서 ffmpeg 로 변환)
@@ -89,6 +91,7 @@ private:
 	EMOBACScript Script = EMOBACScript::Run;
 	bool bAimJump = false;		// 시선을 바깥에서 정하는 경로(aimjump · startstop)
 	bool bProbe = false;
+	bool bNoPostProcess = false;	// -MOBACNoPostProcess
 
 	// -MOBACProbe — 읽을 변수와 상태 기계 목록(BuildProbe 가 첫 촬영 프레임에 만든다)
 	// 무기를 바꾸면 무기 층 인스턴스가 새것으로 갈린다 — 옛것이 사라지면 같은 클래스의 새 인스턴스를 다시 찾아 붙이고, 없으면 칸 수만큼 비워 줄이 밀리지 않게 한다

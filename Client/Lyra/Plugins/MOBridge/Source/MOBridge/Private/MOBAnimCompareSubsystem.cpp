@@ -28,6 +28,7 @@
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "HAL/IConsoleManager.h"
 #include "Equipment/LyraEquipmentDefinition.h"
 #include "Equipment/LyraEquipmentInstance.h"
 #include "Equipment/LyraEquipmentManagerComponent.h"
@@ -430,6 +431,14 @@ void UMOBAnimCompareSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FParse::Value(Cmd, TEXT("MOBACEventDelay="), EventDelay);
 	FParse::Value(Cmd, TEXT("MOBACVideoPass="), VideoPass);
 	bProbe = FParse::Param(Cmd, TEXT("MOBACProbe"));
+	bNoPostProcess = FParse::Param(Cmd, TEXT("MOBACNoPostProcess"));
+	if (FParse::Param(Cmd, TEXT("MOBACNoControlRig")))
+	{
+		// 엔진 AnimNode_ControlRigBase::CanExecute 가 이 값을 본다 — 켜진 값을 읽어 로그에 남겨 실제로 걸렸는지 본다
+		IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(TEXT("ControlRig.DisableExecutionInAnimNode"));
+		if (Var) Var->Set(1, ECVF_SetByCode);
+		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP_NOCONTROLRIG found=%d value=%d"), Var ? 1 : 0, Var ? Var->GetInt() : -1);
+	}
 	if (bShapes || bDumpClips) PhysWeak = LoadObject<UPhysicalMaterial>(nullptr, TEXT("/Game/Characters/Heroes/PhysMat_Player_WeakSpot.PhysMat_Player_WeakSpot"));
 	GAreScreenMessagesEnabled = false;	// 봇이 그전에 쏠 때 남은 오류 글자가 화면을 가린다
 	FMath::RandInit(20261105);		// Lyra 는 캐릭터마다 몸을 무작위로 고른다 — 판끼리 몸을 맞추려는 시도. 실제로 맞았는지는 MOB_ACOMP ready 줄로 본다
@@ -555,6 +564,11 @@ bool UMOBAnimCompareSubsystem::Prepare()
 	}
 
 	Foe = Target;
+	if (bNoPostProcess && Target->GetMesh())
+	{
+		Target->GetMesh()->SetDisablePostProcessBlueprint(true);
+		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP_NOPOSTPROCESS disabled=%d"), Target->GetMesh()->GetDisablePostProcessBlueprint() ? 1 : 0);
+	}
 	Home = FIXED_HOME;
 	StartYaw = FIXED_YAW;
 	BodyYaw = StartYaw;

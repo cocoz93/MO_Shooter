@@ -12,7 +12,8 @@ param(
     [double]$EventDelay = 0,
     [string]$MapPath = '/ShooterCore/Maps/L_ShooterGym',
     [string]$Res = '1280x720',
-    [int]$TimeoutSec = 590
+    [int]$TimeoutSec = 590,
+    [string]$LyraExtra = ''   # extra recorder options, e.g. '-MOBACNoPostProcess -MOBACNoControlRig' (foot plant check, 11-18)
 )
 # Records one opponent running a fixed script (Lyra animation, or -Simple for the plain clip blend) for a side-by-side look.
 # Results: Saved\MOB\animcmp_<Tag>.csv and rec_animcmp_<Tag>.bgra (raw video, turned into mp4 afterwards with ffmpeg).
@@ -50,6 +51,7 @@ if ($VideoPass -ge 0) { $a += "-MOBACVideoPass=$VideoPass" }  # only that pass g
 if ($EventDelay -gt 0) { $a += "-MOBACEventDelay=$EventDelay" }  # tool check: every event of the events script shifts by this many seconds
 if ($Simple -and ($Transitions -or $Script -eq 'aimjump' -or $Script -eq 'startstop')) { $a += '-MOBSimpleAimJump' }  # -Transitions needs the aim/jump clip set too
 if ($Simple -and $Transitions) { $a += '-MOBSimpleTransitions' }
+$a += ($LyraExtra -split ' ' | Where-Object { $_ })
 $t0 = Get-Date
 $p = Start-Process -FilePath $ue -ArgumentList $a -PassThru
 if (-not $p.WaitForExit($TimeoutSec * 1000)) { "TIMEOUT after $TimeoutSec s - killing"; Stop-Process -Id $p.Id -Force }
