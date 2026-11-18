@@ -155,13 +155,15 @@ namespace
 	{
 		if (argc < 3)
 		{
-			std::printf("사용: AnimCheck clips <clips.bin> [--dump=<out.csv>]\n");
+			std::printf("사용: AnimCheck clips <clips.bin> [--dump=<out.csv>] [--markers=<이름 일부>]\n");
 			return 2;
 		}
 		std::string dumpPath;
+		std::string markerName;		// --markers= — 이름에 이 글이 든 클립의 길이 · 발 표시(시각 · 왼발 L / 오른발 R)를 찍는다(꺾기 걸음 따르기 대조, 11-18)
 		for (int i = 3; i < argc; ++i)
 		{
 			if (std::strncmp(argv[i], "--dump=", 7) == 0) dumpPath = argv[i] + 7;
+			else if (std::strncmp(argv[i], "--markers=", 10) == 0) markerName = argv[i] + 10;
 			else
 			{
 				std::printf("[오류] 모르는 인자: %s\n", argv[i]);
@@ -198,6 +200,14 @@ namespace
 			std::printf("ANIMCLIPS montages bundle=%s count=%zu override=%d", bundle.name.c_str(), bundle.montages.size(), bundle.overrideClip);
 			for (const ClipMontage& montage : bundle.montages) std::printf(" %d:%s/tracks=%zu/curves=%zu", (int)montage.kind, montage.name.c_str(), montage.tracks.size(), montage.curves.size());
 			std::printf("\n");
+			if (markerName.empty()) continue;
+			for (const AnimClip& clip : bundle.clips)
+			{
+				if (clip.name.find(markerName) == std::string::npos) continue;
+				std::printf("MARKERS bundle=%s clip=%s length=%.4f", bundle.name.c_str(), clip.name.c_str(), clip.length);
+				for (const ClipMarker& marker : clip.markers) std::printf(" %.4f%c", marker.time, marker.left ? 'L' : 'R');
+				std::printf("\n");
+			}
 		}
 		std::printf("ANIMCLIPS slots=%zu profiles=%zu\n", clips.Slots().size(), clips.Profiles().size());
 
