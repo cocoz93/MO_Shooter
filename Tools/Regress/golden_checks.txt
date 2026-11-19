@@ -294,6 +294,35 @@ dash DASH block ok step=reload_dash rows=120 presses=1 diffRows=0 firstDiffFrame
 dash DASH block ok step=melee_dash rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
 dash DASH block compared=42 fails=0 rows=4709 badStart=0 diff fire=0 reload=0 mag=0 ads=0 jump=0 melee=0
 dash DASH blockPaths blocked fire=58 reload=1 melee=1 jump=2 ads=1 cancel fire=1 reload=1 melee=1 jump=0 ads=1 shotsOnStart=1
+dash DASH predictScript ok script=meleeDash started=1 lateStarted=0 presses=2 startedCount=1 dir=0 force=1850.000,0.000,0.000 cutMelee=1 noDashEndDiff=538.42
+dash DASH predictReplay ok script=meleeDash ack=9 corrected=1 endDiff=0.000037 results=0
+dash DASH predictReplay ok script=meleeDash ack=10 corrected=1 endDiff=0.000027 results=1
+dash DASH predictReplay ok script=meleeDash ack=18 corrected=1 endDiff=0.000059 results=1
+dash DASH predictReplay ok script=meleeDash ack=25 corrected=1 endDiff=0.000051 results=1
+dash DASH predictReplay ok script=meleeDash ack=35 corrected=1 endDiff=0.000027 results=1
+dash DASH predictReplay ok script=meleeDash ack=60 corrected=1 endDiff=0.000012 results=1
+dash DASH predictScript ok script=jumpDash started=1 lateStarted=0 presses=2 startedCount=1 dir=0 force=1761.196,0.000,566.293 cutMelee=0 noDashEndDiff=796.98
+dash DASH predictReplay ok script=jumpDash ack=9 corrected=1 endDiff=0.000049 results=0
+dash DASH predictReplay ok script=jumpDash ack=10 corrected=1 endDiff=0.000062 results=1
+dash DASH predictReplay ok script=jumpDash ack=18 corrected=1 endDiff=0.000033 results=1
+dash DASH predictReplay ok script=jumpDash ack=25 corrected=1 endDiff=0.000058 results=1
+dash DASH predictReplay ok script=jumpDash ack=35 corrected=1 endDiff=0.000021 results=1
+dash DASH predictReplay ok script=jumpDash ack=60 corrected=1 endDiff=0.000023 results=1
+dash DASH predictScript ok script=jumpHeldThrough started=1 lateStarted=0 presses=2 startedCount=1 dir=0 force=1850.000,0.000,0.000 cutMelee=0 noDashEndDiff=524.41
+dash DASH predictReplay ok script=jumpHeldThrough ack=9 corrected=1 endDiff=0.000020 results=0
+dash DASH predictReplay ok script=jumpHeldThrough ack=10 corrected=1 endDiff=0.000050 results=1
+dash DASH predictReplay ok script=jumpHeldThrough ack=18 corrected=1 endDiff=0.000036 results=1
+dash DASH predictReplay ok script=jumpHeldThrough ack=25 corrected=1 endDiff=0.000044 results=1
+dash DASH predictReplay ok script=jumpHeldThrough ack=35 corrected=1 endDiff=0.000029 results=1
+dash DASH predictReplay ok script=jumpHeldThrough ack=60 corrected=1 endDiff=0.000033 results=1
+dash DASH predictReplay compared=18 fails=0 scriptFails=0 maxEndDiff=0.000062 inputs=70 dashAt=10
+dash DASH predictFix ok serverStart ack=55 before=59.7451 afterResult=0.0000 after=0.000000 corrected=0 startMismatches=1 forceFixes=0 unconfirmed=0 meleeInReplay=1 replays=1
+dash DASH predictFix ok serverForce ack=30 before=528.5483 afterResult=0.0000 after=0.000000 corrected=0 startMismatches=0 forceFixes=1 unconfirmed=0 meleeInReplay=0 replays=1
+dash DASH predictFix ok unconfirmed ack=30 before=59.7451 afterResult=59.7451 after=0.000000 corrected=0 startMismatches=0 forceFixes=0 unconfirmed=1 meleeInReplay=1 replays=1
+dash DASH predictFix ok unconfirmedThenLate ack=60 before=59.7451 afterResult=538.4153 after=0.000000 corrected=0 startMismatches=1 forceFixes=0 unconfirmed=1 meleeInReplay=1 replays=2
+dash DASH predictFix ok spawnBase ack=3 before=495.3418 afterResult=0.0000 after=0.000000 corrected=0 startMismatches=1 forceFixes=0 unconfirmed=0 meleeInReplay=0 replays=1
+dash DASH predictFix compared=5 fails=0
+dash DASH predictWillMelee ok compared=6 fails=0 sameInput=0 free=1 at32=0 started32=0 at33=1 started33=1
 dash DASHCHECK PASS steps=30 dashes=33 fails=0 abilityFails=0 blockFails=0
 map_expanse CHECK kind=A total=15000 bothHit=9225 bothMiss=5775 onlyLyra=0 onlyMine=0 lyraPen=4351 penMismatch=0 maxDiff=0.0910 p99Diff=0.00074 over0.1=0 over1=0
 map_expanse NORMAL kind=A compared=4874 over0.01=91 over0.1=90 max=1.4142 | startPen compared=4351 over0.1=663

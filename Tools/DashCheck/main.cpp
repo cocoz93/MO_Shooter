@@ -19,10 +19,13 @@
 //   견주는 것 = 켠 입력(r 줄 dash_start) · 고른 방향(r 줄 몽타주) · 막힘(r 줄 dash_start 이거나 r−1 줄 dashActive) · 쿨다운(r−1 줄 dashCooldown > 0) — 입력마다 전부
 //   앞 입력 사본 = 서버가 쓰는 앞 입력(r−2 줄 inX · inY · ctlYaw)이 Lyra 가 켤 때 본 값(r−1 줄 lastInX · lastInY · 몸 yaw)과 같은지 누름마다 센다(다르면 이 대조의 전제가 틀림)
 // 막기 대조(D-2-b) = 같은 한 줄기에 무기 순환(권총) · 조준 · 점프 · 근접을 서버 차례로 얹어 줄마다 사격 · 재장전 · 조준 · 점프 · 근접 켜짐과 탄창을 견준다(CompareBlocking)
+// 예측 대조(D-3-a) = 내 화면 예측(CSelfPrediction)의 대시 — 서버 값으로 되돌려 다시 돌리기 · 서버 소식으로 고치기 · 근접 누름 미리 보기(ComparePrediction, 기록 없이 만든 입력)
 // 끝 코드: 0 = 전부 통과, 1 = 불일치, 2 = 입력 오류
 #include "Dash.h"
 #include "MapCollision.h"
+#include "MatchRules.h"
 #include "Movement.h"
+#include "Prediction.h"
 #include "Weapon.h"
 
 #include <algorithm>
@@ -31,7 +34,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -512,6 +517,265 @@ namespace
 		}
 		return out;
 	}
+
+	// ── 예측 대조(D-3-a) — CSelfPrediction 의 대시를 와이어 없이 함수 인자로 본다. 「서버」 = 같은 입력을 돌린 예측기 하나(서버도 같은 Shared 이동 · 능력 · 차례)
+	constexpr double kPredictTolerance = 0.01;		// MeleeCheck kReplayTolerance 와 같다
+	constexpr uint32_t kPredictInputs = 70;			// 대시(10) 뒤 힘 15입력 · 미끄러짐이 끝나고 한참 뒤(60)까지
+	constexpr uint32_t kPredictDashSeq = 10;
+	constexpr uint32_t kPredictLateDashSeq = 50;	// 두 번째 누름 — 10 에 켰으면 쿨다운(10 + 91 = 101 전)이라 안 켜진다
+	constexpr uint32_t kPredictMeleeSeq = 8;		// 근접 — 10 의 대시가 끊는다(밀기 힘 0.05초 = 3입력이 10 에도 남아 있다)
+
+	struct PredictScript
+	{
+		const char* name = "";
+		bool dash = true;			// 10 에 대시 누름
+		bool lateDash = true;		// 50 에 대시 누름
+		bool dashAtFirst = false;	// 1 에 대시 누름(부활 뒤 첫 입력)
+		bool melee = false;			// 8 에 근접 + 밀기
+		bool crouch = false;		// 2 에 앉기 키 — 10 의 대시가 일으켜 세운다
+		bool jump = false;			// 5~30 점프 쥠(10 의 대시가 끊는다) · 45 에 다시 누름
+		bool jumpHeldThrough = false;	// 20~65 점프 쥠 — 대시 중 누름이라 막히고, 대시가 끝난 뒤(42~) 땅에서 쥐고 있어도 안 뛴다(D-0 during_jump_hold).
+										// 되돌린 뒤 점프 능력(쥠)을 칸에서 못 이으면 61 에서 새로 눌린 것으로 보고 뛴다 — 점프 쥠 시간이 0 이라 「떼기」는 걸음에 안 보이고 이 갈래만 보인다
+		bool ads = false;			// 3~20 조준 쥠(10 의 대시가 끄고, 쥔 채로는 안 돌아온다)
+		float pitchAtDash = 0.f;	// 10 의 피치 — 앞 대시가 위로도 민다
+		float yawBeforeDash = 0.f;	// 9 의 요 — 10 의 대시 방향을 고르는 몸 요
+	};
+
+	wire::Input PredictInput(const PredictScript& s, uint32_t i)
+	{
+		wire::Input input = wire::Input();
+		input.moveX = 1.f;		// 월드 +X 로 걷는다 — 대시 「앞 입력」
+		if (s.dash && i == kPredictDashSeq) input.buttons |= wire::BUTTON_DASH;
+		if (s.lateDash && i == kPredictLateDashSeq) input.buttons |= wire::BUTTON_DASH;
+		if (s.dashAtFirst && i == 1) input.buttons |= wire::BUTTON_DASH;
+		if (s.melee && i == kPredictMeleeSeq) input.buttons |= wire::BUTTON_MELEE;
+		if (s.crouch && i == 2) input.buttons |= wire::BUTTON_CROUCH;
+		if (s.jump && ((i >= 5 && i <= 30) || i == 45)) input.buttons |= wire::BUTTON_JUMP;
+		if (s.jumpHeldThrough && i >= 20 && i <= 65) input.buttons |= wire::BUTTON_JUMP;
+		if (s.ads && i >= 3 && i <= 20) input.buttons |= wire::BUTTON_ADS;
+		if (i == kPredictDashSeq) input.pitch = s.pitchAtDash;
+		if (i == kPredictDashSeq - 1) input.yaw = s.yawBeforeDash;
+		return input;
+	}
+
+	void RunPredict(CSelfPrediction& pred, const PredictScript& s, const Vec3& start, const Vec3& push)
+	{
+		pred.OnSpawn(start.x, start.y, start.z, 0, 0.f);		// 놓인 요 0 — 1 의 대시는 앞 입력 이동 없음 · 요 0 = 앞
+		for (uint32_t i = 1; i <= kPredictInputs; ++i)
+		{
+			wire::Input input = PredictInput(s, i);
+			pred.AddInput(input, s.melee && i == kPredictMeleeSeq ? &push : nullptr);
+		}
+	}
+
+	const CSelfPrediction::Slot* SlotAt(const CSelfPrediction& pred, uint32_t seq)
+	{
+		wire::PlayerState probe = wire::PlayerState();
+		probe.lastSeq = seq;
+		return pred.FindComparable(probe);
+	}
+
+	// 그 번호 칸을 서버 상태로 — 와이어처럼 float 로 줄인다. 앉음도 싣는다(Reconcile 이 앉음이 다르면 서버 값으로 덮는다)
+	bool StateAt(const CSelfPrediction& pred, uint32_t seq, wire::PlayerState& state)
+	{
+		const CSelfPrediction::Slot* slot = SlotAt(pred, seq);
+		if (!slot) return false;
+		state = wire::PlayerState();
+		state.lastSeq = seq;
+		state.x = (float)slot->move.location.x; state.y = (float)slot->move.location.y; state.z = (float)slot->move.location.z;
+		state.vx = (float)slot->move.velocity.x; state.vy = (float)slot->move.velocity.y; state.vz = (float)slot->move.velocity.z;
+		state.flags = (uint8_t)((slot->move.mode == EMoveMode::Falling ? wire::STATE_FALLING : 0) | (slot->move.crouched ? wire::STATE_CROUCHED : 0));
+		return true;
+	}
+
+	struct PredictReport
+	{
+		int scriptFails = 0;
+		int replayCompared = 0, replayFails = 0;
+		int fixCompared = 0, fixFails = 0;
+		int willCompared = 0, willFails = 0;
+		bool Fail() const { return scriptFails != 0 || replayFails != 0 || fixFails != 0 || willFails != 0 || replayCompared == 0 || fixCompared == 0; }
+	};
+
+	PredictReport ComparePrediction(const CMapCollision& map, const MoveParams& params, const Vec3& start)
+	{
+		PredictReport out;
+		MatchRules rules;
+		rules.spawnImmunitySeconds = 0.0;		// 부활 이동 막음(2.75 × 0.75초 = 124입력)을 끈다 — 걸어야 대시 「앞 입력」이 생긴다
+		CMoveSim sim(map, params);
+		// 밀기는 걸음(+X)과 다른 쪽(+Y)으로 — 같은 쪽(+X)일 때는 밀기 번호를 칸에 안 남겨도 끝 자리가 같았다(일부러 틀림 1차). +Y 면 6.5cm 갈린다(2차).
+		// 지운 힘의 속도는 덧붙이기 전 속도에 남는다(CleanUpRootForce) — 같은 쪽에서 안 갈린 까닭은 좇지 않았다(서버 · 예측이 같은 걸음 코드라 어긋남은 아니다)
+		const Vec3 push = MeleePushForce(Vec3(0.0, 1.0, 0.0), 60.0);
+		// 예측기는 힙에 둔다 — 하나가 고리 1024칸이라 크다(MeleeCheck 「예측기는 힙에 둔다」)
+		const auto make = [&]() { return std::make_unique<CSelfPrediction>(sim, rules, params.maxWalkSpeed); };
+
+		// ① 다시 돌리기 — 대시 앞(9) · 켠 입력(10) · 힘 중(18) · 힘 끝(25) · 미끄러짐(35) · 한참 뒤(60)에서 서버 값으로 되돌려도 끝 자리가 안 고친 판과 같나.
+		//    되돌린 뒤 걸음은 칸에 남긴 점프 능력 · 근접 밀기 번호 · 조준 · 대시 켬(힘 · 끊기)으로 다시 돈다 — 못 이으면 끝 자리가 갈린다
+		//    (일부러 틀림으로 본 자리: 밀기 번호 = meleeDash 9, 점프 능력 = jumpHeldThrough 60)
+		PredictScript meleeDash;
+		meleeDash.name = "meleeDash";
+		meleeDash.melee = true;
+		meleeDash.crouch = true;
+		meleeDash.ads = true;
+		PredictScript jumpDash;
+		jumpDash.name = "jumpDash";
+		jumpDash.jump = true;
+		jumpDash.pitchAtDash = 15.f;
+		PredictScript jumpHold;
+		jumpHold.name = "jumpHeldThrough";
+		jumpHold.jumpHeldThrough = true;
+		double maxEnd = 0;
+		for (const PredictScript* s : { &meleeDash, &jumpDash, &jumpHold })
+		{
+			const auto straightOwner = make();
+			CSelfPrediction& straight = *straightOwner;
+			RunPredict(straight, *s, start, push);
+			const Vec3 straightEnd = straight.GetMove().location;
+			PredictScript none = *s;
+			none.dash = none.lateDash = false;
+			const auto noneOwner = make();
+			RunPredict(*noneOwner, none, start, push);
+			const double noDash = Dist(noneOwner->GetMove().location, straightEnd);		// 대조군 — 대시가 끝 자리를 바꿔야 이 대조가 대시를 본다
+			const CSelfPrediction::Slot* dashSlot = SlotAt(straight, kPredictDashSeq);
+			const CSelfPrediction::Slot* lateSlot = SlotAt(straight, kPredictLateDashSeq);
+			const CSelfPrediction::DashCounters& sc = straight.GetDashCounters();
+			const bool scriptOk = dashSlot && dashSlot->dashStarted && lateSlot && !lateSlot->dashStarted && sc.presses == 2 && sc.started == 1 && noDash > kPredictTolerance;
+			if (!scriptOk) ++out.scriptFails;
+			std::printf("DASH predictScript %s script=%s started=%d lateStarted=%d presses=%llu startedCount=%llu dir=%u force=%.3f,%.3f,%.3f cutMelee=%d noDashEndDiff=%.2f\n",
+				scriptOk ? "ok" : "DIFF", s->name, dashSlot && dashSlot->dashStarted ? 1 : 0, lateSlot && lateSlot->dashStarted ? 1 : 0, (unsigned long long)sc.presses, (unsigned long long)sc.started,
+				dashSlot ? (unsigned)dashSlot->dashDir : 0u, dashSlot ? dashSlot->dashForce.x : 0.0, dashSlot ? dashSlot->dashForce.y : 0.0, dashSlot ? dashSlot->dashForce.z : 0.0,
+				dashSlot && dashSlot->dashCutMelee ? 1 : 0, noDash);
+			for (const uint32_t ack : { 9u, 10u, 18u, 25u, 35u, 60u })
+			{
+				const auto predOwner = make();
+				CSelfPrediction& pred = *predOwner;
+				RunPredict(pred, *s, start, push);
+				++out.replayCompared;
+				wire::PlayerState server;
+				if (!StateAt(pred, ack, server) || !dashSlot)
+				{
+					++out.replayFails;
+					std::printf("DASH predictReplay DIFF script=%s ack=%u 칸 없음\n", s->name, ack);
+					continue;
+				}
+				// 서버가 그 입력을 돌렸으면 소식이 상태보다 먼저 온다. 같은 값이라 고칠 것이 없다 — 안 주면 AckMelee · AckDash 가 지운다
+				if (s->melee && ack >= kPredictMeleeSeq) pred.OnMeleeResult(kPredictMeleeSeq, true, push);
+				if (ack >= kPredictDashSeq) pred.OnDashResult(kPredictDashSeq, dashSlot->dashDir, dashSlot->dashForce);
+				const CSelfPrediction::ReconcileResult rr = pred.Reconcile(server, -1.0);		// 허용 차 음수 = 늘 되돌린다
+				const double diff = Dist(pred.GetMove().location, straightEnd);
+				maxEnd = std::max(maxEnd, diff);
+				const CSelfPrediction::DashCounters& dc = pred.GetDashCounters();
+				const CSelfPrediction::MeleeCounters& mc = pred.GetMeleeCounters();
+				const uint64_t wantResults = ack >= kPredictDashSeq ? 1 : 0;
+				const bool fail = !rr.corrected || diff > kPredictTolerance || dc.results != wantResults || dc.startMismatches != 0 || dc.forceFixes != 0 || dc.unconfirmed != 0
+					|| dc.replaysMissed != 0 || dc.resultsNoSlot != 0 || mc.unconfirmed != 0 || mc.pushHitFixes != 0 || mc.pushForceFixes != 0 || mc.rerunsMissed != 0;
+				if (fail) ++out.replayFails;
+				std::printf("DASH predictReplay %s script=%s ack=%u corrected=%d endDiff=%.6f results=%llu\n", fail ? "DIFF" : "ok", s->name, ack, rr.corrected ? 1 : 0, diff, (unsigned long long)dc.results);
+			}
+		}
+		std::printf("DASH predictReplay compared=%d fails=%d scriptFails=%d maxEndDiff=%.6f inputs=%u dashAt=%u\n", out.replayCompared, out.replayFails, out.scriptFails, maxEnd, kPredictInputs, kPredictDashSeq);
+
+		// ② 서버 소식으로 고치기 — 내 대시와 서버 대시가 다를 때. 소식(OnDashResult)이나 소식 없이 지나감(AckDash)으로 고쳐 다시 돈 끝 자리가
+		//    서버 판(ref)의 끝 자리와 같고, ref 칸을 서버 상태로 줘도 되돌리지 않아야 한다. 세는 값은 갈래마다 하나씩만
+		const auto fixCase = [&](const char* name, const PredictScript& serverScript, const PredictScript& mine, std::initializer_list<uint32_t> messages, uint32_t ack,
+			uint64_t wantStart, uint64_t wantForce, uint64_t wantUnconfirmed, uint64_t wantMeleeInReplay, bool resultCloses)
+		{
+			const auto refOwner = make();
+			const auto predOwner = make();
+			CSelfPrediction& ref = *refOwner;
+			CSelfPrediction& pred = *predOwner;
+			RunPredict(ref, serverScript, start, push);
+			RunPredict(pred, mine, start, push);
+			const Vec3 refEnd = ref.GetMove().location;
+			const double before = Dist(pred.GetMove().location, refEnd);
+			if (mine.melee) pred.OnMeleeResult(kPredictMeleeSeq, true, push);		// 근접은 두 판이 같다 — 소식이 대시 소식보다 먼저(입력 차례)
+			bool slotsOk = true;
+			for (const uint32_t seq : messages)
+			{
+				const CSelfPrediction::Slot* slot = SlotAt(ref, seq);
+				if (!slot || !slot->dashStarted) { slotsOk = false; continue; }
+				pred.OnDashResult(seq, slot->dashDir, slot->dashForce);
+			}
+			const double afterResult = Dist(pred.GetMove().location, refEnd);
+			wire::PlayerState state;
+			if (!StateAt(ref, ack, state)) slotsOk = false;
+			const CSelfPrediction::ReconcileResult rr = pred.Reconcile(state, kPredictTolerance);
+			const double after = Dist(pred.GetMove().location, refEnd);
+			const CSelfPrediction::DashCounters& dc = pred.GetDashCounters();
+			const CSelfPrediction::MeleeCounters& mc = pred.GetMeleeCounters();
+			const bool counters = dc.startMismatches == wantStart && dc.forceFixes == wantForce && dc.unconfirmed == wantUnconfirmed && dc.meleeInReplay == wantMeleeInReplay
+				&& dc.replaysMissed == 0 && dc.resultsNoSlot == 0 && mc.unconfirmed == 0 && mc.rerunsMissed == 0;
+			const bool ok = slotsOk && rr.compared && !rr.corrected && after <= kPredictTolerance && counters && before > kPredictTolerance		// 다르게 시작해야 고친 게 보인다
+				&& (!resultCloses || afterResult <= kPredictTolerance);		// 소식만으로 닫히는 갈래는 상태를 맞춰 보기 전에 이미 같다
+			++out.fixCompared;
+			if (!ok) ++out.fixFails;
+			std::printf("DASH predictFix %s %s ack=%u before=%.4f afterResult=%.4f after=%.6f corrected=%d startMismatches=%llu forceFixes=%llu unconfirmed=%llu meleeInReplay=%llu replays=%llu\n",
+				ok ? "ok" : "DIFF", name, ack, before, afterResult, after, rr.corrected ? 1 : 0, (unsigned long long)dc.startMismatches, (unsigned long long)dc.forceFixes,
+				(unsigned long long)dc.unconfirmed, (unsigned long long)dc.meleeInReplay, (unsigned long long)dc.replays);
+		};
+		PredictScript noDashAt10 = meleeDash;
+		noDashAt10.dash = false;
+		PredictScript leftJump = jumpDash;
+		leftJump.yawBeforeDash = 90.f;		// 몸 요 90 · 앞 이동 +X → 옆(왼) 대시, 힘 = 앞 이동 쪽 수평. 내 판은 요 0 → 앞 대시(피치 15 로 위로도)
+		PredictScript plain;
+		plain.name = "plain";
+		plain.dash = plain.lateDash = false;
+		PredictScript firstDash = plain;
+		firstDash.dashAtFirst = true;
+		// 서버는 켰는데 나는 안 켬(서버의 앞 입력이 달랐다) — 소식으로 켜고, 내 50 누름은 서버 쿨다운으로 꺼진다. 켠 대시가 근접을 끊어 끊음이 바뀐다(meleeInReplay 1)
+		fixCase("serverStart", meleeDash, noDashAt10, { kPredictDashSeq }, 55, 1, 0, 0, 1, true);
+		// 둘 다 켰는데 방향 · 힘이 다름
+		fixCase("serverForce", leftJump, jumpDash, { kPredictDashSeq }, 30, 0, 1, 0, 0, true);
+		// 내가 켰는데 서버는 안 켬 — 소식 없이 30 까지 지나감. 끄면 쿨다운이 풀려 내 50 누름이 켜진다(서버도 50 에 켠다)
+		fixCase("unconfirmed", noDashAt10, meleeDash, {}, 30, 0, 0, 1, 1, false);
+		// 위와 같은데 서버의 50 소식이 먼저 온다(내 50 은 쿨다운으로 안 켬) → 그 뒤 60 상태로 10 을 끈다
+		fixCase("unconfirmedThenLate", noDashAt10, meleeDash, { kPredictLateDashSeq }, 60, 1, 0, 1, 1, false);
+		// 부활 뒤 첫 입력 — 앞 칸 = 부활 직후 대시 상태(이동 없음 · 놓인 요)
+		fixCase("spawnBase", firstDash, plain, { 1u }, 3, 1, 0, 0, 0, true);
+		std::printf("DASH predictFix compared=%d fails=%d\n", out.fixCompared, out.fixFails);
+
+		// ③ 근접 누름 미리 보기(WillMeleeStart) — 화면 근접 판정을 켜질 입력에만 하려고 넣기 전에 본다. 대시가 켜지거나 켜져 있으면 안 켜진다
+		{
+			const auto predOwner = make();
+			CSelfPrediction& pred = *predOwner;
+			pred.OnSpawn(start.x, start.y, start.z, 0, 0.f);
+			wire::Input both = wire::Input();
+			both.moveX = 1.f;
+			both.buttons = (uint8_t)(wire::BUTTON_MELEE | wire::BUTTON_DASH);
+			wire::Input meleeOnly = wire::Input();
+			meleeOnly.moveX = 1.f;
+			meleeOnly.buttons = wire::BUTTON_MELEE;
+			const bool sameInput = pred.WillMeleeStart(both);		// 같은 입력에 대시가 켜진다 → 막힘
+			const bool free = pred.WillMeleeStart(meleeOnly);
+			wire::Input dash = wire::Input();
+			dash.moveX = 1.f;
+			dash.buttons = wire::BUTTON_DASH;
+			pred.AddInput(dash);		// 1 에 켬 — 막힘 = 1 … 32(kDashActiveInputs)
+			for (uint32_t i = 2; i < (uint32_t)kDashActiveInputs; ++i)
+			{
+				wire::Input walk = wire::Input();
+				walk.moveX = 1.f;
+				pred.AddInput(walk);
+			}
+			const bool lastBlocked = pred.WillMeleeStart(meleeOnly);		// 다음 = 32 — 아직 막힘
+			wire::Input press32 = meleeOnly;
+			pred.AddInput(press32);
+			const CSelfPrediction::Slot* at32 = SlotAt(pred, (uint32_t)kDashActiveInputs);
+			const bool afterEnd = pred.WillMeleeStart(meleeOnly);			// 다음 = 33 — 풀림
+			wire::Input press33 = meleeOnly;
+			pred.AddInput(press33);
+			const CSelfPrediction::Slot* at33 = SlotAt(pred, (uint32_t)kDashActiveInputs + 1);
+			const bool checks[] = { !sameInput, free, !lastBlocked, at32 && !at32->meleeStarted, afterEnd, at33 && at33->meleeStarted };
+			for (const bool c : checks)
+			{
+				++out.willCompared;
+				if (!c) ++out.willFails;
+			}
+			std::printf("DASH predictWillMelee %s compared=%d fails=%d sameInput=%d free=%d at32=%d started32=%d at33=%d started33=%d\n", out.willFails == 0 ? "ok" : "DIFF",
+				out.willCompared, out.willFails, sameInput ? 1 : 0, free ? 1 : 0, lastBlocked ? 1 : 0, at32 && at32->meleeStarted ? 1 : 0, afterEnd ? 1 : 0, at33 && at33->meleeStarted ? 1 : 0);
+		}
+		return out;
+	}
 }
 
 int main(int argc, char** argv)
@@ -705,7 +969,19 @@ int main(int argc, char** argv)
 	std::printf("DASH blockPaths blocked fire=%d reload=%d melee=%d jump=%d ads=%d cancel fire=%d reload=%d melee=%d jump=%d ads=%d shotsOnStart=%d\n",
 		bl.firesBlocked, bl.reloadsBlocked, bl.meleeBlocked, bl.jumpsBlocked, bl.adsBlocked, bl.fireCancels, bl.reloadCancels, bl.meleeCancels, bl.jumpCancels, bl.adsCancels, bl.shotsOnStart);
 
-	const bool pass = fails == 0 && !ab.Fail() && !bl.Fail();
+	// ── 예측 대조(D-3-a) — 시작 자리 = 첫 대시 칸의 켜기 앞 줄(바닥 위 · 기록이 그 자리에서 대시했다)
+	Vec3 predictStart;
+	for (size_t r = 1; r < table.rows.size(); ++r)
+	{
+		if ((int)table.rows[r].size() > c.ev && HasEvent(table.rows[r][(size_t)c.ev], "dash_start"))
+		{
+			predictStart = Vec3(Cell(table.rows[r - 1], c.px), Cell(table.rows[r - 1], c.py), Cell(table.rows[r - 1], c.pz));
+			break;
+		}
+	}
+	const PredictReport pr = ComparePrediction(map, params, predictStart);
+
+	const bool pass = fails == 0 && !ab.Fail() && !bl.Fail() && !pr.Fail();
 	std::printf("DASHCHECK %s steps=%d dashes=%d fails=%d abilityFails=%d blockFails=%d\n", pass ? "PASS" : "FAIL", compared, dashes, fails, abilityStepFails + (ab.presses == 0 ? 1 : 0),
 		blockStepFails + bl.badStart + (bl.rows == 0 ? 1 : 0));
 	return pass ? 0 : 1;
