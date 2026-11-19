@@ -35,7 +35,7 @@ class UPhysicalMaterial;
  * 판정에 쓰는 줄은 전부 「MOB_ACOMP」 로 시작한다.
  * 데디 서버(-server)에 주면 서버의 봇을 같은 경로로 움직인다. 카메라와 촬영은 건너뛴다(candidate1-impl-plan.md 0단계)
  */
-enum class EMOBACScript : uint8 { Run, AimJump, StartStop, Events, Ads, Crouch, Melee, AdsLong };
+enum class EMOBACScript : uint8 { Run, AimJump, StartStop, Events, Ads, Crouch, Melee, AdsLong, Dash };
 
 UCLASS()
 class UMOBAnimCompareSubsystem : public UTickableWorldSubsystem
@@ -57,6 +57,7 @@ private:
 	enum class EStage : uint8 { WaitActors, Settle, Run, Stopping, Done };
 
 	bool IsMatchPlaying(float DeltaTime);
+	bool SelfBodyReady(float DeltaTime);		// 대시 각본 — 내 캐릭터 몸을 Quinn 으로 맞추고 다시 쥐는 몽타주가 끝날 때까지 false
 	bool Prepare();
 	void LogBody() const;
 	void BeginPass();
@@ -176,6 +177,18 @@ private:
 	bool bFoeMeleeReleasePending = false;
 	bool PlayFoeHitReact(bool bBack);
 	int32 EvMelee = 0, EvHitBack = 0, EvHitFront = 0, EvHitFail = 0;
+	// 대시(-MOBACScript=dash, 컨텐츠 D-4). GA_Hero_Dash 는 AI 조종기면 방향을 「가장 가까운 길 찾기 점 − 제 자리」로 구해
+	// 평평한 바닥에선 0 이라 취소한다 — 그래서 이 각본만 내 캐릭터를 몸으로 쓴다
+	// (사람 길 = 앞이면 카메라 앞, 그 밖이면 마지막 이동 입력. 입력 0 은 몸 요가 ±45 밖이면 뒤 · 옆을 골라 방향 0 → 취소된다). 누름 = InputTag.Ability.Dash(다음 프레임에 뗌).
+	// 사람 조종기의 겨눔(GetBaseAimRotation)은 보는 카메라 방향이라 기록용 카메라로 안 바꾸고 영상도 안 찍는다
+	bool bSelfBody = false;
+	bool bFoeDashReleasePending = false;
+	bool bDashWasActive = false;
+	int32 EvDash = 0, EvDashStart = 0, EvDashEnd = 0;
+	float BodySeconds = 0.f;
+	float NextBodyTryAt = 0.f;
+	float BodyReadyAt = -1.f;
+	int32 BodyTries = 0;
 	int32 MaxLiveMontages = 0;		// 한 프레임에 살아 있던 몽타주 최대 수(패킷 칸 수를 정한다)
 	TSet<FName> SeenMontages;
 	FString MontageCsv;

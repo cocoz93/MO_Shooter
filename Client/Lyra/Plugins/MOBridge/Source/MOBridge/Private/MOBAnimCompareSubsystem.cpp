@@ -65,7 +65,7 @@ namespace
 	// AdsOn · AdsOff = 조준을 누른다 · 뗀다(-MOBACScript=ads)
 	// CrouchOn · CrouchOff = 앉기 단추를 눌러 앉는다 · 일어선다(-MOBACScript=crouch). Lyra 단추는 누를 때마다 뒤집으므로(ToggleCrouch) 이미 그 상태면 안 누른다
 	// Melee = 근접 단추 · HitBack · HitFront = 맞은 쪽 반응 몽타주를 피해 연출과 같은 길로 튼다(-MOBACScript=melee)
-	enum class EACEvent : uint8 { None, Fire, Hold, Release, Reload, Swap, Back, Spawn, AdsOn, AdsOff, CrouchOn, CrouchOff, Melee, HitBack, HitFront };
+	enum class EACEvent : uint8 { None, Fire, Hold, Release, Reload, Swap, Back, Spawn, AdsOn, AdsOff, CrouchOn, CrouchOff, Melee, HitBack, HitFront, Dash };
 
 	// 경로 한 조각. Angle = 몸 앞 기준 이동 방향(+90 오른쪽). AngleRate·YawRate = 초당 돌리는 각도
 	// PitchFrom → PitchTo = 조각 동안 시선 위아래 각(+ 위). bJump = 조각 처음에 뛴다. Ev0·Ev1 = 조각 시작에서 At0·At1 초에 일으킬 사건
@@ -335,6 +335,55 @@ namespace
 		{ TEXT("idle_end"),      2.0f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOff, 0.f },
 	};
 	constexpr int32 NUM_MELEE_SEGMENTS = UE_ARRAY_COUNT(MELEE_SCRIPT);
+
+	// 대시 경로(-MOBACScript=dash, content-impl-progress.md D-4-b). 대시 몽타주 넷이 몸에 얹히는 자리를 한 번씩 —
+	// 짧게 밀고 멈춘 뒤(마지막 이동 입력 = 그 방향 → 앞 · 뒤 · 왼 · 오른, 대각 앞왼 → 왼 · 뒤오른 → 오른, D-0 표) ·
+	// 달리며(앞 · 오른 · 왼) · 재장전 직후 · 근접 직후 · 앉아서(능력이 일으켜 세운다) — 뒤 셋도 「_in」 을 앞에 둔다.
+	// 「_in」 0.15초 = 그 방향 이동 입력을 넣고 떼는 조각 — 다음 조각 첫 프레임 대시가 그 입력을 마지막 이동 입력으로 읽는다(능력은 이 도구가 그 프레임 끝에 처리한다).
+	// still_dash = 이동 입력 없이 누름 — 입력 0 의 요 0 과 몸 요 180 의 차가 180 이라 뒤를 골라 방향 0 → 취소된다(Shared/Dash.h SelectDashDir, 파일럿 11-20 에서 켜짐 0). 몽타주가 안 나와야 하는 줄로 둔다
+	// 대시 사이는 쿨다운 1.5초(D-0 실측 91프레임)보다 길게, 조각 = 몽타주가 다 빠질 만큼(제 끝에서 빼기 0.33초, 파일럿 수명 53~59프레임)에 여유를 둔 제안값.
+	// 자리 — 집(-1020,-1070) 몸 요 180 이라 앞 = -x · 오른 = -y. 먼저 앞으로 달리며 대시해 집에서 멀어진 뒤 앞뒤 · 좌우를 짝으로 오간다
+	// (선 채 대시 한 번 약 610cm, 달리다 대시하는 0.8초 조각 하나 약 810cm). 파일럿 4 에서 밟은 자리 x -1908..-653 · y -1958..-442, 높이 142(앉음 117) 둘뿐
+	const FScriptSegment DASH_SCRIPT[] = {
+		{ TEXT("idle"),          2.0f, false,    0.f, 0.f, 0.f },
+		{ TEXT("run_dash_f"),    0.8f, true,     0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.3f },
+		{ TEXT("stop_f"),        1.7f, false,    0.f, 0.f, 0.f },
+		{ TEXT("b_in"),          0.15f, true,  180.f, 0.f, 0.f },
+		{ TEXT("b_dash"),        2.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("still_dash"),    2.5f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.3f },
+		{ TEXT("b_in2"),         0.15f, true,  180.f, 0.f, 0.f },
+		{ TEXT("b_dash2"),       2.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("l_in"),          0.15f, true,  -90.f, 0.f, 0.f },
+		{ TEXT("l_dash"),        2.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("r_in"),          0.15f, true,   90.f, 0.f, 0.f },
+		{ TEXT("r_dash"),        2.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("f_in"),          0.15f, true,    0.f, 0.f, 0.f },
+		{ TEXT("f_dash"),        2.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("b_in3"),         0.15f, true,  180.f, 0.f, 0.f },
+		{ TEXT("b_dash3"),       2.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("fl_in"),         0.15f, true,  -45.f, 0.f, 0.f },
+		{ TEXT("fl_dash"),       2.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("br_in"),         0.15f, true,  135.f, 0.f, 0.f },
+		{ TEXT("br_dash"),       2.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("run_dash_r"),    0.8f, true,    90.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.3f },
+		{ TEXT("stop_r"),        1.7f, false,    0.f, 0.f, 0.f },
+		{ TEXT("run_dash_l"),    0.8f, true,   -90.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.3f },
+		{ TEXT("stop_l"),        1.7f, false,    0.f, 0.f, 0.f },
+		{ TEXT("fire_r"),        0.6f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Fire, 0.f },
+		{ TEXT("reload"),        0.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Reload, 0.f },
+		{ TEXT("rl_in"),         0.15f, true,    0.f, 0.f, 0.f },
+		{ TEXT("rl_dash"),       2.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("melee_in"),      0.15f, true,  180.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Melee, 0.f },
+		{ TEXT("ml_dash"),       2.35f, false,   0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("c_on"),          1.0f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOn, 0.f },
+		{ TEXT("c_in"),          0.15f, true,    0.f, 0.f, 0.f },
+		{ TEXT("c_dash"),        1.6f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Dash, 0.f },
+		{ TEXT("idle_end"),      0.5f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOff, 0.f },
+	};
+	// 끝 둘을 짧게 둔 까닭 — Lyra 쉼 몸짓 시계(IdleBreakDelayTime 6초)는 판 사이 자리 옮기기에도 이어 세고 단순 재생 시계는 판 시작에 새로 센다.
+	// 판 1 끝에 오래 서 있으면 판 2 idle 에서 Lyra 만 몸짓을 튼다(파일럿 3: c_dash 2.35 + idle_end 2.0 → 판 2 시작 남은 1.03초, 63프레임째 IdleBreak, 80프레임부터 22부위 평균 12cm).
+	// 지금(파일럿 4) = 판 2 시작 남은 3.3초 · idle 끝 1.3초 · 몸짓 0줄
+	constexpr int32 NUM_DASH_SEGMENTS = UE_ARRAY_COUNT(DASH_SCRIPT);
 	const TCHAR* const HIT_BACK_PATH = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_HitReact_Back_Med_01.AM_MM_HitReact_Back_Med_01");
 	const TCHAR* const HIT_FRONT_PATH = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_HitReact_Front_Med_02.AM_MM_HitReact_Front_Med_02");
 	constexpr float FIRE_TAP_SECONDS = 0.05f;	// 한 발 사건의 방아쇠 시간 — 3프레임. 연사 소총이 한 발만 내도록 짧게(제안값)
@@ -357,6 +406,7 @@ namespace
 		case EMOBACScript::AdsLong: return ADSLONG_SCRIPT[I];
 		case EMOBACScript::Crouch: return CROUCH_SCRIPT[I];
 		case EMOBACScript::Melee: return MELEE_SCRIPT[I];
+		case EMOBACScript::Dash: return DASH_SCRIPT[I];
 		case EMOBACScript::Run: break;
 		}
 		return SCRIPT[I];
@@ -372,6 +422,7 @@ namespace
 		case EMOBACScript::AdsLong: return NUM_ADSLONG_SEGMENTS;
 		case EMOBACScript::Crouch: return NUM_CROUCH_SEGMENTS;
 		case EMOBACScript::Melee: return NUM_MELEE_SEGMENTS;
+		case EMOBACScript::Dash: return NUM_DASH_SEGMENTS;
 		case EMOBACScript::Run: break;
 		}
 		return NUM_SEGMENTS;
@@ -422,8 +473,10 @@ void UMOBAnimCompareSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Script = ScriptName == TEXT("aimjump") ? EMOBACScript::AimJump : ScriptName == TEXT("startstop") ? EMOBACScript::StartStop
 		: ScriptName == TEXT("events") ? EMOBACScript::Events : ScriptName == TEXT("ads") ? EMOBACScript::Ads
 		: ScriptName == TEXT("crouch") ? EMOBACScript::Crouch : ScriptName == TEXT("melee") ? EMOBACScript::Melee
-		: ScriptName == TEXT("adslong") ? EMOBACScript::AdsLong : EMOBACScript::Run;
+		: ScriptName == TEXT("adslong") ? EMOBACScript::AdsLong : ScriptName == TEXT("dash") ? EMOBACScript::Dash : EMOBACScript::Run;
 	bAimJump = Script != EMOBACScript::Run;
+	bSelfBody = Script == EMOBACScript::Dash;
+	if (bSelfBody) bVideo = false;		// 기록용 카메라를 안 보므로 찍을 화면이 없다(헤더 bSelfBody 주석)
 	FString WeaponName = WEAPON_KEYS[1];
 	FParse::Value(Cmd, TEXT("MOBACWeapon="), WeaponName);
 	WeaponIndex = WeaponName == WEAPON_KEYS[0] ? 0 : WeaponName == WEAPON_KEYS[2] ? 2 : 1;
@@ -476,6 +529,55 @@ bool UMOBAnimCompareSubsystem::IsMatchPlaying(float DeltaTime)
 	return ClearSeconds > MATCH_SETTLE_SECONDS;
 }
 
+// 내용 기록 도구 QuinnReady(MOBContentProbeSubsystem.cpp)와 같은 길 — 클립 파일의 몸이 Quinn 이라(animcmp_clips7_rifle.log 의 body 줄) 내 몸도 맞춘다.
+// Lyra 가 몸을 고르는 시점이 늦을 수 있어 맞을 때까지 0.5초마다 다시 걸고, 맞으면 다시 쥐는 몽타주가 끝날 만큼 기다린다
+bool UMOBAnimCompareSubsystem::SelfBodyReady(float DeltaTime)
+{
+	static const FName QUINN_BODY(TEXT("SKM_Quinn_Invis"));
+	constexpr int32 BODY_TRY_LIMIT = 20;
+	constexpr float BODY_RETRY_SECONDS = 0.5f;
+	constexpr float BODY_SETTLE_SECONDS = 2.0f;
+	BodySeconds += DeltaTime;
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ACharacter* Me = PC ? Cast<ACharacter>(PC->GetPawn()) : nullptr;
+	// 기다리는 동안 봇이 내 몸을 쏴 죽이면 몸을 잃는다(D-4-b 샷건 단순 재생 첫 판 — 로그 프레임 255 에 부활 시계가 뜨고 foe_lost). 봇 머리를 Prepare 전에 먼저 끈다(Prepare 가 다시 끄고 숨긴다)
+	for (TActorIterator<ACharacter> It(GetWorld()); It; ++It)
+	{
+		AAIController* AI = *It != Me ? Cast<AAIController>(It->GetController()) : nullptr;
+		if (!AI || !AI->BrainComponent || !AI->BrainComponent->IsRunning()) continue;
+		AI->BrainComponent->StopLogic(TEXT("MOBAnimCompare"));
+		AI->StopMovement();
+		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP self_body bot_brain_stopped bot=%s at=%.2f"), *GetNameSafe(*It), BodySeconds);
+	}
+	if (BodyReadyAt >= 0.f) return BodySeconds - BodyReadyAt >= BODY_SETTLE_SECONDS;
+	const USkeletalMeshComponent* Mesh = Me ? Me->GetMesh() : nullptr;
+	const USkeletalMesh* Asset = Mesh ? Mesh->GetSkeletalMeshAsset() : nullptr;
+	if (Asset && Asset->GetFName() == QUINN_BODY)
+	{
+		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP self_body quinn tries=%d"), BodyTries);
+		BodyReadyAt = BodySeconds;
+		return false;
+	}
+	if (!Me || BodySeconds < NextBodyTryAt) return false;
+	if (BodyTries >= BODY_TRY_LIMIT)
+	{
+		if (BodyTries++ == BODY_TRY_LIMIT) UE_LOG(LogMOBAComp, Error, TEXT("MOB_ACOMP_FAIL self_body mesh=%s tries=%d"), *GetNameSafe(Asset), BODY_TRY_LIMIT);
+		return false;		// 기다림 한도(WAIT_LIMIT_SECONDS)에 걸려 끝난다
+	}
+	// 몸을 바꾸기 전에 집 · 요 180 으로 먼저 옮긴다 — 서 있는 채 몸을 돌리면 Lyra 가 돌린 만큼 뿌리 뼈를 되돌려(RootYawOffset) 움직일 때까지 쥐고 있다.
+	// Prepare 에서 처음 돌리면 판 1 이 RootYawOffset -30 으로 시작했다(파일럿 3, 단순 재생은 0) — idle 전체 22부위 평균 4.6cm · 첫 대시 넣기 15.9cm.
+	// 이렇게 옮긴 뒤(파일럿 4) 판 시작 RootYawOffset -2.8e-05
+	if (BodyTries == 0)
+	{
+		Me->TeleportTo(FIXED_HOME, FRotator(0.f, FIXED_YAW, 0.f), false, true);
+		PC->SetControlRotation(FRotator(0.f, FIXED_YAW, 0.f));
+	}
+	NextBodyTryAt = BodySeconds + BODY_RETRY_SECONDS;
+	++BodyTries;
+	MOBSetBodyPart(Me, TEXT("/Game/Characters/Cosmetics/B_Quinn.B_Quinn_C"));
+	return false;
+}
+
 bool UMOBAnimCompareSubsystem::Prepare()
 {
 	UWorld* World = GetWorld();
@@ -483,19 +585,21 @@ bool UMOBAnimCompareSubsystem::Prepare()
 	ACharacter* Me = PC ? Cast<ACharacter>(PC->GetPawn()) : nullptr;
 	if (!Me || !FindASC(Me)) return false;
 
-	ACharacter* Target = nullptr;
+	ACharacter* Bot = nullptr;
 	for (TActorIterator<ACharacter> It(World); It; ++It)
 	{
 		if (*It != Me && FindASC(*It))
 		{
-			Target = *It;
+			Bot = *It;
 			break;
 		}
 	}
-	if (!Target) return false;
+	if (!Bot) return false;
+	// 몸 = 봇. 대시 각본만 내 캐릭터(헤더 bSelfBody 주석) — 그때 봇은 아래에서 숨기고 끈다
+	ACharacter* Target = bSelfBody ? Me : Bot;
 
-	// 봇 머리를 끈다 — 몸만 빌린다
-	if (AAIController* AI = Cast<AAIController>(Target->GetController()))
+	// 봇 머리를 끈다 — 몸만 빌린다(대시 각본이면 쏘거나 다가오지 않게)
+	if (AAIController* AI = Cast<AAIController>(Bot->GetController()))
 	{
 		if (AI->BrainComponent) AI->BrainComponent->StopLogic(TEXT("MOBAnimCompare"));
 		AI->StopMovement();
@@ -543,8 +647,8 @@ bool UMOBAnimCompareSubsystem::Prepare()
 	if (bSimple) MOBApplySimpleAnim(Target);
 
 	// 위아래 시선 — 봇 조종기는 「다른 캐릭터를 볼 때만 고개를 든다」(AAIController::UpdateControlRotation). 그래서 보이지 않는 표적 캐릭터를 시선 자리에 두고 그것을 보게 한다.
-	// Lyra 원본 애니와 단순 재생이 같은 값(GetBaseAimRotation)을 읽는다
-	if (bAimJump)
+	// Lyra 원본 애니와 단순 재생이 같은 값(GetBaseAimRotation)을 읽는다. 내 캐릭터 몸은 조종 방향을 그대로 보므로 표적이 필요 없다
+	if (bAimJump && !bSelfBody)
 	{
 		AAIController* AI = Cast<AAIController>(Target->GetController());
 		FActorSpawnParameters MarkParams;
@@ -585,10 +689,11 @@ bool UMOBAnimCompareSubsystem::Prepare()
 		++PadsHidden;
 	}
 
-	// 내 캐릭터는 화면에 안 나오고 상대 길도 막지 않게 한다. 충돌을 끄면 바닥을 못 찾아 떨어지므로 움직임부터 끈다
-	if (USkeletalMeshComponent* MyMesh = Me->GetMesh()) MyMesh->SetVisibility(false, true);
-	if (UCharacterMovementComponent* MyMove = Me->GetCharacterMovement()) MyMove->DisableMovement();
-	Me->SetActorEnableCollision(false);
+	// 내 캐릭터는 화면에 안 나오고 상대 길도 막지 않게 한다. 충돌을 끄면 바닥을 못 찾아 떨어지므로 움직임부터 끈다. 대시 각본은 봇을 이렇게 치운다
+	ACharacter* Aside = bSelfBody ? Bot : Me;
+	if (USkeletalMeshComponent* AsideMesh = Aside->GetMesh()) AsideMesh->SetVisibility(false, true);
+	if (UCharacterMovementComponent* AsideMove = Aside->GetCharacterMovement()) AsideMove->DisableMovement();
+	Aside->SetActorEnableCollision(false);
 
 	// 데디 서버에는 화면이 없다 — 카메라와 위젯은 건너뛰고 봇만 움직인다
 	if (World->GetNetMode() == NM_DedicatedServer)
@@ -610,8 +715,11 @@ bool UMOBAnimCompareSubsystem::Prepare()
 	Cam->GetCameraComponent()->SetFieldOfView(CAMERA_FOV);
 	Cam->GetCameraComponent()->bConstrainAspectRatio = false;
 	Camera = Cam;
-	PC->bAutoManageActiveCameraTarget = false;
-	PC->SetViewTargetWithBlend(Cam, 0.f);
+	if (!bSelfBody)		// 내 캐릭터 몸은 제 카메라를 본다 — 겨눔이 보는 카메라 방향이다(헤더 bSelfBody 주석)
+	{
+		PC->bAutoManageActiveCameraTarget = false;
+		PC->SetViewTargetWithBlend(Cam, 0.f);
+	}
 
 	if (GEngine && GEngine->GameViewport) GEngine->GameViewport->RemoveAllViewportWidgets();	// 조준점·체력바를 뺀다
 
@@ -957,7 +1065,7 @@ void UMOBAnimCompareSubsystem::DriveFoe(float DeltaTime)
 		else Target->StopJumping();
 	}
 	if (S.bMove) Target->AddMovementInput(FRotator(0.f, BodyYaw + MoveAngle, 0.f).Vector(), 1.f);
-	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::AdsLong || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee) RunEvents(DeltaTime);
+	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::AdsLong || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee || Script == EMOBACScript::Dash) RunEvents(DeltaTime);
 }
 
 // 사건 경로 — 조각 안의 사건 시각이 이 프레임 [SegmentTime, SegmentTime + DeltaTime) 에 들면 일으킨다. 대기(DeltaTime 0)에는 안 일으킨다.
@@ -978,6 +1086,12 @@ void UMOBAnimCompareSubsystem::RunEvents(float DeltaTime)
 	{
 		bFoeMeleeReleasePending = false;
 		if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get()))) A->AbilityInputTagReleased(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.Melee")));
+		else ++EvNoAsc;
+	}
+	if (bFoeDashReleasePending)
+	{
+		bFoeDashReleasePending = false;
+		if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get()))) A->AbilityInputTagReleased(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.Dash")));
 		else ++EvNoAsc;
 	}
 	const FScriptSegment& S = Seg(Script, Segment);
@@ -1054,6 +1168,17 @@ void UMOBAnimCompareSubsystem::RunEvents(float DeltaTime)
 			else ++EvHitFail;
 			FrameEvents += Ev == EACEvent::HitBack ? TEXT("hit_back;") : TEXT("hit_front;");
 			break;
+		case EACEvent::Dash:
+			// 사람 입력과 같은 InputTag.Ability.Dash 누름, 다음 프레임에 뗀다(근접과 같은 길). 켜졌는지는 아래 dash_start 로 본다
+			if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get())))
+			{
+				A->AbilityInputTagPressed(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.Dash")));
+				bFoeDashReleasePending = true;
+				++EvDash;
+			}
+			else ++EvNoAsc;
+			FrameEvents += TEXT("dash;");
+			break;
 		case EACEvent::None:
 			break;
 		}
@@ -1065,6 +1190,27 @@ void UMOBAnimCompareSubsystem::RunEvents(float DeltaTime)
 		// 조준은 누르는 동안 매 프레임 「눌림」 — IA_ADS 는 트리거가 없어 눌린 동안 매 프레임 Triggered, Lyra 는 그때마다 Pressed 를 보낸다(원본 기준)
 		if (bFoeAdsHeld) A->AbilityInputTagPressed(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.ADS")));
 		A->ProcessAbilityInput(DeltaTime, false);
+		// 대시 능력 켜짐 가장자리(내용 기록 도구 DuringDash 와 같은 판정) — 이 프레임 줄의 events 칸에 남긴다. 누름이 켰는지 · 능력 길이(파일럿 32프레임)를 본다.
+		// 몽타주 끝은 능력 끝과 따로다 — 자산 길이 − 빼기 0.33초에 스스로 뺀다(D-4-b 파일럿, 방향마다 35~41프레임)
+		if (Script == EMOBACScript::Dash)
+		{
+			bool bActive = false;
+			for (const FGameplayAbilitySpec& Spec : A->GetActivatableAbilities())
+			{
+				if (Spec.Ability && Spec.IsActive() && Spec.Ability->GetClass()->GetName().Contains(TEXT("GA_Hero_Dash"))) bActive = true;
+			}
+			if (bActive && !bDashWasActive)
+			{
+				++EvDashStart;
+				FrameEvents += TEXT("dash_start;");
+			}
+			else if (!bActive && bDashWasActive)
+			{
+				++EvDashEnd;
+				FrameEvents += TEXT("dash_end;");
+			}
+			bDashWasActive = bActive;
+		}
 	}
 	else ++EvNoAsc;
 }
@@ -1432,7 +1578,7 @@ void UMOBAnimCompareSubsystem::Finish()
 		const bool bProfSaved = !BlendProfileCsv.IsEmpty() && FFileHelper::SaveStringToFile(BlendProfileCsv, *ProfilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP montages seen=%d maxLive=%d saved=%d profilesSaved=%d"), SeenMontages.Num(), MaxLiveMontages, bMontSaved ? 1 : 0, bProfSaved ? 1 : 0);
 	}
-	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::AdsLong || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee)
+	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::AdsLong || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee || Script == EMOBACScript::Dash)
 	{
 		// 종류마다 센 값 — 경로 표에 적힌 수(판 둘 × 조각의 사건 수)와 대조한다
 		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP events weapon=%s fire=%d hold=%d release=%d reload=%d swap=%d swapFail=%d spawn=%d spawnFail=%d adsOn=%d adsOff=%d noAsc=%d"),
@@ -1440,6 +1586,12 @@ void UMOBAnimCompareSubsystem::Finish()
 		if (Script == EMOBACScript::Melee)
 		{
 			UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP meleeEvents weapon=%s melee=%d hitBack=%d hitFront=%d hitFail=%d crouchOn=%d crouchOff=%d"), WEAPON_KEYS[WeaponIndex], EvMelee, EvHitBack, EvHitFront, EvHitFail, EvCrouchOn, EvCrouchOff);
+		}
+		if (Script == EMOBACScript::Dash)
+		{
+			// 누름 수 = 경로 표의 대시 수 × 판 둘. 켜짐 · 꺼짐 = 실제 능력 가장자리(누름보다 적으면 막힌 누름이 있었다)
+			UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP dashEvents weapon=%s dash=%d start=%d end=%d melee=%d crouchOn=%d crouchOff=%d selfBody=%d bodyTries=%d"),
+				WEAPON_KEYS[WeaponIndex], EvDash, EvDashStart, EvDashEnd, EvMelee, EvCrouchOn, EvCrouchOff, bSelfBody ? 1 : 0, BodyTries);
 		}
 		if (Script == EMOBACScript::Crouch)
 		{
@@ -1470,7 +1622,7 @@ void UMOBAnimCompareSubsystem::Tick(float DeltaTime)
 	{
 	case EStage::WaitActors:
 		WaitSeconds += DeltaTime;
-		if (IsMatchPlaying(DeltaTime) && Prepare())
+		if (IsMatchPlaying(DeltaTime) && (!bSelfBody || SelfBodyReady(DeltaTime)) && Prepare())
 		{
 			BeginPass();
 			SettleLeft = FIRST_SETTLE_SECONDS;
