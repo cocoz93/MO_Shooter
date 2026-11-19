@@ -26,7 +26,7 @@
 //   --breakMelee(--melee 와 함께)는 화면 판정 밀기를 반으로 넣는다 — 서버 결과로 고친 수(meleeFix forceFixes)가 화면 맞음 수만큼 늘어야 한다
 // 판정 대조(후보 1, 7단계): --judgeClips=<클립 파일> --judgeLog=<파일> [--judgeNoSpread] 면 봇이 화면 역할을 한다.
 //   받은 상태로 서버와 같은 식의 몸 자세를 만들어 탄마다 자기 판정을 남긴다. 서버 --rewindBulletLog 줄과 Tools/Regress/check_bot_hits.py 로 견준다
-//   --judgeFireAlways 면 적이 안 보여도 방아쇠를 놓지 않는다(10명 전원 연사 비용 측정)
+//   --judgeFireAlways 면 적이 안 보여도 방아쇠를 놓지 않는다(10명 전원 연사 비용 측정) — 판정 대조 밖(부하 판)에서도 먹는다(D95)
 #include "AnimClips.h"
 #include "AnimPose.h"
 #include "AnimState.h"
@@ -121,7 +121,7 @@ namespace
 		std::string judgeClips;			// 주면 봇이 화면 역할로 탄마다 자기 판정을 남긴다(후보 1, 7단계). measureView 를 함께 켠다
 		std::string judgeLog;
 		bool judgeNoSpread = false;		// 서버 --rewindNoSpread 와 같이 쓴다 — 자세만 본다
-		bool judgeFireAlways = false;	// 비용 측정 — 적이 보이든 말든 방아쇠를 놓지 않는다(10명 전원 연사)
+		bool judgeFireAlways = false;	// 비용 측정 — 적이 보이든 말든 방아쇠를 놓지 않는다(10명 전원 연사). 이름은 판정 대조 때 만든 그대로, 부하 판에서도 먹는다
 		std::string script;				// 주면 두뇌 대신 정해진 경로를 달린다
 		double scriptHoldSeconds = 4.5;	// 자리에 선 뒤 경로 시작까지 — 촬영 쪽 대기 4초보다 길고, 첫 서 있기 2초를 더해도 제자리 장난 동작(서 있은 지 7.35초)이 나오기 전에 출발해야 합격 영상과 같다. 권총은 6.35초라 촬영 스크립트(record_remote_shot.ps1)가 4.25초를 준다
 		uint8_t scriptWeapon = (uint8_t)EWeapon::Rifle;	// --scriptWeapon=pistol|rifle|shotgun — 경로 중 드는 무기(무기별 자세 촬영, 9단계)
@@ -245,7 +245,6 @@ namespace
 		uint64_t bodiesByWeapon[(size_t)EWeapon::Count] = {};	// 판정에 넣은 몸을 그 틱 묶음별로
 		FILE* log = nullptr;
 		bool noSpread = false;
-		bool fireAlways = false;
 		double crouchLift = 0;		// 앉은 메시 올림 — 서버 GetPoseAt 과 같은 값 · 같은 섞기(D64)
 	};
 
@@ -468,6 +467,7 @@ namespace
 		void SetCrouchToggle(bool on, bool breakCrouch) { _crouchToggle = on; _breakCrouch = breakCrouch; }
 		void SetMelee(bool on, bool breakPush) { _meleeNear = on; _breakMelee = breakPush; }
 		void SetPush(bool on) { _push = on; }
+		void SetFireAlways(bool on) { _fireAlways = on; }
 		void SetPauseAfterSpawn(int ticks) { _pauseAfterSpawn = ticks; }
 		uint64_t GetPawnReconciles() const { return _pawnReconciles; }
 		uint64_t GetPawnCorrected() const { return _pawnCorrected; }
@@ -1475,7 +1475,7 @@ namespace
 				input.buttons |= wire::BUTTON_RELOAD;
 			}
 			// 죽어 있어도 방아쇠를 놓지 않는다 — 서버가 거절하는지 보려고. 대기 중에도 쏜다 — 피해 0 인지 보려고
-			if (!_push && (canShoot || _self.IsWaitingSpawn() || (_judge && _judge->fireAlways))) input.buttons |= wire::BUTTON_FIRE;	// --push 는 안 쏜다(아무도 안 죽어야 계속 부딪힌다)
+			if (!_push && (canShoot || _self.IsWaitingSpawn() || _fireAlways)) input.buttons |= wire::BUTTON_FIRE;	// --push 는 안 쏜다(아무도 안 죽어야 계속 부딪힌다)
 			// --ads — 적이 보이면 겨눈다(사람이 쏠 때 누르는 꼴). 시선은 네 틱마다 다시 보므로 켜고 끄는 일이 잦아 덜 섞인 채 풀기까지 지난다. 난수는 안 쓴다 — 끈 판과 경로가 같다
 			if (_adsWhenShooting && canShoot)
 			{
@@ -1641,6 +1641,7 @@ namespace
 		double _capsuleRadius = 0, _capsuleHalfHeight = 0, _crouchLift = 0;
 		// 사람끼리 막기(F-2) — rules.pawnBlock 이면 예측이 남 캡슐(마지막으로 받은 상태)을 보고, 서버와 어긋나면 Reconcile 로 고친다
 		bool _push = false;				// --push — 쏘지 않고 가장 가까운 사람(팀 상관없이) 쪽으로 걷는다. 옆걸음 · 돌아가기 없음
+		bool _fireAlways = false;		// --judgeFireAlways — 적이 보이든 말든 방아쇠를 놓지 않는다. 판정 대조 · 부하 판 어느 쪽에서나(D95 한계 측정 = 전원 연사)
 		std::vector<PawnCapsule> _pawnScratch;
 		std::map<uint32_t, uint32_t> _playerTick;		// 사람마다 마지막으로 상태에 실린 틱 — 나간 사람을 남 캡슐에서 빼려고
 		uint64_t _pawnReconciles = 0, _pawnCorrected = 0, _fallDiff = 0;
@@ -1769,7 +1770,6 @@ int main(int argc, char** argv)
 		judge.localTo.resize(judge.evaluators[0].BoneCount());
 		judge.localBlend.resize(judge.evaluators[0].BoneCount());
 		judge.noSpread = args.judgeNoSpread;
-		judge.fireAlways = args.judgeFireAlways;
 		judge.crouchLift = sim.CrouchMeshLiftZ();
 		if (!args.judgeLog.empty()) judge.log = std::fopen(args.judgeLog.c_str(), "w");
 	}
@@ -1783,6 +1783,7 @@ int main(int argc, char** argv)
 		bots.back()->SetCrouchToggle(args.crouchToggle, args.breakCrouch);
 		bots.back()->SetMelee(args.meleeNear, args.breakMelee);
 		bots.back()->SetPush(args.push);
+		bots.back()->SetFireAlways(args.judgeFireAlways);
 		bots.back()->SetPauseAfterSpawn(args.testPauseAfterSpawn);
 		bots.back()->SetJudge(judging ? &judge : nullptr);
 		if (!args.script.empty()) bots.back()->SetScript(args.scriptHoldSeconds, args.scriptWeapon, args.script);

@@ -13,7 +13,8 @@ param(
 	[string]$Tag = "",
 	[string]$OutDir = "",
 	[string]$Map = "$env:USERPROFILE\Desktop\MyGit\MO_Shooter\Client\Lyra\Saved\MOB\map_expanse.mocl",
-	[switch]$NoPawnBlock		# 시험 전용 — 사람끼리 막기를 서버 · 더미 둘 다 끈다(--testNoPawnBlock, D83). 위치 어긋남 0 을 엄격히 볼 때
+	[switch]$NoPawnBlock,		# 시험 전용 — 사람끼리 막기를 서버 · 더미 둘 다 끈다(--testNoPawnBlock, D83). 위치 어긋남 0 을 엄격히 볼 때
+	[switch]$FireAlways		# 더미 전원 연사(--judgeFireAlways) — 적이 보이든 말든 계속 쏜다. 한계 측정 조건(D95)
 )
 $ErrorActionPreference = 'Stop'
 
@@ -78,6 +79,7 @@ for ($i = 0; $i -lt $processCount; ++$i) {
 		"--seconds=$botSeconds", "--measureFrom=$botMeasureFrom", "--measureSeconds=$MeasureSeconds"
 	)
 	if ($NoPawnBlock) { $botArgs += "--testNoPawnBlock" }
+	if ($FireAlways) { $botArgs += "--judgeFireAlways" }
 	$bot = Start-Process -FilePath $botExe -ArgumentList $botArgs -PassThru -WindowStyle Hidden `
 		-RedirectStandardOutput "$runDir\bot$i.txt" -RedirectStandardError "$runDir\bot${i}_err.txt"
 	$null = $bot.Handle
