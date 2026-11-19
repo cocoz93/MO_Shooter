@@ -10,6 +10,8 @@ class ACharacter;
 class ALyraWeaponSpawner;
 struct FLyraAbilitySimpleFailureMessage;
 struct FLyraVerbMessage;
+struct FAbilityEndedData;
+class UGameplayAbility;
 class AController;
 class APawn;
 
@@ -284,4 +286,30 @@ private:
 	void LowerTargetScore(const TCHAR* StepName);
 	class UActorComponent* FindScoring() const;		// 게임 상태의 B_TeamDeathMatchScoring 부품(목표 점수 · 남은 시간 변수)
 	int32 TeamScore(int32 TeamId) const;			// 팀 처치 점수(ShooterGame.Score.Eliminations) — 없으면 −1
+
+	// G-0-c 섞어 누름 칸(묶음 13~16) — 다른 능력 누름 · 켜짐 · 꺼짐 프레임, Q 누름 수, 탄창 바뀜, 내 ASC 능력 알림(켜짐 · 꺼짐 · 못 켬). 칸마다 다시 채운다(BeginGrenade)
+	int32 GrenStepFrame = -1;				// 이 칸 시작 프레임(이 칸에서 생긴 수류탄 고르기)
+	int32 ComboOtherPress = -1;
+	int32 ComboOtherStart = -1;
+	int32 ComboOtherEnd = -1;
+	int32 ComboOtherCancelled = -1;			// 다른 능력의 첫 꺼짐 알림 — 1 = 취소로 꺼짐 · 0 = 제대로 끝남 · −1 = 알림 없음
+	int32 ComboQPresses = 0;
+	int32 ComboMagBegin = -1;
+	int32 ComboMagPrev = -1;
+	bool bComboOtherWas = false;
+	bool bComboQReleased = false;
+	bool bComboWatch = false;				// 능력 알림을 적는 칸인가
+	FString ComboMagChanges;				// 「프레임:앞>뒤」
+	FString ComboOns;						// 켜진 능력 「프레임:이름」
+	TMap<FString, FIntVector> ComboFails;	// 못 켬 「능력 까닭태그」 → (수, 첫 프레임, 끝 프레임)
+	int32 AbilSeqFrame = -1;
+	int32 AbilSeq = 0;
+	TWeakObjectPtr<class UAbilitySystemComponent> ComboAsc;
+	FDelegateHandle AbilOnHandle, AbilEndHandle, AbilFailHandle;
+	void DuringGrenCombo();
+	void WatchAbilities();					// 내 선수 상태 ASC 에 알림 셋을 건다(이미 걸었으면 그대로)
+	int32 NextAbilSeq();
+	void OnAbilOn(UGameplayAbility* Ability);
+	void OnAbilEnd(const FAbilityEndedData& Data);
+	void OnAbilFail(const UGameplayAbility* Ability, const FGameplayTagContainer& Tags);
 };

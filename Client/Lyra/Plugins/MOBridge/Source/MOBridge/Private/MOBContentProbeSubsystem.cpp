@@ -32,6 +32,7 @@
 #include "UObject/UnrealType.h"
 
 #include "AbilitySystem/Abilities/LyraAbilitySimpleFailureMessage.h"
+#include "AbilitySystem/Abilities/LyraGameplayAbility.h"
 #include "AbilitySystem/Attributes/LyraHealthSet.h"
 #include "AbilitySystem/LyraAbilitySystemComponent.h"
 #include "AbilitySystem/Phases/LyraGamePhaseSubsystem.h"
@@ -350,7 +351,11 @@ namespace
 	bool IsBlastPlace(EGrenPlace P) { return P >= EGrenPlace::BlastHit; }
 	// 뒤 셋(G-0-b2) — 칸 시작 체력(0 = 1000) · 수류탄이 생기고 이 프레임 뒤 스스로 죽음(−1 = 안 죽음). 최대 체력은 늘 1000
 	// 마지막(G-0-b3) — 수류탄이 생기고 이 프레임 뒤 상대가 나를 죽임(−1 = 안 함)
-	struct FGrenShot { const TCHAR* Name; EGrenPlace Place; float Pitch; float Arg; bool bRun; bool bJump; float FoeHp = 0.f; float MyHp = 0.f; int32 DieAfter = -1; int32 FoeKillAfter = -1; };
+	// G-0-c 섞어 누름(묶음 13~16) — Spam = 칸 안 GREN_PRESS_AT ~ GREN_SPAM_UNTIL 동안 매 프레임 Q(떼지 않음) · QFire / FireQ = 한 프레임에 Q 와 사격 탭(앞이 먼저 누름) ·
+	// ReloadQ · DashQ · MeleeQ = 그 능력을 누르고, 켜진 뒤 GrenComboSpec 의 QAfter 프레임에 Q
+	enum class EGrenCombo : uint8 { None, Spam, QFire, FireQ, ReloadQ, DashQ, MeleeQ };
+	struct FGrenShot { const TCHAR* Name; EGrenPlace Place; float Pitch; float Arg; bool bRun; bool bJump; float FoeHp = 0.f; float MyHp = 0.f; int32 DieAfter = -1; int32 FoeKillAfter = -1;
+		EGrenCombo Combo = EGrenCombo::None; };
 	const FGrenShot GREN_SHOTS[] = {
 		// 묶음 1 · 2 — 방향 · 피치(집, 몸 요 0). 하늘 둘(선이 안 맞는 갈래 — 짐작 1) · 수평 · 먼 바닥 둘 · 발밑(카메라가 위로 올라가 선 시작점도 바닥 위 — g0a4 카메라 z 542 · 시작 z 약 152 · 맞은 거리 118)
 		{ TEXT("sky_p45"),      EGrenPlace::Open,     45.f,  0.f,    false, false },	// 0
@@ -407,6 +412,13 @@ namespace
 		// 끝 단계에서 내가 다시 생긴 뒤 상대 몸 겨눔(g_immune 과 같은 직접 맞음 — 던져지나 · 피해)
 		{ TEXT("g_end_inflight"),   EGrenPlace::BlastCenter, -20.f, 200.f, false, false, 50.f, 0.f,  -1, 40 },	// 38
 		{ TEXT("g_end_throw"),      EGrenPlace::FoeAt,       0.f,   800.f, false, false, 0.f,  0.f,  -1, -1 },	// 39
+		// G-0-c 섞어 누름(묶음 13~16) — 모두 집에서 피치 0(p0 와 같은 세움 — 멀리 떨어져 자기 피해 없음, g0a4 p0 myDmg 0)
+		{ TEXT("c_spam"),           EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::Spam },		// 40
+		{ TEXT("c_q_fire"),         EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::QFire },	// 41
+		{ TEXT("c_fire_q"),         EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::FireQ },	// 42
+		{ TEXT("c_reload_q"),       EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::ReloadQ },	// 43
+		{ TEXT("c_dash_q"),         EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::DashQ },	// 44
+		{ TEXT("c_melee_q"),        EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::MeleeQ },	// 45
 	};
 	constexpr int32 GREN_LIFE_FIRST = 32;		// 이 차례부터 죽음 · 부활 길 — 칸 앞뒤로 점수판 줄(MOB_CPROBE_SCORE)
 	constexpr float FOE_KILL_DAMAGE = 5000.f;	// 상대가 나를 죽이는 피해(내 최대 체력 1000 보다 커서 한 번에 죽는다)
@@ -478,6 +490,15 @@ namespace
 		{ TEXT("g_self_kill"),      5.1f,  EAct::GrenThrow,      37.f, false },
 		{ TEXT("me_respawn4"),      12.0f, EAct::MeRespawnWait,  0.f,  false },
 		{ TEXT("me_settle4"),       3.0f,  EAct::Home,           0.f,  false },
+		// G-0-c 섞어 누름 — 경기 끝 칸 앞에 붙인다(앞 칸들 프레임 그대로 · 끝 단계가 판을 끝내서 그 뒤엔 못 붙인다).
+		// c_spam 21초 = 칸 안 16초까지 매 프레임 Q(생김 넷 · 간격 셋) + 마지막 쿨다운 5초가 다음 칸 누름 전에 끝남. 재장전 · 대시 칸 6초 = Q 가 칸 시작 뒤 0.6~0.7초라(g0c2 41 · 36프레임) 5.1초면 다음 칸 Q 와 쿨다운이 맞닿는다
+		{ TEXT("c_spam"),           21.0f, EAct::GrenThrow,      40.f, false },
+		{ TEXT("c_q_fire"),         5.1f,  EAct::GrenThrow,      41.f, false },
+		{ TEXT("c_fire_q"),         5.1f,  EAct::GrenThrow,      42.f, false },
+		{ TEXT("c_ammo"),           0.3f,  EAct::SetAmmo,        1.f,  false },	// 권총 4 · 48(재장전할 거리)
+		{ TEXT("c_reload_q"),       6.0f,  EAct::GrenThrow,      43.f, false },
+		{ TEXT("c_dash_q"),         6.0f,  EAct::GrenThrow,      44.f, false },
+		{ TEXT("c_melee_q"),        5.1f,  EAct::GrenThrow,      45.f, false },
 		// G-0-b3 경기 끝은 맨 뒤 — Phase_PostGame 은 NewGameTime(10초)을 기다린 뒤 능력 입력을 막고 다음 틱에 맵을 다시 연다(그래프 원본). 판은 내 입력이 막힌 프레임에 끝낸다(Tick).
 		// 끝 단계 시간 = 상대가 나를 죽인 뒤 g_end_inflight 남은 235프레임 + 부활 기다림 72프레임(죽고 307) + g_end_throw 180 + 칸 넘김 1 = 488(g0end1 · 2 실측)
 		// → end_block 은 막힘(상대가 나를 죽이고 600프레임 뒤, 실측)을 기다리는 한도 360(안 오면 그대로 끝) — 실측 112프레임째 막혔다
@@ -494,6 +515,39 @@ namespace
 	constexpr int32 GREN_RUN_AFTER = 10;		// 달리며 칸 — 누른 뒤 이 프레임까지 더 달린다(켜지는 다음 프레임이 달리는 중이도록)
 	constexpr float GREN_JUMP_AT = 0.3f;		// 점프 칸 — 점프 누름(점프 능력 InputTag.Jump)
 	constexpr int32 GREN_JUMP_THROW_AFTER = 12;	// 점프 누른 뒤 Q 까지 — 오르는 중(제안값)
+	// 섞어 누름 칸(G-0-c) — 매 프레임 Q 를 그치는 칸 안 시각(16초 = 누름 시작 0.5초 + 쿨다운 5초 셋 + 여유 0.5초 → 간격이 301 이어도 생김 넷) · 재장전이 켜지고 Q 까지(제안값)
+	constexpr float GREN_SPAM_UNTIL = 16.0f;
+	constexpr int32 GREN_RELOAD_Q_AFTER = 10;
+	// 섞어 누름 칸의 다른 능력 — 입력 표식 · 능력 클래스 이름 조각 · 켜진 뒤 Q 까지 프레임(−1 = Q 와 같은 프레임에 누름). 대시 · 근접은 대시 판 「대시 중 누름」과 같은 5
+	struct FGrenComboSpec { const TCHAR* OtherTag; const TCHAR* OtherAbility; int32 QAfter; };
+	FGrenComboSpec GrenComboSpec(EGrenCombo C)
+	{
+		switch (C)
+		{
+		case EGrenCombo::Spam:    return { nullptr, nullptr, -1 };
+		case EGrenCombo::QFire:
+		case EGrenCombo::FireQ:   return { TEXT("InputTag.Weapon.Fire"),   TEXT("GA_Weapon_Fire"),    -1 };
+		case EGrenCombo::ReloadQ: return { TEXT("InputTag.Weapon.Reload"), TEXT("GA_Weapon_Reload_"), GREN_RELOAD_Q_AFTER };
+		case EGrenCombo::DashQ:   return { TEXT("InputTag.Ability.Dash"),  TEXT("GA_Hero_Dash"),      DASH_ACTION_AFTER };
+		case EGrenCombo::MeleeQ:  return { TEXT("InputTag.Ability.Melee"), TEXT("GA_Melee"),          DASH_ACTION_AFTER };
+		case EGrenCombo::None:    break;
+		}
+		return { nullptr, nullptr, -1 };
+	}
+	const TCHAR* GrenComboName(EGrenCombo C)
+	{
+		switch (C)
+		{
+		case EGrenCombo::Spam:    return TEXT("spam");
+		case EGrenCombo::QFire:   return TEXT("q_fire");
+		case EGrenCombo::FireQ:   return TEXT("fire_q");
+		case EGrenCombo::ReloadQ: return TEXT("reload_q");
+		case EGrenCombo::DashQ:   return TEXT("dash_q");
+		case EGrenCombo::MeleeQ:  return TEXT("melee_q");
+		case EGrenCombo::None:    break;
+		}
+		return TEXT("none");
+	}
 	// GA_Grenade 방향 고르기 · B_Grenade 폭발 값 — grenade-plan.md 「Lyra」 표(원본 기준). 시험판(LogAimTrace · LogBoom)이 같은 식으로 다시 해 본다
 	constexpr double GREN_TRACE_START = 450.0;	// Start Trace Offset — 선 시작 = 카메라 + 방향 × 450
 	constexpr double GREN_TRACE_RANGE = 3150.0;	// Default Targeting Range — 선 끝 = 카메라 + 방향 × 3150
@@ -2351,6 +2405,12 @@ void UMOBContentProbeSubsystem::Finish(bool bOk)
 	if (FailMsgHandle.IsValid()) FailMsgHandle.Unregister();
 	for (FGameplayMessageListenerHandle& H : VerbHandles) H.Unregister();
 	if (SpawnedHandle.IsValid() && GetWorld()) GetWorld()->RemoveOnActorSpawnedHandler(SpawnedHandle);
+	if (UAbilitySystemComponent* A = ComboAsc.Get())
+	{
+		A->AbilityActivatedCallbacks.Remove(AbilOnHandle);
+		A->OnAbilityEnded.Remove(AbilEndHandle);
+		A->AbilityFailedCallbacks.Remove(AbilFailHandle);
+	}
 	LogBodies(TEXT("end"));
 	if (bGrenade)
 	{
@@ -2801,6 +2861,20 @@ void UMOBContentProbeSubsystem::BeginGrenade()
 	}
 	GrenMyHpAtBegin = HealthOf(Ch);
 	GrenFoeHpAtBegin = HealthOf(Foe.Get());
+	// 섞어 누름 칸(G-0-c) — 칸 값을 비우고 능력 알림을 켠다(다른 칸에선 알림이 와도 안 적는다)
+	GrenStepFrame = Frame;
+	ComboOtherPress = ComboOtherStart = ComboOtherEnd = ComboOtherCancelled = -1;
+	ComboQPresses = 0;
+	bComboOtherWas = bComboQReleased = false;
+	ComboMagChanges.Reset();
+	ComboOns.Reset();
+	ComboFails.Reset();
+	bComboWatch = G.Combo != EGrenCombo::None;
+	if (bComboWatch)
+	{
+		WatchAbilities();
+		ComboMagBegin = ComboMagPrev = ActiveMagazine();
+	}
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GPLACE step=%s shot=%s place=%d pitch=%.1f arg=%.1f run=%d jump=%d me=%s aim=%d aimAt=%s myHp=%.1f foeHp=%.1f %s"),
 		S.Name, G.Name, (int32)G.Place, G.Pitch, G.Arg, G.bRun ? 1 : 0, G.bJump ? 1 : 0, Ch ? *Ch->GetActorLocation().ToString() : TEXT("-"), bGrenAim ? 1 : 0,
 		*GrenAimPoint.ToString(), GrenMyHpAtBegin, GrenFoeHpAtBegin, *GrenWhere);
@@ -2842,6 +2916,11 @@ void UMOBContentProbeSubsystem::DuringGrenade()
 		FrameEvents += TEXT("foekill;");
 	}
 	if (!Ch) return;
+	if (G.Combo != EGrenCombo::None)
+	{
+		DuringGrenCombo();	// 섞어 누름 칸은 누름 · 뗌을 따로 한다(세움은 Open — 겨눔 · 벽 맞춤 · 달리기 · 점프 없음)
+		return;
+	}
 	const bool bBeforePress = GrenPressFrame < 0;
 	if (bGrenAim && bBeforePress) AimAt(GrenAimPoint);
 	// 벽 카메라 거리 — 카메라에서 시선 방향 무기 채널 선(나 빼고)이 벽에 닿는 거리를 재 몸을 벽 쪽으로 (잰 거리 − Arg) 옮긴다.
@@ -3035,4 +3114,184 @@ void UMOBContentProbeSubsystem::EndGrenade()
 	// 앉은 과녁 칸 — 다음 칸 전에 세운다
 	if (G.Place == EGrenPlace::BlastCrouch && Foe.IsValid()) Foe->UnCrouch();
 	if ((int32)S.Arg >= GREN_LIFE_FIRST) LogScores(S.Name);
+	// 섞어 누름 칸(G-0-c) 요약 — 이 칸에서 생긴 수류탄 프레임 · 간격(짐작 8) · 다른 능력 프레임 · 탄창 바뀜 · 못 켬 까닭별 (수, 첫, 끝)
+	if (G.Combo != EGrenCombo::None)
+	{
+		FString Spawns, Gaps;
+		int32 Prev = -1;
+		for (const FGrenRec& R : Grens)
+		{
+			if (R.SpawnFrame < GrenStepFrame) continue;
+			Spawns += FString::Printf(TEXT("%d "), R.SpawnFrame);
+			if (Prev >= 0) Gaps += FString::Printf(TEXT("%d "), R.SpawnFrame - Prev);
+			Prev = R.SpawnFrame;
+		}
+		FString Fails;
+		for (const TPair<FString, FIntVector>& KV : ComboFails) Fails += FString::Printf(TEXT("%s:%d:%d-%d "), *KV.Key, KV.Value.X, KV.Value.Y, KV.Value.Z);
+		const FGrenComboSpec C = GrenComboSpec(G.Combo);
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GCOMBO step=%s combo=%s other=%s otherPress=%d otherStart=%d otherEnd=%d otherCancelled=%d qPresses=%d qFirst=%d spawns=[%s] gaps=[%s] ")
+			TEXT("magBegin=%d magEnd=%d mag=[%s] ons=[%s] fails=[%s]"),
+			S.Name, GrenComboName(G.Combo), C.OtherAbility ? C.OtherAbility : TEXT("-"), ComboOtherPress, ComboOtherStart, ComboOtherEnd, ComboOtherCancelled, ComboQPresses, GrenPressFrame,
+			*Spawns.TrimEnd(), *Gaps.TrimEnd(), ComboMagBegin, ActiveMagazine(), *ComboMagChanges.TrimEnd(), *ComboOns.TrimEnd(), *Fails.TrimEnd());
+		bComboWatch = false;
+	}
+}
+
+// 섞어 누름 칸 한 프레임(G-0-c) — 다른 능력 켜짐 가장자리 · 탄창 바뀜을 보고, 칸 종류대로 Q 와 다른 능력을 누르고 뗀다(여기서 누른 것은 다음 프레임 입력 처리에서 켜진다)
+void UMOBContentProbeSubsystem::DuringGrenCombo()
+{
+	const FStep& S = StepAt(ScriptIdx(), Step);
+	const FGrenShot& G = GrenShotAt(S.Arg);
+	const FGrenComboSpec C = GrenComboSpec(G.Combo);
+	if (C.OtherAbility)
+	{
+		const bool bOn = IsAbilityActive(C.OtherAbility);
+		if (bOn && !bComboOtherWas)
+		{
+			if (ComboOtherStart < 0) ComboOtherStart = Frame;
+			FrameEvents += TEXT("other_start;");
+		}
+		else if (!bOn && bComboOtherWas)
+		{
+			if (ComboOtherEnd < 0) ComboOtherEnd = Frame;
+			FrameEvents += TEXT("other_end;");
+		}
+		bComboOtherWas = bOn;
+	}
+	const int32 Mag = ActiveMagazine();
+	if (Mag != ComboMagPrev)
+	{
+		ComboMagChanges += FString::Printf(TEXT("%d:%d>%d "), Frame, ComboMagPrev, Mag);
+		ComboMagPrev = Mag;
+	}
+	const auto PressQ = [this]()
+	{
+		PressTag(GREN_TAG, true);
+		if (GrenPressFrame < 0)
+		{
+			GrenPressFrame = Frame;
+			GrenCdAtPress = GrenadeCooldownLeft();
+		}
+		++ComboQPresses;
+		FrameEvents += TEXT("g_press;");
+	};
+	const auto PressOther = [this, &C](bool bPress)
+	{
+		PressTag(C.OtherTag, bPress);
+		if (bPress) ComboOtherPress = Frame;
+		FrameEvents += bPress ? TEXT("other_press;") : TEXT("other_release;");
+	};
+	switch (G.Combo)
+	{
+	case EGrenCombo::Spam:
+		// 매 프레임 누름(떼지 않음 — 대시 판 DashSpam 과 같음). 그친 프레임에 한 번 뗀다
+		if (StepTime >= GREN_PRESS_AT && StepTime < GREN_SPAM_UNTIL) PressQ();
+		else if (GrenPressFrame >= 0 && !bComboQReleased)
+		{
+			PressTag(GREN_TAG, false);
+			bComboQReleased = true;
+			FrameEvents += TEXT("g_release;");
+		}
+		break;
+	case EGrenCombo::QFire:
+	case EGrenCombo::FireQ:
+		if (GrenPressFrame < 0 && StepTime >= GREN_PRESS_AT)
+		{
+			if (G.Combo == EGrenCombo::QFire) { PressQ(); PressOther(true); }
+			else { PressOther(true); PressQ(); }
+		}
+		else if (GrenPressFrame >= 0 && Frame == GrenPressFrame + 1)
+		{
+			PressTag(GREN_TAG, false);
+			FrameEvents += TEXT("g_release;");
+			PressOther(false);
+		}
+		break;
+	case EGrenCombo::ReloadQ:
+	case EGrenCombo::DashQ:
+	case EGrenCombo::MeleeQ:
+		if (ComboOtherPress < 0 && StepTime >= GREN_PRESS_AT) PressOther(true);
+		else if (ComboOtherPress >= 0 && Frame == ComboOtherPress + 1) PressOther(false);
+		if (GrenPressFrame < 0 && ComboOtherStart >= 0 && Frame >= ComboOtherStart + C.QAfter) PressQ();
+		else if (GrenPressFrame >= 0 && Frame == GrenPressFrame + 1)
+		{
+			PressTag(GREN_TAG, false);
+			FrameEvents += TEXT("g_release;");
+		}
+		break;
+	case EGrenCombo::None:
+		break;
+	}
+}
+
+// 내 선수 상태 ASC 에 능력 알림 셋 — 켜짐(AbilityActivatedCallbacks) · 꺼짐(OnAbilityEnded — 취소 깃발) · 못 켬(AbilityFailedCallbacks — 까닭 태그).
+// ASC 는 선수 상태에 있어 부활해도 같다(g0c2 — 부활 넷 뒤 c_spam 에서 건 ASC 주인 = LyraPlayerState_0). 다르면 옛 것에서 떼고 새로 건다
+void UMOBContentProbeSubsystem::WatchAbilities()
+{
+	UAbilitySystemComponent* A = MyPSASC();
+	if (!A || A == ComboAsc.Get()) return;
+	if (UAbilitySystemComponent* Old = ComboAsc.Get())
+	{
+		Old->AbilityActivatedCallbacks.Remove(AbilOnHandle);
+		Old->OnAbilityEnded.Remove(AbilEndHandle);
+		Old->AbilityFailedCallbacks.Remove(AbilFailHandle);
+	}
+	ComboAsc = A;
+	AbilOnHandle = A->AbilityActivatedCallbacks.AddUObject(this, &UMOBContentProbeSubsystem::OnAbilOn);
+	AbilEndHandle = A->OnAbilityEnded.AddUObject(this, &UMOBContentProbeSubsystem::OnAbilEnd);
+	AbilFailHandle = A->AbilityFailedCallbacks.AddUObject(this, &UMOBContentProbeSubsystem::OnAbilFail);
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GABIL_WATCH frame=%d asc=%s owner=%s"), Frame, *GetNameSafe(A), *GetNameSafe(A->GetOwner()));
+	// 능력마다 켜는 방식(0 = 누른 프레임 · 1 = 누르고 있는 동안 · 2 = 생길 때) — Lyra 입력 처리는 「누르고 있는 동안」 능력을 먼저 모으고 「누른 프레임」 능력을 뒤에 모아
+	// 그 차례로 켠다(LyraAbilitySystemComponent.cpp:232-283). 같은 프레임 Q + 사격이 누른 차례와 상관없이 사격 먼저 켜지면(g0c1) 사격이 1 이어야 한다
+	for (const FGameplayAbilitySpec& Spec : A->GetActivatableAbilities())
+	{
+		const ULyraGameplayAbility* L = Cast<ULyraGameplayAbility>(Spec.Ability);
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GABIL_SPEC ability=%s policy=%d tags=[%s]"), *GetNameSafe(Spec.Ability ? Spec.Ability->GetClass() : nullptr),
+			L ? (int32)L->GetActivationPolicy() : -1, *Spec.GetDynamicSpecSourceTags().ToStringSimple());
+	}
+}
+
+// 한 프레임 안 알림 차례(프레임이 바뀌면 0 부터)
+int32 UMOBContentProbeSubsystem::NextAbilSeq()
+{
+	if (AbilSeqFrame != Frame)
+	{
+		AbilSeqFrame = Frame;
+		AbilSeq = 0;
+	}
+	return AbilSeq++;
+}
+
+void UMOBContentProbeSubsystem::OnAbilOn(UGameplayAbility* Ability)
+{
+	if (!bComboWatch) return;
+	const FString Name = GetNameSafe(Ability ? Ability->GetClass() : nullptr);
+	ComboOns += FString::Printf(TEXT("%d:%s "), Frame, *Name);
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GABIL frame=%d seq=%d step=%s ev=on ability=%s"), Frame, NextAbilSeq(), StepAt(ScriptIdx(), Step).Name, *Name);
+}
+
+void UMOBContentProbeSubsystem::OnAbilEnd(const FAbilityEndedData& Data)
+{
+	if (!bComboWatch) return;
+	const FString Name = GetNameSafe(Data.AbilityThatEnded ? Data.AbilityThatEnded->GetClass() : nullptr);
+	const FGrenComboSpec C = GrenComboSpec(GrenShotAt(StepAt(ScriptIdx(), Step).Arg).Combo);
+	if (C.OtherAbility && ComboOtherCancelled < 0 && Name.Contains(C.OtherAbility)) ComboOtherCancelled = Data.bWasCancelled ? 1 : 0;
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GABIL frame=%d seq=%d step=%s ev=end ability=%s cancelled=%d"), Frame, NextAbilSeq(), StepAt(ScriptIdx(), Step).Name, *Name,
+		Data.bWasCancelled ? 1 : 0);
+}
+
+// 못 켬은 매 프레임 Q 칸에서 쿨다운 동안 프레임마다 온다 — 까닭(능력 + 태그)마다 첫 번만 줄로 적고 나머지는 셈만(요약 GCOMBO fails)
+void UMOBContentProbeSubsystem::OnAbilFail(const UGameplayAbility* Ability, const FGameplayTagContainer& Tags)
+{
+	if (!bComboWatch) return;
+	const FString Key = FString::Printf(TEXT("%s[%s]"), *GetNameSafe(Ability ? Ability->GetClass() : nullptr), *Tags.ToStringSimple());
+	FIntVector* V = ComboFails.Find(Key);
+	if (V)
+	{
+		++V->X;
+		V->Z = Frame;
+		return;
+	}
+	ComboFails.Add(Key, FIntVector(1, Frame, Frame));
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GABIL frame=%d seq=%d step=%s ev=fail what=%s cd=%.4f"), Frame, NextAbilSeq(), StepAt(ScriptIdx(), Step).Name, *Key, GrenadeCooldownLeft());
 }
