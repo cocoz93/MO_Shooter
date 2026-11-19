@@ -213,6 +213,38 @@ melee_q MELEE restHand fails=0
 melee_q MELEE push compared=21 fails=0 frames=403 blocked=9 maxPosDiff=0.0019 maxVelDiff=0.0071 walkCells=2 fallCells=2 inputFrames=28 fallingIterations=29
 melee_q MELEE pushCount applied=21 replaced=0 prepared=61 finished=20 restores=60 adds=61 external=0 apexRefund=0
 melee_q MELEECHECK PASS events=45 inputFails=0 fails=0
+dash DASH ok step=fwd dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=back dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=-1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=left dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=0.000,-1850.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=right dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=0.000,1850.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=fwd_left dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1308.148,-1308.148,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=fwd_right dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1308.148,1308.148,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=back_left dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=-1308.148,-1308.148,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=back_right dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=-1308.148,1308.148,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=still_yaw0 dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=605.44
+dash DASH ok step=pitch_up20 dashes=1 melee=0 crouchKeys=0 homes=0 frames=191 force=1695.349,0.000,740.468 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=573.95
+dash DASH ok step=pitch_up45 dashes=1 melee=0 crouchKeys=0 homes=0 frames=191 force=1184.341,0.000,1421.209 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=933.50
+dash DASH ok step=pitch_down20 dashes=1 melee=0 crouchKeys=0 homes=0 frames=191 force=1695.349,0.000,-740.468 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=440.21
+dash DASH ok step=jump_apex dashes=1 melee=0 crouchKeys=0 homes=0 frames=100 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=624.45
+dash DASH ok step=crouch_fwd dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=spam dashes=4 melee=0 crouchKeys=0 homes=3 frames=296 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=598.09
+dash DASH ok step=during_fire_tap dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=during_fire_hold dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=during_reload dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=during_melee dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=during_jump_tap dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=during_jump_hold dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=during_ads_hold dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=ads_then_dash dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=fire_then_dash dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=reload_dash dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
+dash DASH ok step=melee_dash dashes=1 melee=1 crouchKeys=0 homes=0 frames=101 force=0.000,1850.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=560.60
+dash DASH ok step=wall dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0007 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=71.98
+dash DASH ok step=crouch_same dashes=1 melee=0 crouchKeys=1 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=522.64
+dash DASH move compared=28 fails=0 frames=3292 maxPosDiff=0.0000 maxVelDiff=0.0007 dashes=31 melee=1 crouchKeys=1 cut=0 badMontage=0 homes=3 badHome=0
+dash DASH noForce compared=28 fails=28 minMaxPosDiff=71.98
+dash DASH forceCount applied=32 second=1 replaced=0 prepared=466 finished=31 removed=1 clamped=31 zAdds=467 liftoffs=2 restores=468 adds=468 external=0 apexRefund=0
+dash DASHCHECK PASS steps=28 dashes=31 fails=0
 map_expanse CHECK kind=A total=15000 bothHit=9225 bothMiss=5775 onlyLyra=0 onlyMine=0 lyraPen=4351 penMismatch=0 maxDiff=0.0910 p99Diff=0.00074 over0.1=0 over1=0
 map_expanse NORMAL kind=A compared=4874 over0.01=91 over0.1=90 max=1.4142 | startPen compared=4351 over0.1=663
 map_expanse CHECK kind=C total=15000 bothHit=9213 bothMiss=5772 onlyLyra=15 onlyMine=0 lyraPen=6125 penMismatch=0 maxDiff=451.8685 p99Diff=0.00566 over0.1=38 over1=20

@@ -761,7 +761,7 @@ namespace mo
 				++_count.rootForceExternal;
 			}
 		}
-		const bool hasRootForce = rootForce.active;		// HasRootMotionSources — 지우기 전에 본다. 그래서 막 끝난 이동에도 준비가 돌아 hasAdditive 가 꺼진다
+		const bool hasRootForce = rootForce.count > 0;	// HasRootMotionSources — 지우기 전에 본다. 그래서 막 끝난 이동에도 준비가 돌아 hasAdditive 가 꺼진다
 		if (hasRootForce) CleanUpRootForce();
 		const Vec3 oldVelocity = s.velocity;
 		UpdateCharacterStateBeforeMovement();
@@ -790,49 +790,118 @@ namespace mo
 		s.lastUpdateVelocity = s.velocity;		// PerformMovement 끝(3165)
 	}
 
-	// ---------------------------------------------------------------- 루트 모션 힘(근접 밀기, 컨텐츠 E-2-1)
+	// ---------------------------------------------------------------- 루트 모션 힘(근접 밀기 컨텐츠 E-2-1 · 대시 D-1)
 
-	void CMoveSim::ApplyRootForce(MoveState& state, const Vec3& force, float duration)
+	namespace
+	{
+		// FRootMotionSourceGroup::AccumulateRootMotionVelocityFromSource — 덧붙임 갈래. 위아래 무시면 그 힘 앞의 위 속도로 되돌린다
+		void AccumulateRootForce(const RootForceSource& source, Vec3& inOutVelocity)
+		{
+			const double inputZ = inOutVelocity.z;
+			inOutVelocity = inOutVelocity + source.force;
+			if (source.settings.ignoreZ) inOutVelocity.z = inputZ;
+		}
+
+		// FVector::GetClampedToMaxSize2D — 엔진 식 그대로(크기 × 역제곱근, 나누기가 아니다 — 반올림이 다르다)
+		Vec3 ClampedToMaxSize2D(const Vec3& v, double maxSize)
+		{
+			if (maxSize < (double)kKindaSmall) return Vec3(0.0, 0.0, v.z);
+			const double sq = v.x * v.x + v.y * v.y;
+			if (sq > maxSize * maxSize)
+			{
+				const double scale = maxSize * (1.0 / std::sqrt(sq));
+				return Vec3(v.x * scale, v.y * scale, v.z);
+			}
+			return v;
+		}
+	}
+
+	uint16_t CMoveSim::ApplyRootForce(MoveState& state, const Vec3& force, float duration, const RootForceSettings& settings)
 	{
 		RootForceState& rootForce = state.rootForce;
 		++_count.rootForceApplied;
-		if (rootForce.active) ++_count.rootForceReplaced;
-		rootForce.force = force;
-		rootForce.duration = duration;
-		rootForce.time = 0.f;
-		rootForce.active = true;
-		rootForce.finished = false;
+		if (rootForce.count > 0) ++_count.rootForceSecond;
+		if (rootForce.count == kRootForceSlots)
+		{
+			++_count.rootForceReplaced;
+			for (int i = 1; i < kRootForceSlots; ++i) rootForce.sources[i - 1] = rootForce.sources[i];
+			--rootForce.count;
+		}
+		// 번호 0 은 쓰지 않는다(엔진 Invalid = 0 을 건너뜀)
+		if (++rootForce.nextId == 0) ++rootForce.nextId;
+		RootForceSource& source = rootForce.sources[rootForce.count++];
+		source = RootForceSource();
+		source.force = force;
+		source.duration = duration;
+		source.id = rootForce.nextId;
+		source.settings = settings;
 		// hasAdditive · additiveApplied · lastPreAdditiveVelocity 는 묶음 쪽 값이라 그대로 둔다(원본은 대기 칸에 넣기만 한다)
+		return source.id;
+	}
+
+	void CMoveSim::RemoveRootForce(MoveState& state, uint16_t id) const
+	{
+		RootForceState& rootForce = state.rootForce;
+		for (int i = 0; i < rootForce.count; ++i)
+		{
+			if (rootForce.sources[i].id == id) rootForce.sources[i].removing = true;
+		}
 	}
 
 	void CMoveSim::CleanUpRootForce()
 	{
-		RootForceState& rootForce = _s->rootForce;
-		if (!rootForce.finished) return;
-		// 덧붙인 힘이 지워질 때 그 속도를 덧붙이기 전 속도에 더해 남긴다(RootMotionSource.cpp 1362~1377) — 다음 걸음의 되돌림이 이 값을 쓰므로
-		// 마지막 밀기 속도가 그대로 이어진다. 유지 갈래라 자르기(ClampVelocity) · 정하기(SetVelocity)는 없다 — Lyra 기록도 1000 으로 안 잘렸다
-		if (rootForce.additiveApplied)
+		MoveState& s = *_s;
+		RootForceState& rootForce = s.rootForce;
+		int kept = 0;
+		for (int i = 0; i < rootForce.count; ++i)
 		{
-			const double z = rootForce.lastPreAdditiveVelocity.z;
-			rootForce.lastPreAdditiveVelocity = rootForce.lastPreAdditiveVelocity + rootForce.force;
-			rootForce.lastPreAdditiveVelocity.z = z;		// IgnoreZAccumulate
+			const RootForceSource source = rootForce.sources[i];
+			if (!source.finished && !source.removing)
+			{
+				rootForce.sources[kept++] = source;
+				continue;
+			}
+			if (source.removing) ++_count.rootForceRemoved;
+			else ++_count.rootForceFinished;
+			// 대기 칸에서 지워지면 묶음에 들어간 적이 없어 남길 몫 · 끝 처리가 없다(PendingAddRootMotionSources.RemoveAll — 1420~1442)
+			if (source.pending) continue;
+			// 덧붙인 힘이 지워질 때 그 속도를 덧붙이기 전 속도에 더해 남긴다(RootMotionSource.cpp 1362~1377) — 다음 걸음의 되돌림이 이 값을 쓰므로
+			// 마지막 힘 속도가 그대로 이어진다. 근접 밀기는 유지 갈래라 여기까지 — Lyra 기록도 1000 으로 안 잘렸다
+			if (rootForce.additiveApplied) AccumulateRootForce(source, rootForce.lastPreAdditiveVelocity);
+			if (source.settings.finish == ERootForceFinish::ClampVelocity)
+			{
+				// 위는 양수만 자른다 — 떨어지는 속도는 안 늦춘다(1383 주석). 덧붙인 채면 덧붙이기 전 속도가 속도를 덮으므로 그것도 자른다
+				const double clamp = (double)source.settings.clamp;
+				s.velocity = ClampedToMaxSize2D(s.velocity, clamp);
+				s.velocity.z = std::min(s.velocity.z, clamp);
+				if (rootForce.additiveApplied)
+				{
+					rootForce.lastPreAdditiveVelocity = ClampedToMaxSize2D(rootForce.lastPreAdditiveVelocity, clamp);
+					rootForce.lastPreAdditiveVelocity.z = std::min(rootForce.lastPreAdditiveVelocity.z, clamp);
+				}
+				++_count.rootForceClamped;
+			}
 		}
-		rootForce.active = false;
-		rootForce.finished = false;
-		++_count.rootForceFinished;
+		rootForce.count = kept;
 	}
 
 	void CMoveSim::PrepareRootForce(float deltaTime)
 	{
 		RootForceState& rootForce = _s->rootForce;
 		rootForce.hasAdditive = false;
-		if (!rootForce.active) return;
-		// 끝 틱 자르기 끔 · 시작 시각 조정 없음 → 준비 시간 = 이동 틱이라 이번 몫 = Force × (틱 ÷ 틱) = Force.
-		// 시간은 float 로 쌓는다(SetTime → CheckTimeOut) — 1/60 세 번의 합이 반올림으로 0.05 를 넘어 3번째 이동에서 끝난다(Lyra 3프레임과 같음)
-		rootForce.time = rootForce.time + deltaTime;
-		rootForce.finished = rootForce.time >= rootForce.duration;
-		rootForce.hasAdditive = true;
-		++_count.rootForcePrepared;
+		// 대기 칸을 묶음에 붙이고(넣은 차례 그대로) 모두 준비한다(bForcePrepareAll — PerformMovement 2941)
+		for (int i = 0; i < rootForce.count; ++i)
+		{
+			RootForceSource& source = rootForce.sources[i];
+			source.pending = false;
+			// 끝 틱 자르기 끔 · 시작 시각 조정 없음 → 준비 시간 = 이동 틱이라 이번 몫 = Force × (틱 ÷ 틱) = Force.
+			// 시간은 float 로 쌓는다(SetTime → CheckTimeOut) — 1/60 세 번의 합이 반올림으로 0.05 를 넘어 3번째 이동에서 끝난다(Lyra 3프레임과 같음).
+			// 대시 0.25 는 15번째에 꼭 0.25 가 되어 끝난다(D-0 힘 15프레임)
+			source.time = source.time + deltaTime;
+			source.finished = source.time >= source.duration;
+			rootForce.hasAdditive = true;
+			++_count.rootForcePrepared;
+		}
 	}
 
 	void CMoveSim::RestorePreAdditiveRootMotionVelocity()
@@ -844,17 +913,34 @@ namespace mo
 		++_count.rootForceRestores;
 	}
 
-	void CMoveSim::ApplyRootMotionToVelocity()
+	void CMoveSim::ApplyRootMotionToVelocity(float deltaTime)
 	{
-		RootForceState& rootForce = _s->rootForce;
+		MoveState& s = *_s;
+		RootForceState& rootForce = s.rootForce;
 		if (!rootForce.hasAdditive) return;
-		rootForce.lastPreAdditiveVelocity = _s->velocity;
-		const double z = _s->velocity.z;
-		_s->velocity = _s->velocity + rootForce.force;
-		_s->velocity.z = z;		// IgnoreZAccumulate
+		const Vec3 oldVelocity = s.velocity;
+		rootForce.lastPreAdditiveVelocity = s.velocity;
+		for (int i = 0; i < rootForce.count; ++i)
+		{
+			const RootForceSource& source = rootForce.sources[i];
+			AccumulateRootForce(source, s.velocity);
+			if (!source.settings.ignoreZ) ++_count.rootForceZAdds;
+		}
 		rootForce.additiveApplied = true;
 		++_count.rootForceAdds;
-		// 밀기로 위쪽 속도가 생기면 낙하로 바꾸는 갈래(4566~4586)는 위아래를 안 건드려 늘 0 이라 옮기지 않았다
+
+		// 힘이 위 속도를 더했고 땅 위면 낙하로 바꿔 뜰 수 있게 한다(4566~4586) — 기준 = 이 틱에 중력이 빼는 양(민감 검사 설정은 상수 힘이 안 켠다).
+		// 근접 밀기는 위아래를 안 건드려 늘 0 이다
+		const double appliedZ = s.velocity.z - oldVelocity.z;
+		if (appliedZ != 0.0 && IsWalking())
+		{
+			const float liftoffBound = std::max(-_p.gravityZ * deltaTime, kSmall);
+			if (appliedZ > (double)liftoffBound)
+			{
+				SetMode(EMoveMode::Falling);
+				++_count.rootForceLiftoffs;
+			}
+		}
 	}
 
 	void CMoveSim::RefreshFloor(MoveState& state)
@@ -1671,7 +1757,13 @@ namespace mo
 			s.acceleration = Flat(s.acceleration);
 
 			CalcVelocity(timeTick, _p.groundFriction, _p.brakingDecelerationWalking);
-			ApplyRootMotionToVelocity();		// 원본은 이 뒤에 「밀기가 이동 모드를 바꿨으면 다시 시작」— 위아래를 안 건드려 모드가 안 바뀐다
+			ApplyRootMotionToVelocity(timeTick);
+			if (!IsWalking())
+			{
+				// 힘이 땅에서 띄웠다(대시 위 보고 앞) — 이 틱은 아직 안 움직였으니 시간 · 반복 수를 그대로 넘겨 낙하로 다시 시작한다(5723~5729)
+				StartNewPhysics(remainingTime + timeTick, iterations - 1);
+				return;
+			}
 
 			const Vec3 moveVelocity = s.velocity;
 			const Vec3 delta = moveVelocity * (double)timeTick;
@@ -2047,7 +2139,7 @@ namespace mo
 			}
 
 			s.velocity = NewFallVelocity(s.velocity, gravity, gravityTime);
-			ApplyRootMotionToVelocity();
+			ApplyRootMotionToVelocity(timeTick);
 
 			// 꼭대기를 정확히 지나도록 틱을 쪼갠다 — 프레임이 달라도 점프 높이가 같아지게
 			if (oldVelocityWithRootMotion.z > 0.0 && s.velocity.z <= 0.0 && s.numJumpApexAttempts < _p.maxJumpApexAttemptsPerSimulation)
@@ -2069,11 +2161,12 @@ namespace mo
 						--iterations;
 						++s.numJumpApexAttempts;
 						++_count.apexSubsteps;
-						// 밀기에도 돌려준 시간을 돌려준다(5002) — SetTime 이 끝남 표시를 다시 본다
-						if (s.rootForce.active)
+						// 묶음의 힘마다 돌려준 시간을 돌려준다(5002) — SetTime 이 끝남 표시를 다시 본다. 걸음 중엔 대기 칸이 없다(준비가 다 붙였다)
+						for (int i = 0; i < s.rootForce.count; ++i)
 						{
-							s.rootForce.time = std::max(0.f, s.rootForce.time - timeToRefund);
-							s.rootForce.finished = s.rootForce.time >= s.rootForce.duration;
+							RootForceSource& source = s.rootForce.sources[i];
+							source.time = std::max(0.f, source.time - timeToRefund);
+							source.finished = source.time >= source.duration;
 							++_count.rootForceApexRefund;
 						}
 					}
