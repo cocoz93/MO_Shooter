@@ -206,6 +206,7 @@ namespace
 		{ 0, 4, 48 },	// 1 = 권총 — 재장전할 거리(탄창 4 · 예비 가득)
 		{ 1, 10, 60 },	// 2 = 소총 — 재장전할 거리
 		{ 2, 2, 16 },	// 3 = 샷건 — 재장전할 거리
+		{ 0, 12, 48 },	// 4 = 권총 가득(대시 판 — 대시 중 사격 칸 앞에 채운다)
 	};
 	const FStep WEAPONS_SCRIPT[] = {
 		{ TEXT("settle"),         1.0f,  EAct::PadsDump,    0.f, false },	// 받침 15개 정보 · 처음 가방(경기 시작 초기화 뒤)
@@ -236,6 +237,99 @@ namespace
 		{ TEXT("end"),            1.0f,  EAct::None,        0.f, false },
 	};
 
+	// 대시 판(D-0, dash-plan.md) — 연습장 집 둘레에서 고른 자리(PickDashHome, 몸 요 0)에서. 상대는 숨기고 충돌을 꺼 둔다(근접 칸만 다시 켬).
+	// 대시 칸은 2초 — DASH_PRESS_AT 에 누르고, 쿨다운 1.5초(GE_HeroDash_Cooldown)가 다음 칸 누름 전에 끝난다. 이동 입력은 누른 뒤 DASH_INPUT_FRAMES 까지 넣고 놓는다(미끄러져 서는 것까지 찍으려고)
+	const FStep DASH_SCRIPT[] = {
+		{ TEXT("settle"),           1.0f, EAct::Home,           0.f,    false },
+		// 선 채 여덟 방향 — Arg = 이동 입력 각(월드 +X 에서 도, +Y = 오른쪽). 대각은 키보드처럼 앞 · 옆 두 입력을 따로 더한다(길이 √2 — 짐작 2 · 3)
+		{ TEXT("fwd"),              2.0f, EAct::DashMove,       0.f,    false },
+		{ TEXT("back"),             2.0f, EAct::DashMove,       180.f,  false },
+		{ TEXT("left"),             2.0f, EAct::DashMove,       -90.f,  false },
+		{ TEXT("right"),            2.0f, EAct::DashMove,       90.f,   false },
+		{ TEXT("fwd_left"),         2.0f, EAct::DashMove,       -45.f,  false },
+		{ TEXT("fwd_right"),        2.0f, EAct::DashMove,       45.f,   false },
+		{ TEXT("back_left"),        2.0f, EAct::DashMove,       -135.f, false },
+		{ TEXT("back_right"),       2.0f, EAct::DashMove,       135.f,  false },
+		// 입력 없이 — Arg = 몸 요(짐작 1)
+		{ TEXT("still_yaw0"),       2.0f, EAct::DashNoInput,    0.f,    false },
+		{ TEXT("still_yaw90"),      2.0f, EAct::DashNoInput,    90.f,   false },
+		// 위 · 아래 보고 앞 — Arg = 피치(+ = 위). 앞 대시 방향 = 카메라 앞 × (1, 1, 1.2). 3.5초 = 내려앉기까지(dash1 위 45 는 832cm 떠 2초 칸 끝에 아직 공중이었다)
+		{ TEXT("pitch_up20"),       3.5f, EAct::DashPitch,      20.f,   false },
+		{ TEXT("pitch_up45"),       3.5f, EAct::DashPitch,      45.f,   false },
+		{ TEXT("pitch_down20"),     3.5f, EAct::DashPitch,      -20.f,  false },
+		// 점프 꼭대기 — 점프는 능력 입력(InputTag.Jump, GA_Hero_Jump)으로 누르고, 떨어지기 시작한 프레임에 대시
+		{ TEXT("jump_apex"),        2.5f, EAct::DashJumpApex,   0.f,    false },
+		// 앉은 채 — 대시가 일으켜 세우나. 안 섰으면 stand 칸이 세운다
+		{ TEXT("crouch"),           0.8f, EAct::CrouchToggle,   0.f,    false },
+		{ TEXT("crouch_fwd"),       2.0f, EAct::DashMove,       0.f,    false },
+		{ TEXT("stand"),            0.8f, EAct::StandUp,        0.f,    false },
+		// 매 프레임 누름 — 다시 켜지는 간격(짐작 4). 대시가 끝날 때마다 집으로 되돌린다(길이 막히지 않게)
+		{ TEXT("spam"),             5.0f, EAct::DashSpam,       0.f,    false },
+		{ TEXT("spam_cool"),        1.6f, EAct::Home,           0.f,    false },
+		// 대시 중 누름 — Arg = DASH_ACTIONS 차례. 대시가 켜진 프레임 + DASH_ACTION_AFTER 에 누르고, 탭은 다음 프레임에 · 쥠은 칸 끝에 뗀다
+		{ TEXT("ammo_full1"),       0.2f, EAct::SetAmmo,        4.f,    false },
+		{ TEXT("during_fire_tap"),  2.0f, EAct::DashThen,       0.f,    false },
+		{ TEXT("ammo_full2"),       0.2f, EAct::SetAmmo,        4.f,    false },
+		{ TEXT("during_fire_hold"), 2.0f, EAct::DashThen,       1.f,    false },
+		{ TEXT("ammo_low1"),        0.2f, EAct::SetAmmo,        1.f,    false },
+		{ TEXT("during_reload"),    2.0f, EAct::DashThen,       2.f,    false },
+		{ TEXT("during_melee"),     2.0f, EAct::DashThen,       3.f,    false },
+		{ TEXT("during_jump_tap"),  2.0f, EAct::DashThen,       4.f,    false },
+		{ TEXT("during_jump_hold"), 2.0f, EAct::DashThen,       5.f,    false },
+		{ TEXT("during_ads_hold"),  2.0f, EAct::DashThen,       6.f,    false },
+		{ TEXT("ads_settle"),       0.6f, EAct::Home,           0.f,    false },
+		// 쥔 채 대시 — 칸 첫 프레임부터 쥐고(Arg = DASH_ACTIONS 차례) DASH_PRESS_AT 에 대시, 칸 끝에 뗀다(켜는 순간 끊나 · 끝난 뒤 다시 켜지나 — 플랜 「막기 · 끊기」 줄)
+		{ TEXT("ads_then_dash"),    2.0f, EAct::HoldThenDash,   6.f,    false },
+		{ TEXT("ads_settle2"),      0.6f, EAct::Home,           0.f,    false },
+		{ TEXT("ammo_full4"),       0.2f, EAct::SetAmmo,        4.f,    false },
+		{ TEXT("fire_then_dash"),   2.0f, EAct::HoldThenDash,   1.f,    false },
+		// 재장전 중 대시 — 칸 첫 프레임에 재장전, DASH_PRESS_AT 에 대시(재장전이 끊기나 · 탄이 들어오나)
+		{ TEXT("ammo_low2"),        0.2f, EAct::SetAmmo,        1.f,    false },
+		{ TEXT("reload_dash"),      2.0f, EAct::ReloadDash,     0.f,    false },
+		{ TEXT("ammo_full3"),       0.2f, EAct::SetAmmo,        4.f,    false },
+		// 근접 맞은 직후 대시(밀기와 대시 힘 겹침) — 상대를 앞 Arg cm 에 세우고(맞는 앞 범위 150~520, gym1) MELEE_PRESS_AT 에 근접.
+		// 근접을 누른 프레임부터 오른쪽(+Y) 입력(밀기는 앞 X, 대시는 옆 Y — 두 힘을 축으로 가른다), 근접이 켜진 프레임에 대시를 누른다(켜지는 건 다음 프레임)
+		{ TEXT("foe_show"),         0.3f, EAct::FoeShow,        0.f,    false },
+		{ TEXT("foe_setup"),        0.5f, EAct::FoeSetup,       0.f,    false },
+		{ TEXT("melee_dash"),       2.0f, EAct::MeleeDash,      300.f,  false },
+		{ TEXT("foe_away"),         1.0f, EAct::FoeAway,        0.f,    false },
+		// 벽 앞 — 집에서 가장 가까운 벽(ClearAround) 쪽으로, 캡슐 앞 Arg cm 에 벽을 두고 그쪽으로 대시
+		{ TEXT("wall"),             2.0f, EAct::DashWall,       150.f,  false },
+		// 같은 프레임 앉기 + 대시
+		{ TEXT("crouch_same"),      2.0f, EAct::DashCrouchSame, 0.f,    false },
+		{ TEXT("stand2"),           0.8f, EAct::StandUp,        0.f,    false },
+		{ TEXT("end"),              0.5f, EAct::Home,           0.f,    false },
+	};
+	constexpr float DASH_PRESS_AT = 0.3f;		// 칸 시작에서 대시 누르기까지 — 걸음이 붙을 만큼(제안값, 근접 누름 MELEE_PRESS_AT 과 같음)
+	constexpr int32 DASH_INPUT_FRAMES = 33;		// 누른 뒤 이동 입력을 넣는 프레임 수 — 능력 켜짐 0.55초(AbilityDuration) × 60(원본 기준. 실측 켜짐은 31프레임이라 넉넉히 덮는다)
+	constexpr int32 DASH_ACTION_AFTER = 5;		// 대시 중 누름 — 켜진 뒤 몇 프레임에(힘 0.25초 안)
+	constexpr double DASH_CLEAR_TRACE = 3000.0;	// ClearAround 쓸기 길이
+	// 대시 판 집 고르기 — 여덟 방향이 이만큼 비어야 한다. dash1 에서 누른 자리부터 칸 끝까지 간 거리 최대 939cm(위 20 앞) + 누르기 전 걸음 약 60cm 위에 얹은 값
+	constexpr double DASH_CLEAR_NEED = 1100.0;
+	constexpr double DASH_WALL_NORMAL_Z = 0.1;	// 벽 칸이 벽으로 보는 면 — 법선 Z 절댓값이 이 아래(거의 서 있는 면)
+	constexpr double DASH_CLEAR_LIFT = 5.0;		// 쓸 때 캡슐을 띄우는 높이 — 바닥은 안 긁고 낮은 경사 · 턱은 걸리게(dash1 은 걸음 턱 높이 MaxStepHeight 만큼 띄워 뒤 오른쪽 경사를 못 봤다)
+	constexpr double DASH_HOME_RING = 300.0;	// 후보 자리 — 연습장 집에서 이 간격의 고리 넷 × 여덟 방향
+	constexpr int32 DASH_HOME_RINGS = 4;
+	// 대시 중 누름 — 입력 표식 · 그 능력 클래스 이름 조각 · 쥠 여부. 재장전은 「GA_Weapon_Reload_」(권총 · 소총 · 샷건 재장전만 — 「Reload」만 보면
+	// GA_Weapon_AutoReload 도 걸린다, 이름 목록 MOBWeaponDumpSubsystem.cpp ASSETS)
+	struct FDashAction { const TCHAR* Name; const TCHAR* InputTag; const TCHAR* Ability; bool bHold; };
+	const FDashAction DASH_ACTIONS[] = {
+		{ TEXT("fire_tap"),  TEXT("InputTag.Weapon.Fire"),   TEXT("GA_Weapon_Fire"), false },
+		{ TEXT("fire_hold"), TEXT("InputTag.Weapon.Fire"),   TEXT("GA_Weapon_Fire"), true  },
+		{ TEXT("reload"),    TEXT("InputTag.Weapon.Reload"), TEXT("GA_Weapon_Reload_"), false },
+		{ TEXT("melee"),     TEXT("InputTag.Ability.Melee"), TEXT("GA_Melee"),       false },
+		{ TEXT("jump_tap"),  TEXT("InputTag.Jump"),          TEXT("GA_Hero_Jump"),   false },
+		{ TEXT("jump_hold"), TEXT("InputTag.Jump"),          TEXT("GA_Hero_Jump"),   true  },
+		{ TEXT("ads_hold"),  TEXT("InputTag.Weapon.ADS"),    TEXT("GA_ADS"),         true  },
+	};
+	const FDashAction& DashActionAt(float Arg) { return DASH_ACTIONS[FMath::Clamp((int32)Arg, 0, (int32)UE_ARRAY_COUNT(DASH_ACTIONS) - 1)]; }
+	// 키보드 같은 이동 입력 — 각을 축마다 반올림(45도 = (1, 1), 길이 √2. Lyra 영웅 입력은 앞 · 옆을 따로 더한다)
+	FVector KeyInput(float AngleDeg)
+	{
+		const double A = FMath::DegreesToRadians((double)AngleDeg);
+		return FVector(FMath::RoundToDouble(FMath::Cos(A)), FMath::RoundToDouble(FMath::Sin(A)), 0.0);
+	}
+
 	const TCHAR* const WEAPON_DEFS[3] = {
 		TEXT("/ShooterCore/Weapons/Pistol/WID_Pistol.WID_Pistol_C"),
 		TEXT("/ShooterCore/Weapons/Rifle/WID_Rifle.WID_Rifle_C"),
@@ -260,7 +354,7 @@ namespace
 	constexpr float MELEE_SIDE_FORWARD = 250.f;	// 옆 거리 칸에서 상대를 세우는 앞 거리 — 맞는 앞 범위(150~520, gym1) 한가운데쯤
 	constexpr float WATCH_LOG_EVERY = 5.f;		// 다리 판 마지막 칸에서 점수를 적는 간격(초)
 
-	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침
+	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장)
 	const FStep& StepAt(int32 Script, int32 I)
 	{
 		switch (Script)
@@ -269,6 +363,7 @@ namespace
 		case 2: return BRIDGE_SCRIPT[I];
 		case 3: return BUMP_SCRIPT[I];
 		case 4: return WEAPONS_SCRIPT[I];
+		case 5: return DASH_SCRIPT[I];
 		default: return GYM_SCRIPT[I];
 		}
 	}
@@ -280,6 +375,7 @@ namespace
 		case 2: return UE_ARRAY_COUNT(BRIDGE_SCRIPT);
 		case 3: return UE_ARRAY_COUNT(BUMP_SCRIPT);
 		case 4: return UE_ARRAY_COUNT(WEAPONS_SCRIPT);
+		case 5: return UE_ARRAY_COUNT(DASH_SCRIPT);
 		default: return UE_ARRAY_COUNT(GYM_SCRIPT);
 		}
 	}
@@ -364,11 +460,12 @@ void UMOBContentProbeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	bBridge = Mode == TEXT("bridge");
 	bBump = Mode == TEXT("bump");
 	bWeapons = Mode == TEXT("weapons");
+	bDash = Mode == TEXT("dash");
 	bForceQuinn = FParse::Param(Cmd, TEXT("MOBCPQuinn"));
 	StartRealAt = FPlatformTime::Seconds();
 	GAreScreenMessagesEnabled = false;
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_INIT world=%s tag=%s mode=%s"), *GetNameSafe(GetWorld()), *Tag,
-		bBridge ? TEXT("bridge") : (bPads ? TEXT("pads") : (bBump ? TEXT("bump") : (bWeapons ? TEXT("weapons") : TEXT("gym")))));
+		bBridge ? TEXT("bridge") : (bPads ? TEXT("pads") : (bBump ? TEXT("bump") : (bWeapons ? TEXT("weapons") : (bDash ? TEXT("dash") : TEXT("gym"))))));
 }
 
 TStatId UMOBContentProbeSubsystem::GetStatId() const
@@ -529,11 +626,23 @@ bool UMOBContentProbeSubsystem::Prepare()
 		}
 		GoHome();
 		PlaceFoe(-400.0, true);
+		// 대시 판 — 상대는 대시 길(뒤 대시가 등 뒤 400 을 지난다)을 막지 않게 숨기고, 집 둘레에서 여덟 방향이 빈 자리를 집으로 고른다(MOB_CPROBE_DASHHOME · CLEAR 줄)
+		if (bDash)
+		{
+			SetFoeActive(false);
+			PickDashHome();
+			GoHome();
+			PlaceFoe(-400.0, true);
+		}
 	}
 
 	Csv += TEXT("frame,t,step,ev,px,py,pz,vx,vy,vz,speed2d,maxSpeed,crouched,capHH,eyeH,camW,camAds,fov,montage,montagePos,meleeActive,adsActive,")
 		TEXT("foeX,foeY,foeYaw,foeHp,foeMontage,foeMontagePos,hp,padBigAvail,padBigPct,padSmallAvail,padSmallPct,")
-		TEXT("handX,handY,handZ,yaw,foeZ,foeHH,walk,mode,foeWalk,foeVx,foeVy,camZ,footZ\n");
+		TEXT("handX,handY,handZ,yaw,foeZ,foeHH,walk,mode,foeWalk,foeVx,foeVy,camZ,footZ");
+	// 대시 판만 칸을 더한다(다른 판 기록은 바이트째 그대로) — 능력 켜짐 넷 · 쿨다운 남은 초 · 든 무기 탄창 · 조종 피치 · 요 ·
+	// 마지막 이동 입력(이번 프레임 이동이 가져간 것 = 대시가 방향으로 쓰는 값) · 이 프레임에 넣은 이동 입력(다음 프레임 이동이 가져간다)
+	if (bDash) Csv += TEXT(",dashActive,fireActive,reloadActive,jumpActive,dashCooldown,mag,ctlPitch,ctlYaw,lastInX,lastInY,inX,inY");
+	Csv += TEXT("\n");
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_READY pawn=%s home=%s steps=%d"), *GetNameSafe(Ch), *Home.ToString(), StepCount(ScriptIdx()));
 	return true;
 }
@@ -681,6 +790,27 @@ void UMOBContentProbeSubsystem::BeginStep()
 	bMeleeWasActive = IsAbilityActive(TEXT("GA_Melee"));
 	MeAtStepBegin = Ch ? Ch->GetActorLocation() : FVector::ZeroVector;
 	NextWatchLogAt = 0.f;
+	// 대시 판 — 칸마다 다시 센다. 대시 칸은 순간이동으로 시작하니 앞 칸 이동 입력을 비운다(근접 한 번 칸과 같은 까닭)
+	if (bDash)
+	{
+		if (Ch && IsDashAct(S.Act)) Ch->ConsumeMovementInputVector();
+		DashIn = FVector::ZeroVector;
+		FrameIn = FVector::ZeroVector;
+		bDashWasActive = IsAbilityActive(TEXT("GA_Hero_Dash"));
+		DashPressFrame = DashStartFrame = DashEndFrame = -1;
+		DashStarts.Reset();
+		DashMontageSeen.Reset();
+		DashCooldownAtPress = -1.f;
+		DashCrouchedAtPress = -1;
+		DashAtPress = FVector::ZeroVector;
+		DashMaxSpeed2d = DashMaxVz = DashMinVz = 0.0;
+		DashJumpPressFrame = ActionPressFrame = ActionStartFrame = ActionEndFrame = ActionRestartFrame = ActionAfterDash = -1;
+		ActionDuringDash = 0;
+		bActionHeld = false;
+		DashMeleePressFrame = DashMeleeStartFrame = -1;
+		DashFoeHpAtStep = HealthOf(Foe.Get());
+		DashMagAtBegin = ActiveMagazine();
+	}
 
 	switch (S.Act)
 	{
@@ -861,7 +991,196 @@ void UMOBContentProbeSubsystem::BeginStep()
 		if (ULyraHealthComponent* HC = ULyraHealthComponent::FindHealthComponent(Ch)) HC->DamageSelfDestruct();
 		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_SELFDESTRUCT step=%s frame=%d t=%.4f hp=%.1f"), S.Name, Frame, GetWorld()->GetTimeSeconds(), HealthOf(Ch));
 		break;
+	// 대시 판(D-0) — 누르기 · 이동 입력은 DuringDash 가 한다. 여기서는 자리 · 방향 · 이동 입력만 정한다
+	case EAct::DashMove:
+		GoHome();
+		DashIn = KeyInput(S.Arg);
+		break;
+	case EAct::DashNoInput:
+		GoHome();
+		FaceTo(0.0, S.Arg);
+		break;
+	case EAct::DashPitch:
+		GoHome();
+		FaceTo(S.Arg, 0.0);
+		DashIn = FVector::ForwardVector;
+		break;
+	case EAct::DashJumpApex:	// 앞 입력은 대시를 누른 프레임부터(DuringDash)
+	case EAct::DashSpam:		// 입력 없이 — 몸 요 0 이라 카메라 앞으로(짐작 1 의 앞 갈래)
+	case EAct::MeleeDash:		// 오른쪽 입력은 근접을 누른 프레임부터(DuringDash)
+		GoHome();
+		if (S.Act == EAct::MeleeDash) PlaceFoe(S.Arg, true);
+		break;
+	case EAct::DashThen:
+	case EAct::HoldThenDash:	// 쥐기는 칸 첫 프레임에(DuringDash)
+	case EAct::DashCrouchSame:
+		GoHome();
+		DashIn = FVector::ForwardVector;
+		break;
+	case EAct::ReloadDash:
+		GoHome();
+		DashIn = FVector::ForwardVector;
+		PressTag(TEXT("InputTag.Weapon.Reload"), true);	// 한 프레임 누르고 뗀다(DuringStep 의 ReloadPressFrame 갈래)
+		ReloadPressFrame = Frame;
+		FrameEvents += TEXT("reload_press;");
+		break;
+	case EAct::DashWall:
+	{
+		// 집에서 가장 가까운 벽(네 축 방향 중, ClearAround) — 캡슐이 벽에서 Arg cm 떨어진 자리에 그쪽을 보고 선다.
+		// 벽 = 맞은 면이 서 있는 것(법선 Z 가 DASH_WALL_NORMAL_Z 아래). dash2 는 가장 가까운 것을 골라 경사(Cube6_0)를 올랐다(Z +289)
+		int32 Best = -1;
+		for (int32 i = 0; i < 8; i += 2)
+		{
+			if (ClearDist[i] < DASH_CLEAR_TRACE && FMath::Abs(ClearNormalZ[i]) < DASH_WALL_NORMAL_Z && (Best < 0 || ClearDist[i] < ClearDist[Best])) Best = i;
+		}
+		GoHome();
+		if (Ch && Best >= 0)
+		{
+			const FVector Dir = KeyInput(Best * 45.f);
+			Ch->SetActorLocation(Home + Dir * FMath::Max(0.0, ClearDist[Best] - S.Arg), false, nullptr, ETeleportType::TeleportPhysics);
+			FaceTo(0.0, Best * 45.0);
+			DashIn = Dir;
+		}
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_DASHWALL dir=%d wallDist=%.1f normalZ=%.3f gap=%.1f at=%s"), Best, Best >= 0 ? ClearDist[Best] : -1.0, Best >= 0 ? ClearNormalZ[Best] : -1.0,
+			S.Arg, Ch ? *Ch->GetActorLocation().ToString() : TEXT("-"));
+		break;
 	}
+	case EAct::StandUp:
+	{
+		// 대시가 일으켜 세웠으면 그대로, 아니면 앉기 키(ToggleCrouch)로 세운다
+		ALyraCharacter* L = Cast<ALyraCharacter>(Ch);
+		const bool bWas = L && L->bIsCrouched;
+		if (bWas) L->ToggleCrouch();
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_STAND_UP step=%s wasCrouched=%d"), S.Name, bWas ? 1 : 0);
+		break;
+	}
+	case EAct::FoeShow:
+		SetFoeActive(true);
+		break;
+	case EAct::FoeAway:
+		GoHome();
+		PlaceFoe(-400.0, true);
+		SetFoeActive(false);
+		break;
+	}
+}
+
+void UMOBContentProbeSubsystem::FaceTo(double Pitch, double Yaw) const
+{
+	ACharacter* Ch = Me();
+	if (!Ch) return;
+	Ch->SetActorRotation(FRotator(0.0, Yaw, 0.0), ETeleportType::TeleportPhysics);
+	if (APlayerController* PC = Cast<APlayerController>(Ch->GetController())) PC->SetControlRotation(FRotator(Pitch, Yaw, 0.0));
+}
+
+// 상대 숨김 — 충돌을 끄면 이동이 바닥을 못 찾아 떨어지니 이동도 멈춘다(MOVE_None). 다시 켤 때 걷기로
+void UMOBContentProbeSubsystem::SetFoeActive(bool bOn) const
+{
+	ACharacter* F = Foe.Get();
+	if (!F) return;
+	UCharacterMovementComponent* M = F->GetCharacterMovement();
+	if (!bOn && M) M->DisableMovement();
+	F->SetActorHiddenInGame(!bOn);
+	F->SetActorEnableCollision(bOn);
+	if (bOn && M) M->SetMovementMode(MOVE_Walking);
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_FOE_ACTIVE on=%d foe=%s"), bOn ? 1 : 0, *GetNameSafe(F));
+}
+
+float UMOBContentProbeSubsystem::DashCooldownLeft() const
+{
+	const UAbilitySystemComponent* A = FindASC(Me());
+	static const FGameplayTag Cd = FGameplayTag::RequestGameplayTag(TEXT("GameplayCue.Character.Dash.Cooldown"), false);
+	if (!A || !Cd.IsValid()) return -1.f;
+	float Left = 0.f;
+	for (const float L : A->GetActiveEffectsTimeRemaining(FGameplayEffectQuery::MakeQuery_MatchAnyOwningTags(FGameplayTagContainer(Cd)))) Left = FMath::Max(Left, L);
+	return Left;
+}
+
+int32 UMOBContentProbeSubsystem::ActiveMagazine() const
+{
+	static const FGameplayTag MagTag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.MagazineAmmo"));
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	const ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	const ULyraInventoryItemInstance* Item = Bar ? Bar->GetActiveSlotItem() : nullptr;
+	return Item ? Item->GetStatTagStackCount(MagTag) : -1;
+}
+
+// 한 자리에서 여덟 방향 — 캡슐을 DASH_CLEAR_LIFT 만큼 띄워 쓸어 벽까지 거리(ClearDist), 25cm 마다 아래로 광선을 쏴 바닥이 끊기는 첫 거리(-1 = 안 끊김).
+// 바닥 광선은 걸음 턱(MaxStepHeight)까지 내려간 바닥도 바닥으로 본다. 여덟 방향 모두 DASH_CLEAR_NEED 넘게 비고 그 안에서 바닥이 안 끊기면 참
+bool UMOBContentProbeSubsystem::ClearAround(const FVector& Center, bool bLog)
+{
+	const ACharacter* Ch = Me();
+	if (!Ch) return false;
+	const UCapsuleComponent* Cap = Ch->GetCapsuleComponent();
+	const UCharacterMovementComponent* M = Ch->GetCharacterMovement();
+	const double R = Cap->GetScaledCapsuleRadius(), HH = Cap->GetScaledCapsuleHalfHeight();
+	const double StepDown = M ? M->MaxStepHeight : 0.0;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBCProbeClear), false, Ch);
+	if (Foe.IsValid()) Params.AddIgnoredActor(Foe.Get());
+	const FCollisionResponseParams Response(Cap->GetCollisionResponseToChannels());
+	const FVector Start = Center + FVector(0.0, 0.0, DASH_CLEAR_LIFT);
+	bool bOk = true;
+	for (int32 i = 0; i < 8; ++i)
+	{
+		const double Yaw = i * 45.0;
+		const FVector Dir(FMath::Cos(FMath::DegreesToRadians(Yaw)), FMath::Sin(FMath::DegreesToRadians(Yaw)), 0.0);
+		FHitResult Hit;
+		const bool bHit = GetWorld()->SweepSingleByChannel(Hit, Start, Start + Dir * DASH_CLEAR_TRACE, FQuat::Identity, Cap->GetCollisionObjectType(),
+			FCollisionShape::MakeCapsule(R, HH), Params, Response);
+		ClearDist[i] = bHit ? Hit.Distance : DASH_CLEAR_TRACE;
+		ClearNormalZ[i] = bHit ? Hit.ImpactNormal.Z : 1.0;
+		double Gap = -1.0;
+		for (double D = 0.0; D <= ClearDist[i]; D += 25.0)
+		{
+			const FVector P = Center + Dir * D;
+			FHitResult FH;
+			if (!GetWorld()->LineTraceSingleByChannel(FH, P, P - FVector(0.0, 0.0, HH + StepDown + 5.0), Cap->GetCollisionObjectType(), Params, Response))
+			{
+				Gap = D;
+				break;
+			}
+		}
+		if (Hit.bStartPenetrating || ClearDist[i] < DASH_CLEAR_NEED || (Gap >= 0.0 && Gap <= DASH_CLEAR_NEED)) bOk = false;
+		if (bLog)
+		{
+			UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_CLEAR dir=%d yaw=%.0f wall=%.1f hit=%d normalZ=%.3f startPen=%d actor=%s floorGap=%.1f"), i, Yaw, ClearDist[i], bHit ? 1 : 0,
+				ClearNormalZ[i], Hit.bStartPenetrating ? 1 : 0, *GetNameSafe(Hit.GetActor()), Gap);
+		}
+	}
+	return bOk;
+}
+
+// 대시 한 번이 누른 자리에서 최대 939cm 를 간다(dash1 실측) — 연습장 집(GYM_HOME)은 뒤 오른쪽 대각이 경사에 걸렸다(dash1 back_right, Z +65 · 속도 2450 → 790).
+// 그래서 대시 판은 연습장 집 둘레 고리(DASH_HOME_RING 간격 × DASH_HOME_RINGS, 고리마다 여덟 방향)에서 ClearAround 를 지나는 첫 자리를 집으로 쓴다. 높이는 바닥 + 반높이 + 3(StandOn 과 같음)
+void UMOBContentProbeSubsystem::PickDashHome()
+{
+	const ACharacter* Ch = Me();
+	if (!Ch) return;
+	const UCapsuleComponent* Cap = Ch->GetCapsuleComponent();
+	const double HH = Cap->GetScaledCapsuleHalfHeight();
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBCProbeHome), false, Ch);
+	if (Foe.IsValid()) Params.AddIgnoredActor(Foe.Get());
+	const FCollisionResponseParams Response(Cap->GetCollisionResponseToChannels());
+	int32 Tried = 0;
+	for (int32 Ring = 0; Ring <= DASH_HOME_RINGS; ++Ring)
+	{
+		for (int32 i = 0; i < (Ring == 0 ? 1 : 8); ++i)
+		{
+			const double A = FMath::DegreesToRadians(i * 45.0);
+			const FVector XY = GYM_HOME + FVector(FMath::Cos(A), FMath::Sin(A), 0.0) * (Ring * DASH_HOME_RING);
+			FHitResult Floor;
+			if (!GetWorld()->LineTraceSingleByChannel(Floor, XY + FVector(0.0, 0.0, 200.0), XY - FVector(0.0, 0.0, 600.0), Cap->GetCollisionObjectType(), Params, Response)) continue;
+			const FVector C(XY.X, XY.Y, Floor.ImpactPoint.Z + HH + 3.0);
+			++Tried;
+			if (!ClearAround(C, false)) continue;
+			Home = C;
+			UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_DASHHOME ok=1 ring=%d dir=%d tried=%d home=%s"), Ring, i, Tried, *Home.ToString());
+			ClearAround(Home, true);
+			return;
+		}
+	}
+	UE_LOG(LogMOBCProbe, Warning, TEXT("MOB_CPROBE_DASHHOME ok=0 tried=%d home=%s (연습장 집 그대로)"), Tried, *Home.ToString());
+	ClearAround(Home, true);
 }
 
 void UMOBContentProbeSubsystem::DuringStep()
@@ -958,6 +1277,10 @@ void UMOBContentProbeSubsystem::DuringStep()
 		LogScores(TEXT("watch"));
 		NextWatchLogAt += WATCH_LOG_EVERY;
 	}
+	else if (bDash && IsDashAct(S.Act))
+	{
+		DuringDash();
+	}
 
 	if (bPads && Ch)
 	{
@@ -985,6 +1308,11 @@ void UMOBContentProbeSubsystem::EndStep()
 	const FStep& S = StepAt(ScriptIdx(), Step);
 	ACharacter* Ch = Me();
 	if (S.Act == EAct::Equip) LogBodies(S.Name);		// 쥔 뒤 칸 끝 — 무기 층이 다시 붙은 뒤다
+	if (bDash && IsDashAct(S.Act))
+	{
+		EndDash();
+		return;
+	}
 	if (IsMeleeOnce(S.Act))
 	{
 		const ACharacter* F = Foe.Get();
@@ -1018,6 +1346,189 @@ void UMOBContentProbeSubsystem::EndStep()
 			Ch->BaseEyeHeight, W, bAds ? 1 : 0, PC && PC->PlayerCameraManager ? PC->PlayerCameraManager->GetFOVAngle() : -1.f, IsAbilityActive(TEXT("GA_ADS")) ? 1 : 0,
 			Moved.Size2D(), Moved.Z);
 	}
+}
+
+// 대시 칸 한 프레임. 이 틱은 그 프레임의 입력 처리(Lyra 능력 켜기 — ALyraPlayerController::PostProcessInput) · 이동 뒤에 돈다.
+// 그래서 여기서 누른 대시는 다음 프레임 입력 처리에서 켜지고, 여기서 넣은 이동 입력은 다음 프레임 이동이 가져간다
+void UMOBContentProbeSubsystem::DuringDash()
+{
+	const FStep& S = StepAt(ScriptIdx(), Step);
+	ACharacter* Ch = Me();
+	if (!Ch) return;
+	const UCharacterMovementComponent* M = Ch->GetCharacterMovement();
+	const FDashAction* Act = (S.Act == EAct::DashThen || S.Act == EAct::HoldThenDash) ? &DashActionAt(S.Arg) : nullptr;
+	const TCHAR* const DashTag = TEXT("InputTag.Ability.Dash");
+
+	// 켜짐 가장자리
+	const bool bActive = IsAbilityActive(TEXT("GA_Hero_Dash"));
+	if (bActive && !bDashWasActive)
+	{
+		DashStarts.Add(Frame);
+		if (DashStartFrame < 0) DashStartFrame = Frame;
+		FrameEvents += TEXT("dash_start;");
+	}
+	else if (!bActive && bDashWasActive)
+	{
+		if (DashEndFrame < 0) DashEndFrame = Frame;	// 첫 대시의 끝(매 프레임 누름 칸도 activeFrames 는 첫 대시)
+		FrameEvents += TEXT("dash_end;");
+		if (S.Act == EAct::DashSpam) GoHome();	// 다음 대시 길을 비운다(간격만 잰다)
+	}
+	bDashWasActive = bActive;
+	if (DashStartFrame >= 0 && M)
+	{
+		DashMaxSpeed2d = FMath::Max(DashMaxSpeed2d, M->Velocity.Size2D());
+		DashMaxVz = FMath::Max(DashMaxVz, M->Velocity.Z);
+		DashMinVz = FMath::Min(DashMinVz, M->Velocity.Z);
+	}
+	if (bActive)
+	{
+		const FString MM = MontageOf(Ch);
+		if (!MM.IsEmpty() && !DashMontageSeen.Contains(MM)) DashMontageSeen += MM + TEXT(" ");
+	}
+
+	// 누를지
+	bool bPress = false;
+	switch (S.Act)
+	{
+	case EAct::DashSpam:
+		bPress = true;
+		break;
+	case EAct::DashJumpApex:
+		if (DashJumpPressFrame < 0 && StepTime >= DASH_PRESS_AT)
+		{
+			PressTag(TEXT("InputTag.Jump"), true);	// 점프 능력(GA_Hero_Jump) — 대시가 점프를 막는 갈래와 같은 길
+			DashJumpPressFrame = Frame;
+			FrameEvents += TEXT("jump_press;");
+		}
+		else if (DashJumpPressFrame >= 0 && Frame == DashJumpPressFrame + 1)
+		{
+			PressTag(TEXT("InputTag.Jump"), false);
+			FrameEvents += TEXT("jump_release;");
+		}
+		// 꼭대기 = 떨어지기 시작한 첫 프레임(낙하 중 위 속도 0 이하). 앞 입력은 이 프레임부터 — 대시가 켜질 때 마지막 이동 입력은 아직 0 이라 몸 요 0 의 카메라 앞으로 간다
+		bPress = DashPressFrame < 0 && DashJumpPressFrame >= 0 && Frame > DashJumpPressFrame && M && M->IsFalling() && M->Velocity.Z <= 0.0;
+		if (bPress) DashIn = FVector::ForwardVector;
+		break;
+	case EAct::MeleeDash:
+		if (DashMeleePressFrame < 0 && StepTime >= MELEE_PRESS_AT)
+		{
+			DashFoeHpAtStep = HealthOf(Foe.Get());
+			PressTag(TEXT("InputTag.Ability.Melee"), true);
+			DashMeleePressFrame = Frame;
+			DashIn = FVector::RightVector;
+			FrameEvents += TEXT("melee_press;");
+		}
+		else if (DashMeleePressFrame >= 0 && Frame == DashMeleePressFrame + 1)
+		{
+			PressTag(TEXT("InputTag.Ability.Melee"), false);
+			FrameEvents += TEXT("melee_release;");
+		}
+		if (DashMeleePressFrame >= 0 && DashMeleeStartFrame < 0 && IsAbilityActive(TEXT("GA_Melee")))
+		{
+			DashMeleeStartFrame = Frame;
+			bPress = DashPressFrame < 0;
+		}
+		break;
+	case EAct::DashCrouchSame:
+		if (DashPressFrame < 0 && StepTime >= DASH_PRESS_AT)
+		{
+			if (ALyraCharacter* L = Cast<ALyraCharacter>(Ch)) L->ToggleCrouch();
+			FrameEvents += TEXT("crouch_toggle;");
+			bPress = true;
+		}
+		break;
+	default:
+		bPress = DashPressFrame < 0 && StepTime >= DASH_PRESS_AT;
+		break;
+	}
+	if (bPress)
+	{
+		PressTag(DashTag, true);
+		if (DashPressFrame < 0)
+		{
+			DashPressFrame = Frame;
+			DashAtPress = Ch->GetActorLocation();
+			DashCooldownAtPress = DashCooldownLeft();
+			DashCrouchedAtPress = Ch->bIsCrouched ? 1 : 0;
+		}
+		FrameEvents += TEXT("dash_press;");
+	}
+	else if (S.Act != EAct::DashSpam && DashPressFrame >= 0 && Frame == DashPressFrame + 1)
+	{
+		PressTag(DashTag, false);
+		FrameEvents += TEXT("dash_release;");
+	}
+
+	// 이동 입력 — 칸 처음(또는 정한 프레임)부터 누른 뒤 DASH_INPUT_FRAMES 까지. 대각은 앞 · 옆 두 축 그대로(길이 √2, KeyInput)
+	FrameIn = FVector::ZeroVector;
+	if (!DashIn.IsNearlyZero() && (DashPressFrame < 0 || Frame <= DashPressFrame + DASH_INPUT_FRAMES))
+	{
+		Ch->AddMovementInput(DashIn, 1.f);
+		FrameIn = DashIn;
+	}
+
+	// 대시 중 누름 — 켜진 뒤 DASH_ACTION_AFTER 프레임에(쥔 채 대시 칸은 칸 첫 프레임에). 탭은 다음 프레임에 떼고, 쥠은 칸 끝에(EndDash)
+	if (Act)
+	{
+		const bool bPressAct = S.Act == EAct::HoldThenDash ? ActionPressFrame < 0
+			: (ActionPressFrame < 0 && DashStartFrame >= 0 && Frame >= DashStartFrame + DASH_ACTION_AFTER);
+		if (bPressAct)
+		{
+			PressTag(Act->InputTag, true);
+			ActionPressFrame = Frame;
+			bActionHeld = Act->bHold;
+			FrameEvents += TEXT("act_press;");
+		}
+		else if (!Act->bHold && ActionPressFrame >= 0 && Frame == ActionPressFrame + 1)
+		{
+			PressTag(Act->InputTag, false);
+			FrameEvents += TEXT("act_release;");
+		}
+		// 그 능력의 켜짐 가장자리 — 처음 켜짐 · 처음 꺼짐 · 다시 켜짐. 대시와 함께 켜진 프레임 수는 끊기 · 막기를 바로 보여 준다(0 이면 대시 중엔 안 켜짐)
+		const bool bActOn = ActionPressFrame >= 0 && IsAbilityActive(Act->Ability);
+		if (bActOn && ActionStartFrame < 0)
+		{
+			ActionStartFrame = Frame;
+			FrameEvents += TEXT("act_start;");
+		}
+		else if (!bActOn && ActionStartFrame >= 0 && ActionEndFrame < 0)
+		{
+			ActionEndFrame = Frame;
+			FrameEvents += TEXT("act_end;");
+		}
+		else if (bActOn && ActionEndFrame >= 0 && ActionRestartFrame < 0)
+		{
+			ActionRestartFrame = Frame;
+			FrameEvents += TEXT("act_restart;");
+		}
+		if (bActOn && bActive) ++ActionDuringDash;
+		if (bActOn && DashEndFrame >= 0 && ActionAfterDash < 0)
+		{
+			ActionAfterDash = Frame;
+			FrameEvents += TEXT("act_after_dash;");
+		}
+	}
+}
+
+// 대시 칸 요약 한 줄 — 프레임 번호는 기록 표 frame 칸. activeFrames = 꺼진 프레임 − 켜진 프레임, gaps = 매 프레임 누름 칸에서 켜진 프레임 사이(짐작 4)
+void UMOBContentProbeSubsystem::EndDash()
+{
+	const FStep& S = StepAt(ScriptIdx(), Step);
+	const ACharacter* Ch = Me();
+	const FDashAction* Act = (S.Act == EAct::DashThen || S.Act == EAct::HoldThenDash) ? &DashActionAt(S.Arg) : nullptr;
+	if (S.Act == EAct::DashSpam) PressTag(TEXT("InputTag.Ability.Dash"), false);
+	if (Act && bActionHeld) PressTag(Act->InputTag, false);
+	FString Gaps;
+	for (int32 i = 1; i < DashStarts.Num(); ++i) Gaps += FString::Printf(TEXT("%d "), DashStarts[i] - DashStarts[i - 1]);
+	const FVector Moved = (Ch && DashPressFrame >= 0) ? Ch->GetActorLocation() - DashAtPress : FVector::ZeroVector;
+	const UCharacterMovementComponent* M = Ch ? Ch->GetCharacterMovement() : nullptr;
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_DASH step=%s arg=%.0f in=%.0f,%.0f press=%d start=%d end=%d activeFrames=%d starts=%d gaps=[%s] cdAtPress=%.4f crouchedAtPress=%d crouchedEnd=%d montage=[%s] ")
+		TEXT("maxSpeed2d=%.2f maxVz=%.2f minVz=%.2f moved=%.2f,%.2f,%.2f act=%s actPress=%d actStart=%d actEnd=%d actRestart=%d actDuringDash=%d actAfterDash=%d meleePress=%d meleeStart=%d foeDmg=%.2f mag=%d>%d modeEnd=%d"),
+		S.Name, S.Arg, DashIn.X, DashIn.Y, DashPressFrame, DashStartFrame, DashEndFrame, (DashStartFrame >= 0 && DashEndFrame >= 0) ? DashEndFrame - DashStartFrame : -1,
+		DashStarts.Num(), *Gaps.TrimEnd(), DashCooldownAtPress, DashCrouchedAtPress, Ch && Ch->bIsCrouched ? 1 : 0, *DashMontageSeen.TrimEnd(),
+		DashMaxSpeed2d, DashMaxVz, DashMinVz, Moved.X, Moved.Y, Moved.Z, Act ? Act->Name : TEXT("-"), ActionPressFrame, ActionStartFrame, ActionEndFrame, ActionRestartFrame,
+		ActionDuringDash, ActionAfterDash, DashMeleePressFrame, DashMeleeStartFrame, S.Act == EAct::MeleeDash ? DashFoeHpAtStep - HealthOf(Foe.Get()) : 0.f, DashMagAtBegin, ActiveMagazine(),
+		M ? (int32)M->MovementMode.GetValue() : -1);
 }
 
 void UMOBContentProbeSubsystem::WriteRow()
@@ -1068,11 +1579,21 @@ void UMOBContentProbeSubsystem::WriteRow()
 			FootZ = FootZ < -1e5 ? Z : FMath::Min(FootZ, Z);
 		}
 	}
-	Csv += FString::Printf(TEXT("%.3f,%.3f,%.3f,%.4f,%.5f,%.3f,%d,%d,%d,%.5f,%.5f,%.3f,%.3f\n"), Hand.X, Hand.Y, Hand.Z, Ch->GetActorRotation().Yaw,
+	Csv += FString::Printf(TEXT("%.3f,%.3f,%.3f,%.4f,%.5f,%.3f,%d,%d,%d,%.5f,%.5f,%.3f,%.3f"), Hand.X, Hand.Y, Hand.Z, Ch->GetActorRotation().Yaw,
 		F ? F->GetActorLocation().Z : 0.0, F ? F->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 0.f,
 		StepAt(ScriptIdx(), Step).bWalk ? 1 : 0, M ? (int32)M->MovementMode.GetValue() : -1,
 		FoeWalks(StepAt(ScriptIdx(), Step).Act) ? 1 : 0, FV.X, FV.Y,
 		PC && PC->PlayerCameraManager ? PC->PlayerCameraManager->GetCameraLocation().Z : -1e6, FootZ);
+	if (bDash)
+	{
+		const FVector LastIn = Ch->GetLastMovementInputVector();
+		const FRotator CR = PC ? PC->GetControlRotation() : FRotator::ZeroRotator;
+		Csv += FString::Printf(TEXT(",%d,%d,%d,%d,%.4f,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f"),
+			IsAbilityActive(TEXT("GA_Hero_Dash")) ? 1 : 0, IsAbilityActive(TEXT("GA_Weapon_Fire")) ? 1 : 0, IsAbilityActive(TEXT("GA_Weapon_Reload_")) ? 1 : 0,
+			IsAbilityActive(TEXT("GA_Hero_Jump")) ? 1 : 0, DashCooldownLeft(), ActiveMagazine(), FRotator::NormalizeAxis(CR.Pitch), FRotator::NormalizeAxis(CR.Yaw),
+			LastIn.X, LastIn.Y, FrameIn.X, FrameIn.Y);
+	}
+	Csv += TEXT("\n");
 	PrevHand = Hand;
 	bPrevHandValid = true;
 	CollectParts(F, PrevFoeParts, PrevFoePartNames);
