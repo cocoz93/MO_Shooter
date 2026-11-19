@@ -29,6 +29,9 @@ mkdir -p "$OUT"
 DATA="C:/Users/USER/Desktop/MyGit/MO_Shooter/Client/Lyra/Saved/MOB"
 MAP="$DATA/map_expanse.mocl"
 PADS="$DATA/pads_expanse.txt"	# 받침 자료(컨텐츠 B) — Epic 맵 값이라 맵처럼 리포 밖
+# 세 무기로 부활(시험 전용 --testStartAllWeapons, 무기 줍기 W-2)은 프로브 넷(경기규칙 · 재생 · 권위 · 되감기)의 서버에만 준다.
+# 옵션 없이 회귀 한 벌을 돌려(W-5) 그 넷만 갈렸다 — 각본이 무기를 바꾸는데 권총 하나면 서버가 거절한다(switchRejected 2 · 39 · 94 · 1).
+# 나머지 판은 Lyra 규칙(권총 하나로 부활)대로 돈다
 SRV="$BIN/Server/Release/Server.exe"
 BOT="$BIN/BotClient/Release/BotClient.exe"
 PROBE="$BIN/Tools/ServerProbe/Release/ServerProbe.exe"
@@ -37,6 +40,10 @@ FAILS=0
 
 verdict() {	# 이름 참거짓 설명
 	if [ "$2" = 1 ]; then echo "PASS $1 $3"; else echo "FAIL $1 $3"; FAILS=$((FAILS + 1)); fi
+}
+
+num() {	# 줄 이름 — 줄 속 「 이름=숫자」의 숫자(없으면 빈 값)
+	echo "$1" | sed -nE "s/.* $2=([0-9]+).*/\1/p"
 }
 
 # 대조 도구는 판정이 출력 속 수치라 기준선과 줄 단위로 비교한다(TIME 줄은 뺀다)
@@ -104,6 +111,26 @@ run_bots() {
 	ok=1
 	[ -n "$pk" ] && [ "$pk" = "$mine" ] && [ -n "$sought" ] && [ "$sought" -gt 0 ] || ok=0
 	verdict 받침갈래 $ok "서버 회복=$pk 봇 자기 회복 합=$mine 찾아가 닿음=$sought"
+
+	# 무기 받침 갈래(컨텐츠 W-5) — 권총 하나로 부활한 봇이 안 가진 무기의 받침을 찾아가 집는다.
+	# 서버가 보낸 내 줍기 소식 합(new · noSwitch · ammo — full · 칸 없음 · 판 끝은 소식이 없다) = 봇이 센 내 집음 = 예측이 받은 소식 = 그 입력부터 다시 돌린 수,
+	# 칸 없음 · 결과 어긋남 · 탄 고침 · 가방 어긋남 0, 무기 둘 이상 든 비교 줄이 있고(가방 비교가 돌았다) · 서버 new 1 이상 · 찾아가던 중 집음 1 이상(갈래가 받침에 닿았다).
+	# ammo · full 은 값만 본다 — 이 판은 ammo 0 · full 1 이라 사건 하나에 판정이 걸린다. 서버 ammo 갈래는 무기받침 프로브가 Lyra 기록과 견준다
+	local wp wb snew snosw sammo bmine brecv brerun sent k
+	wp="$(grep -a '^SERVER weaponPickups' "$OUT/bots_srv.log")"
+	wb="$(grep -a '^BOT weapons' "$OUT/bots_bot.log")"
+	snew="$(num "$wp" new)"; snosw="$(num "$wp" noSwitch)"; sammo="$(num "$wp" ammo)"
+	bmine="$(num "$wb" pickupsMine)"; brecv="$(num "$wb" received)"; brerun="$(num "$wb" rerun)"
+	ok=1
+	if [ -n "$snew" ] && [ -n "$snosw" ] && [ -n "$sammo" ]; then
+		sent=$((snew + snosw + sammo))
+		[ "$bmine" = "$sent" ] && [ "$brecv" = "$sent" ] && [ "$brerun" = "$sent" ] || ok=0
+	else
+		ok=0
+	fi
+	for k in noSlot resultDiffs ammoFixes invDiff; do [ "$(num "$wb" $k)" = 0 ] || ok=0; done
+	[ "$(num "$wb" invMulti)" -gt 0 ] 2>/dev/null && [ "$(num "$wb" sought)" -gt 0 ] 2>/dev/null && [ "$snew" -gt 0 ] 2>/dev/null || ok=0
+	verdict 무기갈래 $ok "서버 new=$snew noSwitch=$snosw ammo=$sammo full=$(num "$wp" full) 봇 집음=$bmine 받음=$brecv 다시돌림=$brerun$(echo "$wb" | grep -oE ' (noSlot|resultDiffs|ammoFixes|invDiff|invMulti|sought)=[0-9]+' | tr -d '\n')"
 }
 
 # 사람끼리 막기(컨텐츠 F, D83 늘 켬) — 봇이 안 쏘고 가장 가까운 사람 쪽으로 걸어(--push) 계속 부딪힌다. 예측도 남 캡슐을 보고 서버와 다르면 고친다.
@@ -179,6 +206,22 @@ run_pads() {
 	verdict 받침 $ok "프로브 rc=$prc 서버 rc=$src $(tail -1 "$OUT/pads_check.log" | cut -c1-40)"
 }
 
+# 무기 받침(컨텐츠 W-2) — 프로브가 Lyra 무기 판 각본(WEAPONS_SCRIPT)을 걷고, 서버 가방 · 받침 사건을 Lyra 기록 cprobe_w0a 와 프레임 단위로 견준다.
+# 무기 줍기를 보는 판이라 Lyra 처럼 권총 하나로 부활한다(--testStartAllWeapons 안 줌)
+run_weapons() {
+	"$SRV" "--map=$MAP" --port=7960 --debug --warmup=0 --exitWhenEmpty "--pads=$PADS" > "$OUT/weapons_srv.log" 2>&1 &
+	local spid=$!
+	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --weapons --port=7960 "--serverLog=$OUT_W/weapons_srv.log" > "$OUT/weapons_probe.log" 2>&1
+	local prc=$?
+	wait $spid
+	local src=$? ok=1
+	python "$REPO/Tools/LyraPilot/check_weapon_pads.py" "--lyra=$DATA/cprobe_w0a.log" "--probe=$OUT_W/weapons_probe.log" > "$OUT/weapons_check.log" 2>&1
+	local crc=$?
+	[ $prc = 0 ] && [ $src = 0 ] && [ $crc = 0 ] || ok=0
+	grep -q '^WEAPONPADS PASS' "$OUT/weapons_check.log" || ok=0
+	verdict 무기받침 $ok "프로브 rc=$prc 서버 rc=$src $(tail -1 "$OUT/weapons_check.log" | cut -c1-40)"
+}
+
 # 근접 시험판(컨텐츠 E-3) — Lyra 연습장 근접 칸(cprobe_d3f2, Quinn 몸)을 클립 실은 서버에 다시 세워 결과 · 대상 · 피해 · 따라간 자리를 견준다.
 # 클립 없는 서버는 몸 판정이 상자라 칸 몇 개가 Lyra 와 갈린다(17-d d2) — 사람 판과 같은 클립 실은 서버로 본다
 run_melee() {
@@ -194,7 +237,7 @@ run_melee() {
 }
 
 run_rules() {
-	"$SRV" "--map=$MAP" --port=7954 --debug --exitWhenEmpty --warmup=3 --targetScore=2 > "$OUT/rules_srv.log" 2>&1 &
+	"$SRV" "--map=$MAP" --port=7954 --debug --exitWhenEmpty --warmup=3 --targetScore=2 --testStartAllWeapons > "$OUT/rules_srv.log" 2>&1 &
 	local spid=$!
 	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --port=7954 --rules > "$OUT/rules_probe.log" 2>&1
 	local prc=$?
@@ -206,7 +249,7 @@ run_rules() {
 }
 
 run_replay() {
-	"$SRV" "--map=$MAP" --port=7955 --debug --exitWhenEmpty --warmup=0 --matchSeconds=100000 --fallKillZ=-1000000 > "$OUT/replay_srv.log" 2>&1 &
+	"$SRV" "--map=$MAP" --port=7955 --debug --exitWhenEmpty --warmup=0 --matchSeconds=100000 --fallKillZ=-1000000 --testStartAllWeapons > "$OUT/replay_srv.log" 2>&1 &
 	local spid=$!
 	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --port=7955 > "$OUT/replay_probe.log" 2>&1
 	local prc=$?
@@ -218,7 +261,7 @@ run_replay() {
 }
 
 run_rewind() {
-	"$SRV" "--map=$MAP" --port=7957 --debug --rewindShadow --exitWhenEmpty --warmup=0 --matchSeconds=100000 --targetScore=1000 > "$OUT/rewind_srv.log" 2>&1 &
+	"$SRV" "--map=$MAP" --port=7957 --debug --rewindShadow --exitWhenEmpty --warmup=0 --matchSeconds=100000 --targetScore=1000 --testStartAllWeapons > "$OUT/rewind_srv.log" 2>&1 &
 	local spid=$!
 	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --port=7957 --rewind "--serverLog=$OUT_W/rewind_srv.log" > "$OUT/rewind_probe.log" 2>&1
 	local prc=$?
@@ -230,7 +273,7 @@ run_rewind() {
 }
 
 run_authority() {
-	"$SRV" "--map=$MAP" --port=7956 --exitWhenEmpty --warmup=0 --matchSeconds=100000 > "$OUT/auth_srv.log" 2>&1 &
+	"$SRV" "--map=$MAP" --port=7956 --exitWhenEmpty --warmup=0 --matchSeconds=100000 --testStartAllWeapons > "$OUT/auth_srv.log" 2>&1 &
 	local spid=$!
 	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --port=7956 --authority "--serverLog=$OUT_W/auth_srv.log" > "$OUT/auth_probe.log" 2>&1
 	local prc=$?
@@ -305,6 +348,7 @@ else
 		run_authority
 		run_rewind
 		run_pads
+		run_weapons
 		run_melee
 		run_multi
 	fi

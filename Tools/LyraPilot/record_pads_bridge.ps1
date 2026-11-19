@@ -8,8 +8,14 @@ param(
     [string]$ShotAt = '5,40',        # pad 2 off (taken at the first place) and on again (full health refuses the 30.75 s recheck)
     [int]$TimeoutSec = 400,
     [string]$Res = '640x360',
-    [string]$LyraExtra = ''          # extra bridge options, e.g. '-MOBHumanCheck -MOBEventShots' (record_human_auto.ps1 pads run)
+    [string]$LyraExtra = '',         # extra bridge options, e.g. '-MOBHumanCheck -MOBEventShots' (record_human_auto.ps1 pads run)
+    [switch]$Weapons,                # content W-4: the bridge runs its weapon script (-MOBWeaponScript) on pads R2 R4 P8 S6 and the probe runs --weapons on R1 R3 P7 S5;
+                                     # no standing, no hurt health. Check with check_pads_bridge.py --weapons
+    [int]$BreakBag = 0               # > 0 with -Weapons: bridge breaks its bag on purpose (MOBridgeSubsystem.h -MOBBreakBag bits); the bag verdict must then fail
 )
+# weapons run: the script ends about 65 s after the bridge is ready (6 s auto start + 59.1 s of steps); quit 10 s later, while the probe still waits for the server log
+if ($Weapons -and -not $PSBoundParameters.ContainsKey('QuitAt')) { $QuitAt = 75 }
+if ($Weapons -and -not $PSBoundParameters.ContainsKey('ShotAt')) { $ShotAt = '' }
 # Content B-3: one Lyra (the bridge) stands hurt on a health pad while ServerProbe --pads, a second player, walks the pad script on pads 0 and 1.
 # The bridge must draw every pad as the server says (S2C_PICKUP), heal itself and the probe's body with the pad's own effect up to the server's health,
 # and log each message. check_pads_bridge.py compares that log with the server's PADEV lines; check_pads.py still compares the probe with Lyra alone.
@@ -30,8 +36,14 @@ $null = $srv.Handle   # without this ExitCode stays empty after the process ends
 Start-Sleep -Milliseconds 800
 
 $lyraArgs = @("`"$proj\Lyra.uproject`"", '/ShooterMaps/Maps/L_Expanse?NumBots=0', '-game', '-RenderOffScreen', "-ResX=$resX", "-ResY=$resY",
-              '-unattended', '-nosplash', '-nosound', '-log', "-abslog=`"$log`"", "-MOBServer=127.0.0.1:$Port", "-MOBTag=padsb_$Tag",
-              "-MOBStandAt=$Stand", "-MOBStandHp=$StandHp", "-MOBQuitAt=$QuitAt", "-MOBShotAt=$ShotAt")
+              '-unattended', '-nosplash', '-nosound', '-log', "-abslog=`"$log`"", "-MOBServer=127.0.0.1:$Port", "-MOBTag=padsb_$Tag", "-MOBQuitAt=$QuitAt")
+if ($Weapons) {
+    $lyraArgs += '-MOBWeaponScript'
+    if ($BreakBag -gt 0) { $lyraArgs += "-MOBBreakBag=$BreakBag" }
+} else {
+    $lyraArgs += @("-MOBStandAt=$Stand", "-MOBStandHp=$StandHp")
+}
+if ($ShotAt) { $lyraArgs += "-MOBShotAt=$ShotAt" }
 if ($BreakPadsAt -gt 0) { $lyraArgs += "-MOBBreakPadsAt=$BreakPadsAt" }
 $lyraArgs += ($LyraExtra -split ' ' | Where-Object { $_ })
 $t0 = Get-Date
@@ -48,7 +60,8 @@ Start-Sleep -Seconds 3   # the 1 s warmup ends and the match starts before the p
 
 $probe = $null
 if ($welcomed) {
-    $probe = Start-Process -FilePath "$repo\build\Tools\ServerProbe\Release\ServerProbe.exe" -ArgumentList @("`"$map`"", "`"$moves`"", '--pads', "--port=$Port", "--serverLog=`"${base}_server.txt`"") -RedirectStandardOutput "${base}_probe.txt" -RedirectStandardError "${base}_probe_err.txt" -PassThru -WindowStyle Hidden
+    $probeMode = if ($Weapons) { '--weapons' } else { '--pads' }
+    $probe = Start-Process -FilePath "$repo\build\Tools\ServerProbe\Release\ServerProbe.exe" -ArgumentList @("`"$map`"", "`"$moves`"", $probeMode, "--port=$Port", "--serverLog=`"${base}_server.txt`"") -RedirectStandardOutput "${base}_probe.txt" -RedirectStandardError "${base}_probe_err.txt" -PassThru -WindowStyle Hidden
 }
 while ((Get-Date) -lt $deadline -and -not $lyra.HasExited) { Start-Sleep -Seconds 1 }
 if (-not $lyra.HasExited) { "TIMEOUT - killing Lyra $($lyra.Id)"; Stop-Process -Id $lyra.Id -Force }
