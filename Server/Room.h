@@ -179,6 +179,7 @@ namespace mo
 		uint64_t dashUncrouches = 0;		// 앉은 채 켜서 일어서기를 바람
 		uint64_t dashLiftoffs = 0;			// 이동 계수 rootForceLiftoffs 가 그 입력 걸음에서 는 수(위를 보고 앞 대시 — 걷기 → 낙하)
 		uint64_t dashMontage[4] = {};		// 켠 방향(EDashDir — 앞 · 뒤 · 왼 · 오른)
+		uint64_t dashMsgs = 0;				// 보낸 S2C_DASH — started 와 같아야 한다(세는 자리를 따로 둬 보내는 길이 빠졌는지 가린다)
 
 		// 권위 확인 — 일부러 보낸 나쁜 입력을 사유별로 센다. 정직한 클라는 여기 일곱이 전부 0 이어야 한다
 		uint64_t inputsRejectedBadValue = 0;	// NaN·무한대 — 통째로 버림
@@ -414,7 +415,7 @@ namespace mo
 		Vec3 ResolveAimStart(const Player& player, const Vec3& locationBeforeMove, const Vec3& aim);
 		bool TryMelee(Player& player, const wire::Input& input);	// 부르기 전에 melee.NextInput — 대시가 끊을지를 이번 입력 값으로 보려고 ApplyInput 이 앞에서 센다
 		void CountDash(EDashResult result);
-		void StartDash(Player& player, const DashStart& dash);
+		void StartDash(Player& player, const DashStart& dash, uint32_t seq);	// seq = 켠 입력 번호(S2C_DASH 에 싣는다)
 		bool MeleeHandOf(const Player& player, Vec3& out);
 		void RecordRewindSamples();
 		bool GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out, float& outAlpha) const;

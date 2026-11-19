@@ -866,7 +866,7 @@ namespace mo
 			{
 				const DashStart dash = player.dash.TryActivate(input.pitch, input.yaw, false, _phase == wire::EMatchPhase::PostGame);
 				CountDash(dash.result);
-				if (dash.result == EDashResult::Started) StartDash(player, dash);
+				if (dash.result == EDashResult::Started) StartDash(player, dash, input.seq);
 			}
 		}
 
@@ -1059,8 +1059,9 @@ namespace mo
 		++_stats.dashPresses;
 	}
 
-	// 대시가 켜진 입력 — 끊기(Ability.Type.Action) → 일어서기 → 힘. DashCheck 이동 대조(D-1)와 같은 차례: 근접 밀기 지우기 → 일어서기 → 대시 힘
-	void CRoom::StartDash(Player& player, const DashStart& dash)
+	// 대시가 켜진 입력 — 끊기(Ability.Type.Action) → 일어서기 → 힘. DashCheck 이동 대조(D-1)와 같은 차례: 근접 밀기 지우기 → 일어서기 → 대시 힘.
+	// 소식(S2C_DASH)은 입력 처리 안에서 보내 이 틱 상태보다 먼저 간다 — 켠 사람 예측은 상태의 확인(AckDash)보다 소식을 먼저 받아야 「서버는 안 켰다」로 안 읽는다
+	void CRoom::StartDash(Player& player, const DashStart& dash, uint32_t seq)
 	{
 		if (player.melee.Cut())		// 근접 작업이 끝나며 밀기를 지운다(OnDestroy → RemoveRootMotionSourceByID). 피해는 켜진 입력에 이미 들어갔다(D-0 melee_dash 100)
 		{
@@ -1085,6 +1086,19 @@ namespace mo
 		}
 		_moveSim.ApplyRootForce(player.move, dash.force, kDashForceDuration, DashForceSettings());
 		++_stats.dashMontage[(size_t)dash.dir];
+
+		wire::Dash msg = wire::Dash();
+		msg.h.size = (uint16_t)sizeof(msg);
+		msg.h.type = (uint16_t)wire::Msg::S2C_DASH;
+		msg.tick = _tick;
+		msg.player = player.id;
+		msg.seq = seq;
+		msg.forceX = dash.force.x;
+		msg.forceY = dash.force.y;
+		msg.forceZ = dash.force.z;
+		msg.dir = (uint8_t)dash.dir;
+		SendToAll(&msg, (int)sizeof(msg));
+		++_stats.dashMsgs;
 	}
 
 	// 근접(GA_Melee, 컨텐츠 E-3) — 켜지는 입력에 판정 · 피해 · 밀기 · 몽타주를 다 한다. 걸음 앞에서 불러 밀기가 이 입력 걸음부터 먹는다(E-2-1 · D73).

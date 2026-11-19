@@ -11,7 +11,8 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 11;		// 11 = 상태의 빠른 칸 quickSlots · 받침 소식의 종류 · 줍기 결과 · 무기 · 칸 · 탄 · 입력 번호 · 시험 입력의 탄 정하기 · 죽음(컨텐츠 W-2 · W-3)
+		constexpr uint32_t kProtocolVersion = 12;		// 12 = 대시 단추 BUTTON_DASH 를 보냄 · 대시 소식 S2C_DASH(컨텐츠 D-3)
+														// 11 = 상태의 빠른 칸 quickSlots · 받침 소식의 종류 · 줍기 결과 · 무기 · 칸 · 탄 · 입력 번호 · 시험 입력의 탄 정하기 · 죽음(컨텐츠 W-2 · W-3)
 														// 10 = 근접 단추 BUTTON_MELEE · 근접 결과 S2C_MELEE · 피해 · 처치 소식의 무기 번호 근접 kWeaponMelee(컨텐츠 E-3)
 														// 9 = 체력 받침 상태 S2C_PICKUP(컨텐츠 B-3)
 														// 7 = 애니 꼬리에 앉기 묶음 비중 · 겹침 칸 번호에 앉은 전환 14개(컨텐츠 D-3, D62) · 앉기 버튼 BUTTON_CROUCH · 상태 STATE_CROUCHED(D-5)
@@ -40,6 +41,7 @@ namespace mo
 			S2C_RESULT = 107,		// 잃으면 안 됨 — 경기 끝의 점수 기록
 			S2C_PICKUP = 108,		// 잃으면 안 됨 — 체력 받침 상태. 집음 · 다시 켜짐 때와, 들어올 때 · 경기 시작에 받침마다 하나(컨텐츠 B-3)
 			S2C_MELEE = 109,		// 잃으면 안 됨 — 근접 결과. 서버가 근접 능력을 켤 때마다 방 전원에게. 공격자 화면은 이것으로 제 밀기 예측을 고친다(컨텐츠 E-3)
+			S2C_DASH = 110,			// 잃으면 안 됨 — 대시 켬. 서버가 대시를 켤 때마다 방 전원에게. 켠 사람 화면은 이것으로 제 대시 예측(켬 · 방향 · 힘)을 고친다(컨텐츠 D-3)
 		};
 
 		enum EButton : uint8_t
@@ -50,7 +52,7 @@ namespace mo
 			BUTTON_ADS = 1 << 3,	// 누르는 동안 켠다 — 그 입력부터 조준(C-4, D61)
 			BUTTON_CROUCH = 1 << 4,	// 누른 입력 하나에만 켠다 — 앉기 키 한 번 = ALyraCharacter::ToggleCrouch 한 번(D-5)
 			BUTTON_MELEE = 1 << 5,	// Lyra 근접 입력이 눌림을 낸 입력에 켠다 — 근접 능력이 꺼져 있으면 그 입력에 켜지고, 켜진 동안의 누름은 버린다(E-3)
-			BUTTON_DASH = 1 << 6,	// Lyra 대시 입력이 눌림을 낸 입력에 켠다 — 켜짐 · 쿨다운 중이면 버린다(서버 규칙 D-2. 보내는 쪽 · 판 번호 올림은 D-3)
+			BUTTON_DASH = 1 << 6,	// Lyra 대시 입력이 눌림을 낸 입력에 켠다 — 켜짐 · 쿨다운 중이면 버린다(서버 규칙 D-2). 보내는 쪽 = 봇 --dash(D-3) · 다리 Shift(D-5)
 		};
 
 		// S2C_PICKUP 의 까닭 — 화면 효과를 낼지 다리가 이것으로 가른다
@@ -350,6 +352,17 @@ namespace mo
 			uint8_t result;			// EMeleeResult
 			uint8_t weapon;			// 근접을 켠 무기(몽타주 묶음)
 		};
+
+		// 대시 한 번(D-3) — 켬만 보낸다(방향 없음 · 쿨다운 · 켜져 있음 · 죽음 · 경기 끝은 안 보낸다 — 서버도 아무것도 안 했다). 서버는 그 입력을 돈 틱의 상태보다 먼저 보낸다
+		struct Dash
+		{
+			Header h;
+			uint32_t tick;
+			uint32_t player;
+			uint32_t seq;					// 켠 사람의 입력 번호 — 그 사람 화면은 이 입력의 대시를 서버 값으로 바꾼다(CSelfPrediction::OnDashResult)
+			double forceX, forceY, forceZ;	// 서버가 넣은 대시 힘(cm/s). double — 서버가 넣는 값 그대로라야 같은 입력 다시 돌리기가 끝자리까지 같다(근접 밀기는 서버도 float 를 넣는다)
+			uint8_t dir;					// 고른 방향(EDashDir — 앞 · 뒤 · 왼 · 오른) = 몽타주
+		};
 #pragma pack(pop)
 
 		static_assert(sizeof(Header) == 4, "ServerCore MsgHeader 와 같아야 한다");
@@ -396,5 +409,6 @@ namespace mo
 		static_assert(sizeof(Result) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 		static_assert(sizeof(Pickup) == 56, "받침 소식 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 		static_assert(sizeof(Melee) == 38, "근접 소식 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
+		static_assert(sizeof(Dash) == 41, "대시 소식 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 	}
 }
