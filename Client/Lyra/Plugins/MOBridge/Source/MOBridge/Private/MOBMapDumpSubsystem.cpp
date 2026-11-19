@@ -13,7 +13,12 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/Engine.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Character.h"
@@ -219,6 +224,118 @@ namespace
 		}
 		return false;
 	}
+
+	// 수류탄 몸 틀 — B_Grenade 생성 스크립트의 첫 루트 성분(G-0-c2 실측 루트 = Mesh). 부모 블루프린트까지 올라가며 찾는다
+	const UPrimitiveComponent* FindGrenadeBodyTemplate(FString& OutWhere)
+	{
+		UClass* Cls = LoadClass<AActor>(nullptr, TEXT("/ShooterCore/Weapon/Grenade/B_Grenade.B_Grenade_C"));
+		if (!Cls) { OutWhere = TEXT("noClass"); return nullptr; }
+		for (UBlueprintGeneratedClass* Bp = Cast<UBlueprintGeneratedClass>(Cls); Bp; Bp = Cast<UBlueprintGeneratedClass>(Bp->GetSuperClass()))
+		{
+			if (!Bp->SimpleConstructionScript) continue;
+			for (USCS_Node* Root : Bp->SimpleConstructionScript->GetRootNodes())
+			{
+				if (const UPrimitiveComponent* P = Root ? Cast<UPrimitiveComponent>(Root->ComponentTemplate) : nullptr)
+				{
+					OutWhere = FString::Printf(TEXT("%s.%s"), *Bp->GetName(), *Root->GetVariableName().ToString());
+					return P;
+				}
+			}
+		}
+		OutWhere = TEXT("noRoot");
+		return nullptr;
+	}
+
+	// G-0-d(grenade-plan.md 154 · 61줄) — 지금 깃발 둘이 수류탄에도 같은 물체 집합인가. 파일 · 기존 줄은 안 건드리고 따로 한 번 돈다.
+	// 이동 = 본 판(DumpAndQuit) bBlocksMove 와 같은 양쪽 막음(단순) · 수류탄 = 같은 양쪽 막음을 수류탄 몸 틀로(단순 — 날아감은 몸 캡슐 쓸기) ·
+	// 무기 = 본 판 bBlocksWeapon(복잡) · 폭발 선 = B_Grenade 「Detonate」 LineTraceSingle(TraceTypeQuery5 · bTraceComplex, b_flow.txt)이 막힘(복잡).
+	// 잎마다 넷을 세고 한쪽만인 수를 MOB_MAP_GFLAG 로(이동 · 무기 합은 MOB_MAP_COUNT move · weapon 과 같아야 세는 단위가 같다),
+	// 한쪽만인 잎이 있는 성분을 MOB_MAP_GDIFF 로(앞 200개 — expanse 54). 본 판이 건너뛰는 「이동 · 무기 둘 다 안 막음」 성분도 센다
+	void LogGrenadeFlags(UWorld* World, const UCapsuleComponent* Capsule)
+	{
+		FString Where;
+		const UPrimitiveComponent* Gren = FindGrenadeBodyTemplate(Where);
+		FString GrenResp;
+		for (int32 C = 0; C < 32; ++C) GrenResp.AppendInt(Gren ? (int32)Gren->GetCollisionResponseToChannel((ECollisionChannel)C) : 9);
+		const ECollisionChannel GrenObj = Gren ? Gren->GetCollisionObjectType() : ECC_WorldDynamic;
+		const ECollisionChannel BlastCh = UEngineTypes::ConvertToCollisionChannel(TraceTypeQuery5);
+		const ECollisionChannel WeaponCh = UEngineTypes::ConvertToCollisionChannel(TraceTypeQuery4);
+		UE_LOG(LogMOBMap, Log, TEXT("MOB_MAP_GREN body=%s found=%d enabled=%d objType=%d resp=%s blastCh=%d weaponCh=%d weaponMacro=%d capsuleObj=%d"),
+			*Where, Gren ? 1 : 0, Gren ? (int32)Gren->GetCollisionEnabled() : -1, (int32)GrenObj, *GrenResp, (int32)BlastCh, (int32)WeaponCh,
+			(int32)Lyra_TraceChannel_Weapon, Capsule ? (int32)Capsule->GetCollisionObjectType() : -1);
+		if (!Gren || !Capsule) return;
+
+		int32 Comps = 0, Leaves = 0, Move = 0, GrenN = 0, MoveOnly = 0, GrenOnly = 0, Weapon = 0, Blast = 0, WeaponOnly = 0, BlastOnly = 0;
+		int32 CompsMoveDiff = 0, CompsWeaponDiff = 0, Printed = 0;
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (Cast<APawn>(Actor)) continue;
+			TInlineComponentArray<UPrimitiveComponent*> Prims(Actor);
+			for (UPrimitiveComponent* Comp : Prims)
+			{
+				if (!Comp || !Comp->IsRegistered() || !Comp->IsQueryCollisionEnabled()) continue;
+				const ECollisionChannel Obj = Comp->GetCollisionObjectType();
+				const bool bMove = Comp->GetCollisionResponseToChannel(Capsule->GetCollisionObjectType()) == ECR_Block
+					&& Capsule->GetCollisionResponseToChannel(Obj) == ECR_Block;
+				const bool bGren = Comp->GetCollisionResponseToChannel(GrenObj) == ECR_Block && Gren->GetCollisionResponseToChannel(Obj) == ECR_Block;
+				const bool bWeapon = Comp->GetCollisionResponseToChannel(Lyra_TraceChannel_Weapon) == ECR_Block;
+				const bool bBlast = Comp->GetCollisionResponseToChannel(BlastCh) == ECR_Block;
+				if (!bMove && !bGren && !bWeapon && !bBlast) continue;
+				++Comps;
+
+				TArray<FBodyInstance*, TInlineAllocator<1>> Bodies;
+				if (const UInstancedStaticMeshComponent* Ism = Cast<UInstancedStaticMeshComponent>(Comp))
+				{
+					for (FBodyInstance* B : Ism->GetInstanceBodies()) if (B) Bodies.Add(B);
+				}
+				else if (FBodyInstance* B = Comp->GetBodyInstance())
+				{
+					Bodies.Add(B);
+				}
+
+				int32 CMoveOnly = 0, CGrenOnly = 0, CWeaponOnly = 0, CBlastOnly = 0, CLeaves = 0;
+				for (FBodyInstance* Body : Bodies)
+				{
+					const FPhysicsActorHandle Handle = Body->GetPhysicsActor();
+					if (!Handle) continue;
+					for (const auto& Shape : Handle->GetGameThreadAPI().ShapesArray())
+					{
+						if (!Shape->GetQueryEnabled()) continue;
+						const Chaos::Filter::FShapeFilterData Filter = Shape->GetShapeFilterData();
+						const bool bSimple = Filter.HasFlag(Chaos::EFilterFlags::SimpleCollision);
+						const bool bComplex = Filter.HasFlag(Chaos::EFilterFlags::ComplexCollision);
+						const bool M = bMove && bSimple, G = bGren && bSimple, Wp = bWeapon && bComplex, Bl = bBlast && bComplex;
+						if (!M && !G && !Wp && !Bl) continue;
+						const Chaos::FImplicitObject* Geom = Shape->GetGeometry();
+						if (!Geom) continue;
+						Geom->VisitLeafObjects([&](const Chaos::FImplicitObject*, const Chaos::FRigidTransform3&, int32, int32, int32)
+						{
+							++Leaves; ++CLeaves;
+							Move += M; GrenN += G; Weapon += Wp; Blast += Bl;
+							CMoveOnly += (M && !G); CGrenOnly += (G && !M); CWeaponOnly += (Wp && !Bl); CBlastOnly += (Bl && !Wp);
+						});
+					}
+				}
+				MoveOnly += CMoveOnly; GrenOnly += CGrenOnly; WeaponOnly += CWeaponOnly; BlastOnly += CBlastOnly;
+				CompsMoveDiff += (CMoveOnly + CGrenOnly) > 0;
+				CompsWeaponDiff += (CWeaponOnly + CBlastOnly) > 0;
+				if ((CMoveOnly + CGrenOnly + CWeaponOnly + CBlastOnly) > 0 && Printed < 200)
+				{
+					++Printed;
+					const UStaticMeshComponent* Smc = Cast<UStaticMeshComponent>(Comp);
+					UE_LOG(LogMOBMap, Log, TEXT("MOB_MAP_GDIFF actor=%s class=%s comp=%s mesh=%s profile=%s objType=%d movable=%d leaves=%d moveOnly=%d grenOnly=%d weaponOnly=%d blastOnly=%d respCapsule=%d respGren=%d grenToIt=%d respWeapon=%d respBlast=%d"),
+						*Actor->GetName(), *Actor->GetClass()->GetName(), *Comp->GetName(), Smc ? *GetNameSafe(Smc->GetStaticMesh()) : TEXT("-"),
+						*Comp->GetCollisionProfileName().ToString(), (int32)Obj, Comp->Mobility == EComponentMobility::Movable ? 1 : 0, CLeaves,
+						CMoveOnly, CGrenOnly, CWeaponOnly, CBlastOnly,
+						(int32)Comp->GetCollisionResponseToChannel(Capsule->GetCollisionObjectType()), (int32)Comp->GetCollisionResponseToChannel(GrenObj),
+						(int32)Gren->GetCollisionResponseToChannel(Obj), (int32)Comp->GetCollisionResponseToChannel(Lyra_TraceChannel_Weapon), (int32)Comp->GetCollisionResponseToChannel(BlastCh));
+				}
+			}
+		}
+		UE_LOG(LogMOBMap, Log, TEXT("MOB_MAP_GFLAG comps=%d leaves=%d move=%d gren=%d moveOnly=%d grenOnly=%d weapon=%d blast=%d weaponOnly=%d blastOnly=%d compsMoveDiff=%d compsWeaponDiff=%d printed=%d"),
+			Comps, Leaves, Move, GrenN, MoveOnly, GrenOnly, Weapon, Blast, WeaponOnly, BlastOnly, CompsMoveDiff, CompsWeaponDiff, Printed);
+	}
 }
 
 bool UMOBMapDumpSubsystem::ShouldCreateSubsystem(UObject* Outer) const
@@ -276,6 +393,8 @@ void UMOBMapDumpSubsystem::DumpAndQuit()
 		WP ? 1 : 0, (WP && WP->IsStreamingEnabled()) ? 1 : 0, World->GetStreamingLevels().Num(),
 		Capsule ? *Capsule->GetCollisionProfileName().ToString() : TEXT("없음"),
 		Capsule ? Capsule->GetUnscaledCapsuleRadius() : -1.f, Capsule ? Capsule->GetUnscaledCapsuleHalfHeight() : -1.f);
+
+	LogGrenadeFlags(World, Capsule);	// 수류탄 깃발 셈(G-0-d) — 파일과 아래 줄은 그대로
 
 	FDumpWriter W;
 	FString Csv = TEXT("actor,class,component,flags,triangles,prims,x,y,z\n");
