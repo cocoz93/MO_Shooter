@@ -295,4 +295,17 @@ namespace mo
 		}
 		return false;
 	}
+
+	// 그 자세에 대시 몽타주(MONTAGE_DASH_FORWARD ~ RIGHT) 칸이 실렸나 — 봇 BOTSHOT targetDash= 가 「상대가 대시 중」인 쏨을 따로 센다(컨텐츠 D-6).
+	// 몽타주는 힘(0.25초)보다 오래 산다(빼기 포함 53~59프레임, D104) — 빠르게 미끄러지는 몫과 그 뒤 빼기 몫을 같이 센다
+	inline bool HasDashMontage(const wire::AnimStateWire& anim)
+	{
+		constexpr uint8_t kKindMask = (uint8_t)((1 << wire::kAnimMontageKindBits) - 1);
+		for (uint8_t i = 0; i < anim.montageCount && i < wire::kAnimMontagesOnWire; ++i)
+		{
+			const uint8_t kind = (uint8_t)(anim.montages[i].montage & kKindMask);
+			if (kind >= MONTAGE_DASH_FORWARD && kind <= MONTAGE_DASH_RIGHT) return true;
+		}
+		return false;
+	}
 }

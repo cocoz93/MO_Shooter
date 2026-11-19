@@ -12,6 +12,7 @@
 #  - 조건당 600발 이상이 플랜 값이다. 봇이 서로 자주 못 봐서 한 판 분당 머리 30~79발뿐이라(파일럿 실측) 같은 조건을 MEASURE_GAMES 판 동시에 돌려 합산한다
 #  - 비용(cost)은 시간을 재므로 한 판만, --judgeFireAlways 로 10명이 쏠 수 있을 때 계속 쏜다. 무기 셋의 탄이 약 35초치라 MEASURE_SECONDS 는 30 이하로 준다
 #  - 17-d: 「상대가 반응 중」 머리 · 몸(react*) 열 — 반응은 근접에 맞을 때만 켜져 MEASURE_BOT_EXTRA 에 --melee 를 줘야 분모가 생긴다
+#  - 컨텐츠 D-6: 「상대가 대시 중」 머리 · 몸(dash*) 열 — MEASURE_BOT_EXTRA 에 --dash 를 줘야 분모가 생긴다. 서버 --clips(이 도구가 늘 준다)라야 대시 몽타주가 실린다
 #  - 9-6: 「상대가 몽타주 중」 머리 · 몸(mont*) 열을 더 낸다. MEASURE_SERVER_EXTRA = 서버에 더 줄 인자(일부러 틀림 --rewindMontageShift=1 확인용)
 import concurrent.futures
 import csv
@@ -101,7 +102,8 @@ def run_one(out_dir, clips, label, port, rtt, jitter, no_spread, logs=True, seed
                          ('montHead', r'^몽타주 중 머리: 분모 (\d+), 오탈 (\d+)'), ('montBody', r'^몽타주 중 몸: 분모 (\d+), 오탈 (\d+)'),
                          ('adsHead', r'^조준 중 상대 머리: 분모 (\d+), 오탈 (\d+)'), ('adsBody', r'^조준 중 상대 몸: 분모 (\d+), 오탈 (\d+)'),
                          ('crouchHead', r'^앉은 상대 머리: 분모 (\d+), 오탈 (\d+)'), ('crouchBody', r'^앉은 상대 몸: 분모 (\d+), 오탈 (\d+)'),
-                         ('reactHead', r'^반응 중 상대 머리: 분모 (\d+), 오탈 (\d+)'), ('reactBody', r'^반응 중 상대 몸: 분모 (\d+), 오탈 (\d+)')):
+                         ('reactHead', r'^반응 중 상대 머리: 분모 (\d+), 오탈 (\d+)'), ('reactBody', r'^반응 중 상대 몸: 분모 (\d+), 오탈 (\d+)'),
+                         ('dashHead', r'^대시 중 상대 머리: 분모 (\d+), 오탈 (\d+)'), ('dashBody', r'^대시 중 상대 몸: 분모 (\d+), 오탈 (\d+)')):
             mm = re.search(rx, res.stdout, re.M)
             row[name + 'N'], row[name + 'Lost'] = (int(mm.group(1)), int(mm.group(2))) if mm else (None, None)
             n = row[name + 'N']
@@ -115,6 +117,9 @@ def run_one(out_dir, clips, label, port, rtt, jitter, no_spread, logs=True, seed
         mm = re.search(r'이미 나간 상대라 뺀 탄: (\d+)', res.stdout)
         if mm:
             row['leftExcluded'] = int(mm.group(1))
+        mm = re.search(r'줍기 소식 전 옛 무기로 쏜 탄이라 뺀 탄: (\d+)', res.stdout)
+        if mm:
+            row['pickupExcluded'] = int(mm.group(1))
     return row
 
 
@@ -133,10 +138,11 @@ COLUMNS = ['label', 'rtt', 'jitter', 'spread', 'hitsPass', 'headN', 'headLost', 
            'adsHeadN', 'adsHeadLost', 'adsHeadRate', 'adsBodyN', 'adsBodyLost', 'adsBodyRate',
            'crouchHeadN', 'crouchHeadLost', 'crouchHeadRate', 'crouchBodyN', 'crouchBodyLost', 'crouchBodyRate',
            'reactHeadN', 'reactHeadLost', 'reactHeadRate', 'reactBodyN', 'reactBodyLost', 'reactBodyRate',
-           'botOnly', 'serverOnly', 'deadExcluded', 'leftExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks', 'rewindClamped', 'rewindOk', 'rewindFuture', 'rewindNoView', 'idleMoves', 'kills',
+           'dashHeadN', 'dashHeadLost', 'dashHeadRate', 'dashBodyN', 'dashBodyLost', 'dashBodyRate',
+           'botOnly', 'serverOnly', 'deadExcluded', 'leftExcluded', 'pickupExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks', 'rewindClamped', 'rewindOk', 'rewindFuture', 'rewindNoView', 'idleMoves', 'kills',
            'workP50', 'workP99', 'workMax', 'recvBytesPerBotPerSec', 'stateBytesMax', 'poseEvals', 'poseReused', 'poseSkipped', 'botPass', 'botRc', 'serverRc']
 
-SUMMED = ['headN', 'headLost', 'bodyN', 'bodyLost', 'headRunN', 'headRunLost', 'bodyRunN', 'bodyRunLost', 'montHeadN', 'montHeadLost', 'montBodyN', 'montBodyLost', 'adsHeadN', 'adsHeadLost', 'adsBodyN', 'adsBodyLost', 'crouchHeadN', 'crouchHeadLost', 'crouchBodyN', 'crouchBodyLost', 'reactHeadN', 'reactHeadLost', 'reactBodyN', 'reactBodyLost', 'botOnly', 'serverOnly', 'deadExcluded', 'leftExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks',
+SUMMED = ['headN', 'headLost', 'bodyN', 'bodyLost', 'headRunN', 'headRunLost', 'bodyRunN', 'bodyRunLost', 'montHeadN', 'montHeadLost', 'montBodyN', 'montBodyLost', 'adsHeadN', 'adsHeadLost', 'adsBodyN', 'adsBodyLost', 'crouchHeadN', 'crouchHeadLost', 'crouchBodyN', 'crouchBodyLost', 'reactHeadN', 'reactHeadLost', 'reactBodyN', 'reactBodyLost', 'dashHeadN', 'dashHeadLost', 'dashBodyN', 'dashBodyLost', 'botOnly', 'serverOnly', 'deadExcluded', 'leftExcluded', 'pickupExcluded', 'shots', 'bullets', 'noView', 'noSnap', 'noAnim', 'clampedThinks',
           'rewindClamped', 'rewindOk', 'rewindFuture', 'rewindNoView', 'idleMoves', 'kills', 'poseEvals', 'poseReused', 'poseSkipped']
 
 
@@ -152,7 +158,7 @@ def combine(rows, label, limit=0.5):
         out[key] = max(values) if values else None
     values = [r['workP50'] for r in rows if r.get('workP50') is not None]
     out['workP50'] = sum(values) / len(values) if values else None
-    for name in ('head', 'body', 'headRun', 'bodyRun', 'montHead', 'montBody', 'adsHead', 'adsBody', 'crouchHead', 'crouchBody', 'reactHead', 'reactBody'):
+    for name in ('head', 'body', 'headRun', 'bodyRun', 'montHead', 'montBody', 'adsHead', 'adsBody', 'crouchHead', 'crouchBody', 'reactHead', 'reactBody', 'dashHead', 'dashBody'):
         n, lost = out.get(name + 'N'), out.get(name + 'Lost')
         out[name + 'Rate'] = 100.0 * lost / n if n else None
     out['hitsPass'] = bool(out.get('headN')) and bool(out.get('bodyN')) and out['headRate'] <= limit and out['bodyRate'] <= limit

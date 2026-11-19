@@ -518,6 +518,7 @@ namespace
 			}
 			if (_judge && _self.GetLastWeaponEvents().fired) JudgeShot(input, _self.GetLastWeaponEvents());
 			if (!_net.SendPacket(input, wire::Msg::C2S_INPUT)) _net.Close();
+			_lastSentSeq = input.seq;
 		}
 
 		void Close() { _net.Close(); }
@@ -955,6 +956,10 @@ namespace
 				if (_weaponSeeking) ++_weaponTakesSought;	// 무기 받침을 찾아가던 중에 집음 — 갈래가 실제로 받침에 닿았다(W-5)
 				// 예측 가방 · 탄을 서버 값으로 — 그 입력부터 무기 쪽을 다시 돌린다(W-3). 이 소식은 그 틱 상태보다 먼저 와서 맞춰 보기 전에 고쳐진다
 				_self.OnPickup(m.seq, m.reason == wire::PICKUP_TAKE, m.weapon, m.give, m.slot, m.magazine, m.spare);
+				// 화면 판정 기록에 줍기 창 — 서버는 seq 입력부터 새 무기 · 탄인데 봇은 이 소식 전까지(sentSeq 까지 보낸 입력) 옛 무기로 쐈다(무기 줍기 플랜 「예측」 — 줍기는 예측하지 않는다).
+				// check_bot_hits.py 가 이 창의 탄을 죽은 · 나간 상대처럼 빼고 따로 센다(컨텐츠 D-6)
+				if (_judge && _judge->log)
+					std::fprintf(_judge->log, "BOTPICKUP shooter=%u seq=%u give=%u weapon=%u sentSeq=%u\n", _welcome.playerId, m.seq, (unsigned)m.give, (unsigned)m.weapon, _lastSentSeq);
 				// 서버가 무기를 바꿨으면 고른 무기도 따라 맞춘다 — 「앞 입력과 달라졌을 때만 바꾼다」(Loadout.h)라 옛 번호를 보내도 안 되돌아가지만,
 				// 탄이 떨어져 다음 무기로 넘길 때(NextOwnedWeapon) 기준이 든 무기여야 한다. 다리 · 서버 프로브도 같은 규칙(W-2 기록)
 				if (m.give == (uint8_t)EGiveResult::NewEquipped) _chosenWeapon = m.weapon;
@@ -1275,6 +1280,7 @@ namespace
 			_judgeAds.clear();
 			_judgeCrouch.clear();
 			_judgeReact.clear();
+			_judgeDash.clear();
 			for (const auto& entry : _viewHistory)
 			{
 				if (entry.first == _welcome.playerId || _judgeBodies.size() >= _judgePoses.size()) continue;
@@ -1342,6 +1348,8 @@ namespace
 				_judgeCrouch.push_back(targetCrouch);
 				// E-3 「상대가 반응 중」 — 서버 REWIND 줄 react= 와 같은 정의(Shared HasHitReactMontage, 다음 틱과 섞으면 둘 중 하나라도)
 				_judgeReact.push_back(HasHitReactMontage(from->anim) || (poseAlpha > 0.f && HasHitReactMontage(to->anim)) ? 1 : 0);
+				// D-6 「상대가 대시 중」 — 같은 꼴(Shared HasDashMontage, 다음 틱과 섞으면 둘 중 하나라도)
+				_judgeDash.push_back(HasDashMontage(from->anim) || (poseAlpha > 0.f && HasDashMontage(to->anim)) ? 1 : 0);
 			}
 
 			const uint8_t weapon = _self.GetWeaponIndex();
@@ -1361,9 +1369,11 @@ namespace
 				const bool hitBody = result.kind == EBulletHit::Body;
 				// targetWeapon · montages = 맞힌 상대의 자세 묶음 · 몽타주 칸 수(못 맞히면 0). check_bot_hits.py 가 무기별 · 몽타주 중을 따로 센다
 				// targetAds = 맞힌 상대 자세의 조준 묶음 비중(C-5, 못 맞히면 0) — 조준 중인 상대를 맞힌 탄을 따로 센다. targetCrouch = 같은 식의 앉기 묶음 비중(D-5)
-				std::fprintf(js.log, "BOTSHOT seq=%u shooter=%u i=%d weapon=%u kind=%d target=%u weak=%d viewTick=%u alpha=%.4f speed=%.1f targetWeapon=%u montages=%u targetAds=%.3f targetCrouch=%.3f targetReact=%u\n", input.seq, _welcome.playerId, i, (unsigned)weapon, (int)result.kind,
+				// targetDash = 맞힌 상대 자세에 대시 몽타주가 들었나(컨텐츠 D-6, 못 맞히면 0)
+				std::fprintf(js.log, "BOTSHOT seq=%u shooter=%u i=%d weapon=%u kind=%d target=%u weak=%d viewTick=%u alpha=%.4f speed=%.1f targetWeapon=%u montages=%u targetAds=%.3f targetCrouch=%.3f targetReact=%u targetDash=%u\n", input.seq, _welcome.playerId, i, (unsigned)weapon, (int)result.kind,
 					hitBody ? _judgeBodies[result.bodyIndex].id : 0u, hitBody && result.weakSpot ? 1 : 0, input.viewTick, input.viewAlpha, hitBody ? _judgeSpeeds[result.bodyIndex] : 0.f,
-					hitBody ? (unsigned)_judgeTargetWeapons[result.bodyIndex] : 0u, hitBody ? (unsigned)_judgeMontages[result.bodyIndex] : 0u, hitBody ? _judgeAds[result.bodyIndex] : 0.f, hitBody ? _judgeCrouch[result.bodyIndex] : 0.f, hitBody ? (unsigned)_judgeReact[result.bodyIndex] : 0u);
+					hitBody ? (unsigned)_judgeTargetWeapons[result.bodyIndex] : 0u, hitBody ? (unsigned)_judgeMontages[result.bodyIndex] : 0u, hitBody ? _judgeAds[result.bodyIndex] : 0.f, hitBody ? _judgeCrouch[result.bodyIndex] : 0.f, hitBody ? (unsigned)_judgeReact[result.bodyIndex] : 0u,
+					hitBody ? (unsigned)_judgeDash[result.bodyIndex] : 0u);
 			}
 		}
 
@@ -1895,6 +1905,7 @@ namespace
 		std::vector<float> _judgeAds;	// 같은 차례 — 상대 자세의 조준 묶음 비중(C-5, 다음 틱과 섞으면 둘 중 큰 쪽)
 		std::vector<float> _judgeCrouch;	// 같은 차례 — 상대 자세의 앉기 묶음 비중(D-5, 같은 식)
 		std::vector<uint8_t> _judgeReact;	// 같은 차례 — 상대 자세에 맞은 쪽 반응 몽타주가 들었나(E-3 17-d)
+		std::vector<uint8_t> _judgeDash;	// 같은 차례 — 상대 자세에 대시 몽타주가 들었나(컨텐츠 D-6)
 		std::vector<std::vector<BodyPose>> _judgePoses;
 		uint64_t _judgeShots = 0, _judgeBullets = 0, _judgeNoView = 0, _judgeNoSnap = 0, _judgeNoAnim = 0, _judgeClamped = 0, _recvBytes = 0;
 		uint64_t _ackLagSum = 0, _ackLagSamples = 0;
@@ -1905,6 +1916,7 @@ namespace
 		bool _hasStateTime = false;
 		uint64_t _compared = 0, _posDiff = 0, _velDiff = 0, _ammoDiff = 0, _flagDiff = 0;
 		uint64_t _invDiff = 0, _invMulti = 0, _weaponPickupsMine = 0;	// 가방(W-3) — 빠른 칸이 서버와 다른 비교 줄 · 무기 둘 이상 든 비교 줄 · 내가 집은 무기 받침
+		uint32_t _lastSentSeq = 0;		// 마지막으로 보낸 입력 번호 — 화면 판정 기록 BOTPICKUP 의 줍기 창 끝(컨텐츠 D-6)
 		uint64_t _lockDiff = 0, _lockCompared = 0;		// 이동 막음(부활 직후) 깃발이 서버와 다른 줄 — flagDiff 안에도 든다
 		uint64_t _adsCompared = 0, _adsDiff = 0, _adsInputs = 0;	// 서버가 조준 켜짐으로 보낸 비교 줄 · 그중 어긋남 · 조준을 누른 입력
 		bool _adsWhenShooting = false;		// --ads

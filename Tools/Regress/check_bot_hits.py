@@ -7,6 +7,8 @@
 # - 덤 = 봇은 못 맞혔는데 서버가 맞힌 탄. 합격선에는 안 넣고 값만 낸다
 # - 서버가 쏠 때 이미 죽어 있던 상대(DEADSKIP)를 봇이 맞힌 탄은 경기 규칙이라 빼고 따로 센다. 0단계 계산기에도 없는 사건이다
 # - 서버가 쏠 때 이미 나간 상대(그 탄보다 앞선 LEAVE 줄)도 같은 까닭으로 빼고 따로 센다(C-5: 측정 판에서는 판 끝에 봇이 한꺼번에 끊을 때 생긴다)
+# - 줍기 소식 전 탄(컨텐츠 D-6) — 서버가 무기를 집어 바로 든 입력부터 봇이 그 소식을 받기 전까지 보낸 입력(BOTPICKUP 줄의 seq ~ sentSeq)은
+#   서버는 새 무기 · 봇은 옛 무기로 쐈다. 줍기는 예측하지 않는다(무기 줍기 플랜 「예측」). 죽은 · 나간 상대처럼 빼고 따로 세되 맞혔든 못 맞혔든 뺀다(결과로 고르지 않는다). 옛 봇 기록에는 줄이 없어 0
 # - 달리는 상대 = 봇이 본 수평 속도가 --run 이상(check_dedi_baseline.py RUN_SPEED 와 같은 500cm/s)
 # - 상대 무기별 · 「상대가 몽타주 중」(9-6) = 봇이 맞힌 상대의 자세 묶음 · 몽타주 칸 수(BOTSHOT targetWeapon= montages=, 서버 REWIND montages= 와 같은 정의).
 #   몽타주 중 쏨도 같은 기준으로 따로 판정한다(BOTHITS_MONTAGE). 옛 봇 기록에는 두 칸이 없어 이 줄들이 빈다
@@ -14,6 +16,8 @@
 # - 「상대가 앉음」(D-6) = 같은 식의 앉기 묶음 비중 > 0(BOTSHOT targetCrouch=). 값만 낸다(BOTHITS_CROUCH). 봇에 --crouch 를 줘야 분모가 생긴다
 # - 「상대가 반응 중」(E-3 17-d) = 맞힌 상대 자세에 맞은 쪽 반응 몽타주가 들었나(BOTSHOT targetReact=, 서버 REWIND react= 와 같은 정의). 값만 낸다(BOTHITS_REACT).
 #   반응은 근접에 맞을 때만 켜져 봇에 --melee 를 줘야 분모가 생긴다
+# - 「상대가 대시 중」(컨텐츠 D-6) = 맞힌 상대 자세에 대시 몽타주가 들었나(BOTSHOT targetDash=, Shared HasDashMontage). 값만 낸다(BOTHITS_DASH).
+#   봇에 --dash 를 줘야 분모가 생긴다. 조건마다 판을 합친 값은 measure_pose.py 의 dash* 열
 # rc=0 기준 안 · rc=1 기준 밖이거나 분모가 0 (0 은 「맞다」가 아니라 「못 읽었다」)
 import collections
 import re
@@ -26,13 +30,23 @@ RUN = float(opt.get('run', 500))
 LIMIT = float(opt.get('limit', 0.5))
 KIND_BODY = 2   # Shared/Weapon.h EBulletHit::Body
 
-bot_re = re.compile(r'^BOTSHOT seq=(\d+) shooter=(\d+) i=(\d+) weapon=(\d+) kind=(\d+) target=(\d+) weak=(\d+) viewTick=(\d+) alpha=([\d.]+) speed=([\d.]+)(?: targetWeapon=(\d+) montages=(\d+))?(?: targetAds=([\d.]+))?(?: targetCrouch=([\d.]+))?(?: targetReact=(\d+))?')
+bot_re = re.compile(r'^BOTSHOT seq=(\d+) shooter=(\d+) i=(\d+) weapon=(\d+) kind=(\d+) target=(\d+) weak=(\d+) viewTick=(\d+) alpha=([\d.]+) speed=([\d.]+)(?: targetWeapon=(\d+) montages=(\d+))?(?: targetAds=([\d.]+))?(?: targetCrouch=([\d.]+))?(?: targetReact=(\d+))?(?: targetDash=(\d+))?')
 srv_re = re.compile(r'^BULLET seq=(\d+) shooter=(\d+) i=(\d+) kind=(\d+) target=(\d+) weak=(\d+) rewind=(\d+)')
 dead_re = re.compile(r'^DEADSKIP seq=(\d+) shooter=(\d+) target=(\d+)')
 leave_re = re.compile(r'^LEAVE id=(\d+)')
 
+pickup_re = re.compile(r'^BOTPICKUP shooter=(\d+) seq=(\d+) give=(\d+) weapon=(\d+) sentSeq=(\d+)')
+GIVE_NEW_EQUIPPED = 0   # Shared/Loadout.h EGiveResult::NewEquipped — 든 무기가 바뀌는 줍기
 bots = {}
+pickup_windows = collections.defaultdict(list)		# 쏜 사람 → (첫 입력, 끝 입력) — 서버는 새 무기, 봇은 소식 전이라 옛 무기로 쏜 입력들
 for line in open(args[0], encoding='utf-8', errors='replace'):
+    m = pickup_re.match(line)
+    if m:
+        if int(m.group(3)) == GIVE_NEW_EQUIPPED:
+            # seq = 서버가 그 입력의 이동 뒤 겹침에서 집었다 → 같은 입력의 사격부터 새 무기(Room.cpp ApplyInput: UpdatePadOverlaps 다음이 무기 순환)
+            # · 봇은 sentSeq 까지 옛 무기로 보냈다. 다시 검사(TickPads)로 집은 줍기는 다음 입력부터지만 결과를 안 보고 빼니 한 입력 더 빼도 치우치지 않는다
+            pickup_windows[int(m.group(1))].append((int(m.group(2)), int(m.group(5))))
+        continue
     m = bot_re.match(line)
     if m:
         g = m.groups()
@@ -40,7 +54,8 @@ for line in open(args[0], encoding='utf-8', errors='replace'):
                                                        target_weapon=int(g[10]) if g[10] is not None else None, montages=int(g[11]) if g[11] is not None else None,
                                                        target_ads=float(g[12]) if g[12] is not None else None,
                                                        target_crouch=float(g[13]) if g[13] is not None else None,
-                                                       target_react=int(g[14]) if g[14] is not None else None)
+                                                       target_react=int(g[14]) if g[14] is not None else None,
+                                                       target_dash=int(g[15]) if g[15] is not None else None)
 
 server, dead, left = {}, set(), set()
 for line in open(args[1], encoding='utf-8', errors='replace'):
@@ -71,10 +86,14 @@ head_mont, body_mont, head_nomont, body_nomont = zero(), zero(), zero(), zero()
 head_ads, body_ads, head_hip, body_hip = zero(), zero(), zero(), zero()
 head_crouch, body_crouch, head_stand, body_stand = zero(), zero(), zero(), zero()
 head_react, body_react, head_noreact, body_noreact = zero(), zero(), zero(), zero()
-head_gain = body_gain = dead_excluded = left_excluded = 0
+head_dash, body_dash, head_nodash, body_nodash = zero(), zero(), zero(), zero()
+head_gain = body_gain = dead_excluded = left_excluded = pickup_excluded = 0
 samples = []
 for k in both:
     b, s = bots[k], server[k]
+    if any(lo <= k[1] <= hi for lo, hi in pickup_windows.get(k[0], ())):
+        pickup_excluded += 1		# 맞혔든 못 맞혔든 뺀다 — 결과로 고르지 않는다
+        continue
     b_hit = b['kind'] == KIND_BODY
     s_hit = s['kind'] == KIND_BODY
     if b_hit and (k[0], k[1], b['target']) in dead:
@@ -124,6 +143,16 @@ for k in both:
             react_head['n'] += 1
             if not (same_target and s['weak']):
                 react_head['lost'] += 1
+    has_dash = b['target_dash'] is not None
+    dash_body, dash_head = (body_dash, head_dash) if has_dash and b['target_dash'] > 0 else (body_nodash, head_nodash)
+    if has_dash:
+        dash_body['n'] += 1
+        if not same_target:
+            dash_body['lost'] += 1
+        if b['weak']:
+            dash_head['n'] += 1
+            if not (same_target and s['weak']):
+                dash_head['lost'] += 1
     body['n'] += 1
     per_weapon[b['weapon']][2] += 1
     if running:
@@ -174,6 +203,7 @@ show('달리는 상대 몸', body_run)
 print(f'덤(봇 못 맞힘 · 서버 맞힘): 몸 {body_gain}, 그중 머리 {head_gain}')
 print(f'서버가 쏠 때 이미 죽은 상대라 뺀 탄: {dead_excluded}')
 print(f'서버가 쏠 때 이미 나간 상대라 뺀 탄: {left_excluded}')
+print(f'줍기 소식 전 옛 무기로 쏜 탄이라 뺀 탄: {pickup_excluded} (창 {sum(len(v) for v in pickup_windows.values())})')
 WEAPONS = {0: '권총', 1: '소총', 2: '샷건'}
 for w, (hn, hl, bn, bl) in sorted(per_weapon.items()):
     print(f'  {WEAPONS.get(w, w)}: 머리 {hl}/{hn}, 몸 {bl}/{bn}')
@@ -195,6 +225,10 @@ show('반응 중 상대 머리', head_react)
 show('반응 중 상대 몸', body_react)
 show('반응 없는 상대 머리', head_noreact)
 show('반응 없는 상대 몸', body_noreact)
+show('대시 중 상대 머리', head_dash)
+show('대시 중 상대 몸', body_dash)
+show('대시 안 한 상대 머리', head_nodash)
+show('대시 안 한 상대 몸', body_nodash)
 for k, b, s in samples:
     print(f'  오탈 보기 {k}: 봇 {b} 서버 {s}')
 
@@ -212,4 +246,7 @@ print(f'BOTHITS_CROUCH {"PASS" if crouch_ok else "FAIL"} 머리={rate(head_crouc
 # 반응 중 상대(E-3 17-d)도 값만 — 봇에 --melee 를 줘야 분모가 생긴다
 react_ok = head_react['n'] > 0 and body_react['n'] > 0 and rate(head_react) <= LIMIT and rate(body_react) <= LIMIT
 print(f'BOTHITS_REACT {"PASS" if react_ok else "FAIL"} 머리={rate(head_react):.3f}({head_react["lost"]}/{head_react["n"]}) 몸={rate(body_react):.3f}({body_react["lost"]}/{body_react["n"]}) 기준={LIMIT}')
+# 대시 중 상대(컨텐츠 D-6)도 값만 — 봇에 --dash 를 줘야 분모가 생긴다
+dash_ok = head_dash['n'] > 0 and body_dash['n'] > 0 and rate(head_dash) <= LIMIT and rate(body_dash) <= LIMIT
+print(f'BOTHITS_DASH {"PASS" if dash_ok else "FAIL"} 머리={rate(head_dash):.3f}({head_dash["lost"]}/{head_dash["n"]}) 몸={rate(body_dash):.3f}({body_dash["lost"]}/{body_dash["n"]}) 기준={LIMIT}')
 sys.exit(0 if ok else 1)
