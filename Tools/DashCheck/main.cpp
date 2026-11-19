@@ -594,7 +594,8 @@ namespace
 		int replayCompared = 0, replayFails = 0;
 		int fixCompared = 0, fixFails = 0;
 		int willCompared = 0, willFails = 0;
-		bool Fail() const { return scriptFails != 0 || replayFails != 0 || fixFails != 0 || willFails != 0 || replayCompared == 0 || fixCompared == 0; }
+		int respawnCompared = 0, respawnFails = 0;
+		bool Fail() const { return scriptFails != 0 || replayFails != 0 || fixFails != 0 || willFails != 0 || respawnFails != 0 || replayCompared == 0 || fixCompared == 0 || respawnCompared == 0; }
 	};
 
 	PredictReport ComparePrediction(const CMapCollision& map, const MoveParams& params, const Vec3& start)
@@ -733,6 +734,46 @@ namespace
 		// 부활 뒤 첫 입력 — 앞 칸 = 부활 직후 대시 상태(이동 없음 · 놓인 요)
 		fixCase("spawnBase", firstDash, plain, { 1u }, 3, 1, 0, 0, 0, true);
 		std::printf("DASH predictFix compared=%d fails=%d\n", out.fixCompared, out.fixFails);
+
+		// ④ 부활 다시 돌리기에서 켜짐이 바뀐 칸 세기(D-3-b) — 서버는 경기 시작에 산 사람도 다시 세워 쿨다운을 지운다(EnterPhase Playing).
+		//    예측은 부활 번호 뒤 입력을 지운 대시로 다시 고르는데(OnSpawn) 거기서는 started 를 안 센다 → respawnGained · respawnLost 로 센다(봇 판정 「서버 켬 = 예측 켬」의 한 항).
+		//    누름 10 · 50 · 105(+X 걷기 · 요 0 = 앞 대시): 처음엔 10 켬 · 50 쿨다운(다시 켜는 첫 입력 101) · 105 켬. 부활 번호 20 → 50 새로 켬 · 105 는 50 의 쿨다운(141 전)이라 꺼짐.
+		//    부활 번호 5 → 10 · 50 · 105 가 처음과 같다(대조군 — 0 · 0)
+		{
+			constexpr uint32_t kRespawnInputs = 130;
+			const auto respawnCase = [&](uint32_t spawnSeq, bool want50, bool want105, uint64_t wantGained, uint64_t wantLost)
+			{
+				const auto predOwner = make();
+				CSelfPrediction& pred = *predOwner;
+				pred.OnSpawn(start.x, start.y, start.z, 0, 0.f);
+				for (uint32_t i = 1; i <= kRespawnInputs; ++i)
+				{
+					wire::Input input = wire::Input();
+					input.moveX = 1.f;
+					if (i == 10 || i == 50 || i == 105) input.buttons = wire::BUTTON_DASH;
+					pred.AddInput(input);
+				}
+				const CSelfPrediction::Slot* s10 = SlotAt(pred, 10);
+				const CSelfPrediction::Slot* s50 = SlotAt(pred, 50);
+				const CSelfPrediction::Slot* s105 = SlotAt(pred, 105);
+				const bool firstOk = s10 && s10->dashStarted && s50 && !s50->dashStarted && s105 && s105->dashStarted && pred.GetDashCounters().started == 2;
+				pred.OnSpawn(start.x, start.y, start.z, spawnSeq, 0.f);
+				const CSelfPrediction::DashCounters& dc = pred.GetDashCounters();
+				s10 = SlotAt(pred, 10);
+				s50 = SlotAt(pred, 50);
+				s105 = SlotAt(pred, 105);
+				const bool slotsOk = s50 && s50->dashStarted == want50 && s105 && s105->dashStarted == want105;
+				const bool ok = firstOk && slotsOk && dc.respawnGained == wantGained && dc.respawnLost == wantLost && dc.started == 2 && dc.presses == 3;
+				++out.respawnCompared;
+				if (!ok) ++out.respawnFails;
+				std::printf("DASH predictRespawn %s spawnSeq=%u first=%d started50=%d started105=%d respawnGained=%llu respawnLost=%llu started=%llu presses=%llu\n", ok ? "ok" : "DIFF", spawnSeq,
+					firstOk ? 1 : 0, s50 && s50->dashStarted ? 1 : 0, s105 && s105->dashStarted ? 1 : 0, (unsigned long long)dc.respawnGained, (unsigned long long)dc.respawnLost,
+					(unsigned long long)dc.started, (unsigned long long)dc.presses);
+			};
+			respawnCase(20, true, false, 1, 1);
+			respawnCase(5, false, true, 0, 0);
+			std::printf("DASH predictRespawn compared=%d fails=%d\n", out.respawnCompared, out.respawnFails);
+		}
 
 		// ③ 근접 누름 미리 보기(WillMeleeStart) — 화면 근접 판정을 켜질 입력에만 하려고 넣기 전에 본다. 대시가 켜지거나 켜져 있으면 안 켜진다
 		{

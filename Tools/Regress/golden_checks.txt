@@ -322,6 +322,9 @@ dash DASH predictFix ok unconfirmed ack=30 before=59.7451 afterResult=59.7451 af
 dash DASH predictFix ok unconfirmedThenLate ack=60 before=59.7451 afterResult=538.4153 after=0.000000 corrected=0 startMismatches=1 forceFixes=0 unconfirmed=1 meleeInReplay=1 replays=2
 dash DASH predictFix ok spawnBase ack=3 before=495.3418 afterResult=0.0000 after=0.000000 corrected=0 startMismatches=1 forceFixes=0 unconfirmed=0 meleeInReplay=0 replays=1
 dash DASH predictFix compared=5 fails=0
+dash DASH predictRespawn ok spawnSeq=20 first=1 started50=1 started105=0 respawnGained=1 respawnLost=1 started=2 presses=3
+dash DASH predictRespawn ok spawnSeq=5 first=1 started50=0 started105=1 respawnGained=0 respawnLost=0 started=2 presses=3
+dash DASH predictRespawn compared=2 fails=0
 dash DASH predictWillMelee ok compared=6 fails=0 sameInput=0 free=1 at32=0 started32=0 at33=1 started33=1
 dash DASHCHECK PASS steps=30 dashes=33 fails=0 abilityFails=0 blockFails=0
 map_expanse CHECK kind=A total=15000 bothHit=9225 bothMiss=5775 onlyLyra=0 onlyMine=0 lyraPen=4351 penMismatch=0 maxDiff=0.0910 p99Diff=0.00074 over0.1=0 over1=0

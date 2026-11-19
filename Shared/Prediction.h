@@ -147,6 +147,8 @@ namespace mo
 		{
 			uint64_t presses = 0;			// 대시 단추가 든 입력(부활을 기다리는 중 제외) — AddInput 에서만 센다(부활 다시 돌리기는 안 셈)
 			uint64_t started = 0;			// 그중 내가 켠 것(AddInput 때 판단, 다시 고르기로 바뀐 것은 안 셈)
+			uint64_t respawnGained = 0;		// 부활 다시 돌리기(OnSpawn)에서 새로 켜진 칸 — 경기 시작은 산 사람도 다시 세워 쿨다운이 지워진다(서버 EnterPhase Playing)
+			uint64_t respawnLost = 0;		// 같은 자리에서 꺼진 칸. 서버 켬 수 = started + respawnGained − respawnLost(고친 수가 0 일 때)
 			uint64_t results = 0;			// 받은 서버 소식(내 것)
 			uint64_t resultsNoSlot = 0;		// 받았지만 그 번호 칸이 없음(부활 전 목숨 · 기다리는 중)
 			uint64_t startMismatches = 0;	// 서버는 켰는데 나는 안 켬 — 고침. 봇 판 기대 0

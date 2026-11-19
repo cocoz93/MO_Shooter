@@ -100,7 +100,9 @@ namespace mo
 			slot.dashServer = false;		// 앞 목숨에서 받은 대시 소식 · 확인도 버린다 — 새 몸에서 다시 고른다
 			slot.dashDenied = false;
 			Equip(slot.input);
+			const bool dashStartedBefore = slot.dashStarted;
 			StepAbilities(slot, false);
+			if (slot.dashStarted != dashStartedBefore) ++(slot.dashStarted ? _dashCounters.respawnGained : _dashCounters.respawnLost);
 			RememberDash(slot, ApplyMove(slot));
 			ApplyWeapon(slot, _melee.IsActive());
 			RememberMove(slot);
