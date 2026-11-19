@@ -3,7 +3,7 @@
 # - 왜: 빌드 대상을 골라 돌리다 대조 도구가 옛 빌드로 남은 적이 있어, 전부 한 명령으로 묶는다.
 #
 #   Tools/Regress/regress.sh [--bin <빌드 폴더>] [--out <출력 폴더>] [--only checks|play|multi] [--break]
-#     --break  일부러 틀림 — 대조 도구 입력을 잘라 기준선과 어긋나게 하고 봇에 --breakMirror 를 준다.
+#     --break  일부러 틀림 — 대조 도구 입력을 잘라 기준선과 어긋나게 하고 봇에 --breakMirror 를 준다(대시 판 봇엔 --breakDash=predict).
 #              이때 FAIL 이 나와야 맞다(시험의 시험).
 # 판정은 개수·바이트만 본다. 시간 값은 안 쓰므로 PC 가 바빠도 돌릴 수 있다.
 # 기준선 = golden_checks.txt. 이동·충돌·무기 코드를 일부러 고쳤을 때만 갱신한다.
@@ -185,6 +185,50 @@ run_pause() {
 	verdict 쉬기판 $ok "봇 rc=$brc 서버 rc=$src 빈입력이동=$idle 탄어긋남=$ammo 깃발어긋남=$flag 막음어긋남=$lock"
 }
 
+# 대시(컨텐츠 D-3 · D-4) — 봇이 대시하며(--dash, 조준 · 근접 · 앉기와 섞어 막기 · 끊기 갈래까지) 싸운다. 서버엔 클립을 줘 대시 몽타주를 튼다.
+# 봇 RESULT PASS = 위치 · 속도 · 탄 · 깃발 차이 0 · 대시 소식이 예측과 같음(dashDiff 0). 서버 켬 = 보낸 소식 = 봇이 받은 내 소식(mine = results),
+# 켠 방향 수(montage F/B/L/R) = 쌓은 몽타주 사건 = 튼 수(버림 뺌) · 네 방향 다 1 이상(세는 자리마다 한 번은 지나갔다).
+# 막기는 끈다(--testNoPawnBlock) — 위치 차이 0 을 엄격히 본다(run_bots 와 같은 까닭). --break 이면 예측에 대시를 안 넣어(--breakDash=predict) 어긋나야 한다
+run_dash() {
+	local break_arg=""
+	[ "$BREAK" = 1 ] && break_arg="--breakDash=predict"
+	"$SRV" "--map=$MAP" --port=7966 --exitWhenEmpty "--record=$OUT_W/dash_srv.csv" --warmup=2 --matchSeconds=40 --seed=21 "--pads=$PADS" "--clips=$DATA/clips.bin" --testNoPawnBlock > "$OUT/dash_srv.log" 2>&1 &
+	local spid=$!
+	"$BOT" "--map=$MAP" --port=7966 "--record=$OUT_W/dash_bot.csv" --seed=21 --testNoPawnBlock --dash --ads --melee --crouch $break_arg > "$OUT/dash_bot.log" 2>&1
+	local brc=$?
+	wait $spid
+	local src=$? ok=1
+	[ $brc = 0 ] && [ $src = 0 ] || ok=0
+	cmp -s "$OUT/dash_srv.csv" "$OUT/dash_bot.csv" || ok=0
+	grep -q '^RESULT PASS' "$OUT/dash_bot.log" || ok=0
+	local sd ad bd started msgs mine results f b l r
+	sd="$(grep -a '^SERVER dash ' "$OUT/dash_srv.log")"
+	ad="$(grep -a '^SERVER animDash ' "$OUT/dash_srv.log")"
+	bd="$(grep -a '^BOT dash ' "$OUT/dash_bot.log")"
+	started="$(num "$sd" started)"; msgs="$(num "$sd" msgs)"
+	mine="$(num "$bd" mine)"; results="$(num "$bd" results)"
+	f="$(num "$sd" F)"; b="$(num "$sd" B)"; l="$(num "$sd" L)"; r="$(num "$sd" R)"
+	[ -n "$started" ] && [ "$started" -gt 0 ] && [ "$msgs" = "$started" ] && [ "$mine" = "$started" ] && [ "$results" = "$started" ] || ok=0
+	[ "$(num "$bd" dashDiff)" = 0 ] && [ "$(num "$bd" noSlot)" = 0 ] || ok=0
+	if [ -n "$f" ] && [ -n "$b" ] && [ -n "$l" ] && [ -n "$r" ]; then
+		[ $((f + b + l + r)) = "$started" ] && [ "$f" -gt 0 ] && [ "$b" -gt 0 ] && [ "$l" -gt 0 ] && [ "$r" -gt 0 ] || ok=0
+	else
+		ok=0
+	fi
+	# animDash 줄 = events 방향 넷 · dropped 방향 넷 · starts 방향 넷(Room.cpp) — 사건 = 켠 방향 수, 튼 수 = 사건 − 버림
+	local ev dr st i
+	ev=($(echo "$ad" | sed -nE 's/.* events forward=([0-9]+) backward=([0-9]+) left=([0-9]+) right=([0-9]+) dropped .*/\1 \2 \3 \4/p'))
+	dr=($(echo "$ad" | sed -nE 's/.* dropped forward=([0-9]+) backward=([0-9]+) left=([0-9]+) right=([0-9]+) starts .*/\1 \2 \3 \4/p'))
+	st=($(echo "$ad" | sed -nE 's/.* starts forward=([0-9]+) backward=([0-9]+) left=([0-9]+) right=([0-9]+).*/\1 \2 \3 \4/p'))
+	if [ ${#ev[@]} = 4 ] && [ ${#dr[@]} = 4 ] && [ ${#st[@]} = 4 ]; then
+		[ "${ev[*]}" = "$f $b $l $r" ] || ok=0
+		for i in 0 1 2 3; do [ "${st[$i]}" = $((ev[i] - dr[i])) ] || ok=0; done
+	else
+		ok=0
+	fi
+	verdict 봇대시 $ok "봇 rc=$brc 서버 rc=$src 켬=$started 소식=$msgs 봇받음=$mine 방향=$f/$b/$l/$r 사건=${ev[*]} 버림=${dr[*]} 튼수=${st[*]}$(echo "$bd" | grep -oE ' (dashDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n')"
+}
+
 # 사람끼리 막기 대조(컨텐츠 F-1) — Lyra 연습장에서 두 사람이 부딪힌 기록을 Shared 이동으로 다시 돌려 위치 · 속도가 0.01 안이어야 한다.
 # 기록 = F-1 에서 PASS(cells=40)를 낸 네 벌 그대로(f1a · f1b · f1c · f1e)
 run_bump() {
@@ -347,6 +391,7 @@ else
 		run_bots
 		run_block
 		run_pause
+		run_dash
 		run_rules
 		run_replay
 		run_authority
