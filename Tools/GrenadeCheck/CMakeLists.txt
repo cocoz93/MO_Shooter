@@ -1,0 +1,6 @@
+add_executable(GrenadeCheck main.cpp)
+target_link_libraries(GrenadeCheck PRIVATE MoShared)
+if(MSVC)
+    target_compile_options(GrenadeCheck PRIVATE /W4 /utf-8)
+    target_compile_definitions(GrenadeCheck PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+endif()
