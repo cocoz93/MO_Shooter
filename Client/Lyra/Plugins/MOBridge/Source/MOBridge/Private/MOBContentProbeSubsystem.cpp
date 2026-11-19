@@ -298,6 +298,10 @@ namespace
 		// 같은 프레임 앉기 + 대시
 		{ TEXT("crouch_same"),      2.0f, EAct::DashCrouchSame, 0.f,    false },
 		{ TEXT("stand2"),           0.8f, EAct::StandUp,        0.f,    false },
+		// 누르는 프레임에 입력을 바꿈(D-2) — Arg = 바꾼 입력 각. 켜질 때의 마지막 이동 입력이 앞 프레임 것(앞)이면 앞 몽타주 · 카메라 앞, 이번 것이면 그 각의 몽타주.
+		// 앞 칸들의 프레임 번호를 dash5 와 같게 두려고 끝 칸(end) 바로 앞에 붙였다
+		{ TEXT("turn_left"),        2.0f, EAct::DashTurn,       -90.f,  false },
+		{ TEXT("turn_back"),        2.0f, EAct::DashTurn,       180.f,  false },
 		{ TEXT("end"),              0.5f, EAct::Home,           0.f,    false },
 	};
 	constexpr float DASH_PRESS_AT = 0.3f;		// 칸 시작에서 대시 누르기까지 — 걸음이 붙을 만큼(제안값, 근접 누름 MELEE_PRESS_AT 과 같음)
@@ -996,6 +1000,10 @@ void UMOBContentProbeSubsystem::BeginStep()
 		GoHome();
 		DashIn = KeyInput(S.Arg);
 		break;
+	case EAct::DashTurn:		// 누르기 전엔 앞 — 누르는 프레임에 Arg 각으로 바꾼다(DuringDash)
+		GoHome();
+		DashIn = FVector::ForwardVector;
+		break;
 	case EAct::DashNoInput:
 		GoHome();
 		FaceTo(0.0, S.Arg);
@@ -1436,6 +1444,10 @@ void UMOBContentProbeSubsystem::DuringDash()
 			FrameEvents += TEXT("crouch_toggle;");
 			bPress = true;
 		}
+		break;
+	case EAct::DashTurn:
+		bPress = DashPressFrame < 0 && StepTime >= DASH_PRESS_AT;
+		if (bPress) DashIn = KeyInput(S.Arg);	// 아래 이동 입력이 이 프레임부터 바뀐 입력을 넣는다 — 켜지는 다음 프레임의 마지막 이동 입력은 아직 앞
 		break;
 	default:
 		bPress = DashPressFrame < 0 && StepTime >= DASH_PRESS_AT;

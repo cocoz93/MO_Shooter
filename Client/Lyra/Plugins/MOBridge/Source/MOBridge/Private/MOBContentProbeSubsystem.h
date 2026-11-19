@@ -35,7 +35,8 @@ public:
 	enum class EAct : uint8 { None, Home, AdsPress, AdsRelease, CrouchToggle, Equip, FoeSetup, FoeSameTeam, MeleeAt, MeleeAtBack, MeleeAtSide, MeleeHere, MeleeSpam, PadsDump, PadOn, Away, SetHealth, Watch, MeleeJumpAt, BumpStillAt, BumpAt, BumpStillSideAt, BumpSideAt, FoeCrouchToggle,
 		WeaponPadOn, SelectSlot, SetAmmo, ReloadPress, SelfDestruct,
 		// 대시 판(D-0) — 대시는 칸 안 DASH_PRESS_AT 에 한 프레임 누른다(DashSpam 은 매 프레임, DashJumpApex 는 떨어지기 시작한 프레임, MeleeDash 는 근접이 켜진 프레임)
-		DashMove, DashNoInput, DashPitch, DashJumpApex, DashSpam, DashThen, HoldThenDash, ReloadDash, MeleeDash, DashWall, DashCrouchSame, StandUp, FoeShow, FoeAway };
+		// DashTurn(D-2) = 앞으로 걷다가 누르는 프레임에 이동 입력을 Arg 각으로 바꾼다 — 대시가 「앞 입력」을 쓰나 「이번 입력」을 쓰나
+		DashMove, DashNoInput, DashPitch, DashJumpApex, DashSpam, DashThen, HoldThenDash, ReloadDash, MeleeDash, DashWall, DashCrouchSame, DashTurn, StandUp, FoeShow, FoeAway };
 
 private:
 	bool WaitReady(float DeltaTime);
@@ -57,7 +58,7 @@ private:
 	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? 5 : 0)))); }
 	// 대시 판(D-0) — 칸 안에서 누르기 · 이동 입력 · 켜짐 가장자리를 맡고(DuringDash), 칸 끝에 요약 한 줄(EndDash, MOB_CPROBE_DASH)
 	static bool IsDashAct(EAct A) { return A == EAct::DashMove || A == EAct::DashNoInput || A == EAct::DashPitch || A == EAct::DashJumpApex || A == EAct::DashSpam
-		|| A == EAct::DashThen || A == EAct::HoldThenDash || A == EAct::ReloadDash || A == EAct::MeleeDash || A == EAct::DashWall || A == EAct::DashCrouchSame; }
+		|| A == EAct::DashThen || A == EAct::HoldThenDash || A == EAct::ReloadDash || A == EAct::MeleeDash || A == EAct::DashWall || A == EAct::DashCrouchSame || A == EAct::DashTurn; }
 	void DuringDash();
 	void EndDash();
 	float DashCooldownLeft() const;		// 쿨다운 효과(GameplayCue.Character.Dash.Cooldown 을 주는 효과)의 남은 초, 없으면 0
