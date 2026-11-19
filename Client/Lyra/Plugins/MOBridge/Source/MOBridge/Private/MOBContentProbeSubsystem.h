@@ -312,4 +312,32 @@ private:
 	void OnAbilOn(UGameplayAbility* Ability);
 	void OnAbilEnd(const FAbilityEndedData& Data);
 	void OnAbilFail(const UGameplayAbility* Ability, const FGameplayTagContainer& Tags);
+
+	// G-0-c2 수류탄끼리 · 멈춘 수류탄 밟기(묶음 17 · 짐작 7) — 첫 수류탄이 멈춘 프레임 · 둘째 누름 · 둘째를 옮긴 프레임 · 걷기 시작(순간이동) · 집으로 돌아간 프레임.
+	// 걷기 시작 자리는 수류탄 없는 대조 칸(c2_walk_bare)이 그대로 쓴다(칸마다 안 비움 — 걷기 칸 시작에만 비운다)
+	int32 TouchStopFrame = -1;
+	int32 TouchPress2 = -1;
+	int32 TouchDropFrame = -1;
+	int32 TouchT = -1;
+	int32 TouchHome = -1;
+	int32 TouchCdRemoved = -1;				// 칸 시작에 지운 쿨다운 효과 수 · 둘째 누름 앞에 지운 수(−1 = 안 지운 칸 · ASC 없음)
+	int32 TouchCdRemoved2 = -1;
+	int32 TouchPawnHits = 0;				// 이 칸 동안 내 몸 막힘 알림(MOB_CPROBE_HIT) 수 · 그중 상대가 수류탄인 수
+	int32 TouchPawnGrenHits = 0;
+	int32 TouchOnGren = 0;					// 걸음 줄 중 바닥 액터가 수류탄인 수(올라섬)
+	bool bTouchWatch = false;
+	TWeakObjectPtr<AActor> TouchG1;
+	TWeakObjectPtr<AActor> TouchG2;
+	TWeakObjectPtr<ACharacter> TouchHitPawn;	// 막힘 알림을 건 몸(칸 끝에 뗀다)
+	int32 TouchG2Spawn = -1;
+	int32 TouchAliveAtWalk = -1;			// 걷기 시작 때 살아 있는 수류탄 수(대조 칸은 0 이어야 한다)
+	FString TouchG1Name;
+	FString TouchG2Name;
+	FVector TouchG1StopLoc = FVector::ZeroVector;
+	FVector TouchWalkStart = FVector::ZeroVector;
+	void DuringGrenTouch();
+	void StartTouchWalk();
+	void LogGrenColl(const AActor* G, const TCHAR* Which) const;	// 수류탄 성분마다 충돌 설정 한 줄(MOB_CPROBE_GCOLL)
+	int32 ClearGrenadeCooldown();			// GE_Grenade_Cooldown 효과를 지운다 — 지운 수(ASC 없으면 −1)
+	static bool IsGrenadeActor(const AActor* A);
 };

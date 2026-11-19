@@ -12,6 +12,7 @@
 #include "Camera/PlayerCameraManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/SphereComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -354,8 +355,11 @@ namespace
 	// G-0-c 섞어 누름(묶음 13~16) — Spam = 칸 안 GREN_PRESS_AT ~ GREN_SPAM_UNTIL 동안 매 프레임 Q(떼지 않음) · QFire / FireQ = 한 프레임에 Q 와 사격 탭(앞이 먼저 누름) ·
 	// ReloadQ · DashQ · MeleeQ = 그 능력을 누르고, 켜진 뒤 GrenComboSpec 의 QAfter 프레임에 Q
 	enum class EGrenCombo : uint8 { None, Spam, QFire, FireQ, ReloadQ, DashQ, MeleeQ };
+	// G-0-c2(묶음 17 · 짐작 7) — Drop = 첫 수류탄이 멈추면 둘째를 던져 첫 수류탄 바로 위로 옮기고 아래로 · Walk = 멈춘 수류탄 뒤로 나를 옮겨 그 위로 걷기 ·
+	// WalkBare = 수류탄 없이 Walk 와 같은 자리 · 같은 걷기(대조군 — 같은 인덱스 내 자리 차가 수류탄 탓)
+	enum class EGrenTouch : uint8 { None, Drop, Walk, WalkBare };
 	struct FGrenShot { const TCHAR* Name; EGrenPlace Place; float Pitch; float Arg; bool bRun; bool bJump; float FoeHp = 0.f; float MyHp = 0.f; int32 DieAfter = -1; int32 FoeKillAfter = -1;
-		EGrenCombo Combo = EGrenCombo::None; };
+		EGrenCombo Combo = EGrenCombo::None; EGrenTouch Touch = EGrenTouch::None; };
 	const FGrenShot GREN_SHOTS[] = {
 		// 묶음 1 · 2 — 방향 · 피치(집, 몸 요 0). 하늘 둘(선이 안 맞는 갈래 — 짐작 1) · 수평 · 먼 바닥 둘 · 발밑(카메라가 위로 올라가 선 시작점도 바닥 위 — g0a4 카메라 z 542 · 시작 z 약 152 · 맞은 거리 118)
 		{ TEXT("sky_p45"),      EGrenPlace::Open,     45.f,  0.f,    false, false },	// 0
@@ -419,6 +423,10 @@ namespace
 		{ TEXT("c_reload_q"),       EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::ReloadQ },	// 43
 		{ TEXT("c_dash_q"),         EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::DashQ },	// 44
 		{ TEXT("c_melee_q"),        EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::MeleeQ },	// 45
+		// G-0-c2(묶음 17) — 피치 −20(floor_m20 과 같은 세움 — 생기고 46프레임에 집 앞 약 9m 바닥에 멈춘다, g0c2 · 터짐 120 까지 74프레임)
+		{ TEXT("c2_drop"),          EGrenPlace::Open,        -20.f, 0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::None, EGrenTouch::Drop },		// 46
+		{ TEXT("c2_walk"),          EGrenPlace::Open,        -20.f, 0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::None, EGrenTouch::Walk },		// 47
+		{ TEXT("c2_walk_bare"),     EGrenPlace::Open,        -20.f, 0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::None, EGrenTouch::WalkBare },	// 48
 	};
 	constexpr int32 GREN_LIFE_FIRST = 32;		// 이 차례부터 죽음 · 부활 길 — 칸 앞뒤로 점수판 줄(MOB_CPROBE_SCORE)
 	constexpr float FOE_KILL_DAMAGE = 5000.f;	// 상대가 나를 죽이는 피해(내 최대 체력 1000 보다 커서 한 번에 죽는다)
@@ -499,6 +507,11 @@ namespace
 		{ TEXT("c_reload_q"),       6.0f,  EAct::GrenThrow,      43.f, false },
 		{ TEXT("c_dash_q"),         6.0f,  EAct::GrenThrow,      44.f, false },
 		{ TEXT("c_melee_q"),        5.1f,  EAct::GrenThrow,      45.f, false },
+		// G-0-c2 수류탄끼리 · 멈춘 수류탄 밟기 — 칸 시작에 쿨다운 효과를 지우고 던진다(c_melee_q 수류탄이 칸 시작 + 37프레임이라(g0c2 15927 → 15964) 쿨다운 301 이 다음 칸 누름에 1프레임 남는다).
+		// c2_drop 5초 = 둘째가 첫째 멈춤 + 3프레임에 생겨 120 뒤 터지고 60 뒤 사라짐(칸 약 260프레임째). c2_walk 4초 = 수류탄이 약 211프레임째 사라진 뒤 칸이 끝나 대조 칸엔 수류탄이 없다
+		{ TEXT("c2_drop"),          5.0f,  EAct::GrenThrow,      46.f, false },
+		{ TEXT("c2_walk"),          4.0f,  EAct::GrenThrow,      47.f, false },
+		{ TEXT("c2_walk_bare"),     2.0f,  EAct::GrenThrow,      48.f, false },
 		// G-0-b3 경기 끝은 맨 뒤 — Phase_PostGame 은 NewGameTime(10초)을 기다린 뒤 능력 입력을 막고 다음 틱에 맵을 다시 연다(그래프 원본). 판은 내 입력이 막힌 프레임에 끝낸다(Tick).
 		// 끝 단계 시간 = 상대가 나를 죽인 뒤 g_end_inflight 남은 235프레임 + 부활 기다림 72프레임(죽고 307) + g_end_throw 180 + 칸 넘김 1 = 488(g0end1 · 2 실측)
 		// → end_block 은 막힘(상대가 나를 죽이고 600프레임 뒤, 실측)을 기다리는 한도 360(안 오면 그대로 끝) — 실측 112프레임째 막혔다
@@ -518,6 +531,14 @@ namespace
 	// 섞어 누름 칸(G-0-c) — 매 프레임 Q 를 그치는 칸 안 시각(16초 = 누름 시작 0.5초 + 쿨다운 5초 셋 + 여유 0.5초 → 간격이 301 이어도 생김 넷) · 재장전이 켜지고 Q 까지(제안값)
 	constexpr float GREN_SPAM_UNTIL = 16.0f;
 	constexpr int32 GREN_RELOAD_Q_AFTER = 10;
+	// G-0-c2 — 첫 수류탄이 멈추고 둘째 Q 까지 · 둘째를 놓을 높이(첫째 가운데 위) · 아래로 속도. 걷기 = 수류탄 뒤 거리 · 순간이동 뒤 쉼 · 걷는 프레임(제안값).
+	// 집으로 돌아가는 프레임(멈춤 + 1 + 10 + 40 = 멈춤 + 51, g0t1 16610 → 16661)이 터짐(생김 + 120 = 멈춤 + 74) 전이라 폭발에 안 걸린다(집 ↔ 멈춘 자리 약 900cm > 450)
+	constexpr int32 TOUCH_DROP_AFTER = 2;
+	constexpr double TOUCH_DROP_HEIGHT = 30.0;
+	constexpr double TOUCH_DROP_SPEED = 300.0;
+	constexpr double TOUCH_WALK_BACK = 150.0;
+	constexpr int32 TOUCH_WALK_SETTLE = 10;
+	constexpr int32 TOUCH_WALK_FRAMES = 40;
 	// 섞어 누름 칸의 다른 능력 — 입력 표식 · 능력 클래스 이름 조각 · 켜진 뒤 Q 까지 프레임(−1 = Q 와 같은 프레임에 누름). 대시 · 근접은 대시 판 「대시 중 누름」과 같은 5
 	struct FGrenComboSpec { const TCHAR* OtherTag; const TCHAR* OtherAbility; int32 QAfter; };
 	FGrenComboSpec GrenComboSpec(EGrenCombo C)
@@ -545,6 +566,17 @@ namespace
 		case EGrenCombo::DashQ:   return TEXT("dash_q");
 		case EGrenCombo::MeleeQ:  return TEXT("melee_q");
 		case EGrenCombo::None:    break;
+		}
+		return TEXT("none");
+	}
+	const TCHAR* GrenTouchName(EGrenTouch T)
+	{
+		switch (T)
+		{
+		case EGrenTouch::Drop:     return TEXT("drop");
+		case EGrenTouch::Walk:     return TEXT("walk");
+		case EGrenTouch::WalkBare: return TEXT("walk_bare");
+		case EGrenTouch::None:     break;
 		}
 		return TEXT("none");
 	}
@@ -769,6 +801,12 @@ void UMOBContentProbeSubsystem::OnPawnHit(AActor* SelfActor, AActor* OtherActor,
 		Hit.TraceStart.X, Hit.TraceStart.Y, Hit.TraceStart.Z, Hit.TraceEnd.X, Hit.TraceEnd.Y, Hit.TraceEnd.Z, Hit.Location.X, Hit.Location.Y, Hit.Location.Z,
 		OtherActor ? OtherActor->GetActorLocation().X : 0.0, OtherActor ? OtherActor->GetActorLocation().Y : 0.0, OtherActor ? OtherActor->GetActorLocation().Z : 0.0,
 		OtherActor ? OtherActor->GetActorRotation().Yaw : 0.0, SelfActor ? SelfActor->GetActorRotation().Yaw : 0.0);
+	// 수류탄끼리 · 밟기 칸(G-0-c2)은 이 알림을 내 몸에 걸어 막힘 수 · 그중 수류탄인 수를 센다
+	if (bTouchWatch)
+	{
+		++TouchPawnHits;
+		if (IsGrenadeActor(OtherActor)) ++TouchPawnGrenHits;
+	}
 }
 
 void UMOBContentProbeSubsystem::Tick(float DeltaTime)
@@ -2411,6 +2449,7 @@ void UMOBContentProbeSubsystem::Finish(bool bOk)
 		A->OnAbilityEnded.Remove(AbilEndHandle);
 		A->AbilityFailedCallbacks.Remove(AbilFailHandle);
 	}
+	if (ACharacter* P = TouchHitPawn.Get()) P->OnActorHit.RemoveDynamic(this, &UMOBContentProbeSubsystem::OnPawnHit);
 	LogBodies(TEXT("end"));
 	if (bGrenade)
 	{
@@ -2503,7 +2542,7 @@ void UMOBContentProbeSubsystem::OnGrenadeHit(AActor* SelfActor, AActor* OtherAct
 	{
 		if (R.A.Get() == SelfActor) SpawnF = R.SpawnFrame;
 	}
-	const TCHAR* Who = !OtherActor ? TEXT("-") : (OtherActor == Me() ? TEXT("me") : (OtherActor == Foe.Get() ? TEXT("foe") : TEXT("world")));
+	const TCHAR* Who = !OtherActor ? TEXT("-") : (OtherActor == Me() ? TEXT("me") : (OtherActor == Foe.Get() ? TEXT("foe") : (IsGrenadeActor(OtherActor) ? TEXT("gren") : TEXT("world"))));
 	if (SpawnF >= 0 && SpawnF == GrenSpawnFrame)
 	{
 		++GrenHits;
@@ -2875,6 +2914,22 @@ void UMOBContentProbeSubsystem::BeginGrenade()
 		WatchAbilities();
 		ComboMagBegin = ComboMagPrev = ActiveMagazine();
 	}
+	// 수류탄끼리 · 밟기 칸(G-0-c2) — 칸 값을 비우고, 던지는 두 칸은 쿨다운 효과를 지우고, 내 몸 막힘 알림(MOB_CPROBE_HIT)을 건다(칸 끝에 뗀다)
+	TouchStopFrame = TouchPress2 = TouchDropFrame = TouchT = TouchHome = TouchCdRemoved = TouchCdRemoved2 = TouchG2Spawn = TouchAliveAtWalk = -1;
+	TouchPawnHits = TouchPawnGrenHits = TouchOnGren = 0;
+	TouchG1.Reset();
+	TouchG2.Reset();
+	TouchG1Name.Reset();
+	TouchG2Name.Reset();
+	TouchG1StopLoc = FVector::ZeroVector;
+	bTouchWatch = G.Touch != EGrenTouch::None;
+	if (G.Touch == EGrenTouch::Walk) TouchWalkStart = FVector::ZeroVector;
+	if (G.Touch == EGrenTouch::Drop || G.Touch == EGrenTouch::Walk) TouchCdRemoved = ClearGrenadeCooldown();
+	if (bTouchWatch && Ch && !bBump)
+	{
+		Ch->OnActorHit.AddUniqueDynamic(this, &UMOBContentProbeSubsystem::OnPawnHit);
+		TouchHitPawn = Ch;
+	}
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GPLACE step=%s shot=%s place=%d pitch=%.1f arg=%.1f run=%d jump=%d me=%s aim=%d aimAt=%s myHp=%.1f foeHp=%.1f %s"),
 		S.Name, G.Name, (int32)G.Place, G.Pitch, G.Arg, G.bRun ? 1 : 0, G.bJump ? 1 : 0, Ch ? *Ch->GetActorLocation().ToString() : TEXT("-"), bGrenAim ? 1 : 0,
 		*GrenAimPoint.ToString(), GrenMyHpAtBegin, GrenFoeHpAtBegin, *GrenWhere);
@@ -2919,6 +2974,11 @@ void UMOBContentProbeSubsystem::DuringGrenade()
 	if (G.Combo != EGrenCombo::None)
 	{
 		DuringGrenCombo();	// 섞어 누름 칸은 누름 · 뗌을 따로 한다(세움은 Open — 겨눔 · 벽 맞춤 · 달리기 · 점프 없음)
+		return;
+	}
+	if (G.Touch != EGrenTouch::None)
+	{
+		DuringGrenTouch();	// 수류탄끼리 · 밟기 칸도 누름 · 옮김 · 걷기를 따로 한다(세움은 Open)
 		return;
 	}
 	const bool bBeforePress = GrenPressFrame < 0;
@@ -3135,6 +3195,203 @@ void UMOBContentProbeSubsystem::EndGrenade()
 			*Spawns.TrimEnd(), *Gaps.TrimEnd(), ComboMagBegin, ActiveMagazine(), *ComboMagChanges.TrimEnd(), *ComboOns.TrimEnd(), *Fails.TrimEnd());
 		bComboWatch = false;
 	}
+	// 수류탄끼리 · 밟기 칸(G-0-c2) 요약 — 첫째 멈춤 · 지운 쿨다운 수 · 둘째 누름 · 생김 · 옮김 · 걷기 시작 · 집 · 내 몸 막힘 수(그중 수류탄) · 걸음 줄 중 수류탄 위 수 · 걷기 시작 때 산 수류탄 수
+	if (G.Touch != EGrenTouch::None)
+	{
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GTOUCH step=%s kind=%s g1=%s g1Stop=%d g1StopLoc=%.6f,%.6f,%.6f cdRemoved=%d cdRemoved2=%d press2=%d g2=%s g2Spawn=%d drop=%d ")
+			TEXT("walkT=%d home=%d start=%.6f,%.6f,%.6f pawnHits=%d pawnGrenHits=%d onGren=%d aliveAtWalk=%d"),
+			S.Name, GrenTouchName(G.Touch), TouchG1Name.IsEmpty() ? TEXT("-") : *TouchG1Name, TouchStopFrame, TouchG1StopLoc.X, TouchG1StopLoc.Y, TouchG1StopLoc.Z, TouchCdRemoved, TouchCdRemoved2,
+			TouchPress2, TouchG2Name.IsEmpty() ? TEXT("-") : *TouchG2Name, TouchG2Spawn, TouchDropFrame, TouchT, TouchHome, TouchWalkStart.X, TouchWalkStart.Y, TouchWalkStart.Z,
+			TouchPawnHits, TouchPawnGrenHits, TouchOnGren, TouchAliveAtWalk);
+		if (ACharacter* P = TouchHitPawn.Get()) P->OnActorHit.RemoveDynamic(this, &UMOBContentProbeSubsystem::OnPawnHit);
+		TouchHitPawn.Reset();
+		bTouchWatch = false;
+	}
+}
+
+// 수류탄끼리 · 밟기 칸 한 프레임(G-0-c2) — 첫 던짐(대조 칸 빼고) · 첫째 멈춤 보기 · Drop 은 둘째 누름과 옮김 ·
+// Walk / WalkBare 는 순간이동 → 쉼 → 걷기 → 집, 그동안 매 프레임 MOB_CPROBE_GWALK(인덱스 = 순간이동 프레임에서 몇째)
+void UMOBContentProbeSubsystem::DuringGrenTouch()
+{
+	const FStep& S = StepAt(ScriptIdx(), Step);
+	const FGrenShot& G = GrenShotAt(S.Arg);
+	ACharacter* Ch = Me();
+	if (!Ch) return;
+	if (G.Touch != EGrenTouch::WalkBare)
+	{
+		if (GrenPressFrame < 0 && StepTime >= GREN_PRESS_AT)
+		{
+			PressTag(GREN_TAG, true);
+			GrenPressFrame = Frame;
+			GrenCdAtPress = GrenadeCooldownLeft();
+			FrameEvents += TEXT("g_press;");
+		}
+		else if (GrenPressFrame >= 0 && Frame == GrenPressFrame + 1)
+		{
+			PressTag(GREN_TAG, false);
+			FrameEvents += TEXT("g_release;");
+		}
+		// 첫째가 멈춘 프레임 — 날아감 성분이 걸음을 끝내 UpdatedComponent 를 놓은 첫 틱(엔진 멈춤 알림 GSTOP 과 같은 프레임이어야 한다)
+		if (TouchStopFrame < 0 && GrenSpawnFrame >= 0)
+		{
+			for (const FGrenRec& R : Grens)
+			{
+				AActor* A = R.A.Get();
+				const UProjectileMovementComponent* PM = A ? A->FindComponentByClass<UProjectileMovementComponent>() : nullptr;
+				if (R.SpawnFrame != GrenSpawnFrame || !PM || PM->UpdatedComponent) continue;
+				TouchStopFrame = Frame;
+				TouchG1 = A;
+				TouchG1Name = R.Name;
+				TouchG1StopLoc = A->GetActorLocation();
+				FrameEvents += TEXT("t_stop;");
+				LogGrenColl(A, TEXT("g1"));
+				break;
+			}
+		}
+	}
+	if (G.Touch == EGrenTouch::Drop)
+	{
+		if (TouchStopFrame >= 0 && TouchPress2 < 0 && Frame >= TouchStopFrame + TOUCH_DROP_AFTER)
+		{
+			TouchCdRemoved2 = ClearGrenadeCooldown();
+			PressTag(GREN_TAG, true);
+			TouchPress2 = Frame;
+			FrameEvents += TEXT("g_press2;");
+		}
+		else if (TouchPress2 >= 0 && Frame == TouchPress2 + 1)
+		{
+			PressTag(GREN_TAG, false);
+			FrameEvents += TEXT("g_release2;");
+		}
+		// 둘째 — 둘째 누름 뒤에 생긴 수류탄을 생긴 그 프레임(내 틱)에 첫째 가운데 위 TOUCH_DROP_HEIGHT 로 옮기고 속도를 바로 아래로. 다음 프레임 걸음부터 떨어진다
+		if (TouchPress2 >= 0 && TouchDropFrame < 0)
+		{
+			for (const FGrenRec& R : Grens)
+			{
+				AActor* A = R.A.Get();
+				UProjectileMovementComponent* PM = A ? A->FindComponentByClass<UProjectileMovementComponent>() : nullptr;
+				if (R.SpawnFrame <= TouchPress2 || !A || A == TouchG1.Get() || !PM) continue;
+				const FVector Before = A->GetActorLocation();
+				const FVector G1 = TouchG1.IsValid() ? TouchG1->GetActorLocation() : TouchG1StopLoc;
+				A->SetActorLocation(G1 + FVector(0.0, 0.0, TOUCH_DROP_HEIGHT), false, nullptr, ETeleportType::TeleportPhysics);
+				PM->Velocity = FVector(0.0, 0.0, -TOUCH_DROP_SPEED);
+				TouchG2 = A;
+				TouchG2Name = R.Name;
+				TouchG2Spawn = R.SpawnFrame;
+				TouchDropFrame = Frame;
+				FrameEvents += TEXT("t_drop;");
+				const FVector After = A->GetActorLocation();
+				UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GDROP frame=%d step=%s g1=%s g1Loc=%.6f,%.6f,%.6f g2=%s g2Spawn=%d before=%.6f,%.6f,%.6f after=%.6f,%.6f,%.6f vel=%.6f,%.6f,%.6f active=%d"),
+					Frame, S.Name, *TouchG1Name, G1.X, G1.Y, G1.Z, *R.Name, R.SpawnFrame, Before.X, Before.Y, Before.Z, After.X, After.Y, After.Z,
+					PM->Velocity.X, PM->Velocity.Y, PM->Velocity.Z, PM->UpdatedComponent ? 1 : 0);
+				LogGrenColl(A, TEXT("g2"));
+				break;
+			}
+		}
+		return;
+	}
+	// Walk — 첫째가 멈춘 다음 프레임에 걷기 시작 자리를 정한다(첫째 뒤 −X 로 TOUCH_WALK_BACK · 내 캡슐 채널로 위에서 내려 쏜 바닥 + 반높이 + 이동이 띄워 두는 틈)
+	if (G.Touch == EGrenTouch::Walk && TouchStopFrame >= 0 && TouchT < 0 && Frame == TouchStopFrame + 1)
+	{
+		const UCapsuleComponent* Cap = Ch->GetCapsuleComponent();
+		const FVector P(TouchG1StopLoc.X - TOUCH_WALK_BACK, TouchG1StopLoc.Y, TouchG1StopLoc.Z);
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBCProbeTouchFloor), false, Ch);
+		FHitResult H;
+		const bool bFloor = GetWorld()->LineTraceSingleByChannel(H, P + FVector(0.0, 0.0, 200.0), P - FVector(0.0, 0.0, 200.0), Cap->GetCollisionObjectType(), Params,
+			FCollisionResponseParams(Cap->GetCollisionResponseToChannels()));
+		TouchWalkStart = FVector(P.X, P.Y, (bFloor ? H.ImpactPoint.Z : P.Z - 3.0) + Cap->GetScaledCapsuleHalfHeight() + GREN_FOE_FLOOR_GAP);
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GWALKSET frame=%d step=%s floor=%d floorZ=%.6f floorActor=%s start=%.6f,%.6f,%.6f"),
+			Frame, S.Name, bFloor ? 1 : 0, H.ImpactPoint.Z, *GetNameSafe(H.GetActor()), TouchWalkStart.X, TouchWalkStart.Y, TouchWalkStart.Z);
+		StartTouchWalk();
+	}
+	else if (G.Touch == EGrenTouch::WalkBare && TouchT < 0 && StepTime >= GREN_PRESS_AT && !TouchWalkStart.IsZero())
+	{
+		StartTouchWalk();
+	}
+	if (TouchT < 0 || TouchHome >= 0) return;
+	// 이 프레임 걸음 뒤 상태(앞 프레임에 넣은 입력으로 움직인 결과). 두 칸이 같은 인덱스에 같은 입력을 넣으므로 인덱스끼리 견준다
+	const int32 Idx = Frame - TouchT;
+	const UCharacterMovementComponent* M = Ch->GetCharacterMovement();
+	const FVector L = Ch->GetActorLocation();
+	const FVector V = M ? M->Velocity : FVector::ZeroVector;
+	const FHitResult* FH = M ? &M->CurrentFloor.HitResult : nullptr;
+	const bool bOnGren = FH && IsGrenadeActor(FH->GetActor());
+	if (bOnGren) ++TouchOnGren;
+	const bool bInput = Idx >= TOUCH_WALK_SETTLE && Idx < TOUCH_WALK_SETTLE + TOUCH_WALK_FRAMES;
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GWALK step=%s idx=%d frame=%d me=%.6f,%.6f,%.6f vel=%.6f,%.6f,%.6f mode=%d floor=%d walkable=%d floorDist=%.6f floorActor=%s floorComp=%s onGren=%d input=%d"),
+		S.Name, Idx, Frame, L.X, L.Y, L.Z, V.X, V.Y, V.Z, M ? (int32)M->MovementMode.GetValue() : -1, (M && M->CurrentFloor.bBlockingHit) ? 1 : 0,
+		(M && M->CurrentFloor.bWalkableFloor) ? 1 : 0, M ? M->CurrentFloor.FloorDist : -1.f, FH ? *GetNameSafe(FH->GetActor()) : TEXT("-"), FH ? *GetNameSafe(FH->GetComponent()) : TEXT("-"),
+		bOnGren ? 1 : 0, bInput ? 1 : 0);
+	if (Idx >= TOUCH_WALK_SETTLE + TOUCH_WALK_FRAMES)
+	{
+		GoHome();
+		TouchHome = Frame;
+		FrameEvents += TEXT("t_home;");
+	}
+	else if (bInput)
+	{
+		Ch->AddMovementInput(FVector(1.0, 0.0, 0.0), 1.f);
+	}
+}
+
+// 걷기 시작 — 앞 칸 이동 입력을 비우고 시작 자리로 순간이동 · 멈춤 · 요 0(+X 를 본다). 두 칸이 같은 일을 한다
+void UMOBContentProbeSubsystem::StartTouchWalk()
+{
+	ACharacter* Ch = Me();
+	if (!Ch) return;
+	Ch->ConsumeMovementInputVector();
+	Ch->SetActorLocation(TouchWalkStart, false, nullptr, ETeleportType::TeleportPhysics);
+	if (UCharacterMovementComponent* M = Ch->GetCharacterMovement()) M->StopMovementImmediately();
+	FaceTo(0.0, 0.0);
+	TouchT = Frame;
+	TouchAliveAtWalk = 0;
+	for (const FGrenRec& R : Grens)
+	{
+		if (R.A.IsValid()) ++TouchAliveAtWalk;
+	}
+	FrameEvents += TEXT("t_walk;");
+}
+
+// 수류탄 성분마다 충돌 설정 — 켬 · 물체 종류 · 프로필 · 채널 0~31 반응(0 무시 · 1 겹침 · 2 막음) · 구 반지름 · 물리 · 사람 올라섬 허용(ECanBeCharacterBase) · 움직일 때 뺄 액터 수,
+// 그리고 내 캡슐이 그 종류를 어떻게 받나 · 그 성분이 내 캡슐 종류를 어떻게 받나(둘 다 막음이어야 걸음이 막힌다)
+void UMOBContentProbeSubsystem::LogGrenColl(const AActor* G, const TCHAR* Which) const
+{
+	if (!G) return;
+	const ACharacter* Ch = Me();
+	const UCapsuleComponent* Cap = Ch ? Ch->GetCapsuleComponent() : nullptr;
+	TInlineComponentArray<UPrimitiveComponent*> Comps(G);
+	for (const UPrimitiveComponent* P : Comps)
+	{
+		FString Resp;
+		for (int32 c = 0; c < 32; ++c) Resp.AppendInt((int32)P->GetCollisionResponseToChannel((ECollisionChannel)c));
+		const USphereComponent* Sp = Cast<USphereComponent>(P);
+		const ECollisionChannel OT = P->GetCollisionObjectType();
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GCOLL frame=%d step=%s which=%s name=%s comp=%s class=%s root=%d enabled=%d objType=%d profile=%s resp=%s sphere=%.4f bounds=%.4f physics=%d stepUpOn=%d ignore=%d ")
+			TEXT("capRespToIt=%d itRespToCap=%d capObjType=%d"),
+			Frame, bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("-"), Which, *G->GetName(), *P->GetName(), *P->GetClass()->GetName(), P == G->GetRootComponent() ? 1 : 0,
+			(int32)P->GetCollisionEnabled(), (int32)OT, *P->GetCollisionProfileName().ToString(), *Resp, Sp ? Sp->GetScaledSphereRadius() : -1.f, P->Bounds.SphereRadius,
+			P->IsSimulatingPhysics() ? 1 : 0, (int32)P->CanCharacterStepUpOn.GetValue(), P->GetMoveIgnoreActors().Num(),
+			Cap ? (int32)Cap->GetCollisionResponseToChannel(OT) : -1, Cap ? (int32)P->GetCollisionResponseToChannel(Cap->GetCollisionObjectType()) : -1, Cap ? (int32)Cap->GetCollisionObjectType() : -1);
+	}
+}
+
+// 쿨다운 효과 지우기 — GrenadeCooldownLeft 와 같은 고르기(정의 클래스 이름 GE_Grenade_Cooldown). 줄 = MOB_CPROBE_GCDCLEAR(지운 수 · 지운 뒤 남은 초)
+int32 UMOBContentProbeSubsystem::ClearGrenadeCooldown()
+{
+	UAbilitySystemComponent* A = MyPSASC();
+	if (!A) A = FindASC(Me());
+	if (!A) return -1;
+	FGameplayEffectQuery Q;
+	Q.CustomMatchDelegate.BindLambda([](const FActiveGameplayEffect& E) { return E.Spec.Def && E.Spec.Def->GetClass()->GetName().Contains(TEXT("GE_Grenade_Cooldown")); });
+	const int32 N = A->RemoveActiveEffects(Q);
+	FrameEvents += TEXT("t_cdclear;");
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GCDCLEAR frame=%d step=%s removed=%d left=%.4f"), Frame, bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("-"), N, GrenadeCooldownLeft());
+	return N;
+}
+
+bool UMOBContentProbeSubsystem::IsGrenadeActor(const AActor* A)
+{
+	return A && A->GetClass()->GetName().StartsWith(TEXT("B_Grenade"));
 }
 
 // 섞어 누름 칸 한 프레임(G-0-c) — 다른 능력 켜짐 가장자리 · 탄창 바뀜을 보고, 칸 종류대로 Q 와 다른 능력을 누르고 뗀다(여기서 누른 것은 다음 프레임 입력 처리에서 켜진다)
