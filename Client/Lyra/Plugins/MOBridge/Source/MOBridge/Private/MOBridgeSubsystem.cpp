@@ -1630,18 +1630,25 @@ void UMOBridgeSubsystem::EnsureSelfBody(ACharacter* Ch)
 	if (!Bar) return;
 	const int32 Active = Bar->GetActiveSlotIndex();
 	const TArray<ULyraInventoryItemInstance*> Slots = Bar->GetSlots();
-	int32 Other = INDEX_NONE;
+	// 거쳐 갈 칸 — 다른 무기 칸이 먼저, 없으면 빈 칸(권총 하나로 부활, D97 · W-5). 빈 칸을 고르면 쥔 무기만 내려놓고 아무것도 안 쥐었다가
+	// (ULyraQuickBarComponent::EquipItemInSlot 은 빈 칸이면 아무것도 안 한다) 돌아올 때 다시 쥐어 층이 붙는다. 빈 칸을 안 보면 무기 하나일 때 다시 쥐기를 못 해
+	// 첫 캐릭터가 무기 층 없이 남는다(W-5 human_auto 판 w5ha — emptyFrames 10026 · reequips 0)
+	int32 Other = INDEX_NONE, Empty = INDEX_NONE;
 	for (int32 S = 0; S < Slots.Num(); ++S)
 	{
-		if (S != Active && Slots[S]) { Other = S; break; }
+		if (S == Active) continue;
+		if (Slots[S]) { Other = S; break; }
+		if (Empty == INDEX_NONE) Empty = S;
 	}
+	const bool bViaEmpty = Other == INDEX_NONE;
+	if (bViaEmpty) Other = Empty;
 	if (Active == INDEX_NONE || Other == INDEX_NONE) return;
 	SelfBodyNextTryAt = Now + REEQUIP_RETRY_SECONDS;
 	++SelfReequipTries;
 	++SelfReequips;
 	Bar->SetActiveSlotIndex(Other);
 	Bar->SetActiveSlotIndex(Active);	// 고른 칸은 그대로 — 서버 무기 번호와 같은 칸(SyncSelfWeapon)
-	UE_LOG(LogMOB, Log, TEXT("MOB_SELFBODY_REEQUIP slot=%d via=%d layers=[%s] try=%d"), Active, Other, *Layers.TrimEnd(), SelfReequipTries);
+	UE_LOG(LogMOB, Log, TEXT("MOB_SELFBODY_REEQUIP slot=%d via=%d layers=[%s] try=%d viaEmpty=%d"), Active, Other, *Layers.TrimEnd(), SelfReequipTries, bViaEmpty ? 1 : 0);
 }
 
 // 진단 — 안 그려지는 캐릭터는 애니가 안 돌 수 있으므로 그려진 프레임만 상태를 센다. 내 캐릭터와 나란히 찍어 대조한다
