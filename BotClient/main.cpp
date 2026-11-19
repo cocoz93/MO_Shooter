@@ -1005,6 +1005,18 @@ namespace
 			_pawnCorrectMax = std::max(_pawnCorrectMax, r.posDiff);
 		}
 
+		// flagDiff 가 어느 깃발인지 — 부하 판(LOADBOT)은 갈래별 수를 안 적어, 갈린 줄을 봇마다 처음 몇 개만 그대로 적는다(W-5-d 받침 켠 오탈 판 70판 중 4판 flagDiff 1~2)
+		static constexpr int FLAG_DIFF_LOG_LIMIT = 3;
+		void LogFlagDiff(const char* kind, const wire::PlayerState& p, const CSelfPrediction::Slot& slot, bool server, bool pred)
+		{
+			if (_flagDiffLogged >= FLAG_DIFF_LOG_LIMIT) return;
+			++_flagDiffLogged;
+			// predFalling = 예측의 떨어짐(flags 는 서버 깃발 — 0x1 이 서버 떨어짐). 앉기 키는 땅에서만 앉혀 두 쪽 떨어짐이 다르면 앉음도 갈린다
+			std::printf("FLAGDIFF bot=%u kind=%s seq=%u server=%d pred=%d phase=%u weapon=%u/%u mag=%d/%d spare=%d/%d slots=%u/%u flags=0x%x predFalling=%d\n", GetId(), kind, p.lastSeq,
+				server ? 1 : 0, pred ? 1 : 0, (unsigned)_phase, (unsigned)p.weapon, (unsigned)slot.weapon, (int)p.magazine, (int)slot.magazine, (int)p.spare, (int)slot.spare,
+				(unsigned)p.quickSlots, (unsigned)slot.quickSlots, (unsigned)p.flags, slot.move.mode == EMoveMode::Falling ? 1 : 0);
+		}
+
 		void CompareSelf(const wire::PlayerState& p)
 		{
 			// 근접(E-3) — 서버가 지나간 입력 중 결과 없는 근접은 밀기를 지운다(예측 AckMelee). 근접 소식은 같은 연결에서 상태보다 먼저 온다
@@ -1033,7 +1045,7 @@ namespace
 			if (_phase < (uint8_t)wire::EMatchPhase::PostGame)
 			{
 				if (p.magazine != slot.magazine || p.spare != slot.spare || p.weapon != slot.weapon) { ++_ammoDiff; bad = true; }
-				if (((p.flags & wire::STATE_RELOADING) != 0) != slot.reloading) { ++_flagDiff; bad = true; }
+				if (((p.flags & wire::STATE_RELOADING) != 0) != slot.reloading) { ++_flagDiff; bad = true; LogFlagDiff("reloading", p, slot, (p.flags & wire::STATE_RELOADING) != 0, slot.reloading); }
 			}
 			// 떨어짐은 이동의 결과 — 사람끼리 막기를 켠 판은 위치처럼 남의 캡슐(예측은 받은 최신 위치)에 따라 갈릴 수 있어 따로 센다(F-2)
 			const bool fallDiff = ((p.flags & wire::STATE_FALLING) != 0) != (slot.move.mode == EMoveMode::Falling);
@@ -1041,14 +1053,27 @@ namespace
 			if (fallDiff) ++_fallDiff;
 			if ((p.flags & wire::STATE_MOVE_LOCKED) != 0) ++_lockCompared;
 			if (lockDiff) ++_lockDiff;
-			if (lockDiff || (fallDiff && !_rules.pawnBlock)) ++_flagDiff;
+			if (lockDiff || (fallDiff && !_rules.pawnBlock))
+			{
+				++_flagDiff;
+				if (lockDiff) LogFlagDiff("moveLocked", p, slot, (p.flags & wire::STATE_MOVE_LOCKED) != 0, slot.lockInputs > 0);
+				else LogFlagDiff("falling", p, slot, (p.flags & wire::STATE_FALLING) != 0, slot.move.mode == EMoveMode::Falling);
+			}
 			if (fallDiff || lockDiff) bad = true;
 			// 조준 — 경기 끝에도 버튼을 따르므로(D61) 단계와 상관없이 본다. 켜진 줄 수를 같이 세 이 비교가 실제로 돌았는지 본다
 			if ((p.flags & wire::STATE_ADS) != 0) ++_adsCompared;
-			if (((p.flags & wire::STATE_ADS) != 0) != slot.ads.active) { ++_flagDiff; ++_adsDiff; bad = true; }
-			// 앉음 — 이동 상태라 단계와 상관없이 본다. 켜진 줄 수를 같이 센다
+			if (((p.flags & wire::STATE_ADS) != 0) != slot.ads.active) { ++_flagDiff; ++_adsDiff; bad = true; LogFlagDiff("ads", p, slot, (p.flags & wire::STATE_ADS) != 0, slot.ads.active); }
+			// 앉음 — 이동 상태라 단계와 상관없이 본다. 켜진 줄 수를 같이 센다.
+			// 앉기 키의 결과는 땅에 있나(앉기) · 머리 위가 비었나(일어서기)에 달린 이동의 결과다 — 사람끼리 막기를 켠 판은 떨어짐과 같은 까닭(F-2)으로
+			// 남 캡슐에 따라 갈릴 수 있어 따로 센다(W-5-d 막기 켠 판 150판 중 8판 · 갈림을 적은 4판의 4줄 모두 서버 0 · 예측 1, 3줄은 서버가 떨어지는 중). 막기를 끈 판은 flagDiff 에 든다
 			if ((p.flags & wire::STATE_CROUCHED) != 0) ++_crouchCompared;
-			if (((p.flags & wire::STATE_CROUCHED) != 0) != slot.move.crouched) { ++_flagDiff; ++_crouchDiff; bad = true; }
+			if (((p.flags & wire::STATE_CROUCHED) != 0) != slot.move.crouched)
+			{
+				++_crouchDiff;
+				bad = true;
+				if (!_rules.pawnBlock) ++_flagDiff;
+				LogFlagDiff("crouched", p, slot, (p.flags & wire::STATE_CROUCHED) != 0, slot.move.crouched);
+			}
 			// 가방(W-3) — 줍기 · 부활만 바꾸고 둘 다 경기 끝 단계와 상관없는 길이라 단계와 상관없이 본다. 무기 둘 이상 든 줄 수를 같이 센다(가방 비교가 실제로 돌았나)
 			if (CLoadout::UnpackSlot(p.quickSlots, 1) != kNoWeapon) ++_invMulti;
 			if (p.quickSlots != slot.quickSlots) { ++_invDiff; bad = true; }
@@ -1767,6 +1792,7 @@ namespace
 		std::vector<MeleeTarget> _meleeTargets;
 		double _posMax = 0;
 		uint32_t _firstBadSeq = 0;
+		int _flagDiffLogged = 0;		// FLAGDIFF 줄을 적은 수(LogFlagDiff — 봇마다 FLAG_DIFF_LOG_LIMIT 까지)
 	};
 
 	bool ParseArgs(int argc, char** argv, Args& out)
@@ -1986,11 +2012,13 @@ int main(int argc, char** argv)
 	}
 	if (args.seconds > 0)
 	{
-		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, pawnReconciles = 0, invDiff = 0;
+		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, pawnReconciles = 0, invDiff = 0, crouchDiff = 0, fallDiff = 0;
 		for (const std::unique_ptr<CBot>& bot : bots)
 		{
 			compared += bot->GetCompared();
 			invDiff += bot->GetInvDiff();
+			crouchDiff += bot->GetCrouchDiff();
+			fallDiff += bot->GetFallDiff();
 			posDiff += bot->GetPosDiff();
 			velDiff += bot->GetVelDiff();
 			ammoDiff += bot->GetAmmoDiff();
@@ -2032,10 +2060,10 @@ int main(int argc, char** argv)
 		const MoveCounters& predCount = sim.GetCounters();
 		const bool moveOk = args.pawnBlock ? (pawnReconciles > 0 && predCount.pawnOddSimplex == 0) : (posDiff == 0 && velDiff == 0);
 		const bool pass = compared > 0 && moveOk && ammoDiff == 0 && flagDiff == 0 && invDiff == 0 && botsOpen == bots.size();
-		std::printf("LOADBOT bots=%d open=%zu compared=%llu posDiff=%llu velDiff=%llu ammoDiff=%llu flagDiff=%llu states=%llu stateGaps=%zu stateGapP50Ms=%.2f stateGapP99Ms=%.2f stateGapMaxMs=%.2f loopP99Ms=%.2f loopMaxMs=%.2f cpuPercent=%.1f pawnBlock=%d pawnReconciles=%llu predOdd=%llu invDiff=%llu\n",
+		std::printf("LOADBOT bots=%d open=%zu compared=%llu posDiff=%llu velDiff=%llu ammoDiff=%llu flagDiff=%llu states=%llu stateGaps=%zu stateGapP50Ms=%.2f stateGapP99Ms=%.2f stateGapMaxMs=%.2f loopP99Ms=%.2f loopMaxMs=%.2f cpuPercent=%.1f pawnBlock=%d pawnReconciles=%llu predOdd=%llu invDiff=%llu crouchDiff=%llu fallDiff=%llu\n",
 			args.bots, botsOpen, (unsigned long long)compared, (unsigned long long)posDiff, (unsigned long long)velDiff, (unsigned long long)ammoDiff, (unsigned long long)flagDiff, (unsigned long long)states, stateGapsMs.size(),
 			percentile(stateGapsMs, 0.5), percentile(stateGapsMs, 0.99), percentile(stateGapsMs, 1.0), percentile(loopGapsMs, 0.99), percentile(loopGapsMs, 1.0), args.measureSeconds > 0 ? (cpuEnd - cpuBegin) / args.measureSeconds * 100.0 : 0.0,
-			args.pawnBlock ? 1 : 0, (unsigned long long)pawnReconciles, (unsigned long long)predCount.pawnOddSimplex, (unsigned long long)invDiff);
+			args.pawnBlock ? 1 : 0, (unsigned long long)pawnReconciles, (unsigned long long)predCount.pawnOddSimplex, (unsigned long long)invDiff, (unsigned long long)crouchDiff, (unsigned long long)fallDiff);
 		std::printf("RESULT %s\n", pass ? "PASS" : "FAIL");
 		return pass ? 0 : 1;
 	}
@@ -2171,7 +2199,7 @@ int main(int argc, char** argv)
 	std::printf("\n");
 	std::printf("BOT 서버 ↔ 같은 코드: compared=%llu posDiff=%llu posMax=%.5f velDiff=%llu ammoDiff=%llu flagDiff=%llu 처음 어긋난 봇=%d 번호=%u\n", (unsigned long long)compared, (unsigned long long)posDiff, posMax, (unsigned long long)velDiff, (unsigned long long)ammoDiff, (unsigned long long)flagDiff, firstBadBot, firstBad);
 	std::printf("BOT ads inputs=%llu comparedOn=%llu diff=%llu (diff 는 flagDiff 안에도 든다)\n", (unsigned long long)adsInputs, (unsigned long long)adsCompared, (unsigned long long)adsDiff);
-	std::printf("BOT crouch presses=%llu comparedOn=%llu diff=%llu (diff 는 flagDiff 안에도 든다)\n", (unsigned long long)crouchPresses, (unsigned long long)crouchCompared, (unsigned long long)crouchDiff);
+	std::printf("BOT crouch presses=%llu comparedOn=%llu diff=%llu (diff 는 막기를 끈 판만 flagDiff 안에도 든다)\n", (unsigned long long)crouchPresses, (unsigned long long)crouchCompared, (unsigned long long)crouchDiff);
 	// 부활 직후 이동 막음 — comparedOn = 서버가 막음으로 보낸 비교 줄. 서버 빈 입력 이동(SERVER idleMoves)이 막음을 따로 줄이면 diff 가 선다
 	std::printf("BOT moveLock comparedOn=%llu diff=%llu (diff 는 flagDiff 안에도 든다)\n", (unsigned long long)lockCompared, (unsigned long long)lockDiff);
 	// 사람끼리 막기(F-2) — 꺼진 판은 0. 예측 쪽 계수는 봇끼리 나눠 쓰는 sim 하나의 합(다시 돌린 걸음 포함)
