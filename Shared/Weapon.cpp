@@ -658,7 +658,7 @@ namespace mo
 		}
 
 		// 입력 처리 — 발사. 재장전보다 먼저다(Weapon.h 주석). 근접이 켜져 있으면 막힌다(근접의 막기 태그)
-		if (input.fireHeld && !input.meleeActive && !_fireActive && _magazine >= 1)
+		if (input.fireHeld && !input.meleeActive && !input.dashActive && !_fireActive && _magazine >= 1)
 		{
 			--_magazine;
 			ev.spreadAngle = _spread.GetSpreadAngle();
@@ -671,8 +671,26 @@ namespace mo
 			ev.fired = true;
 		}
 
-		// 입력 처리 — 재장전. 발사 능력 · 근접 능력이 켜져 있으면 막힌다(Ability.ActivateFail.TagsBlocked)
-		if (input.reloadPressed && !_fireActive && !input.meleeActive && _reloadLeft <= 0 && _magazine < _def->magazineSize && _spare > 0)
+		// 대시가 켜지는 입력 — 켜져 있던 사격(방금 쏜 발 포함)과 도는 재장전을 끊는다(대시의 끊기 태그 Ability.Type.Action). 타이머 앞이라 끊긴 재장전은 탄이 안 들어간다
+		const bool dashBlocks = input.dashActive || input.dashStarted;
+		if (input.dashStarted)
+		{
+			if (_fireActive)
+			{
+				_fireActive = false;
+				_fireLeft = 0;
+				_fireMontageLeft = 0;
+				ev.fireCancelledByDash = true;
+			}
+			if (_reloadLeft > 0)
+			{
+				_reloadLeft = 0;
+				ev.reloadCancelledByDash = true;
+			}
+		}
+
+		// 입력 처리 — 재장전. 발사 능력 · 근접 능력 · 대시가 켜져 있으면 막힌다(Ability.ActivateFail.TagsBlocked)
+		if (input.reloadPressed && !_fireActive && !input.meleeActive && !dashBlocks && _reloadLeft <= 0 && _magazine < _def->magazineSize && _spare > 0)
 		{
 			StartReload();
 			ev.reloadStarted = true;
@@ -706,7 +724,7 @@ namespace mo
 		if (_pollLeft <= 1e-4f)
 		{
 			_pollLeft += _def->autoReloadPollSeconds;
-			if (_magazine == 0 && _spare > 0 && _idleSeconds >= _def->autoReloadIdleSeconds && _reloadLeft <= 0 && !input.meleeActive)	// 근접 중 검사는 재장전 능력이 막혀 그냥 지나간다(원본 기준)
+			if (_magazine == 0 && _spare > 0 && _idleSeconds >= _def->autoReloadIdleSeconds && _reloadLeft <= 0 && !input.meleeActive && !dashBlocks)	// 근접 · 대시 중 검사는 재장전 능력이 막혀 그냥 지나간다(원본 기준)
 			{
 				StartReload();
 				ev.reloadStarted = true;

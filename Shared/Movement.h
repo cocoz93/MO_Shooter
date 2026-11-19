@@ -241,6 +241,51 @@ namespace mo
 		uint64_t pawnTouchStart = 0;		// 정확한 식으론 안 겹쳤는데 단정밀도 반복이 처음부터 여유 안(λ = 0)으로 끝남 — 엔진처럼 겹침 맞음(깊이 0 근처)으로 돌려준다
 	};
 
+	// 점프 능력(GA_Hero_Jump) 켜짐 한 사람치 — 누를 때 켜고(OnInputTriggered) 뗄 때 끈다. 서버 ApplyInput 과 대조 도구가 같이 쓴다(D-2).
+	// 막힌 누름은 버려진다 — 쥔 채 대시가 끝나도 안 켜진다(D-0 기록 during_jump_hold). 막기가 없으면 active 는 held 와 같다(전과 같은 길)
+	enum class EJumpStep : uint8_t
+	{
+		None,		// 버튼이 그대로
+		Press,		// 켰다 — 부르는 쪽이 RequestUnCrouch · PressJump
+		Release,	// 켜져 있던 것을 뗐다 — ReleaseJump
+		Blocked,	// 누름을 막았다(대시)
+	};
+
+	struct JumpAbility
+	{
+		bool held = false;		// 마지막 입력의 버튼 — 입력이 끊긴 틱에 서버가 채우는 빈 입력도 누른 채로 둔다
+		bool active = false;
+
+		void Reset() { *this = JumpAbility(); }
+		EJumpStep Apply(bool buttonHeld, bool blocked)
+		{
+			EJumpStep step = EJumpStep::None;
+			if (buttonHeld && !held)
+			{
+				if (blocked) step = EJumpStep::Blocked;
+				else
+				{
+					active = true;
+					step = EJumpStep::Press;
+				}
+			}
+			else if (!buttonHeld && held && active)
+			{
+				active = false;
+				step = EJumpStep::Release;
+			}
+			held = buttonHeld;
+			return step;
+		}
+		// 대시가 켜질 때 끊는다 — 켜져 있었으면 true(부르는 쪽이 ReleaseJump — 능력이 끝나며 StopJumping). 쥐고 있어도 다시 안 켜진다(누름 가장자리가 없다)
+		bool Cut()
+		{
+			const bool wasActive = active;
+			active = false;
+			return wasActive;
+		}
+	};
+
 	class CMoveSim
 	{
 	public:

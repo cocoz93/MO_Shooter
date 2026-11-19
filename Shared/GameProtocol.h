@@ -50,6 +50,7 @@ namespace mo
 			BUTTON_ADS = 1 << 3,	// 누르는 동안 켠다 — 그 입력부터 조준(C-4, D61)
 			BUTTON_CROUCH = 1 << 4,	// 누른 입력 하나에만 켠다 — 앉기 키 한 번 = ALyraCharacter::ToggleCrouch 한 번(D-5)
 			BUTTON_MELEE = 1 << 5,	// Lyra 근접 입력이 눌림을 낸 입력에 켠다 — 근접 능력이 꺼져 있으면 그 입력에 켜지고, 켜진 동안의 누름은 버린다(E-3)
+			BUTTON_DASH = 1 << 6,	// Lyra 대시 입력이 눌림을 낸 입력에 켠다 — 켜짐 · 쿨다운 중이면 버린다(서버 규칙 D-2. 보내는 쪽 · 판 번호 올림은 D-3)
 		};
 
 		// S2C_PICKUP 의 까닭 — 화면 효과를 낼지 다리가 이것으로 가른다

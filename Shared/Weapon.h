@@ -167,12 +167,17 @@ namespace mo
 		bool held = false;		// 마지막 입력의 버튼 — 입력이 끊긴 틱에 서버가 채우는 빈 입력도 누른 채로 둔다
 		bool active = false;	// 이번 입력에 켜져 있나
 		bool granted = false;	// 새 몸에 능력이 붙었나 — 첫 입력을 받은 뒤 참
+		bool latched = false;	// 대시가 끊거나 막은 뒤 — 떼었다가 다시 눌러야 켜진다(D-2)
 
 		void Reset() { *this = AdsAbility(); }	// 새 몸 · 죽음(Lyra 죽음 능력이 다른 능력을 끈다)
-		void Apply(bool buttonHeld)
+		// dashBlocks = 대시가 이 입력에 켜져 있다(CDashAbility::BlocksPresses, 켠 입력 포함). GA_ADS 는 누를 때 한 번 켜지는 능력이라(OnInputTriggered)
+		// 끊기거나 막힌 누름은 쥐고 있어도 다시 안 켜진다 — D-0 기록 ads_then_dash(켠 프레임 3583 에 꺼지고 쥔 채 안 돌아옴) · during_ads_hold(대시 중 누름, 끝난 뒤에도 0)
+		void Apply(bool buttonHeld, bool dashBlocks = false)
 		{
 			held = buttonHeld;
-			active = buttonHeld && granted;
+			if (!buttonHeld) latched = false;
+			else if (dashBlocks) latched = true;
+			active = buttonHeld && granted && !latched;
 			granted = true;
 		}
 	};
@@ -188,6 +193,8 @@ namespace mo
 		bool reloadPressed = false;
 		bool meleeActive = false;	// 근접 능력이 켜져 있다 — 사격 · 재장전 입력 · 자동 재장전이 막힌다(TagRelationships_ShooterHero 의 근접 막기, E-3)
 		bool meleeStarted = false;	// 이 입력에 근접 능력이 켜졌다 — 도는 재장전을 끊는다(같은 표의 근접 끊기)
+		bool dashActive = false;	// 대시가 앞 입력부터 켜져 있다(CDashAbility::BlocksHeldFire) — 사격 · 재장전 입력 · 자동 재장전이 막힌다(D-2)
+		bool dashStarted = false;	// 이 입력에 대시가 켜졌다 — 쥔 사격은 먼저 켜진 뒤 끊기고, 도는 재장전이 끊기고, 재장전 입력 · 자동 재장전은 막힌다
 	};
 
 	struct WeaponEvents
@@ -196,6 +203,8 @@ namespace mo
 		bool reloaded = false;		// 이번 틱에 탄이 들어옴
 		bool reloadStarted = false;
 		bool reloadCancelledByMelee = false;	// 이번 입력에 켜진 근접이 도는 재장전을 끊었다 — 탄이 안 들어간다
+		bool reloadCancelledByDash = false;		// 이번 입력에 켜진 대시가 도는 재장전을 끊었다 — 탄이 안 들어간다(D-0 기록 reload_dash 4 → 4)
+		bool fireCancelledByDash = false;		// 이번 입력에 켜진 대시가 켜져 있던 사격 능력을 끊었다(이 입력에 쏜 발 포함)
 		float spreadAngle = 0;			// fired 일 때 — 이번 발의 퍼짐. 이번 발이 더하는 열은 들어가지 않는다(Lyra 는 광선을 쏜 뒤 열을 더한다)
 		float spreadMultiplier = 1;
 	};
@@ -207,6 +216,8 @@ namespace mo
 	//   Lyra 의 Ability.Weapon.NoFiring 은 그 구간과 겹쳐 결과를 바꾸지 않으므로 따로 들지 않는다(빼도 기록과 같음을 확인)
 	// - 수동 재장전은 시작한 틱부터 시간이 줄고, 자동 재장전은 타이머 뒤에 시작해 다음 틱부터 준다(Lyra 에서 한 프레임 차이)
 	// 시간은 초로 들고 간다 — Lyra 는 프레임에 묶이므로 고정 틱에서 같은 간격이 나온다
+	// 대시(D-2)는 발사 입력 바로 뒤에 끊는다 — 쥔 사격은 대시보다 먼저 켜지고(Dash.h BlocksHeldFire), 재장전 끊기는 타이머 앞이어야 그 입력에 탄이 안 들어간다.
+	//   대시가 켜진 입력 · 켜져 있는 입력의 재장전 입력과 자동 재장전은 막힌다(자동 재장전 검사는 입력 처리 뒤 월드 틱에서 돌아 이미 켜진 대시를 본다 — 원본 기준 차례)
 	// 근접(E-3)은 부르는 쪽이 이 순환 앞에서 켠다(CMeleeAbility) — 켜진 동안 발사 · 재장전 입력 · 자동 재장전이 막히고, 켜지는 입력에 도는 재장전이 끊긴다.
 	//   발사 능력은 근접을 막지도 끊지도 않는다(관계표에 없음). 같은 입력에 둘 다 누르면 근접이 먼저라 발사가 막힌다 — Lyra 의 같은 프레임 차례는 확인 못 했다(제 판단)
 	class CWeaponCycle;
@@ -449,6 +460,13 @@ namespace mo
 		bool WillActivateNextInput() const { return _inputsLeft <= 1; }
 		uint32_t GetInputsLeft() const { return _inputsLeft; }
 		void Reset() { _inputsLeft = 0; }
+		// 대시가 켜질 때 끊는다(D-2) — 이번 입력에 켜져 있었으면 true(부르는 쪽이 밀기 힘을 지운다). NextInput 뒤에 불러야 이번 입력 값이다
+		bool Cut()
+		{
+			const bool wasActive = _inputsLeft > 0;
+			_inputsLeft = 0;
+			return wasActive;
+		}
 
 	private:
 		uint32_t _inputsLeft = 0;	// 이 입력을 포함해 켜져 있을 입력 수. 0 = 꺼짐

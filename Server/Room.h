@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "AnimState.h"
+#include "Dash.h"
 #include "GameProtocol.h"
 #include "Loadout.h"
 #include "MapCollision.h"
@@ -156,6 +157,29 @@ namespace mo
 		uint64_t meleeRewindClamped = 0;
 		uint64_t meleeRewindOk = 0;
 
+		// 대시(컨텐츠 D-2) — 누름(dashPresses) = 켬 + 방향 없음 + 쿨다운 + 켜져 있음 + 죽음 + 경기 끝. 갈래마다 따로 센다(0 이 「안 지나감」인지 가리려고)
+		uint64_t dashPresses = 0;			// 대시 단추가 든 입력(서버가 만든 빈 입력 제외)
+		uint64_t dashStarted = 0;
+		uint64_t dashNoDirection = 0;		// 앞 입력 · 몸 요로 고른 방향이 0 — 쿨다운 없이 취소
+		uint64_t dashOnCooldown = 0;
+		uint64_t dashWhileActive = 0;
+		uint64_t dashDead = 0;
+		uint64_t dashPostGame = 0;			// 경기 끝 단계 — GE_BlockAbilityInput
+		uint64_t dashFiresBlocked = 0;		// 대시가 앞 입력부터 켜져 있어 막은 쥔 사격 입력
+		uint64_t dashReloadsBlocked = 0;	// 대시가 켜져 있어(켠 입력 포함) 막은 재장전 누름
+		uint64_t dashMeleeBlocked = 0;		// 같은 까닭으로 막은 근접 누름
+		uint64_t dashJumpsBlocked = 0;		// 같은 까닭으로 막은 점프 누름(버튼이 눌리는 입력)
+		uint64_t dashAdsBlocked = 0;		// 같은 까닭으로 막은 조준 누름(버튼이 눌리는 입력)
+		uint64_t dashFireCancels = 0;		// 켜는 입력에 끊은 사격 능력(그 입력에 쏜 발 포함)
+		uint64_t dashReloadCancels = 0;		// 켜는 입력에 끊은 재장전(탄이 안 들어감)
+		uint64_t dashMeleeCancels = 0;		// 켜는 입력에 끊은 근접
+		uint64_t dashMeleePushRemoved = 0;	// 그중 밀기 힘이 있어 지움(RemoveRootForce — 이미 끝난 힘이면 아무것도 안 한다)
+		uint64_t dashJumpCancels = 0;		// 켜는 입력에 끊은 점프(ReleaseJump)
+		uint64_t dashAdsCancels = 0;		// 켜는 입력에 끈 조준
+		uint64_t dashUncrouches = 0;		// 앉은 채 켜서 일어서기를 바람
+		uint64_t dashLiftoffs = 0;			// 이동 계수 rootForceLiftoffs 가 그 입력 걸음에서 는 수(위를 보고 앞 대시 — 걷기 → 낙하)
+		uint64_t dashMontage[4] = {};		// 켠 방향(EDashDir — 앞 · 뒤 · 왼 · 오른)
+
 		// 권위 확인 — 일부러 보낸 나쁜 입력을 사유별로 센다. 정직한 클라는 여기 일곱이 전부 0 이어야 한다
 		uint64_t inputsRejectedBadValue = 0;	// NaN·무한대 — 통째로 버림
 		uint64_t movesOverLength = 0;			// 이동 입력 길이가 1을 넘음 — 1로 줄여 씀
@@ -278,10 +302,12 @@ namespace mo
 			float hp = 0;
 			float yaw = 0, pitch = 0;
 			int8_t moveX = 0, moveY = 0;	// 마지막 누름 방향 — 상태 패킷에 실어 보낸다
-			bool jumpHeld = false;
+			JumpAbility jump;				// 점프 능력 — 버튼 · 켜짐. 대시가 누름을 막고 켜는 순간 끊는다(D-2)
 			AdsAbility ads;					// 조준 능력(C-4) — 걸음 속도 · 카메라 · 애니 · STATE_ADS
 			CAimCamera aimCamera;			// 사격 퍼짐이 읽는 조준 비율의 출처(C-1)
 			CMeleeAbility melee;			// 근접 능력(E-3) — 입력 개수로 센다. 부활하면 꺼진 채
+			uint16_t meleePushId = 0;		// 이번 근접이 넣은 밀기 힘 번호(0 = 없음) — 대시가 근접을 끊으면 지운다(D-2)
+			CDashAbility dash;				// 대시 능력(D-2) — 켜짐 · 쿨다운을 입력 개수로 센다. 부활하면 꺼진 채
 			bool dead = false;
 			uint32_t respawnTick = 0;		// dead 일 때
 			uint32_t immuneUntilTick = 0;
@@ -386,7 +412,9 @@ namespace mo
 		size_t PadCount() const { return _pickups.pads ? _pickups.pads->size() : 0; }
 		bool IsImmune(const Player& player) const;
 		Vec3 ResolveAimStart(const Player& player, const Vec3& locationBeforeMove, const Vec3& aim);
-		bool TryMelee(Player& player, const wire::Input& input);
+		bool TryMelee(Player& player, const wire::Input& input);	// 부르기 전에 melee.NextInput — 대시가 끊을지를 이번 입력 값으로 보려고 ApplyInput 이 앞에서 센다
+		void CountDash(EDashResult result);
+		void StartDash(Player& player, const DashStart& dash);
 		bool MeleeHandOf(const Player& player, Vec3& out);
 		void RecordRewindSamples();
 		bool GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out, float& outAlpha) const;

@@ -6,6 +6,7 @@
 
 // 대시(컨텐츠 대시) — Lyra GA_Hero_Dash 를 엔진 없이 옮긴 것. 정본 = MyDocs/claude-plans/mo-shooter/dash-plan.md
 // - D-1 = 힘 하나(방향 → 힘 벡터 · 힘 설정). D-2 = 방향 고르기 · 능력(켜짐 · 쿨다운 · 켜기 조건). 막기 · 끊기는 무기 순환 · 서버 차례 쪽(Weapon · Room)
+//   막기 · 끊기의 갈래 = 무기 순환(WeaponInput 의 대시 두 칸) · 조준(AdsAbility::Apply) · 점프(JumpAbility) · 근접(CMeleeAbility::Cut) — 서버와 대조 도구가 같은 함수를 쓴다
 // - 언리얼 안에서도 컴파일돼야 하므로 예외·RTTI 를 쓰지 않는다
 namespace mo
 {
@@ -79,6 +80,11 @@ namespace mo
 		void RememberInput(const Vec3& move, float yaw) { _prevMove = move; _prevYaw = yaw; }
 		bool Active() const { return _activeLeft > 0; }			// 이번 입력에 다른 행동을 막나 — 켠 입력 포함 kDashActiveInputs 개
 		bool JustStarted() const { return _justStarted; }		// 이번 입력에 켰나 — 끊기(재장전 · 근접 · 조준 · 자동 사격 · 점프)는 이 입력에만
+		// 막기(D-2) — 켠 입력부터 kDashActiveInputs 개. 새로 누른 근접 · 재장전 · 점프 · 조준은 켠 입력에도 막힌다(TryActivate 가 TryMelee · 점프보다 먼저다)
+		bool BlocksPresses() const { return Active(); }
+		// 쥔 사격만 켠 입력에 먼저 켜진다 — Lyra 는 쥠 능력(WhileInputActive = 사격 셋)을 누름 능력(대시)보다 먼저 켜고(LyraAbilitySystemComponent.cpp:232-283),
+		// 대시가 켜지며 끊는다. D-0 기록 fire_then_dash 3751 = 켠 프레임에 탄창 10 → 9 · 사격 꺼짐. 그 뒤 입력부터 막힌다
+		bool BlocksHeldFire() const { return Active() && !_justStarted; }
 		int CooldownLeft() const { return _cooldownLeft; }		// 0 보다 크면 이번 입력에 못 켬
 		void Reset();		// 부활 · 판 시작 — 켜짐 · 쿨다운 · 앞 입력을 지운다(몸 요가 있으면 부르는 쪽이 RememberInput 으로 다시 넣는다)
 

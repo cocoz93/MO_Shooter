@@ -280,7 +280,21 @@ dash DASH ability ok step=turn_left presses=1 started=1 lyraStarted=1 dirs=F dif
 dash DASH ability ok step=turn_back presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
 dash DASH ability compared=32 fails=0 inputs=4781 presses=330 started=33 lyraStarted=33 noDirection=1 whileActive=119 onCooldown=177 dirF=25 dirB=1 dirL=3 dirR=4
 dash DASH abilityDiff start=0 dir=0 badMontage=0 active=0 cooldown=0 moveCopy=0 yawCopy=0
-dash DASHCHECK PASS steps=30 dashes=33 fails=0 abilityFails=0
+dash DASH block ok step=jump_apex rows=150 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=during_fire_tap rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=during_fire_hold rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=during_reload rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=during_melee rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=during_jump_tap rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=during_jump_hold rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=during_ads_hold rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=ads_then_dash rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=fire_then_dash rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=reload_dash rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block ok step=melee_dash rows=120 presses=1 diffRows=0 firstDiffFrame=- what=-
+dash DASH block compared=42 fails=0 rows=4709 badStart=0 diff fire=0 reload=0 mag=0 ads=0 jump=0 melee=0
+dash DASH blockPaths blocked fire=58 reload=1 melee=1 jump=2 ads=1 cancel fire=1 reload=1 melee=1 jump=0 ads=1 shotsOnStart=1
+dash DASHCHECK PASS steps=30 dashes=33 fails=0 abilityFails=0 blockFails=0
 map_expanse CHECK kind=A total=15000 bothHit=9225 bothMiss=5775 onlyLyra=0 onlyMine=0 lyraPen=4351 penMismatch=0 maxDiff=0.0910 p99Diff=0.00074 over0.1=0 over1=0
 map_expanse NORMAL kind=A compared=4874 over0.01=91 over0.1=90 max=1.4142 | startPen compared=4351 over0.1=663
 map_expanse CHECK kind=C total=15000 bothHit=9213 bothMiss=5772 onlyLyra=15 onlyMine=0 lyraPen=6125 penMismatch=0 maxDiff=451.8685 p99Diff=0.00566 over0.1=38 over1=20

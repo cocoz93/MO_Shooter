@@ -18,6 +18,7 @@
 //   입력 r = 기록 r−1 줄 틱에서 넣은 것(누름 = dash_press · 이동 = inX · inY · 요 · 피치 = ctlYaw · ctlPitch), r 프레임이 먹는다
 //   견주는 것 = 켠 입력(r 줄 dash_start) · 고른 방향(r 줄 몽타주) · 막힘(r 줄 dash_start 이거나 r−1 줄 dashActive) · 쿨다운(r−1 줄 dashCooldown > 0) — 입력마다 전부
 //   앞 입력 사본 = 서버가 쓰는 앞 입력(r−2 줄 inX · inY · ctlYaw)이 Lyra 가 켤 때 본 값(r−1 줄 lastInX · lastInY · 몸 yaw)과 같은지 누름마다 센다(다르면 이 대조의 전제가 틀림)
+// 막기 대조(D-2-b) = 같은 한 줄기에 무기 순환(권총) · 조준 · 점프 · 근접을 서버 차례로 얹어 줄마다 사격 · 재장전 · 조준 · 점프 · 근접 켜짐과 탄창을 견준다(CompareBlocking)
 // 끝 코드: 0 = 전부 통과, 1 = 불일치, 2 = 입력 오류
 #include "Dash.h"
 #include "MapCollision.h"
@@ -78,10 +79,11 @@ namespace
 	{
 		int step, ev, px, py, pz, vx, vy, vz, speed, maxSpeed, crouched, mode, montage, jumpActive, ctlPitch, ctlYaw, lastInX, lastInY, inX, inY;
 		int yaw, dashActive, dashCooldown;		// 능력 대조(D-2)
+		int fireActive, reloadActive, meleeActive, adsActive, mag;		// 막기 대조(D-2-b)
 		bool Ok() const
 		{
 			const int all[] = { step, ev, px, py, pz, vx, vy, vz, speed, maxSpeed, crouched, mode, montage, jumpActive, ctlPitch, ctlYaw, lastInX, lastInY, inX, inY,
-				yaw, dashActive, dashCooldown };
+				yaw, dashActive, dashCooldown, fireActive, reloadActive, meleeActive, adsActive, mag };
 			for (int c : all) if (c < 0) return false;
 			return true;
 		}
@@ -336,6 +338,180 @@ namespace
 		}
 		return out;
 	}
+
+	// 로그 한 줄에서 「 key=값」 의 값(다음 빈칸까지)
+	std::string Token(const std::string& line, const char* key)
+	{
+		const size_t at = line.find(key);
+		if (at == std::string::npos) return std::string();
+		const size_t from = at + std::strlen(key);
+		const size_t to = line.find(' ', from);
+		return line.substr(from, to == std::string::npos ? std::string::npos : to - from);
+	}
+
+	// ── 막기 대조(D-2-b)
+	constexpr const char* kAmmoStepPrefix = "ammo_";	// 기록 도구가 탄을 바로 바꾸는 칸 — 견주지 않는다
+	constexpr int32_t kCheckSpare = 48;					// 권총 startSpareAmmo — 막히지 않으면 재장전이 켜질 만큼
+
+	struct BlockStep
+	{
+		std::string name;
+		bool compared = false;
+		int rows = 0, presses = 0, diffs = 0;
+		int firstDiffRow = -1;
+		std::string firstDiffWhat;
+	};
+
+	struct BlockReport
+	{
+		int rows = 0, badStart = 0;
+		int fireDiff = 0, reloadDiff = 0, magDiff = 0, adsDiff = 0, jumpDiff = 0, meleeDiff = 0;
+		// 지나간 갈래 — 0 이면 이 기록이 그 갈래를 안 본 것
+		int firesBlocked = 0, reloadsBlocked = 0, meleeBlocked = 0, jumpsBlocked = 0, adsBlocked = 0;
+		int fireCancels = 0, reloadCancels = 0, meleeCancels = 0, jumpCancels = 0, adsCancels = 0, shotsOnStart = 0;
+		std::vector<BlockStep> steps;
+		bool Fail() const { return rows == 0 || badStart + fireDiff + reloadDiff + magDiff + adsDiff + jumpDiff + meleeDiff > 0; }
+	};
+
+	// 기록의 누름 사건을 입력으로 되살려 대시 · 무기 순환(권총) · 조준 · 점프 · 근접을 Room::ApplyInput 차례 그대로 Shared 함수로 돌리고,
+	// 줄마다 Lyra 능력 켜짐(사격 · 재장전 · 조준 · 점프 · 근접)과 탄창을 견준다. 대시 시계는 기록 전체를 한 줄기로(능력 대조와 같다)
+	//   입력 r 의 누름 = r−1 줄 사건(act_press · act_release · melee_press · jump_press · jump_release · dash_press — 기록 도구 틱이 누른 것은 다음 프레임이 먹는다).
+	//   예외 = reload_press 는 r 줄 사건이 입력 r 이다 — 칸 준비에서 눌러 그 줄에 이미 켜져 있다(dash6 3864 reload_press · reloadActive 1)
+	//   act 누름의 단추 = 로그 칸 줄 act=(기록 도구 DASH_ACTIONS). 쥠(fire_hold · jump_hold · ads_hold)은 칸이 바뀔 때 뗀다(EndDash)
+	//   근접 켜짐 줄 = 그 입력 뒤에도 켜져 있나(GetInputsLeft > 1) — 근접은 마지막 입력의 입력 처리 뒤에 끝난다(Weapon.h MeleeAbilityInputs)
+	//   견주는 칸 = ammo_ 로 시작하지 않는 칸. 칸 첫 줄에서 앞 줄 탄창으로 다시 맞추고 다른 능력은 끈 채 시작한다 — 앞 줄에 켜진 능력이 있으면 badStart(전제가 틀림)
+	BlockReport CompareBlocking(const Table& t, const Columns& c, const std::map<std::string, std::string>& stepActs)
+	{
+		BlockReport out;
+		const WeaponDef& pistol = GetWeaponDef(EWeapon::Pistol);
+		CDashAbility dash;
+		CWeaponCycle cycle;
+		cycle.Init(EWeapon::Pistol);
+		AdsAbility ads;
+		JumpAbility jump;
+		CMeleeAbility melee;
+		bool fireHeld = false, adsHeld = false, jumpHeld = false;
+		for (size_t r = 1; r < t.rows.size(); ++r)
+		{
+			const std::vector<std::string>& prev = t.rows[r - 1];
+			const std::vector<std::string>& now = t.rows[r];
+			const std::string& stepName = Text(now, c.step);
+			const bool compare = stepName.compare(0, std::strlen(kAmmoStepPrefix), kAmmoStepPrefix) != 0;
+			if (out.steps.empty() || Text(prev, c.step) != stepName)
+			{
+				BlockStep s;
+				s.name = stepName;
+				s.compared = compare;
+				out.steps.push_back(s);
+				fireHeld = adsHeld = jumpHeld = false;		// 쥔 단추는 칸 끝에 뗀다
+				if (compare)
+				{
+					cycle.ResetCycleForCheck();
+					cycle.SetAmmoForCheck((int32_t)Cell(prev, c.mag), kCheckSpare);
+					ads.Reset();
+					ads.granted = true;		// 능력은 판 내내 붙어 있다 — 칸 첫 입력의 누름도 받는다
+					jump.Reset();
+					melee.Reset();
+					if (Cell(prev, c.fireActive) != 0.0 || Cell(prev, c.reloadActive) != 0.0 || Cell(prev, c.meleeActive) != 0.0 ||
+						Cell(prev, c.adsActive) != 0.0 || Cell(prev, c.jumpActive) != 0.0) ++out.badStart;
+				}
+			}
+			BlockStep& step = out.steps.back();
+
+			// 이 입력의 단추 — 앞 줄 사건(칸 준비 재장전만 이 줄)
+			const std::string& evPrev = Text(prev, c.ev);
+			const auto actIt = stepActs.find(Text(prev, c.step));
+			const std::string act = actIt == stepActs.end() ? std::string() : actIt->second;
+			bool reloadPressed = HasEvent(Text(now, c.ev), "reload_press");
+			bool meleePressed = HasEvent(evPrev, "melee_press");
+			if (HasEvent(evPrev, "jump_press")) jumpHeld = true;
+			if (HasEvent(evPrev, "jump_release")) jumpHeld = false;
+			const bool actPress = HasEvent(evPrev, "act_press");
+			const bool actRelease = HasEvent(evPrev, "act_release");
+			if (actPress || actRelease)
+			{
+				if (act == "fire_tap" || act == "fire_hold") fireHeld = actPress;
+				else if (act == "jump_tap" || act == "jump_hold") jumpHeld = actPress;
+				else if (act == "ads_hold") adsHeld = actPress;
+				else if (act == "reload") reloadPressed = reloadPressed || actPress;
+				else if (act == "melee") meleePressed = meleePressed || actPress;
+			}
+			if (reloadPressed || meleePressed || actPress || HasEvent(evPrev, "jump_press")) ++step.presses;
+
+			// 서버 차례(Room::ApplyInput) — 대시 켜기 · 끊기 → 점프 → 근접 → 조준 → 무기 순환 → 앞 입력 기억
+			const Vec3 move(Cell(prev, c.inX), Cell(prev, c.inY), 0.0);
+			const float viewPitch = (float)Cell(prev, c.ctlPitch);
+			const float viewYaw = (float)Cell(prev, c.ctlYaw);
+			melee.NextInput();
+			dash.NextInput();
+			bool started = false;
+			if (HasEvent(evPrev, "dash_press")) started = dash.TryActivate(viewPitch, viewYaw, false, false).result == EDashResult::Started;
+			if (started)
+			{
+				if (melee.Cut()) ++out.meleeCancels;
+				if (jump.Cut()) ++out.jumpCancels;
+			}
+			if (jump.Apply(jumpHeld, dash.BlocksPresses()) == EJumpStep::Blocked) ++out.jumpsBlocked;
+			bool meleeStarted = false;
+			if (meleePressed)
+			{
+				if (dash.BlocksPresses()) ++out.meleeBlocked;
+				else meleeStarted = melee.TryActivate(pistol, kFrameSeconds);
+			}
+			const bool adsWasActive = ads.active;
+			const bool adsWasHeld = ads.held;
+			ads.Apply(adsHeld, dash.BlocksPresses());
+			if (dash.JustStarted() && adsWasActive) ++out.adsCancels;
+			else if (adsHeld && !adsWasHeld && dash.BlocksPresses()) ++out.adsBlocked;
+			WeaponInput wi;
+			wi.fireHeld = fireHeld;
+			wi.reloadPressed = reloadPressed;
+			wi.meleeActive = melee.IsActive();
+			wi.meleeStarted = meleeStarted;
+			wi.dashActive = dash.BlocksHeldFire();
+			wi.dashStarted = dash.JustStarted();
+			if (wi.fireHeld && wi.meleeActive) wi.fireHeld = false;
+			if (wi.fireHeld && wi.dashActive)
+			{
+				++out.firesBlocked;
+				wi.fireHeld = false;
+			}
+			if (wi.reloadPressed && dash.BlocksPresses()) ++out.reloadsBlocked;
+			const WeaponEvents ev = cycle.Tick(kFrameSeconds, wi, WeaponMotion());
+			if (ev.fired && started) ++out.shotsOnStart;
+			if (ev.fireCancelledByDash) ++out.fireCancels;
+			if (ev.reloadCancelledByDash) ++out.reloadCancels;
+			dash.RememberInput(move, viewYaw);
+
+			if (!compare) continue;
+			++out.rows;
+			++step.rows;
+			std::string what;
+			const auto check = [&what](bool differs, int& counter, const char* name)
+			{
+				if (!differs) return;
+				++counter;
+				if (!what.empty()) what += ',';
+				what += name;
+			};
+			check(cycle.IsFireActive() != (Cell(now, c.fireActive) != 0.0), out.fireDiff, "fire");
+			check(cycle.IsReloading() != (Cell(now, c.reloadActive) != 0.0), out.reloadDiff, "reload");
+			check(cycle.GetMagazine() != (int32_t)Cell(now, c.mag), out.magDiff, "mag");
+			check(ads.active != (Cell(now, c.adsActive) != 0.0), out.adsDiff, "ads");
+			check(jump.active != (Cell(now, c.jumpActive) != 0.0), out.jumpDiff, "jump");
+			check((melee.IsActive() && melee.GetInputsLeft() > 1) != (Cell(now, c.meleeActive) != 0.0), out.meleeDiff, "melee");
+			if (!what.empty())
+			{
+				++step.diffs;
+				if (step.firstDiffRow < 0)
+				{
+					step.firstDiffRow = (int)r;
+					step.firstDiffWhat = what;
+				}
+			}
+		}
+		return out;
+	}
 }
 
 int main(int argc, char** argv)
@@ -362,6 +538,7 @@ int main(int argc, char** argv)
 		return 2;
 	}
 	int logStarts = 0, logSteps = 0, badLines = 0;
+	std::map<std::string, std::string> stepActs;
 	std::string line;
 	while (std::getline(log, line))
 	{
@@ -371,6 +548,10 @@ int main(int argc, char** argv)
 		if (key == std::string::npos) { ++badLines; continue; }
 		logStarts += std::atoi(line.c_str() + key + 8);
 		++logSteps;
+		// 칸의 대시 중 누름 종류(act= — 기록 도구 DASH_ACTIONS 이름, 없으면 -) — 막기 대조가 act_press · act_release 를 어느 단추로 볼지
+		const std::string stepName = Token(line, " step=");
+		const std::string actName = Token(line, " act=");
+		if (!stepName.empty() && !actName.empty() && actName != "-") stepActs[stepName] = actName;
 	}
 
 	// ── 기록 표
@@ -403,6 +584,8 @@ int main(int argc, char** argv)
 	c.ctlPitch = table.Column("ctlPitch"); c.ctlYaw = table.Column("ctlYaw");
 	c.lastInX = table.Column("lastInX"); c.lastInY = table.Column("lastInY"); c.inX = table.Column("inX"); c.inY = table.Column("inY");
 	c.yaw = table.Column("yaw"); c.dashActive = table.Column("dashActive"); c.dashCooldown = table.Column("dashCooldown");
+	c.fireActive = table.Column("fireActive"); c.reloadActive = table.Column("reloadActive"); c.meleeActive = table.Column("meleeActive");
+	c.adsActive = table.Column("adsActive"); c.mag = table.Column("mag");
 	if (!c.Ok())
 	{
 		std::printf("DASHCHECK FAIL 기록 표 머리에 대시 대조 칸이 없음(대시 판 기록인가 — D-0 record_content_probe.ps1)\n");
@@ -505,7 +688,25 @@ int main(int argc, char** argv)
 	std::printf("DASH abilityDiff start=%d dir=%d badMontage=%d active=%d cooldown=%d moveCopy=%d yawCopy=%d\n",
 		ab.startDiff, ab.dirDiff, ab.badMontage, ab.activeDiff, ab.cooldownDiff, ab.moveCopyDiff, ab.yawCopyDiff);
 
-	const bool pass = fails == 0 && !ab.Fail();
-	std::printf("DASHCHECK %s steps=%d dashes=%d fails=%d abilityFails=%d\n", pass ? "PASS" : "FAIL", compared, dashes, fails, abilityStepFails + (ab.presses == 0 ? 1 : 0));
+	// ── 막기 대조(D-2-b)
+	const BlockReport bl = CompareBlocking(table, c, stepActs);
+	int blockSteps = 0, blockStepFails = 0;
+	for (const BlockStep& s : bl.steps)
+	{
+		if (!s.compared) continue;
+		++blockSteps;
+		if (s.diffs > 0) ++blockStepFails;
+		if (s.presses == 0 && s.diffs == 0) continue;		// 누름이 없는 칸은 줄을 안 찍는다(합에는 든다)
+		std::printf("DASH block %s step=%s rows=%d presses=%d diffRows=%d firstDiffFrame=%s what=%s\n", s.diffs > 0 ? "DIFF" : "ok", s.name.c_str(), s.rows, s.presses, s.diffs,
+			s.firstDiffRow >= 0 ? table.rows[(size_t)s.firstDiffRow][0].c_str() : "-", s.firstDiffWhat.empty() ? "-" : s.firstDiffWhat.c_str());
+	}
+	std::printf("DASH block compared=%d fails=%d rows=%d badStart=%d diff fire=%d reload=%d mag=%d ads=%d jump=%d melee=%d\n",
+		blockSteps, blockStepFails, bl.rows, bl.badStart, bl.fireDiff, bl.reloadDiff, bl.magDiff, bl.adsDiff, bl.jumpDiff, bl.meleeDiff);
+	std::printf("DASH blockPaths blocked fire=%d reload=%d melee=%d jump=%d ads=%d cancel fire=%d reload=%d melee=%d jump=%d ads=%d shotsOnStart=%d\n",
+		bl.firesBlocked, bl.reloadsBlocked, bl.meleeBlocked, bl.jumpsBlocked, bl.adsBlocked, bl.fireCancels, bl.reloadCancels, bl.meleeCancels, bl.jumpCancels, bl.adsCancels, bl.shotsOnStart);
+
+	const bool pass = fails == 0 && !ab.Fail() && !bl.Fail();
+	std::printf("DASHCHECK %s steps=%d dashes=%d fails=%d abilityFails=%d blockFails=%d\n", pass ? "PASS" : "FAIL", compared, dashes, fails, abilityStepFails + (ab.presses == 0 ? 1 : 0),
+		blockStepFails + bl.badStart + (bl.rows == 0 ? 1 : 0));
 	return pass ? 0 : 1;
 }

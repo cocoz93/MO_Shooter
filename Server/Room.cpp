@@ -499,10 +499,13 @@ namespace mo
 		player.move.location = slot.point.location;
 		player.move.maxSpeed = _params.maxWalkSpeed;
 		_moveSim.RefreshFloor(player.move);
-		player.jumpHeld = false;
+		player.jump.Reset();
 		player.ads.Reset();
 		player.aimCamera.Reset();
 		player.melee.Reset();		// 죽음이 능력을 끈다 — 새 몸은 꺼진 채
+		player.meleePushId = 0;
+		player.dash.Reset();		// 쿨다운도 — Lyra 쿨다운 효과는 1.5초라 부활 대기(respawnSeconds)보다 먼저 끝난다
+		player.dash.RememberInput(Vec3(), slot.point.yawDegrees);	// 새 몸의 「앞 입력」 = 이동 입력 없음 · 놓인 요 — 첫 입력에 누르면 still_yaw0 · still_yaw90(D-0)과 같은 갈래
 		player.yaw = slot.point.yawDegrees;
 		player.pitch = 0;
 		// 가방 — Lyra 는 죽은 몸이 치워질 때 비우고 새 몸에 권총만 준다(W-0 실측). 죽은 동안은 줍기 · 바꾸기가 없어 부활 때 비워도 보이는 것이 같다(제 판단)
@@ -769,7 +772,8 @@ namespace mo
 		player.move.mode = place.falling ? EMoveMode::Falling : EMoveMode::Walking;
 		player.move.maxSpeed = _params.maxWalkSpeed;
 		_moveSim.RefreshFloor(player.move);
-		player.jumpHeld = false;
+		player.jump.Reset();
+		player.meleePushId = 0;		// 힘 묶음도 새로 만들었다(번호도 처음부터) — 앞 근접의 밀기 번호는 없는 힘을 가리킨다
 		player.hp = place.hp;
 		player.dead = false;
 		player.immuneUntilTick = 0;
@@ -822,6 +826,7 @@ namespace mo
 		if (player.dead)
 		{
 			++_stats.inputsWhileDead;
+			if (!serverMade && (input.buttons & wire::BUTTON_DASH) != 0) CountDash(player.dash.TryActivate(input.pitch, input.yaw, true, _phase == wire::EMatchPhase::PostGame).result);
 			return;
 		}
 		++_stats.inputsApplied;
@@ -851,14 +856,36 @@ namespace mo
 			break;
 		}
 
-		const bool jump = (input.buttons & wire::BUTTON_JUMP) != 0;
-		if (jump && !player.jumpHeld)
+		// 대시(D-2) — 무기 바꾸기 뒤 · 점프 앞. 켜면 그 자리에서 근접(밀기 힘까지) · 점프를 끊고 일어서기 · 힘을 넣는다(StartDash).
+		// 조준 · 사격 · 재장전의 막기 · 끊기는 각자의 자리(ads.Apply · 무기 순환)가 대시 상태를 본다. 근접 입력 수도 여기서 센다 — 끊을지를 이번 입력 값으로 본다
+		if (!serverMade)	// 빈 입력은 대시 · 근접 시계를 안 센다(D87)
 		{
+			player.melee.NextInput();
+			player.dash.NextInput();
+			if ((input.buttons & wire::BUTTON_DASH) != 0)
+			{
+				const DashStart dash = player.dash.TryActivate(input.pitch, input.yaw, false, _phase == wire::EMatchPhase::PostGame);
+				CountDash(dash.result);
+				if (dash.result == EDashResult::Started) StartDash(player, dash);
+			}
+		}
+
+		const bool jump = (input.buttons & wire::BUTTON_JUMP) != 0;
+		switch (player.jump.Apply(jump, player.dash.BlocksPresses()))
+		{
+		case EJumpStep::Press:
 			_moveSim.RequestUnCrouch(player.move);		// Lyra 점프 능력은 점프 전에 일어서기를 부른다(LyraGameplayAbility_Jump.cpp:55) — 이동 대조(MoveCheck)와 같은 차례
 			_moveSim.PressJump(player.move);
+			break;
+		case EJumpStep::Release:
+			_moveSim.ReleaseJump(player.move);
+			break;
+		case EJumpStep::Blocked:
+			++_stats.dashJumpsBlocked;
+			break;
+		case EJumpStep::None:
+			break;
 		}
-		else if (!jump && player.jumpHeld) _moveSim.ReleaseJump(player.move);
-		player.jumpHeld = jump;
 		// 앉기 키 — 바람만 바꾸고 실제로 앉고 서는 것은 이 입력의 이동 앞뒤 갱신이다(D-2). 점프 뒤에 넣는다(MoveCheck 와 같은 차례).
 		// 이동 막음 · 경기 끝에도 받는다 — Lyra 앉기는 능력이 아니라 키에 바로 묶인 함수라(LyraHeroComponent.cpp:451) 이동 금지 태그 · 능력 입력 막음을 안 거친다
 		if ((input.buttons & wire::BUTTON_CROUCH) != 0)
@@ -867,7 +894,7 @@ namespace mo
 			++_stats.crouchPresses;
 		}
 		// 근접(E-3) — 무기 교체 뒤(켜는 무기의 간격 · 몽타주) · 걸음 앞(밀기가 이 걸음부터). 예측(CSelfPrediction::StepMelee)도 같은 자리
-		const bool meleeStarted = serverMade ? false : TryMelee(player, input);	// 빈 입력은 근접 입력 수(melee.NextInput)도 안 센다(D87)
+		const bool meleeStarted = serverMade ? false : TryMelee(player, input);	// 빈 입력은 근접 입력 수(melee.NextInput — 위 대시 자리)도 안 센다(D87)
 
 		Vec3 moveInput(input.moveX, input.moveY, 0);
 		const double moveLength = Length(moveInput);
@@ -888,7 +915,12 @@ namespace mo
 		// 조준 — 이 입력의 버튼이 이 입력의 걸음부터 먹는다(D61). 이동 막음 · 경기 끝에도 버튼을 따른다(예측이 단계를 몰라 맞춰 둔다, D61)
 		if (!serverMade)	// 빈 입력은 조준 상태를 그대로 둔다 — Apply 는 첫 입력에 granted 를 켜므로 부활 직후 빈 입력이 서버만 먼저 켠다(D87)
 		{
-			player.ads.Apply((input.buttons & wire::BUTTON_ADS) != 0);
+			const bool adsHeld = (input.buttons & wire::BUTTON_ADS) != 0;
+			const bool adsWasActive = player.ads.active;
+			const bool adsWasHeld = player.ads.held;
+			player.ads.Apply(adsHeld, player.dash.BlocksPresses());		// 대시가 켜지는 입력에 끄고, 막힌 누름은 떼었다 다시 눌러야 켜진다(D-2)
+			if (player.dash.JustStarted() && adsWasActive) ++_stats.dashAdsCancels;
+			else if (adsHeld && !adsWasHeld && player.dash.BlocksPresses()) ++_stats.dashAdsBlocked;
 			if (player.ads.active) ++_stats.adsInputs;
 		}
 		player.move.maxSpeed = AdsWalkSpeed(_params.maxWalkSpeed, player.ads.active);
@@ -917,7 +949,10 @@ namespace mo
 			++_stats.pawnBlockMoves;
 			_stats.pawnBlockOthers += _pawnScratch.size();
 		}
+		const uint64_t liftoffsBefore = _moveSim.GetCounters().rootForceLiftoffs;
 		_moveSim.Tick(player.move, moveInput, kTickSeconds);
+		_stats.dashLiftoffs += _moveSim.GetCounters().rootForceLiftoffs - liftoffsBefore;	// 위아래를 더하는 힘은 대시뿐이다(근접 밀기는 위아래 무시)
+		player.dash.RememberInput(moveInput, input.yaw);	// 다음 입력의 「앞 입력」 — 이 걸음이 가져간 이동(막음 뒤) · 이 입력의 요. 빈 입력도 걸음을 굴렸으니 넣는다(Dash.h)
 		if (_rules.pawnBlock)
 		{
 			_moveSim.SetPawns(nullptr, 0);
@@ -962,6 +997,15 @@ namespace mo
 			++_stats.meleeFiresBlocked;
 			weaponInput.fireHeld = false;
 		}
+		// 대시(D-2) — 앞 입력부터 켜져 있으면 쥔 사격을 뺀다(근접과 같은 까닭). 켜는 입력의 쥔 사격은 무기 순환이 먼저 쏘고 끊는다(Dash.h BlocksHeldFire)
+		weaponInput.dashActive = player.dash.BlocksHeldFire();
+		weaponInput.dashStarted = player.dash.JustStarted();
+		if (weaponInput.fireHeld && weaponInput.dashActive)
+		{
+			++_stats.dashFiresBlocked;
+			weaponInput.fireHeld = false;
+		}
+		if (weaponInput.reloadPressed && player.dash.BlocksPresses()) ++_stats.dashReloadsBlocked;	// 순환이 막는다 — 여기선 세기만
 		CWeaponCycle& cycle = player.weapons[player.weapon];
 		if (weaponInput.fireHeld && player.fireGate.IsBlocked((EWeapon)player.weapon, cycle.IsFireActive()))
 		{
@@ -970,6 +1014,8 @@ namespace mo
 		}
 		const WeaponEvents events = cycle.Tick(kTickSeconds, weaponInput, motion);
 		if (events.reloadCancelledByMelee) ++_stats.meleeReloadCancels;
+		if (events.reloadCancelledByDash) ++_stats.dashReloadCancels;
+		if (events.fireCancelledByDash) ++_stats.dashFireCancels;
 		player.aimCamera.Tick(player.ads.active, kTickSeconds);		// 이 입력의 조준으로 카메라를 굴린다 — 다음 입력의 퍼짐이 읽는다
 		if (weaponInput.fireHeld && !events.fired)
 		{
@@ -997,18 +1043,68 @@ namespace mo
 		if (events.reloadStarted) PushAnimEvent(player, EAnimEvent::Reload, player.weapon);		// 손으로 · 탄창이 비어 스스로 둘 다. 무기 순환 차례(쏘기 → 재장전) 그대로
 	}
 
+	// 대시 누름 결과 — 갈래마다 따로 센다(합 = dashPresses)
+	void CRoom::CountDash(EDashResult result)
+	{
+		switch (result)
+		{
+		case EDashResult::NotPressed: return;		// TryActivate 는 안 낸다 — 누른 입력에만 부른다
+		case EDashResult::Started: ++_stats.dashStarted; break;
+		case EDashResult::NoDirection: ++_stats.dashNoDirection; break;
+		case EDashResult::WhileActive: ++_stats.dashWhileActive; break;
+		case EDashResult::OnCooldown: ++_stats.dashOnCooldown; break;
+		case EDashResult::Dead: ++_stats.dashDead; break;
+		case EDashResult::PostGame: ++_stats.dashPostGame; break;
+		}
+		++_stats.dashPresses;
+	}
+
+	// 대시가 켜진 입력 — 끊기(Ability.Type.Action) → 일어서기 → 힘. DashCheck 이동 대조(D-1)와 같은 차례: 근접 밀기 지우기 → 일어서기 → 대시 힘
+	void CRoom::StartDash(Player& player, const DashStart& dash)
+	{
+		if (player.melee.Cut())		// 근접 작업이 끝나며 밀기를 지운다(OnDestroy → RemoveRootMotionSourceByID). 피해는 켜진 입력에 이미 들어갔다(D-0 melee_dash 100)
+		{
+			++_stats.dashMeleeCancels;
+			if (player.meleePushId != 0)
+			{
+				_moveSim.RemoveRootForce(player.move, player.meleePushId);
+				++_stats.dashMeleePushRemoved;
+			}
+		}
+		player.meleePushId = 0;
+		if (player.jump.Cut())		// 점프 능력이 끝나며 StopJumping
+		{
+			_moveSim.ReleaseJump(player.move);
+			++_stats.dashJumpCancels;
+		}
+		// 앉아 있으면 일어선다(그래프 bIsCrouched → UnCrouch). 같은 입력의 앉기 키는 이 뒤에 받아 앉기가 이긴다(D-0 crouch_same)
+		if (player.move.crouched)
+		{
+			_moveSim.RequestUnCrouch(player.move);
+			++_stats.dashUncrouches;
+		}
+		_moveSim.ApplyRootForce(player.move, dash.force, kDashForceDuration, DashForceSettings());
+		++_stats.dashMontage[(size_t)dash.dir];
+	}
+
 	// 근접(GA_Melee, 컨텐츠 E-3) — 켜지는 입력에 판정 · 피해 · 밀기 · 몽타주를 다 한다. 걸음 앞에서 불러 밀기가 이 입력 걸음부터 먹는다(E-2-1 · D73).
 	// 손 · 몸 앞 = 앞 프레임(능력은 그 프레임 자세 평가 전에 켜진다, e1g1). 상대 몸 = 사격과 같은 되감기(D8 · D30) —
 	// 사격은 틱 끝(기록 뒤)에 판정하지만 근접은 입력 처리 안이라 이 틱 기록이 아직 없다. 마지막으로 적은 틱(_tick − 1)이 「지금」이다(D74).
 	// 반환 = 이 입력에 근접 능력이 켜졌나
 	bool CRoom::TryMelee(Player& player, const wire::Input& input)
 	{
-		player.melee.NextInput();
 		if ((input.buttons & wire::BUTTON_MELEE) == 0) return false;
 		++_stats.meleePresses;
 		if (_phase == wire::EMatchPhase::PostGame)
 		{
 			++_stats.meleeBlockedPostGame;		// GE_BlockAbilityInput — 쏘기와 같다
+			return false;
+		}
+		// 대시가 켜져 있으면(켠 입력 포함) 막힌다 — 같은 프레임에 근접과 대시를 누르면 Lyra 는 둘 다 누름 능력이라 그 프레임에 눌린 차례대로 켠다
+		// (LyraAbilitySystemComponent.cpp:250-283 InputPressedSpecHandles). 입력 하나에는 그 차례가 없어 대시 먼저로 둔다(제 판단 · 기록 없음 — 근접이 먼저면 피해가 들어간 뒤 끊긴다)
+		if (player.dash.BlocksPresses())
+		{
+			++_stats.dashMeleeBlocked;
 			return false;
 		}
 		if (!player.melee.TryActivate(GetWeaponDef((EWeapon)player.weapon), kTickSeconds))
@@ -1017,6 +1113,7 @@ namespace mo
 			return false;
 		}
 		++_stats.meleeStarts;
+		player.meleePushId = 0;		// 맞아야 밀기를 넣는다 — 앞 근접의 번호를 안 남긴다
 		PushAnimEvent(player, EAnimEvent::Melee, player.weapon);		// 공격자 몽타주는 맞음 · 같은 팀 · 벽 · 빗나감 모두 돈다(0-3)
 
 		const Vec3 forward = AimDirection(player.yaw, 0.f);		// 앞 입력의 요 — player.yaw 는 이 입력 걸음 뒤에 바뀐다
@@ -1117,7 +1214,7 @@ namespace mo
 			const Vec3 exact = MeleePushForce(forward, result.distance);
 			msg.forceX = (float)exact.x;
 			msg.forceY = (float)exact.y;
-			_moveSim.ApplyRootForce(player.move, Vec3(msg.forceX, msg.forceY, 0.0), kMeleePushDuration);
+			player.meleePushId = _moveSim.ApplyRootForce(player.move, Vec3(msg.forceX, msg.forceY, 0.0), kMeleePushDuration);
 			++_stats.meleePushes;
 			// 맞은 쪽 반응 — 둘 중 무작위(0-3 · D58). 입력 번호 · 맞은 사람으로 정해 같은 입력이면 같은 쪽
 			CSpreadRng react(SpreadSeed(input.seq, target->id));
@@ -1253,7 +1350,7 @@ namespace mo
 			idle.pitch = player.pitch;
 			idle.weapon = player.weapon;
 			idle.seq = player.lastSeq;
-			if (player.jumpHeld) idle.buttons |= wire::BUTTON_JUMP;
+			if (player.jump.held) idle.buttons |= wire::BUTTON_JUMP;
 			if (player.ads.held) idle.buttons |= wire::BUTTON_ADS;		// 끊긴 틱에 조준이 풀렸다 다시 켜지지 않게 — D87 뒤로는 빈 입력이 ads.Apply 를 안 불러 조준 상태가 그대로 남는다. 이 줄은 버튼 값만 맞춰 둔다
 			// 앉기는 누른 입력 하나에만 켜는 버튼이라 채우지 않는다 — 앉음은 이동 상태(wantsToCrouch · crouched)에 남는다
 			ApplyInput(player, idle, true);

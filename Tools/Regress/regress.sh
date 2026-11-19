@@ -67,7 +67,7 @@ run_checks() {
 	"$tools/MeleeCheck/Release/MeleeCheck.exe" "$DATA/cprobe_d3f2.log" "$DATA/cprobe_d3f2.csv" "$DATA/clips.bin" "$DATA/map_gym.mocl" > "$OUT/melee_q.log" 2>&1
 	sed 's/^/melee_q /' "$OUT/melee_q.log" >> "$g"
 	# 대시(D-1 · D-2) — Lyra 연습장 대시 기록(cprobe_dash6 = D-0 각본 46칸 + 누르는 프레임에 입력 바꿈 두 칸)과 Shared 이동 힘(설정 셋 · 두 칸 · 뜨기)을 칸마다 프레임 대조,
-	# 능력(CDashAbility — 켠 입력 · 방향 · 막힘 · 쿨다운)을 입력마다 대조. 힘 없는 대조군 줄도 기준선에 든다
+	# 능력(CDashAbility — 켠 입력 · 방향 · 막힘 · 쿨다운)을 입력마다 대조, 막기 · 끊기(사격 · 재장전 · 근접 · 점프 · 조준 켜짐 · 탄창)를 줄마다 대조(D-2-b). 힘 없는 대조군 줄도 기준선에 든다
 	"$tools/DashCheck/Release/DashCheck.exe" "$DATA/cprobe_dash6.log" "$DATA/cprobe_dash6.csv" "$DATA/map_gym.mocl" > "$OUT/dash.log" 2>&1
 	sed 's/^/dash /' "$OUT/dash.log" >> "$g"
 	for t in expanse gym; do
