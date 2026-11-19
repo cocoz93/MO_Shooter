@@ -238,13 +238,49 @@ dash DASH ok step=during_ads_hold dashes=1 melee=0 crouchKeys=0 homes=0 frames=1
 dash DASH ok step=ads_then_dash dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
 dash DASH ok step=fire_then_dash dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
 dash DASH ok step=reload_dash dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=478.87
-dash DASH ok step=melee_dash dashes=1 melee=1 crouchKeys=0 homes=0 frames=101 force=0.000,1850.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=560.60
+dash DASH ok step=melee_dash dashes=1 melee=1 crouchKeys=0 homes=0 frames=101 force=0.000,1850.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=560.58
 dash DASH ok step=wall dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0007 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=71.98
 dash DASH ok step=crouch_same dashes=1 melee=0 crouchKeys=1 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=522.64
-dash DASH move compared=28 fails=0 frames=3292 maxPosDiff=0.0000 maxVelDiff=0.0007 dashes=31 melee=1 crouchKeys=1 cut=0 badMontage=0 homes=3 badHome=0
-dash DASH noForce compared=28 fails=28 minMaxPosDiff=71.98
-dash DASH forceCount applied=32 second=1 replaced=0 prepared=466 finished=31 removed=1 clamped=31 zAdds=467 liftoffs=2 restores=468 adds=468 external=0 apexRefund=0
-dash DASHCHECK PASS steps=28 dashes=31 fails=0
+dash DASH ok step=turn_left dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=600.51
+dash DASH ok step=turn_back dashes=1 melee=0 crouchKeys=0 homes=0 frames=101 force=1850.000,0.000,0.000 maxPosDiff=0.0000 maxVelDiff=0.0000 firstDiffFrame=- cutFrame=- noForceMaxPosDiff=709.53
+dash DASH move compared=30 fails=0 frames=3494 maxPosDiff=0.0000 maxVelDiff=0.0007 dashes=33 melee=1 crouchKeys=1 cut=0 badMontage=0 homes=3 badHome=0
+dash DASH noForce compared=30 fails=30 minMaxPosDiff=71.98
+dash DASH forceCount applied=34 second=1 replaced=0 prepared=496 finished=33 removed=1 clamped=33 zAdds=497 liftoffs=2 restores=498 adds=498 external=0 apexRefund=0
+dash DASH ability ok step=fwd presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=back presses=1 started=1 lyraStarted=1 dirs=B diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=left presses=1 started=1 lyraStarted=1 dirs=L diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=right presses=1 started=1 lyraStarted=1 dirs=R diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=fwd_left presses=1 started=1 lyraStarted=1 dirs=L diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=fwd_right presses=1 started=1 lyraStarted=1 dirs=R diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=back_left presses=1 started=1 lyraStarted=1 dirs=L diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=back_right presses=1 started=1 lyraStarted=1 dirs=R diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=still_yaw0 presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=still_yaw90 presses=1 started=0 lyraStarted=0 dirs=- diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=pitch_up20 presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=pitch_up45 presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=pitch_down20 presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=jump_apex presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=crouch_fwd presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=spam presses=299 started=4 lyraStarted=4 dirs=FFFF diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=spam_cool presses=1 started=0 lyraStarted=0 dirs=- diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=during_fire_tap presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=during_fire_hold presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=during_reload presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=during_melee presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=during_jump_tap presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=during_jump_hold presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=during_ads_hold presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=ads_then_dash presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=fire_then_dash presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=reload_dash presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=melee_dash presses=1 started=1 lyraStarted=1 dirs=R diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=wall presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=crouch_same presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=turn_left presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability ok step=turn_back presses=1 started=1 lyraStarted=1 dirs=F diffInputs=0 firstDiffFrame=-
+dash DASH ability compared=32 fails=0 inputs=4781 presses=330 started=33 lyraStarted=33 noDirection=1 whileActive=119 onCooldown=177 dirF=25 dirB=1 dirL=3 dirR=4
+dash DASH abilityDiff start=0 dir=0 badMontage=0 active=0 cooldown=0 moveCopy=0 yawCopy=0
+dash DASHCHECK PASS steps=30 dashes=33 fails=0 abilityFails=0
 map_expanse CHECK kind=A total=15000 bothHit=9225 bothMiss=5775 onlyLyra=0 onlyMine=0 lyraPen=4351 penMismatch=0 maxDiff=0.0910 p99Diff=0.00074 over0.1=0 over1=0
 map_expanse NORMAL kind=A compared=4874 over0.01=91 over0.1=90 max=1.4142 | startPen compared=4351 over0.1=663
 map_expanse CHECK kind=C total=15000 bothHit=9213 bothMiss=5772 onlyLyra=15 onlyMine=0 lyraPen=6125 penMismatch=0 maxDiff=451.8685 p99Diff=0.00566 over0.1=38 over1=20

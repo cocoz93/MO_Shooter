@@ -14,6 +14,10 @@
 //   새 점프(jumpActive 0 → 1)가 켜진 줄부터는 안 견준다(재생은 점프 키를 안 누른다 — 기대 0번)
 //   매 프레임 누름 칸(spam)에서 대시가 꺼진 줄 = 기록 도구가 집으로 옮긴 뒤 값 — 견주지 않고 그 줄에서 다시 시작한다(kHomeAfterDashStep)
 // 대조군 = 같은 재생을 힘 없이(일어서기 · 앉기 키는 그대로) — 거의 모든 칸이 어긋나야 이 대조가 대시를 본다
+// 능력 대조(D-2) = 기록 전체를 한 줄기로(쿨다운이 칸을 넘는다) 입력마다 CDashAbility 를 서버 차례(NextInput → TryActivate → RememberInput)로 돌려 Lyra 사건과 견준다
+//   입력 r = 기록 r−1 줄 틱에서 넣은 것(누름 = dash_press · 이동 = inX · inY · 요 · 피치 = ctlYaw · ctlPitch), r 프레임이 먹는다
+//   견주는 것 = 켠 입력(r 줄 dash_start) · 고른 방향(r 줄 몽타주) · 막힘(r 줄 dash_start 이거나 r−1 줄 dashActive) · 쿨다운(r−1 줄 dashCooldown > 0) — 입력마다 전부
+//   앞 입력 사본 = 서버가 쓰는 앞 입력(r−2 줄 inX · inY · ctlYaw)이 Lyra 가 켤 때 본 값(r−1 줄 lastInX · lastInY · 몸 yaw)과 같은지 누름마다 센다(다르면 이 대조의 전제가 틀림)
 // 끝 코드: 0 = 전부 통과, 1 = 불일치, 2 = 입력 오류
 #include "Dash.h"
 #include "MapCollision.h"
@@ -73,9 +77,11 @@ namespace
 	struct Columns
 	{
 		int step, ev, px, py, pz, vx, vy, vz, speed, maxSpeed, crouched, mode, montage, jumpActive, ctlPitch, ctlYaw, lastInX, lastInY, inX, inY;
+		int yaw, dashActive, dashCooldown;		// 능력 대조(D-2)
 		bool Ok() const
 		{
-			const int all[] = { step, ev, px, py, pz, vx, vy, vz, speed, maxSpeed, crouched, mode, montage, jumpActive, ctlPitch, ctlYaw, lastInX, lastInY, inX, inY };
+			const int all[] = { step, ev, px, py, pz, vx, vy, vz, speed, maxSpeed, crouched, mode, montage, jumpActive, ctlPitch, ctlYaw, lastInX, lastInY, inX, inY,
+				yaw, dashActive, dashCooldown };
 			for (int c : all) if (c < 0) return false;
 			return true;
 		}
@@ -102,6 +108,13 @@ namespace
 		Vec3 firstForce;
 		bool fail = false;
 	};
+
+	double Cell(const std::vector<std::string>& cells, int col) { return (int)cells.size() > col ? std::atof(cells[(size_t)col].c_str()) : 0.0; }
+	const std::string& Text(const std::vector<std::string>& cells, int col)
+	{
+		static const std::string empty;
+		return (int)cells.size() > col ? cells[(size_t)col] : empty;
+	}
 
 	bool HasEvent(const std::string& ev, const char* name)
 	{
@@ -210,12 +223,6 @@ namespace
 
 	private:
 		const std::vector<std::string>& Row(size_t r) const { return _t.rows[r]; }
-		static double Cell(const std::vector<std::string>& cells, int col) { return (int)cells.size() > col ? std::atof(cells[(size_t)col].c_str()) : 0.0; }
-		static const std::string& Text(const std::vector<std::string>& cells, int col)
-		{
-			static const std::string empty;
-			return (int)cells.size() > col ? cells[(size_t)col] : empty;
-		}
 		// 기록 maxSpeed = GetMaxSpeed — 앉아 걸으면 앉은 속도라, 앉은 줄은 서서 걷는 값을 준다(이동 코드가 앉음을 보고 바꾼다)
 		float MaxSpeedOf(const std::vector<std::string>& cells) const
 		{
@@ -228,6 +235,107 @@ namespace
 		CMoveSim _sim;
 		CMoveSim _scratch;		// 근접 밀기 크기 구하기 전용 — 계수가 본 재생에 안 섞이게
 	};
+
+	// ── 능력 대조(D-2)
+	constexpr double kCopyTolerance = 0.001;		// 앞 입력 사본 — 기록 표가 넷째 자리까지 남긴다
+
+	struct AbilityStep
+	{
+		std::string name;
+		int presses = 0, started = 0, lyraStarted = 0, diffs = 0;
+		int firstDiffRow = -1;
+		std::string dirs;			// 켠 방향(F · B · L · R) 차례
+	};
+
+	struct AbilityReport
+	{
+		int inputs = 0, presses = 0, lyraStarted = 0;
+		int results[7] = {};		// EDashResult 마다(누른 입력만)
+		int dirs[4] = {};			// 켠 방향마다
+		int startDiff = 0, dirDiff = 0, badMontage = 0, activeDiff = 0, cooldownDiff = 0;
+		int moveCopyDiff = 0, yawCopyDiff = 0;
+		std::vector<AbilityStep> steps;
+		bool Fail() const { return presses == 0 || startDiff + dirDiff + badMontage + activeDiff + cooldownDiff + moveCopyDiff + yawCopyDiff > 0; }
+	};
+
+	const char kDirLetter[4] = { 'F', 'B', 'L', 'R' };
+
+	double AngleDiff(double a, double b)
+	{
+		double d = std::fmod(a - b, 360.0);
+		if (d < 0.0) d += 360.0;
+		return d > 180.0 ? 360.0 - d : d;
+	}
+
+	AbilityReport CompareAbility(const Table& t, const Columns& c)
+	{
+		AbilityReport out;
+		CDashAbility ability;
+		for (size_t r = 1; r < t.rows.size(); ++r)
+		{
+			const std::vector<std::string>& prev = t.rows[r - 1];
+			const std::vector<std::string>& now = t.rows[r];
+			const std::string& stepName = Text(now, c.step);
+			if (out.steps.empty() || out.steps.back().name != stepName)
+			{
+				AbilityStep s;
+				s.name = stepName;
+				out.steps.push_back(s);
+			}
+			AbilityStep& step = out.steps.back();
+			const Vec3 move(Cell(prev, c.inX), Cell(prev, c.inY), 0.0);
+			const float viewPitch = (float)Cell(prev, c.ctlPitch);
+			const float viewYaw = (float)Cell(prev, c.ctlYaw);
+			const bool pressed = HasEvent(Text(prev, c.ev), "dash_press");
+			int diffs = 0;
+
+			ability.NextInput();
+			++out.inputs;
+			if ((ability.CooldownLeft() > 0) != (Cell(prev, c.dashCooldown) > 0.0)) { ++out.cooldownDiff; ++diffs; }
+
+			DashStart res;
+			if (pressed)
+			{
+				++out.presses;
+				++step.presses;
+				if (r >= 2)
+				{
+					const std::vector<std::string>& prev2 = t.rows[r - 2];
+					if (std::fabs(Cell(prev2, c.inX) - Cell(prev, c.lastInX)) > kCopyTolerance || std::fabs(Cell(prev2, c.inY) - Cell(prev, c.lastInY)) > kCopyTolerance) { ++out.moveCopyDiff; ++diffs; }
+					if (AngleDiff(Cell(prev2, c.ctlYaw), Cell(prev, c.yaw)) > kCopyTolerance) { ++out.yawCopyDiff; ++diffs; }
+				}
+				res = ability.TryActivate(viewPitch, viewYaw, false, false);
+				++out.results[(int)res.result];
+			}
+			ability.RememberInput(move, viewYaw);
+
+			const bool mine = res.result == EDashResult::Started;
+			const bool lyra = HasEvent(Text(now, c.ev), "dash_start");
+			if (lyra) { ++out.lyraStarted; ++step.lyraStarted; }
+			if (mine)
+			{
+				++step.started;
+				++out.dirs[(int)res.dir];
+				step.dirs += kDirLetter[(int)res.dir];
+			}
+			if (mine != lyra) { ++out.startDiff; ++diffs; }
+			if (mine && lyra)
+			{
+				EDashDir lyraDir;
+				if (!MontageDir(Text(now, c.montage), lyraDir)) { ++out.badMontage; ++diffs; }
+				else if (lyraDir != res.dir) { ++out.dirDiff; ++diffs; }
+			}
+			const bool lyraBlocked = lyra || Cell(prev, c.dashActive) != 0.0;
+			if (ability.Active() != lyraBlocked) { ++out.activeDiff; ++diffs; }
+
+			if (diffs > 0)
+			{
+				++step.diffs;
+				if (step.firstDiffRow < 0) step.firstDiffRow = (int)r;
+			}
+		}
+		return out;
+	}
 }
 
 int main(int argc, char** argv)
@@ -294,6 +402,7 @@ int main(int argc, char** argv)
 	c.montage = table.Column("montage"); c.jumpActive = table.Column("jumpActive");
 	c.ctlPitch = table.Column("ctlPitch"); c.ctlYaw = table.Column("ctlYaw");
 	c.lastInX = table.Column("lastInX"); c.lastInY = table.Column("lastInY"); c.inX = table.Column("inX"); c.inY = table.Column("inY");
+	c.yaw = table.Column("yaw"); c.dashActive = table.Column("dashActive"); c.dashCooldown = table.Column("dashCooldown");
 	if (!c.Ok())
 	{
 		std::printf("DASHCHECK FAIL 기록 표 머리에 대시 대조 칸이 없음(대시 판 기록인가 — D-0 record_content_probe.ps1)\n");
@@ -378,6 +487,25 @@ int main(int argc, char** argv)
 		(unsigned long long)mc.rootForceFinished, (unsigned long long)mc.rootForceRemoved, (unsigned long long)mc.rootForceClamped, (unsigned long long)mc.rootForceZAdds,
 		(unsigned long long)mc.rootForceLiftoffs, (unsigned long long)mc.rootForceRestores, (unsigned long long)mc.rootForceAdds, (unsigned long long)mc.rootForceExternal,
 		(unsigned long long)mc.rootForceApexRefund);
-	std::printf("DASHCHECK %s steps=%d dashes=%d fails=%d\n", fails == 0 ? "PASS" : "FAIL", compared, dashes, fails);
-	return fails == 0 ? 0 : 1;
+
+	// ── 능력 대조(D-2)
+	const AbilityReport ab = CompareAbility(table, c);
+	int abilitySteps = 0, abilityStepFails = 0;
+	for (const AbilityStep& s : ab.steps)
+	{
+		if (s.presses == 0 && s.lyraStarted == 0 && s.diffs == 0) continue;
+		++abilitySteps;
+		if (s.diffs > 0) ++abilityStepFails;
+		std::printf("DASH ability %s step=%s presses=%d started=%d lyraStarted=%d dirs=%s diffInputs=%d firstDiffFrame=%s\n", s.diffs > 0 ? "DIFF" : "ok", s.name.c_str(),
+			s.presses, s.started, s.lyraStarted, s.dirs.empty() ? "-" : s.dirs.c_str(), s.diffs, s.firstDiffRow >= 0 ? table.rows[(size_t)s.firstDiffRow][0].c_str() : "-");
+	}
+	std::printf("DASH ability compared=%d fails=%d inputs=%d presses=%d started=%d lyraStarted=%d noDirection=%d whileActive=%d onCooldown=%d dirF=%d dirB=%d dirL=%d dirR=%d\n",
+		abilitySteps, abilityStepFails, ab.inputs, ab.presses, ab.results[(int)EDashResult::Started], ab.lyraStarted, ab.results[(int)EDashResult::NoDirection],
+		ab.results[(int)EDashResult::WhileActive], ab.results[(int)EDashResult::OnCooldown], ab.dirs[0], ab.dirs[1], ab.dirs[2], ab.dirs[3]);
+	std::printf("DASH abilityDiff start=%d dir=%d badMontage=%d active=%d cooldown=%d moveCopy=%d yawCopy=%d\n",
+		ab.startDiff, ab.dirDiff, ab.badMontage, ab.activeDiff, ab.cooldownDiff, ab.moveCopyDiff, ab.yawCopyDiff);
+
+	const bool pass = fails == 0 && !ab.Fail();
+	std::printf("DASHCHECK %s steps=%d dashes=%d fails=%d abilityFails=%d\n", pass ? "PASS" : "FAIL", compared, dashes, fails, abilityStepFails + (ab.presses == 0 ? 1 : 0));
+	return pass ? 0 : 1;
 }
