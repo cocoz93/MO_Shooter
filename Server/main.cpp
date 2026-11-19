@@ -755,6 +755,11 @@ int main(int argc, char** argv)
 		std::printf("SERVER animMelee events melee=%llu hitBack=%llu hitFront=%llu dropped melee=%llu hitBack=%llu hitFront=%llu starts melee=%llu hitBack=%llu hitFront=%llu reloadCancels=%llu\n",
 			ev(EAnimEvent::Melee), ev(EAnimEvent::HitBack), ev(EAnimEvent::HitFront), dropped(EAnimEvent::Melee), dropped(EAnimEvent::HitBack), dropped(EAnimEvent::HitFront),
 			starts(mo::MONTAGE_MELEE), starts(mo::MONTAGE_HIT_BACK), starts(mo::MONTAGE_HIT_FRONT), (unsigned long long)room.meleeReloadMontageCancels);
+		// 대시 몽타주(D-4) — 방향마다 사건 − 버림 = 튼 수. 사건 = SERVER dash 의 montage 칸(켠 방향)
+		std::printf("SERVER animDash events forward=%llu backward=%llu left=%llu right=%llu dropped forward=%llu backward=%llu left=%llu right=%llu starts forward=%llu backward=%llu left=%llu right=%llu\n",
+			ev(EAnimEvent::DashForward), ev(EAnimEvent::DashBackward), ev(EAnimEvent::DashLeft), ev(EAnimEvent::DashRight),
+			dropped(EAnimEvent::DashForward), dropped(EAnimEvent::DashBackward), dropped(EAnimEvent::DashLeft), dropped(EAnimEvent::DashRight),
+			starts(mo::MONTAGE_DASH_FORWARD), starts(mo::MONTAGE_DASH_BACKWARD), starts(mo::MONTAGE_DASH_LEFT), starts(mo::MONTAGE_DASH_RIGHT));
 	}
 	std::printf("SERVER pickups=%llu fromRecheck=%llu fullHealth=%llu padRespawns=%llu padRechecks=%llu\n", (unsigned long long)room.pickups, (unsigned long long)room.pickupsFromRecheck,
 		(unsigned long long)room.pickupsFullHealth, (unsigned long long)room.padRespawns, (unsigned long long)room.padRechecks);

@@ -113,6 +113,13 @@ namespace mo
 	static_assert(wire::kWeaponMelee == (uint8_t)EWeapon::Count, "근접 무기 번호 = 무기 셋 뒤");
 	static_assert(wire::MELEE_NONE == (uint8_t)EMeleeHit::None && wire::MELEE_SAME_TEAM == (uint8_t)EMeleeHit::SameTeam
 		&& wire::MELEE_BLOCKED == (uint8_t)EMeleeHit::Blocked && wire::MELEE_HIT == (uint8_t)EMeleeHit::Hit, "S2C_MELEE 결과 = EMeleeHit 차례");
+	// 대시 사건 · 몽타주 종류 = 기준 + EDashDir(StartDash · PlayAnimEvents 가 더해서 쓴다)
+	static_assert((uint8_t)EAnimEvent::DashBackward - (uint8_t)EAnimEvent::DashForward == (uint8_t)EDashDir::Backward
+		&& (uint8_t)EAnimEvent::DashLeft - (uint8_t)EAnimEvent::DashForward == (uint8_t)EDashDir::Left
+		&& (uint8_t)EAnimEvent::DashRight - (uint8_t)EAnimEvent::DashForward == (uint8_t)EDashDir::Right
+		&& (uint8_t)EDashDir::Forward == 0, "대시 사건 차례 = EDashDir");
+	static_assert(MONTAGE_DASH_BACKWARD - MONTAGE_DASH_FORWARD == (int)EDashDir::Backward && MONTAGE_DASH_LEFT - MONTAGE_DASH_FORWARD == (int)EDashDir::Left
+		&& MONTAGE_DASH_RIGHT - MONTAGE_DASH_FORWARD == (int)EDashDir::Right, "대시 몽타주 종류 차례 = EDashDir");
 
 	ERewindKind ClassifyRewind(uint32_t nowTick, uint32_t viewTick, float viewAlpha, uint32_t limitTicks)
 	{
@@ -1086,6 +1093,7 @@ namespace mo
 		}
 		_moveSim.ApplyRootForce(player.move, dash.force, kDashForceDuration, DashForceSettings());
 		++_stats.dashMontage[(size_t)dash.dir];
+		PushAnimEvent(player, (EAnimEvent)((uint8_t)EAnimEvent::DashForward + (uint8_t)dash.dir), player.weapon);
 
 		wire::Dash msg = wire::Dash();
 		msg.h.size = (uint16_t)sizeof(msg);
@@ -1602,6 +1610,14 @@ namespace mo
 				break;
 			case EAnimEvent::HitFront:
 				play(MONTAGE_HIT_FRONT, kAnimEventRate, bundle);
+				break;
+			case EAnimEvent::DashForward:
+			case EAnimEvent::DashBackward:
+			case EAnimEvent::DashLeft:
+			case EAnimEvent::DashRight:
+				// 대시 · 재장전 · 근접이 같은 무리(DefaultGroup, 기록의 자산 표 animcmp_dash_rifle_montages.csv)라 같은 무리 규칙이 대시의 넣기 섞기로 끈다 — 쏘기 · 근접처럼 재장전 칸을 먼저 끄지 않는다.
+				// Lyra 기록(D-4-b rl_dash): 재장전 비중이 대시 넣기의 거울(1 → 0.844 → 0.500 → 0.157 → 0)로 빠졌다. 먼저 끄면 재장전 빼기 곡선이 남는다(StopMontage 는 시간만 줄인다). 속도 1.0(같은 기록, 실측)
+				play((uint8_t)(MONTAGE_DASH_FORWARD + ((uint8_t)event.kind - (uint8_t)EAnimEvent::DashForward)), kAnimEventRate, bundle);
 				break;
 			case EAnimEvent::Count:
 				break;
