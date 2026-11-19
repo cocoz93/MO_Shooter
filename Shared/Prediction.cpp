@@ -33,10 +33,19 @@ namespace mo
 		slot.meleePushForce = Vec3();
 		slot.meleeStarted = false;
 		slot.meleeServer = false;
+		slot.meleeWasActive = false;
+		slot.dashStarted = false;
+		slot.dashDir = 0;
+		slot.dashForce = Vec3();
+		slot.dashBlocks = false;
+		slot.dashBlocksFire = false;
+		slot.dashCutMelee = false;
+		slot.dashServer = false;
+		slot.dashDenied = false;
 		_lastWeaponEvents = WeaponEvents();
 		if (_waitingSpawn) return;
 		Equip(input);
-		StepMelee(slot);
+		StepAbilities(slot, true);
 		if (meleePush)
 		{
 			if (slot.meleeStarted)
@@ -47,13 +56,13 @@ namespace mo
 			}
 			else ++_meleeCounters.pushesIgnored;
 		}
-		ApplyMove(slot);
+		RememberDash(slot, ApplyMove(slot));
 		ApplyWeapon(slot, _melee.IsActive());
 		RememberMove(slot);
 		RememberWeapon(slot, _melee.IsActive());
 	}
 
-	void CSelfPrediction::OnSpawn(double x, double y, double z, uint32_t lastSeq)
+	void CSelfPrediction::OnSpawn(double x, double y, double z, uint32_t lastSeq, float yaw)
 	{
 		_waitingSpawn = false;
 		_compareFromSeq = lastSeq;
@@ -62,7 +71,8 @@ namespace mo
 		_move.location = Vec3(x, y, z);
 		_move.maxSpeed = _maxWalkSpeed;
 		_sim.RefreshFloor(_move);
-		_jumpHeld = false;
+		_jump.Reset();
+		_meleePushId = 0;
 		_lockInputs = SpawnMoveLockInputs(_rules);
 		_ads.Reset();
 		_aimCamera.Reset();
@@ -70,9 +80,13 @@ namespace mo
 		_weapon = _loadout.Held();
 		_fireGate = CWeaponFireGate();
 		_melee.Reset();		// 죽음이 능력을 끈다 — 새 몸은 꺼진 채 시작한다
+		_dash.Reset();		// 서버 SpawnPlayer 와 같다 — 쿨다운도 지우고, 새 몸의 「앞 입력」 = 이동 없음 · 놓인 요
+		_dash.RememberInput(Vec3(), yaw);
 		RememberMove(_spawnBase);
+		_spawnBase.dashAfter = _dash;
 		SaveWeapon(_spawnWeapon, lastSeq, false);
 		_meleeAckedSeq = lastSeq;
+		_dashAckedSeq = lastSeq;
 
 		// 서버는 이 번호 뒤의 입력을 새 자리에서 쓴다 — 여기도 똑같이 다시 돌린다.
 		// 앞 목숨 자리에서 정한 근접 밀기는 버린다 — 새 자리 판정은 서버 결과(OnMeleeResult)가 채운다
@@ -83,9 +97,11 @@ namespace mo
 			slot.meleePush = false;
 			slot.meleePushForce = Vec3();
 			slot.meleeServer = false;
+			slot.dashServer = false;		// 앞 목숨에서 받은 대시 소식 · 확인도 버린다 — 새 몸에서 다시 고른다
+			slot.dashDenied = false;
 			Equip(slot.input);
-			StepMelee(slot);
-			ApplyMove(slot);
+			StepAbilities(slot, false);
+			RememberDash(slot, ApplyMove(slot));
 			ApplyWeapon(slot, _melee.IsActive());
 			RememberMove(slot);
 			RememberWeapon(slot, _melee.IsActive());
@@ -106,11 +122,15 @@ namespace mo
 		_move.mode = EMoveMode::Walking;
 		_move.maxSpeed = _maxWalkSpeed;
 		_sim.RefreshFloor(_move);
-		_jumpHeld = false;
+		_jump.Reset();
+		_meleePushId = 0;		// 서버 ApplyPlace 와 같다 — 힘 묶음을 새로 만들었다. 대시 능력은 서버도 안 건드린다(켜짐 · 쿨다운 · 앞 입력 그대로)
 		_lockInputs = 0;
 		// 옮기기 앞 번호의 근접 결과는 부활처럼 닫는다 — 그 밀기를 고쳐 옮기기 앞 걸음부터 다시 돌리면 옮긴 자리를 덮는다(OnMeleeResult 도 이 번호 앞은 안 받는다)
 		_meleeAckedSeq = seq;
+		_dashAckedSeq = seq;		// 대시 소식도 같다(OnDashResult)
 		RememberMove(_spawnBase);
+		_spawnBase.dashAfter = _dash;
+		slot.dashAfter = _dash;
 		// 서버는 겹침(받침 집기)을 탄 정하기 앞에 본다 — 이 번호로 집은 소식의 앞 칸은 탄 정하기 앞 무기 쪽, 집은 뒤 탄 정하기를 다시 건다(OnPickup)
 		const bool meleeActive = _melee.IsActive();
 		SaveWeapon(_placeWeapon, seq, meleeActive);
@@ -137,7 +157,11 @@ namespace mo
 	CSelfPrediction::ReconcileResult CSelfPrediction::Reconcile(const wire::PlayerState& server, double tolerance)
 	{
 		ReconcileResult result;
-		if (!_waitingSpawn && !(server.flags & wire::STATE_DEAD)) AckMelee(server.lastSeq);
+		if (!_waitingSpawn && !(server.flags & wire::STATE_DEAD))
+		{
+			AckMelee(server.lastSeq);
+			AckDash(server.lastSeq);
+		}
 		const Slot* found = FindComparable(server);
 		if (!found || _waitingSpawn) return result;
 		result.compared = true;
@@ -167,7 +191,8 @@ namespace mo
 		// 같은 입력을 돈 두 쪽이 앉음만 다르면 앉기 키를 받은 때의 땅 · 공중이 달랐던 것이고, 서버는 그 바람대로 앉거나 섰다고 본다)
 		if (_move.crouched != serverCrouched) _move.wantsToCrouch = serverCrouched;
 		_move.crouched = serverCrouched;
-		_jumpHeld = slot.jumpHeld;
+		_jump = slot.jump;
+		_meleePushId = slot.meleePushId;
 		_lockInputs = slot.lockInputs;
 		_ads = slot.ads;
 		_sim.RefreshFloor(_move);
@@ -176,7 +201,7 @@ namespace mo
 		{
 			Slot& later = _ring[seq % kRingSize];
 			if (later.seq != seq) continue;
-			ApplyMove(later);
+			(void)ApplyMove(later);		// 걸음이 쓴 이동은 이 입력을 처음 돌릴 때(AddInput) 정한 값과 같다 — 이동 막음 수가 칸에서 이어진다
 			RememberMove(later);
 			later.valid = true;
 		}
@@ -305,6 +330,110 @@ namespace mo
 		if (rerunFrom != 0) RerunMovesFrom(rerunFrom);
 	}
 
+	bool CSelfPrediction::WillMeleeStart(const wire::Input& input) const
+	{
+		if ((input.buttons & wire::BUTTON_MELEE) == 0 || _waitingSpawn || !_melee.WillActivateNextInput()) return false;
+		CDashAbility dash = _dash;		// StepAbilities 의 대시 자리를 사본으로 — 켜거나 켜져 있으면 근접 누름은 막힌다
+		dash.NextInput();
+		if ((input.buttons & wire::BUTTON_DASH) != 0) (void)dash.TryActivate(input.pitch, input.yaw, false, false);
+		return !dash.BlocksPresses();
+	}
+
+	void CSelfPrediction::OnDashResult(uint32_t seq, uint8_t dir, const Vec3& force)
+	{
+		Slot& slot = _ring[seq % kRingSize];
+		if (_waitingSpawn || slot.seq != seq || seq <= _compareFromSeq || !slot.valid)
+		{
+			++_dashCounters.resultsNoSlot;
+			return;
+		}
+		++_dashCounters.results;
+		slot.dashServer = true;
+		slot.dashDenied = false;
+		if (slot.dashStarted && slot.dashDir == dir && SameForce(slot.dashForce, force)) return;
+		if (!slot.dashStarted) ++_dashCounters.startMismatches;
+		else ++_dashCounters.forceFixes;
+		slot.dashDir = dir;
+		slot.dashForce = force;
+		if (ReplayDash(seq)) RerunMovesFrom(seq);
+	}
+
+	void CSelfPrediction::AckDash(uint32_t lastSeq)
+	{
+		if (_waitingSpawn) return;		// AckMelee 와 같다 — OnSpawn 이 본 번호를 부활 번호로 옮긴다
+		if (lastSeq > _seq) lastSeq = _seq;
+		uint32_t replayFrom = 0;
+		for (uint32_t seq = _dashAckedSeq + 1; seq <= lastSeq; ++seq)
+		{
+			Slot& slot = _ring[seq % kRingSize];
+			if (slot.seq != seq || slot.dashServer) continue;
+			slot.dashDenied = true;		// 서버가 돌린 입력인데 켬 소식이 없다 = 서버는 안 켰다. 다시 고를 때 이 칸에서는 안 켠다
+			if (!slot.dashStarted) continue;
+			++_dashCounters.unconfirmed;
+			if (replayFrom == 0) replayFrom = seq;
+		}
+		if (lastSeq > _dashAckedSeq) _dashAckedSeq = lastSeq;
+		if (replayFrom != 0 && ReplayDash(replayFrom)) RerunMovesFrom(replayFrom);
+	}
+
+	// 서버 소식 · 확인으로 정해진 칸을 따라 seq 부터 대시를 다시 고른다 — 켬 · 방향 · 힘 · 막기 둘 · 근접 끊음을 칸에 다시 쓰고, 지금 대시 상태(_dash)도 바꾼다.
+	// 서버가 켠 칸은 켜기 조건을 안 본다(StartFromServer — 서버가 켰다). 그 밖의 누름은 다시 고른 쿨다운 · 켜짐으로 다시 본다(앞 입력 = 칸의 dashMove · 요).
+	// 근접은 다시 안 고른다 — 대시가 바뀌어 근접 끊음이 달라졌거나 이제 막히는 칸에 근접이 켜져 있으면 meleeInReplay 로 센다(걸음 쪽 밀기는 근접 소식 · AckMelee 가 고친다)
+	bool CSelfPrediction::ReplayDash(uint32_t seq)
+	{
+		const Slot* base = nullptr;		// RerunMovesFrom 과 같은 앞 칸 — 다시 고른 뒤 걸음도 거기서 다시 돈다
+		if (seq == _compareFromSeq + 1) base = &_spawnBase;
+		else
+		{
+			const Slot& before = _ring[(seq - 1) % kRingSize];
+			if (before.seq == seq - 1 && before.valid) base = &before;
+		}
+		if (!base)
+		{
+			++_dashCounters.replaysMissed;
+			return false;
+		}
+		++_dashCounters.replays;
+		CDashAbility dash = base->dashAfter;
+		for (uint32_t at = seq; at <= _seq; ++at)
+		{
+			Slot& later = _ring[at % kRingSize];
+			if (later.seq != at) continue;
+			const bool oldCut = later.dashCutMelee;
+			dash.NextInput();
+			bool started = false;
+			if (later.dashServer)
+			{
+				dash.StartFromServer();		// 방향 · 힘은 소식 값 그대로(OnDashResult 가 칸에 넣었다)
+				started = true;
+			}
+			else if (!later.dashDenied && (later.input.buttons & wire::BUTTON_DASH) != 0)
+			{
+				const DashStart start = dash.TryActivate(later.input.pitch, later.input.yaw, false, false);
+				if (start.result == EDashResult::Started)
+				{
+					started = true;
+					later.dashDir = (uint8_t)start.dir;
+					later.dashForce = start.force;
+				}
+			}
+			if (!started)
+			{
+				later.dashDir = 0;
+				later.dashForce = Vec3();
+			}
+			later.dashStarted = started;
+			later.dashCutMelee = started && later.meleeWasActive;
+			later.dashBlocks = dash.BlocksPresses();
+			later.dashBlocksFire = dash.BlocksHeldFire();
+			if (oldCut != later.dashCutMelee || (later.dashBlocks && later.meleeStarted)) ++_dashCounters.meleeInReplay;
+			dash.RememberInput(later.dashMove, later.input.yaw);
+			later.dashAfter = dash;
+		}
+		_dash = dash;
+		return true;
+	}
+
 	bool CSelfPrediction::RerunMovesFrom(uint32_t seq)
 	{
 		const Slot* base = nullptr;
@@ -319,42 +448,88 @@ namespace mo
 			++_meleeCounters.rerunsMissed;
 			return false;
 		}
-		// Reconcile 의 다시 돌리기와 같은 값을 잇는다 — 걸음 상태 · 점프 키 · 이동 막음 · 조준
+		// Reconcile 의 다시 돌리기와 같은 값을 잇는다 — 걸음 상태 · 점프 능력 · 근접 밀기 번호 · 이동 막음 · 조준
 		_move = base->move;
-		_jumpHeld = base->jumpHeld;
+		_jump = base->jump;
+		_meleePushId = base->meleePushId;
 		_lockInputs = base->lockInputs;
 		_ads = base->ads;
 		for (uint32_t at = seq; at <= _seq; ++at)
 		{
 			Slot& later = _ring[at % kRingSize];
 			if (later.seq != at) continue;
-			ApplyMove(later);
+			(void)ApplyMove(later);
 			RememberMove(later);
 			later.valid = true;
 		}
 		return true;
 	}
 
-	// 근접 능력 — 서버 ApplyInput 과 같은 자리(무기 교체 뒤 · 걸음 앞). 경기 끝 단계는 모른다(서버만 막는다 — 결과가 안 와 AckMelee 가 지운다)
-	void CSelfPrediction::StepMelee(Slot& slot)
+	// 근접 · 대시 능력 — 서버 ApplyInput 과 같은 자리(무기 교체 뒤 · 걸음 앞). 두 입력 수를 먼저 세고(NextInput 둘), 대시 누름 → 켜면 근접을 끊는다(StartDash) →
+	// 근접 누름은 대시가 켜져 있으면(켠 입력 포함) 막힌다(TryMelee). 경기 끝 단계 · 죽음은 모른다(서버만 막는다 — 소식이 안 와 AckMelee · AckDash 가 지운다)
+	void CSelfPrediction::StepAbilities(Slot& slot, bool count)
 	{
+		const wire::Input& input = slot.input;
 		_melee.NextInput();
-		slot.meleeStarted = (slot.input.buttons & wire::BUTTON_MELEE) != 0 && _melee.TryActivate(GetWeaponDef((EWeapon)_weapon), kTick);
+		_dash.NextInput();
+		slot.meleeWasActive = _melee.IsActive();
+		slot.dashStarted = false;
+		slot.dashDir = 0;
+		slot.dashForce = Vec3();
+		slot.dashCutMelee = false;
+		if ((input.buttons & wire::BUTTON_DASH) != 0)
+		{
+			if (count) ++_dashCounters.presses;
+			const DashStart dash = _dash.TryActivate(input.pitch, input.yaw, false, false);
+			if (dash.result == EDashResult::Started)
+			{
+				slot.dashStarted = true;
+				slot.dashDir = (uint8_t)dash.dir;
+				slot.dashForce = dash.force;
+				slot.dashCutMelee = _melee.Cut();
+				if (count) ++_dashCounters.started;
+			}
+		}
+		slot.dashBlocks = _dash.BlocksPresses();
+		slot.dashBlocksFire = _dash.BlocksHeldFire();
+		slot.meleeStarted = (input.buttons & wire::BUTTON_MELEE) != 0 && !slot.dashBlocks && _melee.TryActivate(GetWeaponDef((EWeapon)_weapon), kTick);
 		if (slot.meleeStarted) ++_meleeCounters.started;
 	}
 
+	void CSelfPrediction::RememberDash(Slot& slot, const Vec3& moveUsed)
+	{
+		_dash.RememberInput(moveUsed, slot.input.yaw);		// 서버와 같은 자리 — 걸음 뒤, 이 걸음이 가져간 이동 · 이 입력의 요
+		slot.dashMove = moveUsed;
+		slot.dashAfter = _dash;
+	}
+
 	// Room.cpp ApplyInput 과 같은 순서
-	void CSelfPrediction::ApplyMove(const Slot& slot)
+	Vec3 CSelfPrediction::ApplyMove(const Slot& slot)
 	{
 		const wire::Input& input = slot.input;
-		const bool jump = (input.buttons & wire::BUTTON_JUMP) != 0;
-		if (jump && !_jumpHeld)
+		// 대시를 켠 입력 — 서버 StartDash 와 같은 차례: 끊은 근접의 밀기 힘 지우기 → 점프 끊기 → 일어서기 → 대시 힘
+		if (slot.dashStarted)
 		{
+			if (slot.dashCutMelee && _meleePushId != 0) _sim.RemoveRootForce(_move, _meleePushId);
+			_meleePushId = 0;
+			if (_jump.Cut()) _sim.ReleaseJump(_move);
+			if (_move.crouched) _sim.RequestUnCrouch(_move);
+			_sim.ApplyRootForce(_move, slot.dashForce, kDashForceDuration, DashForceSettings());
+		}
+		const bool jump = (input.buttons & wire::BUTTON_JUMP) != 0;
+		switch (_jump.Apply(jump, slot.dashBlocks))		// 대시가 켜져 있으면 새 누름은 버려진다(쥐고 있어도 끝난 뒤 안 켜진다)
+		{
+		case EJumpStep::Press:
 			_sim.RequestUnCrouch(_move);		// 점프 전 일어서기(LyraGameplayAbility_Jump.cpp:55)
 			_sim.PressJump(_move);
+			break;
+		case EJumpStep::Release:
+			_sim.ReleaseJump(_move);
+			break;
+		case EJumpStep::Blocked:
+		case EJumpStep::None:
+			break;
 		}
-		else if (!jump && _jumpHeld) _sim.ReleaseJump(_move);
-		_jumpHeld = jump;
 		if ((input.buttons & wire::BUTTON_CROUCH) != 0) _sim.ToggleCrouch(_move);		// 이동 막음 중에도(서버와 같다)
 
 		Vec3 moveInput(input.moveX, input.moveY, 0);
@@ -365,12 +540,15 @@ namespace mo
 			--_lockInputs;
 			moveInput = Vec3();
 		}
+		const Vec3 moveUsed = moveInput;		// 서버가 대시 「앞 입력」으로 기억하는 값 — 일부러 틀림 배율 앞
 		if (_debugMoveScale != 1.0) moveInput = moveInput * _debugMoveScale;
-		_ads.Apply((input.buttons & wire::BUTTON_ADS) != 0);
+		_ads.Apply((input.buttons & wire::BUTTON_ADS) != 0, slot.dashBlocks);		// 대시가 켜지는 입력에 끄고, 막힌 누름은 떼었다 다시 눌러야 켜진다(서버와 같다)
 		_move.maxSpeed = AdsWalkSpeed(_maxWalkSpeed, _ads.active);
 		// 근접 밀기는 걸음 바로 앞 — Lyra 는 능력이 켜지는 입력 처리에서 넣고 그 프레임 이동이 민다(E-2-1). 서버도 이 자리에서 넣는다(E-3)
-		if (slot.meleePush) _sim.ApplyRootForce(_move, slot.meleePushForce, kMeleePushDuration);
+		if (slot.meleeStarted) _meleePushId = 0;		// 서버 TryMelee 와 같다 — 맞아야 밀기 번호가 생긴다
+		if (slot.meleePush) _meleePushId = _sim.ApplyRootForce(_move, slot.meleePushForce, kMeleePushDuration);
 		_sim.Tick(_move, moveInput, kTick);
+		return moveUsed;
 	}
 
 	void CSelfPrediction::ApplyWeapon(const Slot& slot, bool meleeActive)
@@ -386,7 +564,10 @@ namespace mo
 		weaponInput.reloadPressed = (input.buttons & wire::BUTTON_RELOAD) != 0;
 		weaponInput.meleeActive = meleeActive;
 		weaponInput.meleeStarted = slot.meleeStarted;
-		// 서버와 같은 순서(Room.cpp ApplyInput)
+		weaponInput.dashActive = slot.dashBlocksFire;
+		weaponInput.dashStarted = slot.dashStarted;
+		// 서버와 같은 순서(Room.cpp ApplyInput) — 대시가 앞 입력부터 켜져 있으면 쥔 사격을 발사 문 앞에서 뺀다
+		if (weaponInput.fireHeld && weaponInput.dashActive) weaponInput.fireHeld = false;
 		_fireGate.NextInput();
 		if (weaponInput.fireHeld && _fireGate.IsBlocked((EWeapon)_weapon, _weapons[_weapon].IsFireActive())) weaponInput.fireHeld = false;
 		_lastWeaponEvents = _weapons[_weapon].Tick(kTick, weaponInput, motion);
@@ -397,7 +578,8 @@ namespace mo
 	void CSelfPrediction::RememberMove(Slot& slot) const
 	{
 		slot.move = _move;
-		slot.jumpHeld = _jumpHeld;
+		slot.jump = _jump;
+		slot.meleePushId = _meleePushId;
 		slot.lockInputs = _lockInputs;
 		slot.ads = _ads;
 	}

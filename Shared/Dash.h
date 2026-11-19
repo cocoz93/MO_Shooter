@@ -86,6 +86,8 @@ namespace mo
 		// 대시가 켜지며 끊는다. D-0 기록 fire_then_dash 3751 = 켠 프레임에 탄창 10 → 9 · 사격 꺼짐. 그 뒤 입력부터 막힌다
 		bool BlocksHeldFire() const { return Active() && !_justStarted; }
 		int CooldownLeft() const { return _cooldownLeft; }		// 0 보다 크면 이번 입력에 못 켬
+		// 서버가 이 입력에 켰다(예측이 서버 소식으로 고칠 때, D-3) — 켜기 조건 · 방향은 안 보고 켜짐 · 쿨다운만 TryActivate 의 켬과 같게 놓는다. NextInput 뒤에 부른다
+		void StartFromServer();
 		void Reset();		// 부활 · 판 시작 — 켜짐 · 쿨다운 · 앞 입력을 지운다(몸 요가 있으면 부르는 쪽이 RememberInput 으로 다시 넣는다)
 
 	private:

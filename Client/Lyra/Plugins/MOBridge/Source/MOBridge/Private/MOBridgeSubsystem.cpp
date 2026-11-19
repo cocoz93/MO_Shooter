@@ -797,7 +797,7 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 			{
 				{
 					const FMOBCore::FPawnScope PawnScope(*Core);	// 부활 자리에서 다시 돌리는 걸음도 남 캡슐을 본다(봇과 같다)
-					Core->Prediction.OnSpawn(M.x, M.y, M.z, M.lastSeq);
+					Core->Prediction.OnSpawn(M.x, M.y, M.z, M.lastSeq, M.yaw);	// 요 = 대시의 「앞 입력」 요(서버 SpawnPlayer 와 같다)
 				}
 				NextStandAt = 0;	// 촬영 전용 — 시작 자리로 돌아갔으면 바로 다시 옮긴다(맵이 달라 시작 자리는 허공이다)
 				bStandPlaced = false;	// 받침 시험(-MOBStandHp) — 새 몸도 다친 채 선다(경기 시작 부활이 체력 100 으로 다시 세웠다, B-3 pb1)

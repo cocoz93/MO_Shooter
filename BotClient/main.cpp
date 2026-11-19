@@ -650,7 +650,7 @@ namespace
 			_hasSpawn = true;
 			_pauseLeft = _pauseAfterSpawn;
 			SetPawnsForPrediction();	// 부활 자리에서 다시 돌리는 걸음도 남 캡슐을 본다
-			_self.OnSpawn(spawn.x, spawn.y, spawn.z, spawn.lastSeq);
+			_self.OnSpawn(spawn.x, spawn.y, spawn.z, spawn.lastSeq, spawn.yaw);
 			ClearPawns();
 			// 근접 몸 앞 = 서버 player.yaw — 부활이 시작 자리 요로 놓는다. 그 뒤 입력을 이미 보냈으면 서버도 그 입력의 요로 바꿔 둔다(마지막 보낸 요 그대로)
 			if (_self.GetSeq() <= spawn.lastSeq) _meleeYaw = spawn.yaw;
@@ -1345,7 +1345,8 @@ namespace
 				_net.Close();
 				return;
 			}
-			_self.OnSpawn(kScriptHome.x, kScriptHome.y, kScriptHome.z, place.seq);
+			// 요 = 마지막으로 보낸 입력의 요(서버 대시의 앞 요). 서버 ApplyPlace 는 대시를 안 지운다 — 대본 첫 입력에 대시를 누르면 앞 이동 · 쿨다운이 어긋날 수 있다(대본에 대시가 들 때 D-3-b 에서 본다)
+			_self.OnSpawn(kScriptHome.x, kScriptHome.y, kScriptHome.z, place.seq, _meleeYaw);
 			_scriptPlaced = true;
 			_scriptTick = 0;
 			_scriptStep = -1;

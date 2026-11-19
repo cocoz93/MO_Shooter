@@ -603,7 +603,7 @@ int main(int argc, char** argv)
 		CMoveSim replaySim(map, moveParams);		// 밀기 대조의 계수(pushCount)와 섞이지 않게 따로
 		const auto runInputs = [&](CSelfPrediction& pred)
 		{
-			pred.OnSpawn(replayStart.x, replayStart.y, replayStart.z, 0);
+			pred.OnSpawn(replayStart.x, replayStart.y, replayStart.z, 0, 0.f);		// 요 = 입력 요(0). 대시 단추가 없어 대시 「앞 입력」은 안 쓴다
 			for (uint32_t i = 1; i <= kReplayInputs; ++i)
 			{
 				wire::Input input = wire::Input();
@@ -654,7 +654,7 @@ int main(int argc, char** argv)
 		// press = 근접 단추, push = 넘기는 밀기(nullptr = 내 화면에선 빗나감)
 		const auto runWith = [&](CSelfPrediction& pred, uint32_t meleeSeq, bool press, const Vec3* push)
 		{
-			pred.OnSpawn(replayStart.x, replayStart.y, replayStart.z, 0);
+			pred.OnSpawn(replayStart.x, replayStart.y, replayStart.z, 0, 0.f);
 			for (uint32_t i = 1; i <= kReplayInputs; ++i)
 			{
 				wire::Input input = wire::Input();

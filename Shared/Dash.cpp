@@ -115,6 +115,13 @@ namespace mo
 		return out;
 	}
 
+	void CDashAbility::StartFromServer()
+	{
+		_activeLeft = kDashActiveInputs;
+		_cooldownLeft = kDashCooldownInputs;
+		_justStarted = true;
+	}
+
 	void CDashAbility::Reset()
 	{
 		_activeLeft = 0;
