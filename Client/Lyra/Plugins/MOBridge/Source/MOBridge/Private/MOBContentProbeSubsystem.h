@@ -9,6 +9,9 @@
 class ACharacter;
 class ALyraWeaponSpawner;
 struct FLyraAbilitySimpleFailureMessage;
+struct FLyraVerbMessage;
+class AController;
+class APawn;
 
 /**
  * 컨텐츠 확인 기록 — 조준 · 앉기 · 근접 · 체력 받침의 Lyra 실행값을 정해진 각본으로 찍는다. 서버 없이 돈다(content-add-plan.md 0-3).
@@ -39,7 +42,9 @@ public:
 		// DashTurn(D-2) = 앞으로 걷다가 누르는 프레임에 이동 입력을 Arg 각으로 바꾼다 — 대시가 「앞 입력」을 쓰나 「이번 입력」을 쓰나
 		DashMove, DashNoInput, DashPitch, DashJumpApex, DashSpam, DashThen, HoldThenDash, ReloadDash, MeleeDash, DashWall, DashCrouchSame, DashTurn, StandUp, FoeShow, FoeAway,
 		// 수류탄 판(G-0) — Arg = GREN_SHOTS 차례(자리 · 피치 · 누르는 때). Q 는 칸 안에서 한 프레임 누른다(DuringGrenade)
-		GrenThrow };
+		GrenThrow,
+		// G-0-b2 죽음 · 부활 길 — 상대 · 내가 다시 생길 때까지 기다림(생기면 칸을 바로 끝낸다, 칸 길이 = 한도) · 상대가 나를 죽임(상대 ASC 로 피해 효과)
+		FoeRespawnWait, MeRespawnWait, FoeKillsMe };
 
 private:
 	bool WaitReady(float DeltaTime);
@@ -255,4 +260,16 @@ private:
 	double GrenBlastZ = 0.0;
 	FVector GrenBlastDir = FVector::ZeroVector;
 	FString GrenCsv;				// 수류탄마다 프레임마다 한 줄 → Saved/MOB/cprobe_<tag>_gren.csv
+
+	// G-0-b2 죽음 · 부활 길 — 상대 컨트롤러(봇은 다시 생겨도 같은 컨트롤러 · 새 몸) · 기다림 칸이 일찍 끝남 · 생사 줄(바뀐 때만) · 소식 셋(처치 · 피해 · 도움)
+	TWeakObjectPtr<AController> FoeCtl;
+	TWeakObjectPtr<APawn> WaitFromPawn;		// 기다림 칸 — 이 몸이 아닌 산 몸이 생기면 끝
+	bool bStepDone = false;
+	int32 GrenDieFrame = -1;				// 던진 뒤 죽는 칸 — 스스로 죽은 프레임
+	FString LastLifeSig[2];
+	TArray<FGameplayMessageListenerHandle> VerbHandles;
+	void OnVerbMsg(FGameplayTag Channel, const FLyraVerbMessage& Msg);
+	void WatchLife();
+	void FlushShots(const TCHAR* StepName, double Now);
+	class UAbilitySystemComponent* MyPSASC() const;	// 내 선수 상태의 ASC — 몸이 없을 때(죽음 ~ 부활)도 쿨다운을 읽는다
 };

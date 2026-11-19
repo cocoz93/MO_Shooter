@@ -42,6 +42,10 @@
 #include "Inventory/LyraInventoryItemInstance.h"
 #include "Inventory/LyraInventoryManagerComponent.h"
 #include "GameFramework/GameStateBase.h"
+#include "LyraGameplayTags.h"
+#include "Messages/LyraVerbMessage.h"
+#include "Messages/LyraVerbMessageHelpers.h"
+#include "System/LyraGameData.h"
 #include "Player/LyraPlayerState.h"
 #include "Equipment/LyraEquipmentDefinition.h"
 #include "Equipment/LyraEquipmentInstance.h"
@@ -337,9 +341,11 @@ namespace
 
 	// 수류탄 판(G-0, grenade-plan.md) — 대시 판과 같은 집(PickDashHome, 여덟 방향 1100cm 빔). 상대는 숨겨 두고(사람 칸만 다시 켬) 던짐 칸마다 나 · 상대 체력을 1000 으로 둔다(피해 값만 본다).
 	// 던짐 칸은 5.1초 — GREN_PRESS_AT 에 Q 를 한 프레임 누른다. 쿨다운 5초(GE_Grenade_Cooldown) = 300프레임이 다음 칸 누름(306프레임 뒤) 전에 끝나고, 타이머 2초도 칸 안에 든다
-	enum class EGrenPlace : uint8 { Open, WallCam, WallGap, WallBack, FoeAt, Slope, Corner, BlastHit, BlastCap, BlastCenter, BlastCrouch, WallLedge, WallRoof };
+	// SelfNear(G-0-b2) = 피해 칸과 같은 세움을 상대 대신 나에게(자기 피해 · 자기 처치)
+	enum class EGrenPlace : uint8 { Open, WallCam, WallGap, WallBack, FoeAt, Slope, Corner, BlastHit, BlastCap, BlastCenter, BlastCrouch, WallLedge, WallRoof, SelfNear };
 	bool IsBlastPlace(EGrenPlace P) { return P >= EGrenPlace::BlastHit; }
-	struct FGrenShot { const TCHAR* Name; EGrenPlace Place; float Pitch; float Arg; bool bRun; bool bJump; };
+	// 뒤 셋(G-0-b2) — 칸 시작 체력(0 = 1000) · 수류탄이 생기고 이 프레임 뒤 스스로 죽음(−1 = 안 죽음). 최대 체력은 늘 1000
+	struct FGrenShot { const TCHAR* Name; EGrenPlace Place; float Pitch; float Arg; bool bRun; bool bJump; float FoeHp = 0.f; float MyHp = 0.f; int32 DieAfter = -1; };
 	const FGrenShot GREN_SHOTS[] = {
 		// 묶음 1 · 2 — 방향 · 피치(집, 몸 요 0). 하늘 둘(선이 안 맞는 갈래 — 짐작 1) · 수평 · 먼 바닥 둘 · 발밑(카메라가 위로 올라가 선 시작점도 바닥 위 — g0a4 카메라 z 542 · 시작 z 약 152 · 맞은 거리 118)
 		{ TEXT("sky_p45"),      EGrenPlace::Open,     45.f,  0.f,    false, false },	// 0
@@ -382,7 +388,18 @@ namespace
 		{ TEXT("blast_stand200"),   EGrenPlace::BlastCenter, -20.f, 200.f, false, false },	// 29
 		{ TEXT("blast_crouch200"),  EGrenPlace::BlastCrouch, -20.f, 200.f, false, false },	// 30
 		{ TEXT("blast_same200"),    EGrenPlace::BlastCenter, -20.f, 200.f, false, false },	// 31 같은 팀(앞 칸 FoeSameTeam 그대로)
+		// G-0-b2 죽음 · 부활 길(묶음 10 무적 · 11 · 12 · 19) — 상대 처치(체력 50 ← 수평 200 피해 93.114, g0b · 처치 소식 · 처치 아이콘 사진) ·
+		// 갓 부활한 상대 몸 겨눔(직접 맞음 — 상대가 다시 생기고 50프레임 뒤 터짐, 부활 무적 166프레임 안 · g0life1 실측) ·
+		// 던진 뒤 죽음(생기고 DieAfter 프레임 뒤 스스로 죽음 — 신관으로 터지는 것 / 날아가다 상대에 직접 맞는 것, 짐작 3) · 자기 피해(그 뒤 상대가 나를 죽임 — 도움) · 자기 처치
+		{ TEXT("g_kill_foe"),       EGrenPlace::BlastCenter, -20.f, 200.f, false, false, 50.f, 0.f,  -1 },	// 32
+		{ TEXT("g_immune"),         EGrenPlace::FoeAt,       0.f,   800.f, false, false, 0.f,  0.f,  -1 },	// 33
+		{ TEXT("g_die_after"),      EGrenPlace::BlastCenter, -20.f, 200.f, false, false, 0.f,  0.f,  5 },		// 34
+		{ TEXT("g_die_direct"),     EGrenPlace::FoeAt,       0.f,   800.f, false, false, 0.f,  0.f,  2 },		// 35
+		{ TEXT("g_self_hurt"),      EGrenPlace::SelfNear,    -20.f, 200.f, false, false, 0.f,  0.f,  -1 },	// 36
+		{ TEXT("g_self_kill"),      EGrenPlace::SelfNear,    -20.f, 200.f, false, false, 0.f,  50.f, -1 },	// 37
 	};
+	constexpr int32 GREN_LIFE_FIRST = 32;		// 이 차례부터 죽음 · 부활 길 — 칸 앞뒤로 점수판 줄(MOB_CPROBE_SCORE)
+	constexpr float FOE_KILL_DAMAGE = 5000.f;	// 상대가 나를 죽이는 피해(내 최대 체력 1000 보다 커서 한 번에 죽는다)
 	const FGrenShot& GrenShotAt(float Arg) { return GREN_SHOTS[FMath::Clamp((int32)Arg, 0, (int32)UE_ARRAY_COUNT(GREN_SHOTS) - 1)]; }
 	const FStep GRENADE_SCRIPT[] = {
 		{ TEXT("settle"),        1.0f, EAct::Home,         0.f,  false },
@@ -426,6 +443,23 @@ namespace
 		{ TEXT("blast_wall_roof"),  5.1f, EAct::GrenThrow, 28.f, false },
 		{ TEXT("blast_stand200"),   5.1f, EAct::GrenThrow, 29.f, false },
 		{ TEXT("blast_crouch200"),  5.1f, EAct::GrenThrow, 30.f, false },
+		// G-0-b2 죽음 · 부활 길도 뒤에 붙인다. 기다림 칸 길이 = 한도(다시 생기면 그 프레임에 끝). 내가 다시 생긴 뒤 3초 쉼 = 내 부활 무적(2.75초)이 끝난 뒤 던진다
+		{ TEXT("g_kill_foe"),       5.1f,  EAct::GrenThrow,      32.f, false },
+		{ TEXT("foe_respawn"),      12.0f, EAct::FoeRespawnWait, 0.f,  false },
+		{ TEXT("g_immune"),         5.1f,  EAct::GrenThrow,      33.f, false },
+		{ TEXT("g_die_after"),      5.1f,  EAct::GrenThrow,      34.f, false },
+		{ TEXT("me_respawn"),       12.0f, EAct::MeRespawnWait,  0.f,  false },
+		{ TEXT("me_settle"),        3.0f,  EAct::Home,           0.f,  false },
+		{ TEXT("g_die_direct"),     5.1f,  EAct::GrenThrow,      35.f, false },
+		{ TEXT("me_respawn2"),      12.0f, EAct::MeRespawnWait,  0.f,  false },
+		{ TEXT("me_settle2"),       3.0f,  EAct::Home,           0.f,  false },
+		{ TEXT("g_self_hurt"),      5.1f,  EAct::GrenThrow,      36.f, false },
+		{ TEXT("foe_kills_me"),     0.5f,  EAct::FoeKillsMe,     0.f,  false },
+		{ TEXT("me_respawn3"),      12.0f, EAct::MeRespawnWait,  0.f,  false },
+		{ TEXT("me_settle3"),       3.0f,  EAct::Home,           0.f,  false },
+		{ TEXT("g_self_kill"),      5.1f,  EAct::GrenThrow,      37.f, false },
+		{ TEXT("me_respawn4"),      12.0f, EAct::MeRespawnWait,  0.f,  false },
+		{ TEXT("me_settle4"),       3.0f,  EAct::Home,           0.f,  false },
 		{ TEXT("foe_away"),      1.0f, EAct::FoeAway,      0.f,  false },
 		{ TEXT("end"),           0.5f, EAct::Home,         0.f,  false },
 	};
@@ -535,6 +569,22 @@ namespace
 	UAbilitySystemComponent* FindASC(const AActor* A)
 	{
 		return A ? UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(A) : nullptr;
+	}
+
+	APawn* PawnOf(const TWeakObjectPtr<AController>& C)
+	{
+		return C.IsValid() ? C->GetPawn() : nullptr;
+	}
+
+	// 봇 머리를 멈춘다 — 나를 쏘거나 움직이지 않게(처음 상대 · 다시 생긴 상대, G-0-b2)
+	void StopBrain(const APawn* P)
+	{
+		AAIController* AI = P ? Cast<AAIController>(P->GetController()) : nullptr;
+		if (!AI) return;
+		if (AI->BrainComponent) AI->BrainComponent->StopLogic(TEXT("MOBContentProbe"));
+		AI->StopMovement();
+		AI->ClearFocus(EAIFocusPriority::Gameplay);
+		AI->bSetControlRotationFromPawnOrientation = false;
 	}
 
 	// 조준 섞임 — Lyra 사격이 읽는 값 그대로(LyraRangedWeaponInstance.cpp 의 GetBlendInfo → 스택 맨 끝 모드의 비율 · 표식).
@@ -695,7 +745,8 @@ void UMOBContentProbeSubsystem::Tick(float DeltaTime)
 			return;
 		}
 		ClearPawn = Me();
-		if (!ClearPawn.IsValid()) return;
+		// 수류탄 판은 몸이 없는 프레임(죽음 ~ 부활)도 센다 — 수류탄 나이 · 칸 시간이 프레임마다 가야 터짐 프레임이 맞다(G-0-b2)
+		if (!ClearPawn.IsValid() && !bGrenade) return;
 	}
 
 	if (bBump && !bHitsBound && Me() && Foe.IsValid())
@@ -704,12 +755,17 @@ void UMOBContentProbeSubsystem::Tick(float DeltaTime)
 		Foe->OnActorHit.AddDynamic(this, &UMOBContentProbeSubsystem::OnPawnHit);
 		bHitsBound = true;
 	}
-	if (bGrenade) WatchGrenades();
+	if (bGrenade)
+	{
+		WatchGrenades();
+		WatchLife();
+	}
 	DuringStep();
+	if (bGrenade) FlushShots(StepAt(ScriptIdx(), Step).Name, GetWorld()->GetTimeSeconds());
 	WriteRow();
 	StepTime += DeltaTime;
 	++Frame;
-	if (StepTime + KINDA_SMALL_NUMBER >= StepAt(ScriptIdx(), Step).Seconds)
+	if (bStepDone || StepTime + KINDA_SMALL_NUMBER >= StepAt(ScriptIdx(), Step).Seconds)
 	{
 		EndStep();
 		if (++Step >= StepCount(ScriptIdx()))
@@ -775,13 +831,7 @@ bool UMOBContentProbeSubsystem::Prepare()
 		{
 			if (*It != Ch && FindASC(*It) && It->GetController()) { Foe = *It; break; }
 		}
-		if (AAIController* AI = Foe.IsValid() ? Cast<AAIController>(Foe->GetController()) : nullptr)
-		{
-			if (AI->BrainComponent) AI->BrainComponent->StopLogic(TEXT("MOBContentProbe"));
-			AI->StopMovement();
-			AI->ClearFocus(EAIFocusPriority::Gameplay);
-			AI->bSetControlRotationFromPawnOrientation = false;
-		}
+		StopBrain(Foe.Get());
 		GoHome();
 		PlaceFoe(-400.0, true);
 		// 대시 판 — 상대는 대시 길(뒤 대시가 등 뒤 400 을 지난다)을 막지 않게 숨기고, 집 둘레에서 여덟 방향이 빈 자리를 집으로 고른다(MOB_CPROBE_DASHHOME · CLEAR 줄)
@@ -808,9 +858,16 @@ bool UMOBContentProbeSubsystem::Prepare()
 		Csv += TEXT(",gLive,gCooldown,camX,camY,camZ,camPitch,camYaw,camBack,ctlPitch,ctlYaw,grenadeActive,fireActive,reloadActive,dashActive");
 		GrenCsv = TEXT("frame,name,age,x,y,z,vx,vy,vz,pitch,yaw,roll,hidden,pmActive,sim,sliding\n");
 		SpawnedHandle = World->AddOnActorSpawnedHandler(FOnActorSpawned::FDelegate::CreateUObject(this, &UMOBContentProbeSubsystem::OnActorSpawned));
-		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GPARAMS aimChannel=%d boomChannel=%d boomObject=%d weaponChannel=%d weaponCapsuleChannel=%d shots=%d"),
+		// G-0-b2 — 소식 셋을 듣고(MOB_CPROBE_GMSG) 상대 컨트롤러를 붙잡는다(다시 생긴 상대 몸을 찾는다)
+		for (const TCHAR* Chan : { TEXT("Lyra.Elimination.Message"), TEXT("Lyra.Damage.Message"), TEXT("Lyra.Assist.Message") })
+		{
+			VerbHandles.Add(UGameplayMessageSubsystem::Get(this).RegisterListener(FGameplayTag::RequestGameplayTag(Chan), this, &UMOBContentProbeSubsystem::OnVerbMsg));
+		}
+		FoeCtl = Foe.IsValid() ? Foe->GetController() : nullptr;
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GPARAMS aimChannel=%d boomChannel=%d boomObject=%d weaponChannel=%d weaponCapsuleChannel=%d shots=%d psAscSame=%d"),
 			(int32)UEngineTypes::ConvertToCollisionChannel(TraceTypeQuery4), (int32)UEngineTypes::ConvertToCollisionChannel(TraceTypeQuery5),
-			(int32)UEngineTypes::ConvertToCollisionChannel(ObjectTypeQuery3), (int32)Lyra_TraceChannel_Weapon, (int32)Lyra_TraceChannel_Weapon_Capsule, (int32)UE_ARRAY_COUNT(GREN_SHOTS));
+			(int32)UEngineTypes::ConvertToCollisionChannel(ObjectTypeQuery3), (int32)Lyra_TraceChannel_Weapon, (int32)Lyra_TraceChannel_Weapon_Capsule, (int32)UE_ARRAY_COUNT(GREN_SHOTS),
+			(MyPSASC() && MyPSASC() == FindASC(Ch)) ? 1 : 0);
 	}
 	Csv += TEXT("\n");
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_READY pawn=%s home=%s steps=%d"), *GetNameSafe(Ch), *Home.ToString(), StepCount(ScriptIdx()));
@@ -938,6 +995,7 @@ void UMOBContentProbeSubsystem::BeginStep()
 	const FStep& S = StepAt(ScriptIdx(), Step);
 	ACharacter* Ch = Me();
 	FrameEvents += FString::Printf(TEXT("begin_%s;"), S.Name);
+	bStepDone = false;
 	bMeleePressed = false;
 	MeleePressFrame = -1;
 	bJumpPending = false;
@@ -1239,6 +1297,37 @@ void UMOBContentProbeSubsystem::BeginStep()
 	case EAct::GrenThrow:
 		BeginGrenade();
 		break;
+	// G-0-b2 — 지금 몸이 아닌 산 몸이 생기면 끝(DuringStep). 지금 몸 = 죽는 중인 몸 · 이미 지워졌으면 없음
+	case EAct::FoeRespawnWait:
+		WaitFromPawn = PawnOf(FoeCtl);
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_WAIT step=%s frame=%d who=foe from=%s"), S.Name, Frame, *GetNameSafe(WaitFromPawn.Get()));
+		break;
+	case EAct::MeRespawnWait:
+		WaitFromPawn = Ch;
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_WAIT step=%s frame=%d who=me from=%s"), S.Name, Frame, *GetNameSafe(Ch));
+		break;
+	// 상대가 나를 죽인다 — 상대 ASC 로 Lyra 기본 피해 효과(DamageSelfDestruct 와 같은 효과 · 같은 SetByCaller, LyraHealthComponent.cpp:279-309)를 내게.
+	// 맥락 = 상대 ASC 의 MakeEffectContext(시킨 쪽 = 상대 선수 상태 · 일으킨 것 = 상대 몸) — 처치 소식의 Instigator 가 상대가 된다
+	case EAct::FoeKillsMe:
+	{
+		LogScores(TEXT("foe_kills_me_before"));
+		UAbilitySystemComponent* FA = FindASC(Foe.Get());
+		UAbilitySystemComponent* MA = FindASC(Ch);
+		const TSubclassOf<UGameplayEffect> GE = ULyraGameData::Get().DamageGameplayEffect_SetByCaller.LoadSynchronous();
+		bool bApplied = false;
+		if (FA && MA && GE)
+		{
+			const FGameplayEffectSpecHandle Spec = FA->MakeOutgoingSpec(GE, 1.f, FA->MakeEffectContext());
+			if (Spec.Data.IsValid())
+			{
+				Spec.Data->SetSetByCallerMagnitude(LyraGameplayTags::SetByCaller_Damage, FOE_KILL_DAMAGE);
+				FA->ApplyGameplayEffectSpecToTarget(*Spec.Data, MA);
+				bApplied = true;
+			}
+		}
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_FOEKILL step=%s frame=%d applied=%d ge=%s foe=%s myHp=%.1f"), S.Name, Frame, bApplied ? 1 : 0, *GetNameSafe(GE), *GetNameSafe(Foe.Get()), HealthOf(Ch));
+		break;
+	}
 	}
 }
 
@@ -1462,6 +1551,26 @@ void UMOBContentProbeSubsystem::DuringStep()
 	{
 		DuringGrenade();
 	}
+	else if (S.Act == EAct::FoeRespawnWait || S.Act == EAct::MeRespawnWait)
+	{
+		// 다시 생김 = 기다림 시작 몸과 다른 몸 · 죽음 단계 0 · 체력이 읽힘(ASC 가 붙음). 상대면 그 몸을 새 상대로 잡고 머리를 멈춘다
+		const bool bMe = S.Act == EAct::MeRespawnWait;
+		APawn* P = bMe ? Cast<APawn>(Ch) : PawnOf(FoeCtl);
+		const ULyraHealthComponent* HC = ULyraHealthComponent::FindHealthComponent(P);
+		if (!bStepDone && P && P != WaitFromPawn.Get() && HC && HC->GetDeathState() == ELyraDeathState::NotDead && HealthOf(P) > 0.f)
+		{
+			if (!bMe)
+			{
+				Foe = Cast<ACharacter>(P);
+				StopBrain(P);
+			}
+			static const FGameplayTag Immune = FGameplayTag::RequestGameplayTag(TEXT("Gameplay.DamageImmunity"));
+			const UAbilitySystemComponent* A = FindASC(P);
+			UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_RESPAWN step=%s frame=%d stepT=%.4f who=%s pawn=%s at=%s hp=%.1f immune=%d cd=%.4f"), S.Name, Frame, StepTime, bMe ? TEXT("me") : TEXT("foe"),
+				*GetNameSafe(P), *P->GetActorLocation().ToString(), HealthOf(P), (A && A->HasMatchingGameplayTag(Immune)) ? 1 : 0, bMe ? GrenadeCooldownLeft() : -1.f);
+			bStepDone = true;
+		}
+	}
 
 	if (bPads && Ch)
 	{
@@ -1497,6 +1606,12 @@ void UMOBContentProbeSubsystem::EndStep()
 	if (bGrenade && S.Act == EAct::GrenThrow)
 	{
 		EndGrenade();
+		return;
+	}
+	if (S.Act == EAct::FoeRespawnWait || S.Act == EAct::MeRespawnWait || S.Act == EAct::FoeKillsMe)
+	{
+		if (S.Act != EAct::FoeKillsMe && !bStepDone) UE_LOG(LogMOBCProbe, Error, TEXT("MOB_CPROBE_FAIL respawnTimeout step=%s"), S.Name);
+		LogScores(S.Name);
 		return;
 	}
 	if (IsMeleeOnce(S.Act))
@@ -1724,7 +1839,17 @@ void UMOBContentProbeSubsystem::EndDash()
 void UMOBContentProbeSubsystem::WriteRow()
 {
 	ACharacter* Ch = Me();
-	if (!Ch) return;
+	if (!Ch)
+	{
+		// 수류탄 판 — 몸이 없는 프레임(죽음 ~ 부활)은 줄을 안 쓴다. 이 프레임 사건은 버리고(로그 줄에 있다) 앞 프레임 체력만 넘긴다(G-0-b2)
+		if (bGrenade)
+		{
+			PrevMyHp = -1.f;
+			PrevFoeHp = HealthOf(Foe.Get());
+			FrameEvents.Reset();
+		}
+		return;
+	}
 	const UCharacterMovementComponent* M = Ch->GetCharacterMovement();
 	const FVector P = Ch->GetActorLocation();
 	const FVector V = M ? M->Velocity : FVector::ZeroVector;
@@ -1993,15 +2118,7 @@ void UMOBContentProbeSubsystem::WatchWeapons()
 		LastInvSig = Sig;
 		if (bReady) PendingShots.Emplace(Frame + 20, FString::Printf(TEXT("inv%02d_%s"), ++ShotCount, StepName));
 	}
-	for (int32 i = 0; i < PendingShots.Num(); ++i)
-	{
-		if (Frame < PendingShots[i].Key) continue;
-		const FString Path = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("cprobe_%s_%s.png"), *Tag, *PendingShots[i].Value);
-		FScreenshotRequest::RequestScreenshot(Path, true, false);
-		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_SHOT frame=%d t=%.4f step=%s path=%s"), Frame, Now, StepName, *Path);
-		PendingShots.RemoveAt(i);
-		break;
-	}
+	FlushShots(StepName, Now);
 
 	for (TActorIterator<ALyraWeaponSpawner> It(World); It; ++It)
 	{
@@ -2046,10 +2163,73 @@ void UMOBContentProbeSubsystem::OnFailMsg(FGameplayTag Channel, const FLyraAbili
 	PendingShots.Emplace(Frame + 40, FString::Printf(TEXT("fail%02d_b_%s"), FailMsgs, StepName));
 }
 
+// 찍을 프레임이 된 사진 하나(UI 포함) — 한 프레임에 한 장
+void UMOBContentProbeSubsystem::FlushShots(const TCHAR* StepName, double Now)
+{
+	for (int32 i = 0; i < PendingShots.Num(); ++i)
+	{
+		if (Frame < PendingShots[i].Key) continue;
+		const FString Path = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("cprobe_%s_%s.png"), *Tag, *PendingShots[i].Value);
+		FScreenshotRequest::RequestScreenshot(Path, true, false);
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_SHOT frame=%d t=%.4f step=%s path=%s"), Frame, Now, StepName, *Path);
+		PendingShots.RemoveAt(i);
+		break;
+	}
+}
+
+UAbilitySystemComponent* UMOBContentProbeSubsystem::MyPSASC() const
+{
+	const APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	return PC ? FindASC(PC->PlayerState) : nullptr;
+}
+
+// G-0-b2 생사 줄 — 나(첫 플레이어 몸) · 상대(봇 컨트롤러의 몸)마다 몸 · 죽음 단계(0 산 · 1 죽는 중 · 2 죽음 끝) · 몸에서 ASC 가 찾아지나 · 무적 표식이 바뀐 프레임에 한 줄.
+// 내 줄엔 선수 상태 ASC 의 수류탄 쿨다운도(몸이 없어도 읽힌다 — 부활 뒤 이어지나, 묶음 11)
+void UMOBContentProbeSubsystem::WatchLife()
+{
+	static const FGameplayTag Immune = FGameplayTag::RequestGameplayTag(TEXT("Gameplay.DamageImmunity"));
+	for (int32 i = 0; i < 2; ++i)
+	{
+		APawn* P = i == 0 ? Cast<APawn>(Me()) : PawnOf(FoeCtl);
+		const ULyraHealthComponent* HC = ULyraHealthComponent::FindHealthComponent(P);
+		const UAbilitySystemComponent* A = FindASC(P);
+		const FString Sig = FString::Printf(TEXT("pawn=%s death=%d asc=%d immune=%d"), *GetNameSafe(P), HC ? (int32)HC->GetDeathState() : -1, A ? 1 : 0,
+			(A && A->HasMatchingGameplayTag(Immune)) ? 1 : 0);
+		if (Sig == LastLifeSig[i]) continue;
+		LastLifeSig[i] = Sig;
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_LIFE frame=%d t=%.4f step=%s stepT=%.4f who=%s %s hp=%.1f cd=%.4f"), Frame, GetWorld()->GetTimeSeconds(),
+			bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("-"), StepTime, i == 0 ? TEXT("me") : TEXT("foe"), *Sig, HealthOf(P), i == 0 ? GrenadeCooldownLeft() : -1.f);
+	}
+}
+
+// G-0-b2 소식 셋(처치 · 피해 · 도움 — LyraHealthSet.cpp:131-143 · LyraHealthComponent.cpp:170-181 · AssistProcessor.cpp:51-62) 그대로 적는다.
+// 처치 아이콘은 처치 소식의 InstigatorTags 에 든 피해 종류 표식으로 고른다(W_EliminationFeedEntryWidget 그래프) — 처치마다 UI 사진 셋
+void UMOBContentProbeSubsystem::OnVerbMsg(FGameplayTag Channel, const FLyraVerbMessage& Msg)
+{
+	static const FGameplayTag Elim = FGameplayTag::RequestGameplayTag(TEXT("Lyra.Elimination.Message"));
+	const TCHAR* StepName = bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("-");
+	const APlayerState* IPS = ULyraVerbMessageHelpers::GetPlayerStateFromObject(Msg.Instigator.Get());
+	const APlayerState* TPS = ULyraVerbMessageHelpers::GetPlayerStateFromObject(Msg.Target.Get());
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	const APlayerState* MyPS = PC ? PC->PlayerState.Get() : nullptr;
+	const auto WhoPS = [MyPS](const APlayerState* PS) { return !PS ? TEXT("-") : (PS == MyPS ? TEXT("me") : TEXT("foe")); };
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GMSG frame=%d step=%s stepT=%.4f verb=%s inst=%s instWho=%s target=%s targetWho=%s mag=%.4f instTags=[%s] targetTags=[%s]"),
+		Frame, StepName, StepTime, *Channel.ToString(), *GetNameSafe(Msg.Instigator.Get()), WhoPS(IPS), *GetNameSafe(Msg.Target.Get()), WhoPS(TPS), Msg.Magnitude,
+		*Msg.InstigatorTags.ToStringSimple(), *Msg.TargetTags.ToStringSimple());
+	if (Channel == Elim && bReady)
+	{
+		++ShotCount;
+		PendingShots.Emplace(Frame + 10, FString::Printf(TEXT("elim%02d_a_%s"), ShotCount, StepName));
+		PendingShots.Emplace(Frame + 40, FString::Printf(TEXT("elim%02d_b_%s"), ShotCount, StepName));
+		PendingShots.Emplace(Frame + 90, FString::Printf(TEXT("elim%02d_c_%s"), ShotCount, StepName));
+	}
+}
+
 void UMOBContentProbeSubsystem::Finish(bool bOk)
 {
 	bDone = true;
 	if (FailMsgHandle.IsValid()) FailMsgHandle.Unregister();
+	for (FGameplayMessageListenerHandle& H : VerbHandles) H.Unregister();
 	if (SpawnedHandle.IsValid() && GetWorld()) GetWorld()->RemoveOnActorSpawnedHandler(SpawnedHandle);
 	LogBodies(TEXT("end"));
 	if (bGrenade)
@@ -2244,8 +2424,8 @@ void UMOBContentProbeSubsystem::WatchGrenades()
 }
 
 // 터짐 다시 해 보기 — B_Grenade 「Detonate」 그대로(b_flow.txt): 수류탄 자리에서 반경 450 구 겹침(물체 종류 Pawn = ObjectTypeQuery3 · 액터 거르개 Pawn) →
-// 사람마다 무시 목록 = 겹친 사람 전부에서 그 사람만 뺀 것 → 수류탄 → 그 사람 자리 선(TraceTypeQuery5 = Weapon_Capsule · 복잡 켬 · 수류탄 빼고) → 무엇이든 맞으면 피해,
-// 등급 = clamp(맞은 거리 ÷ 450, 0.1, 1). 같은 구로 성분 겹침도 적는다(사람 몸에서 캡슐 · 메시 중 무엇이 겹치나 — 짐작 6). 체력은 앞 프레임 끝 값 > 지금 값
+// 사람마다 무시 목록 = 겹친 사람 전부에서 그 사람만 뺀 것 → 수류탄 → 그 사람 자리 선(TraceTypeQuery5 = Weapon_Capsule · 복잡 켬 · 수류탄 빼고) → 무엇이든 맞으면 피해 효과,
+// 등급 = clamp(맞은 거리 ÷ 450, 0.1, 1). 피해 계산이 그 맞은 것으로 팀을 따져 벽이 먼저 맞으면 0 이다(G-0-b 실측 · LyraDamageExecution.cpp:67-109,144 — D107). 같은 구로 성분 겹침도 적는다(사람 몸에서 캡슐 · 메시 중 무엇이 겹치나 — 짐작 6). 체력은 앞 프레임 끝 값 > 지금 값
 void UMOBContentProbeSubsystem::LogBoom(AActor* G, int32 SpawnFrame) const
 {
 	const FVector L = G->GetActorLocation();
@@ -2264,9 +2444,18 @@ void UMOBContentProbeSubsystem::LogBoom(AActor* G, int32 SpawnFrame) const
 	const ULyraTeamSubsystem* TS = GetWorld()->GetSubsystem<ULyraTeamSubsystem>();
 	int32 TeamMe = -1, TeamFoe = -1;
 	const int32 FoeCmp = (TS && Ch && F) ? (int32)TS->CompareTeams(Ch, F, TeamMe, TeamFoe) : 2;
-	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GBOOM frame=%d step=%s name=%s spawn=%d age=%d loc=%.6f,%.6f,%.6f over=%d comps=[%s] myHp=%.3f>%.3f foeHp=%.3f>%.3f foeCmp=%d foeCrouched=%d"),
+	// G-0-b2 — 무적 표식(나 · 상대) · 수류탄을 던진 몸(Instigator)과 그 몸에서 ASC 가 찾아지나(B_Grenade 가 피해 효과를 그 ASC 로 만든다 — 짐작 3) · 그 몸의 죽음 단계
+	static const FGameplayTag Immune = FGameplayTag::RequestGameplayTag(TEXT("Gameplay.DamageImmunity"));
+	const UAbilitySystemComponent* MA = FindASC(Ch);
+	const UAbilitySystemComponent* FA = FindASC(F);
+	const APawn* Inst = G->GetInstigator();
+	const ULyraHealthComponent* InstHC = ULyraHealthComponent::FindHealthComponent(Inst);
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GBOOM frame=%d step=%s name=%s spawn=%d age=%d loc=%.6f,%.6f,%.6f over=%d comps=[%s] myHp=%.3f>%.3f foeHp=%.3f>%.3f foeCmp=%d foeCrouched=%d ")
+		TEXT("myImmune=%d foeImmune=%d inst=%s instIsMe=%d instAsc=%d instDeath=%d die=%d"),
 		Frame, bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("-"), *G->GetName(), SpawnFrame, Frame - SpawnFrame, L.X, L.Y, L.Z, Over.Num(), *CompS.TrimEnd(),
-		PrevMyHp, HealthOf(Ch), PrevFoeHp, HealthOf(F), FoeCmp, (F && F->bIsCrouched) ? 1 : 0);
+		PrevMyHp, HealthOf(Ch), PrevFoeHp, HealthOf(F), FoeCmp, (F && F->bIsCrouched) ? 1 : 0,
+		(MA && MA->HasMatchingGameplayTag(Immune)) ? 1 : 0, (FA && FA->HasMatchingGameplayTag(Immune)) ? 1 : 0, *GetNameSafe(Inst), (Inst && Inst == Ch) ? 1 : 0,
+		FindASC(Inst) ? 1 : 0, InstHC ? (int32)InstHC->GetDeathState() : -1, GrenDieFrame);
 	for (AActor* P : Over)
 	{
 		TArray<AActor*> Ignore = Over;
@@ -2293,7 +2482,9 @@ void UMOBContentProbeSubsystem::LogBoom(AActor* G, int32 SpawnFrame) const
 // 쿨다운 남은 초 — GE_Grenade_Cooldown 효과(정의 클래스 이름으로 고른다 — 쿨다운 표식 이름을 몰라도 된다)
 float UMOBContentProbeSubsystem::GrenadeCooldownLeft() const
 {
-	const UAbilitySystemComponent* A = FindASC(Me());
+	// 선수 상태 ASC(산 몸의 ASC 와 같은 것 — Lyra 는 ASC 가 선수 상태에 있다). 몸이 없을 때도 읽는다(G-0-b2)
+	const UAbilitySystemComponent* A = MyPSASC();
+	if (!A) A = FindASC(Me());
 	if (!A) return -1.f;
 	FGameplayEffectQuery Q;
 	Q.CustomMatchDelegate.BindLambda([](const FActiveGameplayEffect& E) { return E.Spec.Def && E.Spec.Def->GetClass()->GetName().Contains(TEXT("GE_Grenade_Cooldown")); });
@@ -2428,15 +2619,16 @@ void UMOBContentProbeSubsystem::BeginGrenade()
 	const FStep& S = StepAt(ScriptIdx(), Step);
 	const FGrenShot& G = GrenShotAt(S.Arg);
 	ACharacter* Ch = Me();
-	GrenPressFrame = GrenSpawnFrame = GrenFirstHitFrame = GrenBoomFrame = GrenJumpFrame = GrenWallDir = -1;
+	GrenPressFrame = GrenSpawnFrame = GrenFirstHitFrame = GrenBoomFrame = GrenJumpFrame = GrenWallDir = GrenDieFrame = -1;
 	GrenHits = GrenSpawns = GrenAdjusts = 0;
 	GrenCdAtPress = -1.f;
 	GrenFirstHit.Reset();
 	GrenWhere.Reset();
 	bGrenAim = false;
+	if ((int32)S.Arg >= GREN_LIFE_FIRST) LogScores(*FString::Printf(TEXT("%s_before"), S.Name));
 	if (Ch) Ch->ConsumeMovementInputVector();	// 순간이동으로 시작 — 앞 칸 이동 입력을 비운다(대시 칸과 같은 까닭)
-	SetHealthOf(Ch, 1000.f, 1000.f);
-	SetHealthOf(Foe.Get(), 1000.f, 1000.f);
+	SetHealthOf(Ch, 1000.f, G.MyHp > 0.f ? G.MyHp : 1000.f);
+	SetHealthOf(Foe.Get(), 1000.f, G.FoeHp > 0.f ? G.FoeHp : 1000.f);
 	GoHome();
 	switch (G.Place)
 	{
@@ -2478,7 +2670,8 @@ void UMOBContentProbeSubsystem::BeginGrenade()
 	case EGrenPlace::BlastCrouch:
 	case EGrenPlace::WallLedge:
 	case EGrenPlace::WallRoof:
-		// 던지는 동안 상대는 등 뒤 400(FoeSetup 자리) — 세우기는 터지기 전 BlastPass
+	case EGrenPlace::SelfNear:
+		// 던지는 동안 상대는 등 뒤 400(FoeSetup 자리) — 세우기는 터지기 전 BlastPass(SelfNear 는 나를 세운다)
 		if (ACharacter* F = Foe.Get()) F->UnCrouch();
 		PlaceFoe(-400.0, true);
 		FaceTo(G.Pitch, 0.0);
@@ -2500,6 +2693,27 @@ void UMOBContentProbeSubsystem::DuringGrenade()
 	const FStep& S = StepAt(ScriptIdx(), Step);
 	const FGrenShot& G = GrenShotAt(S.Arg);
 	ACharacter* Ch = Me();
+	// 피해 칸 — 이 칸 수류탄의 나이가 GREN_BLAST_AT · + STEP · + 2 STEP 인 프레임에 세움 · 고침 · 잼. 내 몸이 없어도 한다(던진 뒤 죽는 칸, G-0-b2)
+	if (IsBlastPlace(G.Place) && GrenSpawnFrame >= 0)
+	{
+		const int32 Age = Frame - GrenSpawnFrame;
+		for (const FGrenRec& R : Grens)
+		{
+			if (R.SpawnFrame != GrenSpawnFrame || !R.A.IsValid()) continue;
+			for (int32 Pass = 0; Pass < 3; ++Pass)
+			{
+				if (Age == GREN_BLAST_AT + Pass * GREN_BLAST_STEP) BlastPass(R.A.Get(), Pass);
+			}
+		}
+	}
+	// 던진 뒤 죽는 칸(G-0-b2 · 묶음 11) — 이 칸 수류탄이 생기고 DieAfter 프레임 뒤 스스로 죽는다(무기 판 「die」 칸과 같은 DamageSelfDestruct)
+	if (G.DieAfter >= 0 && GrenSpawnFrame >= 0 && GrenDieFrame < 0 && Frame - GrenSpawnFrame >= G.DieAfter && Ch)
+	{
+		if (ULyraHealthComponent* HC = ULyraHealthComponent::FindHealthComponent(Ch)) HC->DamageSelfDestruct();
+		GrenDieFrame = Frame;
+		FrameEvents += TEXT("die;");
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GDIE step=%s frame=%d age=%d hp=%.1f"), S.Name, Frame, Frame - GrenSpawnFrame, HealthOf(Ch));
+	}
 	if (!Ch) return;
 	const bool bBeforePress = GrenPressFrame < 0;
 	if (bGrenAim && bBeforePress) AimAt(GrenAimPoint);
@@ -2561,19 +2775,6 @@ void UMOBContentProbeSubsystem::DuringGrenade()
 		PressTag(GREN_TAG, false);
 		FrameEvents += TEXT("g_release;");
 	}
-	// 피해 칸 — 이 칸 수류탄의 나이가 GREN_BLAST_AT · + STEP · + 2 STEP 인 프레임에 세움 · 고침 · 잼
-	if (IsBlastPlace(G.Place) && GrenSpawnFrame >= 0)
-	{
-		const int32 Age = Frame - GrenSpawnFrame;
-		for (const FGrenRec& R : Grens)
-		{
-			if (R.SpawnFrame != GrenSpawnFrame || !R.A.IsValid()) continue;
-			for (int32 Pass = 0; Pass < 3; ++Pass)
-			{
-				if (Age == GREN_BLAST_AT + Pass * GREN_BLAST_STEP) BlastPass(R.A.Get(), Pass);
-			}
-		}
-	}
 }
 
 // 피해 칸 한 번 — Pass 0 에 상대를 세우고(벽 칸은 수류탄도 옮김 · 앉은 칸은 앉힘), 1 에 폭발 선 거리를 재서 거리 칸만 그만큼 고치고, 2 는 재기만 한다.
@@ -2583,7 +2784,8 @@ void UMOBContentProbeSubsystem::BlastPass(AActor* G, int32 Pass)
 {
 	const FStep& S = StepAt(ScriptIdx(), Step);
 	const FGrenShot& Shot = GrenShotAt(S.Arg);
-	ACharacter* F = Foe.Get();
+	const bool bSelf = Shot.Place == EGrenPlace::SelfNear;	// G-0-b2 자기 피해 · 자기 처치 — 상대 대신 나를 세운다
+	ACharacter* F = bSelf ? Me() : Foe.Get();
 	if (!G || !F) return;
 	const UCapsuleComponent* Cap = F->GetCapsuleComponent();
 	const double R = Cap->GetScaledCapsuleRadius();
@@ -2632,7 +2834,7 @@ void UMOBContentProbeSubsystem::BlastPass(AActor* G, int32 Pass)
 		}
 		if (!bFloor) FloorZ = L.Z - 3.0;
 		GrenBlastZ = FloorZ + HH + GREN_FOE_FLOOR_GAP;
-		if (Shot.Place == EGrenPlace::BlastCenter || Shot.Place == EGrenPlace::BlastCrouch)
+		if (Shot.Place == EGrenPlace::BlastCenter || Shot.Place == EGrenPlace::BlastCrouch || bSelf)
 		{
 			GrenBlastS = Shot.Arg;
 		}
@@ -2682,9 +2884,9 @@ void UMOBContentProbeSubsystem::BlastPass(AActor* G, int32 Pass)
 		F->SetActorLocation(FVector(L.X + GrenBlastDir.X * GrenBlastS, L.Y + GrenBlastDir.Y * GrenBlastS, To.Z), false, nullptr, ETeleportType::TeleportPhysics);
 	}
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GBLAST frame=%d step=%s pass=%d place=%d target=%.3f stopped=%d grenade=%.6f,%.6f,%.6f foe=%.6f,%.6f,%.6f crouched=%d hh=%.3f ")
-		TEXT("hit=%d dist=%.6f hitActor=%s hitComp=%s pen=%d capDist=%.6f centerDist=%.6f horiz=%.6f s=%.6f fix=%.6f"),
+		TEXT("hit=%d dist=%.6f hitActor=%s hitComp=%s pen=%d capDist=%.6f centerDist=%.6f horiz=%.6f s=%.6f fix=%.6f who=%s"),
 		Frame, S.Name, Pass, (int32)Shot.Place, Shot.Arg, bStopped ? 1 : 0, L.X, L.Y, L.Z, To.X, To.Y, To.Z, F->bIsCrouched ? 1 : 0, HHNow,
-		bHit ? 1 : 0, Hit.Distance, *GetNameSafe(Hit.GetActor()), *GetNameSafe(Hit.GetComponent()), Hit.bStartPenetrating ? 1 : 0, CapDist, FVector::Dist(L, To), Horiz, GrenBlastS, Fix);
+		bHit ? 1 : 0, Hit.Distance, *GetNameSafe(Hit.GetActor()), *GetNameSafe(Hit.GetComponent()), Hit.bStartPenetrating ? 1 : 0, CapDist, FVector::Dist(L, To), Horiz, GrenBlastS, Fix, bSelf ? TEXT("me") : TEXT("foe"));
 }
 
 // 던짐 칸 요약 한 줄(MOB_CPROBE_GREN) — 프레임 번호는 기록 표 frame 칸. spawnAfterPress = 생긴 프레임 − 누른 프레임, timerFrames = 터진 프레임 − 생긴 프레임(표 기대 120 또는 121)
@@ -2699,10 +2901,11 @@ void UMOBContentProbeSubsystem::EndGrenade()
 		if (GrenSpawnFrame >= 0 && R.SpawnFrame == GrenSpawnFrame) bGone = R.bGone;
 	}
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GREN step=%s shot=%s place=%d press=%d spawn=%d spawnAfterPress=%d spawns=%d firstHit=%d hits=%d hitWhat=[%s] boom=%d timerFrames=%d gone=%d ")
-		TEXT("cdAtPress=%.4f cdEnd=%.4f myDmg=%.3f foeDmg=%.3f crouched=%d where=[%s]"),
+		TEXT("cdAtPress=%.4f cdEnd=%.4f myDmg=%.3f foeDmg=%.3f crouched=%d where=[%s] die=%d"),
 		S.Name, G.Name, (int32)G.Place, GrenPressFrame, GrenSpawnFrame, (GrenSpawnFrame >= 0 && GrenPressFrame >= 0) ? GrenSpawnFrame - GrenPressFrame : -1, GrenSpawns,
 		GrenFirstHitFrame, GrenHits, *GrenFirstHit, GrenBoomFrame, (GrenBoomFrame >= 0 && GrenSpawnFrame >= 0) ? GrenBoomFrame - GrenSpawnFrame : -1, bGone ? 1 : 0,
-		GrenCdAtPress, GrenadeCooldownLeft(), GrenMyHpAtBegin - HealthOf(Ch), GrenFoeHpAtBegin - HealthOf(Foe.Get()), (Ch && Ch->bIsCrouched) ? 1 : 0, *GrenWhere);
+		GrenCdAtPress, GrenadeCooldownLeft(), GrenMyHpAtBegin - HealthOf(Ch), GrenFoeHpAtBegin - HealthOf(Foe.Get()), (Ch && Ch->bIsCrouched) ? 1 : 0, *GrenWhere, GrenDieFrame);
 	// 앉은 과녁 칸 — 다음 칸 전에 세운다
 	if (G.Place == EGrenPlace::BlastCrouch && Foe.IsValid()) Foe->UnCrouch();
+	if ((int32)S.Arg >= GREN_LIFE_FIRST) LogScores(S.Name);
 }
