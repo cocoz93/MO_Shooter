@@ -27,6 +27,7 @@
 //     u32 몽타주 수(버전 2), 몽타주마다 {
 //       u8 이름 길이, 이름, u8 종류(EMontageKind), u8 무리 이름 길이, 무리 이름, f 길이(초), f 재생 속도,
 //       f 넣기 시간, u8 넣기 곡선(엔진 EAlphaBlendOption 값), f 빼기 시간, u8 빼기 곡선, f 빼기 시작(음수 = 끝에서 빼기 시간만큼 앞), u8 자동 빼기,
+//       i16 빼기 비중 표(버전 6 — 뼈별 비중 표 번호, -1 = 없음),
 //       u8 줄 수, 줄마다 { u8 끼움 자리, u16 클립, f 몽타주 시각, f 클립 시작, f 클립 끝, f 클립 재생 속도 },
 //       u8 곡선 수, 곡선마다 { u8 이름 길이, 이름, i8 자리(-1 = 몽타주 시각 기준, 0 이상 = 그 줄 클립의 시각 기준), u32 hz, u32 값 수, f[값 수] } },
 //     i16 쏜 뒤 윗몸 덮기 클립(그 클립 시각 0 의 자세를 쓴다. -1 = 없음), u8 그 끼움 자리 }
@@ -34,7 +35,8 @@
 // 크기 칸은 넣지 않는다. 일반 클립은 1, 덧붙임 클립은 0 으로 항상 같고, 다르면 도구가 파일을 만들지 않는다.
 namespace mo
 {
-	inline constexpr uint32_t kClipPackVersion = 5;	// 5 = 몽타주 종류 5 → 8(근접 · 맞은 쪽 반응 뒤 · 앞, 컨텐츠 E-2). 칸 꼴은 그대로다. 4 는 거부한다(근접 몽타주가 없다).
+	inline constexpr uint32_t kClipPackVersion = 6;	// 6 = 몽타주 종류 8 → 12(대시 앞 · 뒤 · 왼 · 오른, 컨텐츠 D-4) · 몽타주마다 빼기 비중 표 칸(대시 넷 = FastFeet). 5 는 거부한다(대시 몽타주가 없다).
+														// 5 = 몽타주 종류 5 → 8(근접 · 맞은 쪽 반응 뒤 · 앞, 컨텐츠 E-2). 칸 꼴은 그대로다. 4 는 거부한다(근접 몽타주가 없다).
 														// 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3) — 몽타주 클립 번호가 20 씩 더 밀린다. 3 은 거부한다(앉기 클립이 없다).
 														// 3 = 묶음 클립 30개 뒤에 조준 클립 17개(컨텐츠 C-3, D60) — 몽타주 클립 번호가 17 씩 밀린다. 2 는 거부한다(조준 클립이 없다).
 														// 2 = 무기별 묶음 셋 + 뼈별 비중 표 · 끼움 자리 · 몽타주 표(9단계). 1 은 거부한다 — 소총까지 다시 만든다.
@@ -76,6 +78,10 @@ namespace mo
 		MONTAGE_MELEE,		// 근접 공격(무기마다 자산 — GA_Melee 의 무기별 MeleeAttackMontage, e1g3 실측 권총 · 소총 · 샷건 셋)
 		MONTAGE_HIT_BACK,	// 맞은 쪽 반응 AM_MM_HitReact_Back_Med_01(세 무기 같은 자산). 근접은 이것과 아래 것 중 무작위(D58)
 		MONTAGE_HIT_FRONT,	// 맞은 쪽 반응 AM_MM_HitReact_Front_Med_02
+		MONTAGE_DASH_FORWARD,	// 대시(컨텐츠 D-4) — GA_Hero_Dash 의 AM_MM_Dash_Forward · Backward · Left · Right, 자리 FullBody, 세 무기 같은 자산(D-0 dump_dash.txt, 원본 기준).
+		MONTAGE_DASH_BACKWARD,	// 차례 = EDashDir(Shared/Dash.h) — 종류 = MONTAGE_DASH_FORWARD + 방향
+		MONTAGE_DASH_LEFT,
+		MONTAGE_DASH_RIGHT,
 		MONTAGE_KIND_COUNT,
 	};
 
@@ -241,6 +247,10 @@ namespace mo
 		uint8_t blendOutOption = 0;
 		float blendOutTrigger = -1;
 		bool autoBlendOut = true;
+		// 빼기 비중 표(버전 6) — ClipProfile 번호, -1 = 없음. 엔진은 빼는 동안 이 표(시간 배율 방식)로 뼈마다 빠르기를 달리한다
+		// (FAnimInstanceProxy::SlotEvaluatePoseWithBlendProfiles · UBlendProfile::CalculateBoneWeight, 원본 기준). 대시 넷 = FastFeet(다리 뼈 0.5).
+		// 자세 계산은 아직 이 칸을 안 쓴다 — 와이어 몽타주 칸에 빼기 진행이 없어 되감기 판정이 따라 할 수 없다(content-impl-progress.md 미결 8)
+		int16_t blendOutProfile = -1;
 		std::vector<MontageTrack> tracks;
 		std::vector<MontageCurve> curves;
 	};

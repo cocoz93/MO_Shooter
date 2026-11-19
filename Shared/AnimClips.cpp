@@ -231,11 +231,13 @@ namespace mo
 				montage.blendOutOption = reader.Read<uint8_t>();
 				montage.blendOutTrigger = reader.Read<float>();
 				montage.autoBlendOut = reader.Read<uint8_t>() != 0;
+				montage.blendOutProfile = reader.Read<int16_t>();
 				const uint8_t trackCount = reader.Read<uint8_t>();
 				if (!reader.Ok()) return EClipLoad::Truncated;
 				if (montage.kind >= MONTAGE_KIND_COUNT || bundle.FindMontage(montage.kind) != &montage) return EClipLoad::BadMontage;
 				if (!(montage.length > 0.f) || !(montage.rate > 0.f) || !(montage.blendIn >= 0.f) || !(montage.blendOut >= 0.f) || trackCount == 0) return EClipLoad::BadMontage;
 				if (montage.blendInOption > kBlendOptionMax || montage.blendOutOption > kBlendOptionMax) return EClipLoad::BadMontage;
+				if (montage.blendOutProfile < -1 || montage.blendOutProfile >= (int)profileCount) return EClipLoad::BadMontage;
 
 				montage.tracks.resize(trackCount);
 				for (MontageTrack& track : montage.tracks)

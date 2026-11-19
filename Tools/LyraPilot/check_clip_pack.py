@@ -44,7 +44,7 @@ for line in open(profile_src, encoding='utf-8-sig', errors='replace'):
 
 def parse(src_path):
     s = dict(names={}, parent={}, ref={}, clips={}, marks={}, curves={}, keys={}, aim=None, move=None, mesh=None, bodies={}, hz=None,
-             montages={}, tracks={}, mcurves={}, override=None)
+             montages={}, mprofile={}, tracks={}, mcurves={}, override=None)
     for line in open(src_path, encoding='utf-8-sig', errors='replace'):
         c = line.rstrip('\r\n').split(',')
         if c[0] == 'INFO':
@@ -71,6 +71,7 @@ def parse(src_path):
             s['keys'][(int(c[1]), int(c[2]), int(c[3]))] = c[4:11]
         elif c[0] == 'MONTAGE':
             s['montages'][int(c[1])] = c[2:12]     # 이름 · 무리 · 길이 · 속도 · 넣기 · 넣기 곡선 · 빼기 · 빼기 곡선 · 빼기 시작 · 자동 빼기
+            s['mprofile'][int(c[1])] = c[15]       # 빼기 비중 표 이름(버전 6, None = 없음)
         elif c[0] == 'TRACK':
             s['tracks'].setdefault(int(c[1]), []).append(c[2:8])     # 자리 · 클립 · 몽타주 시각 · 클립 시작 · 클립 끝 · 속도
         elif c[0] in ('MCURVE', 'SCURVE'):
@@ -234,6 +235,13 @@ for line in open(dump_path, encoding='utf-8', errors='replace'):
             if int(want[i]) != int(c[2 + i]):
                 diff += 1
                 note('montage int', (cur, k, i))
+        # 빼기 비중 표(버전 6) — 덤프는 번호, 원본은 이름. 번호는 덤프 PROFILE 줄 차례
+        values += 1
+        p = int(c[12]) if len(c) > 12 else -2
+        got_profile = 'None' if p == -1 else (seen_profiles[p] if 0 <= p < len(seen_profiles) else f'?{p}')
+        if got_profile != srcs[cur]['mprofile'].get(k):
+            diff += 1
+            note('montage blend out profile', (cur, k, got_profile, srcs[cur]['mprofile'].get(k)))
     elif h == 'TRACK':
         k = int(c[1])
         counts['tracks'] = counts.get('tracks', 0) + 1

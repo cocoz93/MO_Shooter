@@ -132,8 +132,8 @@ namespace
 			}
 			for (const ClipMontage& montage : bundle.montages)
 			{
-				std::fprintf(file, "MONTAGE,%d,%s,%s,%.9g,%.9g,%.9g,%d,%.9g,%d,%.9g,%d\n", (int)montage.kind, montage.name.c_str(), montage.group.c_str(), montage.length, montage.rate,
-					montage.blendIn, (int)montage.blendInOption, montage.blendOut, (int)montage.blendOutOption, montage.blendOutTrigger, montage.autoBlendOut ? 1 : 0);
+				std::fprintf(file, "MONTAGE,%d,%s,%s,%.9g,%.9g,%.9g,%d,%.9g,%d,%.9g,%d,%d\n", (int)montage.kind, montage.name.c_str(), montage.group.c_str(), montage.length, montage.rate,
+					montage.blendIn, (int)montage.blendInOption, montage.blendOut, (int)montage.blendOutOption, montage.blendOutTrigger, montage.autoBlendOut ? 1 : 0, (int)montage.blendOutProfile);
 				for (const MontageTrack& track : montage.tracks)
 				{
 					std::fprintf(file, "TRACK,%d,%s,%u,%.9g,%.9g,%.9g,%.9g\n", (int)montage.kind, slots[track.slot].name.c_str(), (unsigned)track.clip, track.startPos, track.clipStart, track.clipEnd, track.playRate);

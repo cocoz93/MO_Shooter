@@ -34,7 +34,7 @@ tol_t = float(opt.get('time', 0.0002))
 tol_w = float(opt.get('weight', 0.0021))
 excepted = set(s for s in opt.get('except', '').split(',') if s)
 
-KINDS = ['fire', 'reload', 'equip', 'unequip', 'spawn', 'melee', 'hit_back', 'hit_front']    # Shared/AnimClips.h EMontageKind 차례
+KINDS = ['fire', 'reload', 'equip', 'unequip', 'spawn', 'melee', 'hit_back', 'hit_front', 'dash_forward', 'dash_backward', 'dash_left', 'dash_right']    # Shared/AnimClips.h EMontageKind 차례
 
 
 def kind_of(name):

@@ -157,12 +157,17 @@ namespace
 	// (사격 = fire_stand · 재장전 = reload · 꺼내기 = 그 무기로 돌아온 swap_back 조각의 첫 프레임). 차례 = Shared/AnimClips.h EMontageKind(사격 · 재장전 · 꺼내기 · 빼기 · 부활).
 	// 샷건 꺼내기 = 소총 것(샷건 자산이 없고 기록에서도 AM_MM_Rifle_Equip) · 빼기 · 부활은 세 무기가 같은 자산이다
 	// 근접 · 맞은 쪽 반응 뒤 · 앞(컨텐츠 E-2) — 근접 자산은 근접 시험판 e1g3 에서 그 무기를 든 채 능력이 튼 것(실측), 반응 둘은 근접에 늘 나오는 두 개(D58, 세 무기 같은 자산)
-	constexpr int32 kMontageKinds = 8;
+	// 대시 앞 · 뒤 · 왼 · 오른(컨텐츠 D-4) — GA_Hero_Dash 가 트는 넷, 세 무기 같은 자산(D-0 dump_dash.txt, 원본 기준)
+	constexpr int32 kMontageKinds = 12;
 	const TCHAR* const UNEQUIP_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Generic_Unequip.AM_MM_Generic_Unequip");
 	const TCHAR* const SPAWN_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Pistol_Spawn.AM_MM_Pistol_Spawn");
 	const TCHAR* const RIFLE_EQUIP_MONTAGE = TEXT("/Game/Weapons/Rifle/Animations/AM_MM_Rifle_Equip.AM_MM_Rifle_Equip");
 	const TCHAR* const HIT_BACK_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_HitReact_Back_Med_01.AM_MM_HitReact_Back_Med_01");
 	const TCHAR* const HIT_FRONT_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_HitReact_Front_Med_02.AM_MM_HitReact_Front_Med_02");
+	const TCHAR* const DASH_FORWARD_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Dash_Forward.AM_MM_Dash_Forward");
+	const TCHAR* const DASH_BACKWARD_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Dash_Backward.AM_MM_Dash_Backward");
+	const TCHAR* const DASH_LEFT_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Dash_Left.AM_MM_Dash_Left");
+	const TCHAR* const DASH_RIGHT_MONTAGE = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Dash_Right.AM_MM_Dash_Right");
 	struct FWeaponMontageNames
 	{
 		const TCHAR* Key;							// FWeaponClipNames::Key 와 같다
@@ -172,15 +177,18 @@ namespace
 	const FWeaponMontageNames WEAPON_MONTAGES[] = {
 		{ TEXT("rifle"), { TEXT("/Game/Weapons/Rifle/Animations/AM_MM_Rifle_Fire.AM_MM_Rifle_Fire"), TEXT("/Game/Weapons/Rifle/Animations/AM_MM_Rifle_Reload.AM_MM_Rifle_Reload"),
 			RIFLE_EQUIP_MONTAGE, UNEQUIP_MONTAGE, SPAWN_MONTAGE,
-			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Rifle_Melee.AM_MM_Rifle_Melee"), HIT_BACK_MONTAGE, HIT_FRONT_MONTAGE },
+			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Rifle_Melee.AM_MM_Rifle_Melee"), HIT_BACK_MONTAGE, HIT_FRONT_MONTAGE,
+			DASH_FORWARD_MONTAGE, DASH_BACKWARD_MONTAGE, DASH_LEFT_MONTAGE, DASH_RIGHT_MONTAGE },
 			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle/MF_Rifle_Idle_Hipfire.MF_Rifle_Idle_Hipfire") },
 		{ TEXT("pistol"), { TEXT("/Game/Weapons/Pistol/Animations/AM_MM_Pistol_Fire.AM_MM_Pistol_Fire"), TEXT("/Game/Weapons/Pistol/Animations/AM_MM_Pistol_Reload.AM_MM_Pistol_Reload"),
 			TEXT("/Game/Weapons/Pistol/Animations/AM_MM_Pistol_Equip.AM_MM_Pistol_Equip"), UNEQUIP_MONTAGE, SPAWN_MONTAGE,
-			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Pistol_Melee.AM_MM_Pistol_Melee"), HIT_BACK_MONTAGE, HIT_FRONT_MONTAGE },
+			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Pistol_Melee.AM_MM_Pistol_Melee"), HIT_BACK_MONTAGE, HIT_FRONT_MONTAGE,
+			DASH_FORWARD_MONTAGE, DASH_BACKWARD_MONTAGE, DASH_LEFT_MONTAGE, DASH_RIGHT_MONTAGE },
 			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Pistol/MF_Pistol_Hipfire_OverridePose.MF_Pistol_Hipfire_OverridePose") },
 		{ TEXT("shotgun"), { TEXT("/Game/Weapons/Shotgun/Animations/AM_MM_Shotgun_Fire.AM_MM_Shotgun_Fire"), TEXT("/Game/Weapons/Shotgun/Animations/AM_MM_Shotgun_Reload.AM_MM_Shotgun_Reload"),
 			RIFLE_EQUIP_MONTAGE, UNEQUIP_MONTAGE, SPAWN_MONTAGE,
-			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Shotgun_Melee.AM_MM_Shotgun_Melee"), HIT_BACK_MONTAGE, HIT_FRONT_MONTAGE },
+			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Shotgun_Melee.AM_MM_Shotgun_Melee"), HIT_BACK_MONTAGE, HIT_FRONT_MONTAGE,
+			DASH_FORWARD_MONTAGE, DASH_BACKWARD_MONTAGE, DASH_LEFT_MONTAGE, DASH_RIGHT_MONTAGE },
 			TEXT("/Game/Characters/Heroes/Mannequin/Animations/Locomotion/Rifle/MF_Rifle_Idle_Hipfire.MF_Rifle_Idle_Hipfire") },
 	};
 	constexpr int32 MONTAGE_CURVE_HZ = 120;		// 몽타주 · 몽타주 클립 곡선을 뽑는 간격(클립 표본과 같은 간격, 제안값)
