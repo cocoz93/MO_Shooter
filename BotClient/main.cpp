@@ -24,6 +24,10 @@
 //   --melee = 적이 4m 안에 보이면 근접 단추를 누른다(E-3). 근접이 켜지는 입력마다 서버와 같은 식으로 화면 판정해 밀기를 예측에 넣고,
 //     서버 근접 결과(S2C_MELEE)로 고친다. 받은 근접 소식의 규칙도 본다(BOT melee · meleeFix · meleeRules 줄). 기본 꺼짐
 //   --breakMelee(--melee 와 함께)는 화면 판정 밀기를 반으로 넣는다 — 서버 결과로 고친 수(meleeFix forceFixes)가 화면 맞음 수만큼 늘어야 한다
+//   --dash = 0.2~2.5초마다 대시 단추를 한 번 누른다(D-3). 방향(앞 · 뒤 · 왼 · 오른 · 위 보고 앞 · 아래 보고 앞)을 고루 섞고, 켜져 있는 동안 점프 · 재장전 · 근접을 가끔 눌러
+//     막기 갈래를 지나가게 한다. 서버 대시 소식(S2C_DASH)으로 예측을 고치고 고친 수(BOT dash dashDiff)를 센다. 기본 꺼짐
+//   --breakDash=predict(--dash 와 함께)는 대시 단추를 서버에만 보내고 예측엔 안 넣는다 — 서버가 켠 대시를 예측이 안 켜 dashDiff(startMismatches)가 서야 한다.
+//     --breakDash=server 는 반대로 예측에만 넣는다 — 서버 소식 없이 지나간 대시(unconfirmed)가 서야 한다
 // 판정 대조(후보 1, 7단계): --judgeClips=<클립 파일> --judgeLog=<파일> [--judgeNoSpread] 면 봇이 화면 역할을 한다.
 //   받은 상태로 서버와 같은 식의 몸 자세를 만들어 탄마다 자기 판정을 남긴다. 서버 --rewindBulletLog 줄과 Tools/Regress/check_bot_hits.py 로 견준다
 //   --judgeFireAlways 면 적이 안 보여도 방아쇠를 놓지 않는다(10명 전원 연사 비용 측정) — 판정 대조 밖(부하 판)에서도 먹는다(D95)
@@ -97,6 +101,9 @@ namespace
 		return read == data.size() && map.LoadFromMemory(data.data(), data.size()) == EMapLoad::Ok;
 	}
 
+	constexpr int kBreakDashPredict = 1;	// --breakDash=predict — 예측에 안 넣음
+	constexpr int kBreakDashServer = 2;		// --breakDash=server — 서버에 안 보냄
+
 	struct Args
 	{
 		std::string mapPath;
@@ -120,6 +127,8 @@ namespace
 		bool startAllWeapons = false;	// --testStartAllWeapons(시험 전용 · 서버도 같이) — 세 무기로 부활(무기 줍기 전 동작). 예측의 가방이 서버와 같게(W-2)
 		bool push = false;				// --push — 쏘지 않고 가장 가까운 사람 쪽으로 걷는다(F-2 보정 양 측정)
 		bool breakMelee = false;			// --breakMelee — 화면 판정 밀기를 반으로(일부러 틀림)
+		bool dash = false;				// --dash — 가끔 대시를 누른다(D-3). 꺼져 있으면 기존 시험과 같은 입력
+		int breakDash = 0;				// --breakDash=predict|server — 대시 단추를 예측 · 서버 한쪽에만(일부러 틀림)
 		std::string judgeClips;			// 주면 봇이 화면 역할로 탄마다 자기 판정을 남긴다(후보 1, 7단계). measureView 를 함께 켠다
 		std::string judgeLog;
 		bool judgeNoSpread = false;		// 서버 --rewindNoSpread 와 같이 쓴다 — 자세만 본다
@@ -368,6 +377,52 @@ namespace
 		to.rerunsMissed += from.rerunsMissed;
 	}
 
+	// 대시(D-3) — 봇 하나가 센 것. 누름 · 받은 대시 소식 규칙
+	struct DashBotCounts
+	{
+		uint64_t presses = 0;			// 대시 단추를 누른 입력(봇이 센 것 — 예측 presses 와 같아야 한다)
+		uint64_t kinds[6] = {};			// 그중 고른 방향 종류 — 앞 · 뒤 · 왼 · 오른 · 위 보고 앞 · 아래 보고 앞(누르기 한 입력 앞 이동 · 누른 입력 피치)
+		uint64_t extraJump = 0, extraReload = 0, extraMelee = 0;	// 켜져 있는 동안(예측 기준) 같이 누른 단추 — 막기 갈래를 지나가게
+		uint64_t msgs = 0;				// 받은 대시 소식 전부(남의 것 포함)
+		uint64_t mine = 0;				// 그중 내 것 — 합 = 서버 SERVER dash started(봇만 든 판)
+		uint64_t mineDir[4] = {};		// 내 것의 방향(EDashDir)
+		// 규칙 위반 — 전부 0 이어야 한다
+		uint64_t badShape = 0;			// 방향 칸 범위 밖 · 힘 크기가 kDashStrength 가 아님
+		uint64_t badDead = 0;			// 죽은 뒤 대시
+		uint64_t badPost = 0;			// 경기 끝 단계 대시(서버가 막는다)
+	};
+
+	void AddDashCounts(DashBotCounts& to, const DashBotCounts& from)
+	{
+		to.presses += from.presses;
+		for (int i = 0; i < 6; ++i) to.kinds[i] += from.kinds[i];
+		to.extraJump += from.extraJump;
+		to.extraReload += from.extraReload;
+		to.extraMelee += from.extraMelee;
+		to.msgs += from.msgs;
+		to.mine += from.mine;
+		for (int i = 0; i < 4; ++i) to.mineDir[i] += from.mineDir[i];
+		to.badShape += from.badShape;
+		to.badDead += from.badDead;
+		to.badPost += from.badPost;
+	}
+
+	void AddDashFixes(CSelfPrediction::DashCounters& to, const CSelfPrediction::DashCounters& from)
+	{
+		to.presses += from.presses;
+		to.started += from.started;
+		to.respawnGained += from.respawnGained;
+		to.respawnLost += from.respawnLost;
+		to.results += from.results;
+		to.resultsNoSlot += from.resultsNoSlot;
+		to.startMismatches += from.startMismatches;
+		to.forceFixes += from.forceFixes;
+		to.unconfirmed += from.unconfirmed;
+		to.replays += from.replays;
+		to.replaysMissed += from.replaysMissed;
+		to.meleeInReplay += from.meleeInReplay;
+	}
+
 	// 근접 화면 판정 한 번 — 결과(wire::EMeleeResult) · 처음 닿은 몸의 주인
 	struct MeleeGuess
 	{
@@ -380,7 +435,7 @@ namespace
 	{
 	public:
 		CBot(const CMapCollision& map, CMoveSim& sim, const MatchRules& rules, uint32_t seed)
-			: _map(map), _rules(rules), _sim(sim), _rng(seed), _self(sim, rules, MakeLyraMoveParams().maxWalkSpeed), _judgeRng(seed ^ 0x5A5A1234u), _crouchRng(seed ^ 0x3C3C5678u)
+			: _map(map), _rules(rules), _sim(sim), _rng(seed), _self(sim, rules, MakeLyraMoveParams().maxWalkSpeed), _judgeRng(seed ^ 0x5A5A1234u), _crouchRng(seed ^ 0x3C3C5678u), _dashRng(seed ^ 0x6A6A9ABCu)
 		{
 			const MoveParams params = MakeLyraMoveParams();		// 서버 CRoom 의 _params 와 같은 값 — 근접 화면 판정의 상대 캡슐
 			_capsuleRadius = params.capsuleRadius;
@@ -442,14 +497,17 @@ namespace
 			if (meleeStarts) guess = JudgeMelee(input, meleePush);
 			const Vec3* pushArg = meleeStarts && guess.kind == wire::MELEE_HIT ? &meleePush : nullptr;
 			SetPawnsForPrediction();
-			if (_breakCrouch && (input.buttons & wire::BUTTON_CROUCH) != 0)
+			const bool breakDashPredict = _breakDash == kBreakDashPredict && (input.buttons & wire::BUTTON_DASH) != 0;
+			if ((_breakCrouch && (input.buttons & wire::BUTTON_CROUCH) != 0) || breakDashPredict)
 			{
 				wire::Input mine = input;
-				mine.buttons &= (uint8_t)~wire::BUTTON_CROUCH;
+				if (_breakCrouch) mine.buttons &= (uint8_t)~wire::BUTTON_CROUCH;
+				if (breakDashPredict) mine.buttons &= (uint8_t)~wire::BUTTON_DASH;
 				_self.AddInput(mine, pushArg);
 				input.seq = mine.seq;
 			}
 			else _self.AddInput(input, pushArg);
+			if (_breakDash == kBreakDashServer) input.buttons &= (uint8_t)~wire::BUTTON_DASH;	// 일부러 틀림 — 예측엔 넣고 서버엔 안 보냄
 			ClearPawns();
 			if (meleeStarts) _meleeGuesses[input.seq] = guess;
 			_meleeYaw = input.yaw;		// 서버 player.yaw = 마지막으로 적용한 입력의 요 — 다음 근접의 몸 앞
@@ -468,6 +526,10 @@ namespace
 		void SetAdsWhenShooting(bool on) { _adsWhenShooting = on; }
 		void SetCrouchToggle(bool on, bool breakCrouch) { _crouchToggle = on; _breakCrouch = breakCrouch; }
 		void SetMelee(bool on, bool breakPush) { _meleeNear = on; _breakMelee = breakPush; }
+		void SetDash(bool on, int breakDash) { _dashPress = on; _breakDash = breakDash; }
+		const DashBotCounts& GetDashCounts() const { return _dashCounts; }
+		const CSelfPrediction::DashCounters& GetDashFixes() const { return _self.GetDashCounters(); }
+		uint64_t GetDashUnconfirmedPost() const { return _dashUnconfirmedPost; }
 		void SetPush(bool on) { _push = on; }
 		void SetFireAlways(bool on) { _fireAlways = on; }
 		void SetPauseAfterSpawn(int ticks) { _pauseAfterSpawn = ticks; }
@@ -608,6 +670,9 @@ namespace
 				break;
 			case wire::Msg::S2C_MELEE:
 				OnMelee(Copy<wire::Melee>(data, size));
+				break;
+			case wire::Msg::S2C_DASH:
+				OnDash(Copy<wire::Dash>(data, size));
 				break;
 			case wire::Msg::S2C_RESULT:
 				_result = Copy<wire::Result>(data, size);
@@ -769,6 +834,24 @@ namespace
 			}
 			SetPawnsForPrediction();	// 그 입력부터 다시 돌리는 걸음도 남 캡슐을 본다 — 근접은 늘 남 옆이다
 			_self.OnMeleeResult(melee.seq, hit, Vec3((double)melee.forceX, (double)melee.forceY, 0.0));
+			ClearPawns();
+		}
+
+		// 대시 소식(D-3) — 받은 것 전부의 규칙을 보고, 내 것이면 예측을 서버 값으로 고친다(다르면 그 입력부터 대시를 다시 고르고 걸음을 다시 돌린다)
+		void OnDash(const wire::Dash& dash)
+		{
+			DashBotCounts& c = _dashCounts;
+			++c.msgs;
+			const Vec3 force(dash.forceX, dash.forceY, dash.forceZ);
+			if (dash.dir > (uint8_t)EDashDir::Right || std::fabs(Length(force) - (double)kDashStrength) > 1e-6) ++c.badShape;	// 힘 = 정규화한 방향 × 세기(DashForce)
+			const auto dead = _deadSince.find(dash.player);
+			if (dead != _deadSince.end() && dash.tick > dead->second) ++c.badDead;
+			if (_postTick != 0 && dash.tick > _postTick) ++c.badPost;		// 근접 · 피해와 같은 경계
+			if (dash.player != _welcome.playerId) return;
+			++c.mine;
+			if (dash.dir <= (uint8_t)EDashDir::Right) ++c.mineDir[dash.dir];
+			SetPawnsForPrediction();	// 그 입력부터 다시 돌리는 걸음도 남 캡슐을 본다
+			_self.OnDashResult(dash.seq, dash.dir, force);
 			ClearPawns();
 		}
 
@@ -991,11 +1074,22 @@ namespace
 			if (_rules.pawnBlock) _sim.SetPawns(nullptr, 0);
 		}
 
+		// 대시 확인(AckDash)으로 「소식 없이 지나감」이 는 수 중 경기 끝 단계 몫 — 서버는 단계를 틱 첫머리에 바꾸고(TickPhase → 입력) 경기 끝엔 대시를 막는데,
+		// 예측은 경기 단계를 모르고 봇은 경기 끝 소식을 받기 전에 보낸 입력에선 누를 수 있다. 정직한 클라도 못 피하는 고침이라 따로 센다(상태 틱 ≥ 경기 끝 틱).
+		// 점수로 끝난 틱은 그 틱 입력이 경기 중에 돌아(끝은 그 뒤 처치에서) 서버도 켜므로 이 갈래에 안 든다
+		void NoteDashUnconfirmed(uint64_t before)
+		{
+			const uint64_t added = _self.GetDashCounters().unconfirmed - before;
+			if (added != 0 && _postTick != 0 && _newestStateTick >= _postTick) _dashUnconfirmedPost += added;
+		}
+
 		// 사람끼리 막기를 켠 판 — 같은 코드라도 남 자리를 늦게 알아 어긋난다. 다리(MOBridgeSubsystem.cpp kCorrectTolerance)와 같은 0.1 로 고치고 그 양을 센다
 		void ReconcileWithPawns(const wire::PlayerState& p)
 		{
 			SetPawnsForPrediction();
-			const CSelfPrediction::ReconcileResult r = _self.Reconcile(p, kPawnCorrectTolerance);
+			const uint64_t unconfirmedBefore = _self.GetDashCounters().unconfirmed;
+			const CSelfPrediction::ReconcileResult r = _self.Reconcile(p, kPawnCorrectTolerance);		// 처음에 AckMelee · AckDash
+			NoteDashUnconfirmed(unconfirmedBefore);
 			ClearPawns();
 			if (!r.compared) return;
 			++_pawnReconciles;
@@ -1019,8 +1113,18 @@ namespace
 
 		void CompareSelf(const wire::PlayerState& p)
 		{
-			// 근접(E-3) — 서버가 지나간 입력 중 결과 없는 근접은 밀기를 지운다(예측 AckMelee). 근접 소식은 같은 연결에서 상태보다 먼저 온다
-			if (!(p.flags & wire::STATE_DEAD)) _self.AckMelee(p.lastSeq);
+			// 근접(E-3) — 서버가 지나간 입력 중 결과 없는 근접은 밀기를 지운다(예측 AckMelee). 근접 소식은 같은 연결에서 상태보다 먼저 온다.
+			// 대시(D-3)도 같다 — 소식 없이 지나간 대시는 안 켠 것으로 다시 고른다(AckDash). 막기를 켠 판은 뒤 ReconcileWithPawns → Reconcile 이 남 캡슐을 놓고 부른다
+			if (!(p.flags & wire::STATE_DEAD))
+			{
+				_self.AckMelee(p.lastSeq);
+				if (!_rules.pawnBlock)
+				{
+					const uint64_t unconfirmedBefore = _self.GetDashCounters().unconfirmed;
+					_self.AckDash(p.lastSeq);
+					NoteDashUnconfirmed(unconfirmedBefore);
+				}
+			}
 			while (!_meleeGuesses.empty() && _meleeGuesses.begin()->first <= p.lastSeq)
 			{
 				++_meleeCounts.guessNoResult;
@@ -1635,6 +1739,41 @@ namespace
 				input.buttons |= wire::BUTTON_MELEE;
 				++_meleeCounts.presses;
 			}
+			// --dash(D-3) — 정해 둔 간격마다 대시 단추를 한 번 누른다(누른 입력 하나에만). 간격 · 방향 · 같이 누를 단추는 따로 쓰는 난수(_dashRng)라 두뇌 난수(_rng)를 안 건드린다.
+			// 간격 12~150 입력 = --crouch 와 같다 — 켜짐 32 · 쿨다운 91 입력보다 짧은 것 · 긴 것이 섞여 켬 · 켜져 있음 · 쿨다운 갈래가 다 돈다.
+			// 방향은 능력이 앞 입력의 이동 · 몸 요로 고르므로(SelectDashDir) 누르기 한 입력 앞에서 이동을 그 입력 요 기준 0 · 180 · −90 · +90° 로 놓는다(갈래마다 한가운데).
+			// 위 · 아래 보고 앞은 누른 입력의 피치를 +40 · −30 으로(앞 대시 힘은 카메라 앞이다. D-0 기록은 피치 +20 · +45 · 아래). 부활 기다리는 중 · 경기 끝 단계엔 안 누른다 —
+			// 서버는 죽은 사람 입력을 대시 앞에서 버리고(dead 로만 센다), 경기 끝은 막는데 예측은 경기 단계를 모른다(다리는 Lyra 입력 막음을 따른다 — D-5)
+			if (_dashPress && !_self.IsWaitingSpawn() && _phase != (uint8_t)wire::EMatchPhase::PostGame)
+			{
+				--_dashWait;
+				if (_dashWait == 1)
+				{
+					_dashKind = std::min(5, (int)(_dashRng.NextFloat() * 6.f));
+					static const double kDashKindYaw[6] = { 0.0, 180.0, -90.0, 90.0, 0.0, 0.0 };
+					const double angle = ((double)input.yaw + kDashKindYaw[_dashKind]) * kPi / 180.0;
+					input.moveX = (float)std::cos(angle);
+					input.moveY = (float)std::sin(angle);
+				}
+				else if (_dashWait <= 0)
+				{
+					input.buttons |= wire::BUTTON_DASH;
+					if (_dashKind == 4) input.pitch = 40.f;
+					else if (_dashKind == 5) input.pitch = -30.f;
+					++_dashCounts.presses;
+					++_dashCounts.kinds[_dashKind];
+					_dashWait = 12 + (int)(_dashRng.NextFloat() * 138.f);
+				}
+				else if (_self.IsDashActive() && _dashRng.NextFloat() < 0.125f)
+				{
+					// 켜져 있는 동안 — 서버 · 예측 둘 다 막아야 하는 누름(점프 · 재장전 · 근접). 끝 입력이면 막히지 않고 켜진다(그것도 같은 코드로 같아야 한다).
+					// 근접은 앉기 키와 같은 입력엔 안 누른다(위 --melee 와 같은 까닭 — 화면 판정이 넣기 전 손 높이로 본다)
+					const int pick = std::min(2, (int)(_dashRng.NextFloat() * 3.f));
+					if (pick == 0) { input.buttons |= wire::BUTTON_JUMP; ++_dashCounts.extraJump; }
+					else if (pick == 1) { input.buttons |= wire::BUTTON_RELOAD; ++_dashCounts.extraReload; }
+					else if ((input.buttons & wire::BUTTON_CROUCH) == 0) { input.buttons |= wire::BUTTON_MELEE; ++_dashCounts.extraMelee; }
+				}
+			}
 		}
 
 		const CMapCollision& _map;
@@ -1791,6 +1930,14 @@ namespace
 		std::map<uint32_t, MeleeGuess> _meleeGuesses;		// 입력 번호 → 화면 판정. 서버 결과가 오거나 서버가 결과 없이 지나가면 지운다
 		std::deque<wire::Melee> _meleePendingDamage;		// 피해 소식이 뒤따라야 할 근접 맞음
 		std::vector<MeleeTarget> _meleeTargets;
+		// 대시(D-3)
+		bool _dashPress = false;		// --dash
+		int _breakDash = 0;				// --breakDash — kBreakDashPredict · kBreakDashServer
+		CSpreadRng _dashRng;
+		int _dashWait = 30;				// 다음 누름까지 남은 입력(첫 누름은 부활 뒤 30입력째 — 처음부터 방향을 고른 누름이 되게 1 을 지나간다)
+		int _dashKind = 0;				// 이번 누름의 방향 종류(DashBotCounts::kinds 차례)
+		DashBotCounts _dashCounts;
+		uint64_t _dashUnconfirmedPost = 0;	// 그중 경기 끝 단계 몫(NoteDashUnconfirmed)
 		double _posMax = 0;
 		uint32_t _firstBadSeq = 0;
 		int _flagDiffLogged = 0;		// FLAGDIFF 줄을 적은 수(LogFlagDiff — 봇마다 FLAG_DIFF_LOG_LIMIT 까지)
@@ -1841,6 +1988,17 @@ namespace
 			else if (s == "--ads") out.adsWhenShooting = true;
 			else if (s == "--crouch") out.crouchToggle = true;
 			else if (s == "--melee") out.meleeNear = true;
+			else if (s == "--dash") out.dash = true;
+			else if (value("--breakDash=", v))
+			{
+				if (v == "predict") out.breakDash = kBreakDashPredict;
+				else if (v == "server") out.breakDash = kBreakDashServer;
+				else
+				{
+					std::printf("모르는 대시 틀림 %s (predict · server)\n", v.c_str());
+					return false;
+				}
+			}
 			else if (s == "--testNoPawnBlock") out.pawnBlock = false;
 			else if (s == "--testStartAllWeapons") out.startAllWeapons = true;
 			else if (s == "--push") out.push = true;
@@ -1926,6 +2084,7 @@ int main(int argc, char** argv)
 		bots.back()->SetAdsWhenShooting(args.adsWhenShooting);
 		bots.back()->SetCrouchToggle(args.crouchToggle, args.breakCrouch);
 		bots.back()->SetMelee(args.meleeNear, args.breakMelee);
+		bots.back()->SetDash(args.dash, args.breakDash);
 		bots.back()->SetPush(args.push);
 		bots.back()->SetFireAlways(args.judgeFireAlways);
 		bots.back()->SetPauseAfterSpawn(args.testPauseAfterSpawn);
@@ -2100,6 +2259,9 @@ int main(int argc, char** argv)
 	double pawnCorrectSum = 0, pawnCorrectMax = 0;
 	MeleeBotCounts melee;
 	CSelfPrediction::MeleeCounters meleeFixes;
+	DashBotCounts dash;
+	CSelfPrediction::DashCounters dashFixes;
+	uint64_t dashUnconfirmedPost = 0;
 	uint64_t meleePendingLeft = 0;
 	uint64_t padMsgs = 0, padBad = 0, padSeekStarts = 0, padSeekTicks = 0, padHealsMine = 0, padHealsSought = 0;
 	uint64_t invDiff = 0, invMulti = 0, weaponPickupsMine = 0, weaponSeekStarts = 0, weaponSeekTicks = 0, weaponTakesSought = 0, weaponSeekAmmoStarts = 0, spareOutTicks = 0;
@@ -2133,6 +2295,9 @@ int main(int argc, char** argv)
 		pawnCorrectMax = std::max(pawnCorrectMax, bot.GetPawnCorrectMax());
 		AddMeleeCounts(melee, bot.GetMeleeCounts());
 		AddMeleeFixes(meleeFixes, bot.GetMeleeFixes());
+		AddDashCounts(dash, bot.GetDashCounts());
+		AddDashFixes(dashFixes, bot.GetDashFixes());
+		dashUnconfirmedPost += bot.GetDashUnconfirmedPost();
 		meleePendingLeft += bot.GetMeleePendingDamage();
 		states += bot.GetStates();
 		detours += bot.GetDetours();
@@ -2218,6 +2383,14 @@ int main(int argc, char** argv)
 			u(meleeFixes.started), u(meleeFixes.pushesGiven), u(meleeFixes.pushesIgnored), u(meleeFixes.results), u(meleeFixes.resultsNoSlot), u(meleeFixes.startMismatches), u(meleeFixes.pushHitFixes), u(meleeFixes.pushForceFixes), u(meleeFixes.unconfirmed), u(meleeFixes.rerunsMissed));
 		std::printf("BOT meleeRules msgs=%llu hits=%llu damaged=%llu zero=%llu damageMsgs=%llu kills=%llu pendingLeft=%llu | bad shape=%llu dead=%llu post=%llu damage=%llu zero=%llu\n",
 			u(melee.msgs), u(melee.hits), u(melee.hitsDamaged), u(melee.hitsZero), u(melee.damageMsgs), u(melee.kills), u(meleePendingLeft), u(melee.badShape), u(melee.badDead), u(melee.badPost), u(melee.badDamage), u(melee.badZero));
+		// 대시(D-3) — mine 합 = 서버 SERVER dash started(봇만 든 판). dashDiff = 서버 소식으로 고친 대시(켬 어긋남 + 방향 · 힘 + 소식 없이 지나감 − 그중 경기 끝 몫 unconfirmedPost), 봇 판 기대 0.
+		// pressed = 봇이 누른 입력, predPresses = 예측이 센 누름(같아야 한다). kinds = 앞 · 뒤 · 왼 · 오른 · 위 보고 앞 · 아래 보고 앞, dir = 서버가 고른 방향(앞 · 뒤 · 왼 · 오른)
+		// respawn = 부활 다시 돌리기에서 켜짐이 바뀐 칸(늘어남/줄어듦). 서버 켬 = mine = predStarted + 늘어남 − 줄어듦 + startMismatches − unconfirmed
+		std::printf("BOT dash pressed=%llu predPresses=%llu predStarted=%llu respawn=+%llu/-%llu kinds=%llu/%llu/%llu/%llu/%llu/%llu extra jump=%llu reload=%llu melee=%llu | mine=%llu dir=%llu/%llu/%llu/%llu results=%llu noSlot=%llu | dashDiff=%llu startMismatches=%llu forceFixes=%llu unconfirmed=%llu unconfirmedPost=%llu replays=%llu replaysMissed=%llu meleeInReplay=%llu\n",
+			u(dash.presses), u(dashFixes.presses), u(dashFixes.started), u(dashFixes.respawnGained), u(dashFixes.respawnLost), u(dash.kinds[0]), u(dash.kinds[1]), u(dash.kinds[2]), u(dash.kinds[3]), u(dash.kinds[4]), u(dash.kinds[5]),
+			u(dash.extraJump), u(dash.extraReload), u(dash.extraMelee), u(dash.mine), u(dash.mineDir[0]), u(dash.mineDir[1]), u(dash.mineDir[2]), u(dash.mineDir[3]), u(dashFixes.results), u(dashFixes.resultsNoSlot),
+			u(dashFixes.startMismatches + dashFixes.forceFixes + dashFixes.unconfirmed - dashUnconfirmedPost), u(dashFixes.startMismatches), u(dashFixes.forceFixes), u(dashFixes.unconfirmed), u(dashUnconfirmedPost), u(dashFixes.replays), u(dashFixes.replaysMissed), u(dashFixes.meleeInReplay));
+		std::printf("BOT dashRules msgs=%llu | bad shape=%llu dead=%llu post=%llu\n", u(dash.msgs), u(dash.badShape), u(dash.badDead), u(dash.badPost));
 	}
 	// 받침(컨텐츠 B-4) — healsMine 합 = 서버 SERVER pickups(봇만 든 판). healsSought = 찾아가던 중에 받은 회복(갈래가 실제로 닿았나)
 	std::printf("BOT pads count=%zu msgs=%llu bad=%llu seekStarts=%llu seekTicks=%llu healsMine=%llu healsSought=%llu\n", padCountMax, (unsigned long long)padMsgs,
@@ -2260,6 +2433,11 @@ int main(int argc, char** argv)
 	if (melee.badShape != 0 || melee.badDead != 0 || melee.badPost != 0 || melee.badDamage != 0 || melee.badZero != 0 || meleePendingLeft != 0) ok = false;
 	if (melee.noGuess != 0 || meleeFixes.startMismatches != 0 || meleeFixes.rerunsMissed != 0 || meleeFixes.pushesIgnored != 0) ok = false;
 	if (args.meleeNear && melee.mine == 0) ok = false;
+	// 대시(D-3) — 소식 규칙 · 고친 수 0(경기 끝 몫 빼고) · 받은 내 소식 = 예측이 받은 수(칸 있음 + 없음). --dash 면 서버가 한 번 이상 켜고, 누른 수가 봇 · 예측 같고,
+	// 서버 켬 = 예측 켬(입력 때 + 부활 다시 돌리기 늘어남 − 줄어듦 + 서버 소식으로 켬 − 소식 없이 지나감) — 세는 자리가 빠지면 갈린다
+	if (dash.badShape != 0 || dash.badDead != 0 || dash.badPost != 0) ok = false;
+	if (dashFixes.startMismatches != 0 || dashFixes.forceFixes != 0 || dashFixes.unconfirmed != dashUnconfirmedPost || dashFixes.results + dashFixes.resultsNoSlot != dash.mine) ok = false;
+	if (args.dash && (dash.mine == 0 || dash.presses != dashFixes.presses || dashFixes.started + dashFixes.respawnGained + dashFixes.startMismatches != dash.mine + dashFixes.respawnLost + dashFixes.unconfirmed)) ok = false;
 	if (shotsWhileDead != 0 || damageOutside != 0 || damageImmune != 0) ok = false;
 	std::printf("RESULT %s\n", ok ? "PASS" : "FAIL");
 	return ok ? 0 : 1;

@@ -15,7 +15,7 @@ class ALyraWeaponSpawner;
 struct FMOBCore;
 struct FGameplayAbilityActorInfo;
 
-namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; } struct Vec3; }
+namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; } struct Vec3; }
 
 // 남의 캐릭터 — 서버 상태를 틱 번호와 함께 쌓아 0.1초 뒤 시점을 보여 준다
 struct FMOBSnapshot
@@ -165,6 +165,7 @@ private:
 	void TickDevices(double Now);		// 매 프레임 — 몸이 장치 겹침 칸에 든 프레임 · 그중 Lyra 가 겹침으로 본 프레임을 센다
 	void HandlePickup(const mo::wire::Pickup& M);
 	void HandleMelee(const mo::wire::Melee& M);
+	void HandleDash(const mo::wire::Dash& M);
 	ALyraWeaponSpawner* BindPad(int32 Index);
 	void ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects);
 	float ApplyPadHeal(const mo::wire::Pickup& M, ALyraWeaponSpawner* Actor);
@@ -476,6 +477,8 @@ private:
 	// Lyra 근접 능력 — 예측이 켠 근접(켤 차례로 둠) · 켬 · 켜기 실패 · 능력 칸 없음 · 기다리다 버림 · 기다린 프레임 · 다리가 안 켰는데 켜짐(Lyra 혼자) · 입력 표식을 뗀 칸
 	int64 MeleeQueued = 0, MeleeDriven = 0, MeleeActivateFail = 0, MeleeNoSpec = 0, MeleeDropped = 0, MeleeWaitFrames = 0, LyraMeleeSelf = 0, LyraMeleeStripped = 0;
 	bool bMeleePending = false;
+	// 대시(D-3) — 받은 서버 대시 소식(내 것 · 남의 것). 남의 몸 효과는 D-5
+	int64 DashMine = 0, DashOthers = 0;
 	uint32 MeleePendingSeq = 0;
 	uint64 MeleePendingFrame = 0;
 	bool bLyraMeleeWasActive = false;

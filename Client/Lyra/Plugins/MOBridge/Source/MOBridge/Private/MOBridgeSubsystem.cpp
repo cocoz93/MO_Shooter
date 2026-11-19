@@ -912,6 +912,12 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 		HandleMelee(M);
 		break;
 	}
+	case wire::Msg::S2C_DASH:
+	{
+		wire::Dash M = wire::Dash(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
+		HandleDash(M);
+		break;
+	}
 	case wire::Msg::S2C_RESULT:
 	{
 		wire::Result M = wire::Result(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));	// 사람 칸은 수만큼만 온다 — 뒤는 0
@@ -2185,6 +2191,22 @@ void UMOBridgeSubsystem::HandleMelee(const wire::Melee& M)
 	}
 }
 
+// 서버 대시 소식(D-3) — 내 것이면 예측을 서버 값으로 고친다(다르면 그 입력부터 대시를 다시 고르고 걸음을 다시 돌린다). 남의 것은 세기만 — 남의 몸 효과는 D-5
+void UMOBridgeSubsystem::HandleDash(const wire::Dash& M)
+{
+	if (M.player != PlayerId)
+	{
+		++DashOthers;
+		return;
+	}
+	++DashMine;
+	if (Core)
+	{
+		const FMOBCore::FPawnScope PawnScope(*Core);	// 그 입력부터 다시 돌리는 걸음도 남 캡슐을 본다(근접과 같다)
+		Core->Prediction.OnDashResult(M.seq, M.dir, mo::Vec3(M.forceX, M.forceY, M.forceZ));
+	}
+}
+
 // Lyra 근접 능력(GA_Melee)을 예측이 켠 근접 입력에서 켠다(사격 TickAbilityFire 와 같은 꼴, D77). 능력 칸의 입력 표식(InputTag.Ability.Melee)을 떼어
 // C · E 키로는 Lyra 가 혼자 못 켠다(ULyraAbilitySystemComponent::AbilityInputTagPressed 가 이 표식으로 칸을 찾는다). 캐릭터가 새로 생기면 능력 칸을 새로 받으므로 프레임마다 찾아 뗀다.
 // 켠 능력이 내 공격 몽타주 · 소리 · 맞은 연출을 낸다. 피해는 막혀 있고(BlockLyraDamage), 밀기는 Lyra 이동 계산이 쉬어(NoLyraMove) 내 자리를 안 바꾼다 — 자리는 예측 밀기다
@@ -3260,6 +3282,12 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 			(unsigned long long)MC.pushesIgnored, (unsigned long long)MC.pushHitFixes, (unsigned long long)MC.pushForceFixes, (unsigned long long)MC.unconfirmed, (unsigned long long)MC.rerunsMissed);
 		UE_LOG(LogMOB, Log, TEXT("MOB_MELEE3 queued=%lld driven=%lld activateFail=%lld noSpec=%lld dropped=%lld waitFrames=%lld lyraSelf=%lld stripped=%lld"),
 			MeleeQueued, MeleeDriven, MeleeActivateFail, MeleeNoSpec, MeleeDropped, MeleeWaitFrames, LyraMeleeSelf, LyraMeleeStripped);
+		// 대시(D-3) — 받은 내 소식 · 남의 소식 · 예측 쪽 고친 수(dashDiff = startMismatches + forceFixes + unconfirmed). 다리가 대시를 보내는 것은 D-5(그 전엔 presses 0)
+		const mo::CSelfPrediction::DashCounters& DC = Core->Prediction.GetDashCounters();
+		UE_LOG(LogMOB, Log, TEXT("MOB_DASH mine=%lld others=%lld presses=%llu started=%llu respawnGained=%llu respawnLost=%llu results=%llu resultsNoSlot=%llu dashDiff=%llu startMismatches=%llu forceFixes=%llu unconfirmed=%llu replays=%llu replaysMissed=%llu meleeInReplay=%llu"),
+			DashMine, DashOthers, (unsigned long long)DC.presses, (unsigned long long)DC.started, (unsigned long long)DC.respawnGained, (unsigned long long)DC.respawnLost, (unsigned long long)DC.results, (unsigned long long)DC.resultsNoSlot,
+			(unsigned long long)(DC.startMismatches + DC.forceFixes + DC.unconfirmed), (unsigned long long)DC.startMismatches, (unsigned long long)DC.forceFixes, (unsigned long long)DC.unconfirmed,
+			(unsigned long long)DC.replays, (unsigned long long)DC.replaysMissed, (unsigned long long)DC.meleeInReplay);
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY4 remotes=%d remoteFail=%d frames=%lld underrun=%lld teleports=%lld driftMax=%.3f driftOver1cm=%lld yawDiffMax=%.3f lagAvg=%.1f behindTicksAvg=%.2f"),
 		RemoteSpawned, RemoteSpawnFail, RemoteFrames, RemoteUnderrun, RemoteTeleports, RemoteDriftMax, RemoteDriftOver1cm, RemoteYawDiffMax, RemoteFrames ? RemoteLagSum / RemoteFrames : 0.0, RemoteFrames ? RemoteBehindSum / RemoteFrames : 0.0);
