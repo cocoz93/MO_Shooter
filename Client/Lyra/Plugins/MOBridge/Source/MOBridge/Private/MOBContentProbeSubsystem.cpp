@@ -34,6 +34,10 @@
 #include "AbilitySystem/Abilities/LyraAbilitySimpleFailureMessage.h"
 #include "AbilitySystem/Attributes/LyraHealthSet.h"
 #include "AbilitySystem/LyraAbilitySystemComponent.h"
+#include "AbilitySystem/Phases/LyraGamePhaseSubsystem.h"
+#include "CommonInputModeTypes.h"
+#include "Engine/LocalPlayer.h"
+#include "Input/CommonUIActionRouterBase.h"
 #include "Camera/LyraCameraMode.h"
 #include "Character/LyraCharacter.h"
 #include "Character/LyraHealthComponent.h"
@@ -345,7 +349,8 @@ namespace
 	enum class EGrenPlace : uint8 { Open, WallCam, WallGap, WallBack, FoeAt, Slope, Corner, BlastHit, BlastCap, BlastCenter, BlastCrouch, WallLedge, WallRoof, SelfNear };
 	bool IsBlastPlace(EGrenPlace P) { return P >= EGrenPlace::BlastHit; }
 	// 뒤 셋(G-0-b2) — 칸 시작 체력(0 = 1000) · 수류탄이 생기고 이 프레임 뒤 스스로 죽음(−1 = 안 죽음). 최대 체력은 늘 1000
-	struct FGrenShot { const TCHAR* Name; EGrenPlace Place; float Pitch; float Arg; bool bRun; bool bJump; float FoeHp = 0.f; float MyHp = 0.f; int32 DieAfter = -1; };
+	// 마지막(G-0-b3) — 수류탄이 생기고 이 프레임 뒤 상대가 나를 죽임(−1 = 안 함)
+	struct FGrenShot { const TCHAR* Name; EGrenPlace Place; float Pitch; float Arg; bool bRun; bool bJump; float FoeHp = 0.f; float MyHp = 0.f; int32 DieAfter = -1; int32 FoeKillAfter = -1; };
 	const FGrenShot GREN_SHOTS[] = {
 		// 묶음 1 · 2 — 방향 · 피치(집, 몸 요 0). 하늘 둘(선이 안 맞는 갈래 — 짐작 1) · 수평 · 먼 바닥 둘 · 발밑(카메라가 위로 올라가 선 시작점도 바닥 위 — g0a4 카메라 z 542 · 시작 z 약 152 · 맞은 거리 118)
 		{ TEXT("sky_p45"),      EGrenPlace::Open,     45.f,  0.f,    false, false },	// 0
@@ -397,10 +402,23 @@ namespace
 		{ TEXT("g_die_direct"),     EGrenPlace::FoeAt,       0.f,   800.f, false, false, 0.f,  0.f,  2 },		// 35
 		{ TEXT("g_self_hurt"),      EGrenPlace::SelfNear,    -20.f, 200.f, false, false, 0.f,  0.f,  -1 },	// 36
 		{ TEXT("g_self_kill"),      EGrenPlace::SelfNear,    -20.f, 200.f, false, false, 0.f,  50.f, -1 },	// 37
+		// G-0-b3 경기 끝(묶음 20) — 목표 점수를 낮춘 뒤(LowerTarget) g_kill_foe 와 같은 세움(수평 200 · 체력 50 인 상대)에 던지고, 수류탄이 생기고 40프레임 뒤 상대가 나를 죽여
+		// 상대 팀이 이긴다 → 수류탄은 끝 단계에서 터진다(40 = 상대를 세우는 96 · 신관 120 보다 앞이라 끝 단계가 된 뒤 세우고 터진다. 진행 중이면 g_kill_foe 처럼 상대가 죽는다) ·
+		// 끝 단계에서 내가 다시 생긴 뒤 상대 몸 겨눔(g_immune 과 같은 직접 맞음 — 던져지나 · 피해)
+		{ TEXT("g_end_inflight"),   EGrenPlace::BlastCenter, -20.f, 200.f, false, false, 50.f, 0.f,  -1, 40 },	// 38
+		{ TEXT("g_end_throw"),      EGrenPlace::FoeAt,       0.f,   800.f, false, false, 0.f,  0.f,  -1, -1 },	// 39
 	};
 	constexpr int32 GREN_LIFE_FIRST = 32;		// 이 차례부터 죽음 · 부활 길 — 칸 앞뒤로 점수판 줄(MOB_CPROBE_SCORE)
 	constexpr float FOE_KILL_DAMAGE = 5000.f;	// 상대가 나를 죽이는 피해(내 최대 체력 1000 보다 커서 한 번에 죽는다)
 	const FGrenShot& GrenShotAt(float Arg) { return GREN_SHOTS[FMath::Clamp((int32)Arg, 0, (int32)UE_ARRAY_COUNT(GREN_SHOTS) - 1)]; }
+	// 블루프린트 숫자 변수 하나(이름으로 찾음 — B_TeamDeathMatchScoring.TargetScore · Phase_PostGame.NewGameTime) — 없으면 −1
+	double ReadNumber(const UObject* O, const TCHAR* Prop)
+	{
+		const FNumericProperty* N = O ? FindFProperty<FNumericProperty>(O->GetClass(), Prop) : nullptr;
+		if (!N) return -1.0;
+		const void* Ptr = N->ContainerPtrToValuePtr<void>(O);
+		return N->IsFloatingPoint() ? N->GetFloatingPointPropertyValue(Ptr) : (double)N->GetSignedIntPropertyValue(Ptr);
+	}
 	const FStep GRENADE_SCRIPT[] = {
 		{ TEXT("settle"),        1.0f, EAct::Home,         0.f,  false },
 		{ TEXT("foe_setup"),     0.5f, EAct::FoeSetup,     0.f,  false },	// 다른 팀 · 체력 1000(숨긴 채)
@@ -460,8 +478,14 @@ namespace
 		{ TEXT("g_self_kill"),      5.1f,  EAct::GrenThrow,      37.f, false },
 		{ TEXT("me_respawn4"),      12.0f, EAct::MeRespawnWait,  0.f,  false },
 		{ TEXT("me_settle4"),       3.0f,  EAct::Home,           0.f,  false },
-		{ TEXT("foe_away"),      1.0f, EAct::FoeAway,      0.f,  false },
-		{ TEXT("end"),           0.5f, EAct::Home,         0.f,  false },
+		// G-0-b3 경기 끝은 맨 뒤 — Phase_PostGame 은 NewGameTime(10초)을 기다린 뒤 능력 입력을 막고 다음 틱에 맵을 다시 연다(그래프 원본). 판은 내 입력이 막힌 프레임에 끝낸다(Tick).
+		// 끝 단계 시간 = 상대가 나를 죽인 뒤 g_end_inflight 남은 235프레임 + 부활 기다림 72프레임(죽고 307) + g_end_throw 180 + 칸 넘김 1 = 488(g0end1 · 2 실측)
+		// → end_block 은 막힘(상대가 나를 죽이고 600프레임 뒤, 실측)을 기다리는 한도 360(안 오면 그대로 끝) — 실측 112프레임째 막혔다
+		{ TEXT("end_target"),       0.3f,  EAct::LowerTarget,    0.f,  false },
+		{ TEXT("g_end_inflight"),   5.1f,  EAct::GrenThrow,      38.f, false },
+		{ TEXT("me_respawn5"),      12.0f, EAct::MeRespawnWait,  0.f,  false },
+		{ TEXT("g_end_throw"),      3.0f,  EAct::GrenThrow,      39.f, false },
+		{ TEXT("end_block"),        6.0f,  EAct::None,           0.f,  false },
 	};
 	const TCHAR* const GREN_TAG = TEXT("InputTag.Weapon.Grenade");	// Q(IMC_ShooterGame) → GA_Grenade, 켜기 = OnInputTriggered
 	constexpr float GREN_PRESS_AT = 0.5f;		// 칸 시작에서 Q 까지 — 겨눔(AimAt)이 모이고 벽 거리 맞춤 두 번이 끝난 뒤(제안값)
@@ -759,10 +783,18 @@ void UMOBContentProbeSubsystem::Tick(float DeltaTime)
 	{
 		WatchGrenades();
 		WatchLife();
+		WatchPhase();
 	}
 	DuringStep();
 	if (bGrenade) FlushShots(StepAt(ScriptIdx(), Step).Name, GetWorld()->GetTimeSeconds());
 	WriteRow();
+	// G-0-b3 — 끝 단계에서 내 능력 입력이 막힌 프레임에 끝낸다. 다음 틱에 Lyra 가 맵을 다시 연다(PlayNextGame) — 그 도중에 끄다 무너진 적이 있다(파일럿 c1, ULyraExperienceManagerComponent::EndPlay)
+	if (bPostBlocked)
+	{
+		EndStep();
+		Finish(true);
+		return;
+	}
 	StepTime += DeltaTime;
 	++Frame;
 	if (bStepDone || StepTime + KINDA_SMALL_NUMBER >= StepAt(ScriptIdx(), Step).Seconds)
@@ -1306,29 +1338,117 @@ void UMOBContentProbeSubsystem::BeginStep()
 		WaitFromPawn = Ch;
 		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_WAIT step=%s frame=%d who=me from=%s"), S.Name, Frame, *GetNameSafe(Ch));
 		break;
-	// 상대가 나를 죽인다 — 상대 ASC 로 Lyra 기본 피해 효과(DamageSelfDestruct 와 같은 효과 · 같은 SetByCaller, LyraHealthComponent.cpp:279-309)를 내게.
-	// 맥락 = 상대 ASC 의 MakeEffectContext(시킨 쪽 = 상대 선수 상태 · 일으킨 것 = 상대 몸) — 처치 소식의 Instigator 가 상대가 된다
+	// 상대가 나를 죽인다(FoeKillMe — 수류탄 칸 안에서도 부른다, G-0-b3)
 	case EAct::FoeKillsMe:
-	{
 		LogScores(TEXT("foe_kills_me_before"));
-		UAbilitySystemComponent* FA = FindASC(Foe.Get());
-		UAbilitySystemComponent* MA = FindASC(Ch);
-		const TSubclassOf<UGameplayEffect> GE = ULyraGameData::Get().DamageGameplayEffect_SetByCaller.LoadSynchronous();
-		bool bApplied = false;
-		if (FA && MA && GE)
-		{
-			const FGameplayEffectSpecHandle Spec = FA->MakeOutgoingSpec(GE, 1.f, FA->MakeEffectContext());
-			if (Spec.Data.IsValid())
-			{
-				Spec.Data->SetSetByCallerMagnitude(LyraGameplayTags::SetByCaller_Damage, FOE_KILL_DAMAGE);
-				FA->ApplyGameplayEffectSpecToTarget(*Spec.Data, MA);
-				bApplied = true;
-			}
-		}
-		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_FOEKILL step=%s frame=%d applied=%d ge=%s foe=%s myHp=%.1f"), S.Name, Frame, bApplied ? 1 : 0, *GetNameSafe(GE), *GetNameSafe(Foe.Get()), HealthOf(Ch));
+		FoeKillMe(S.Name);
+		break;
+	case EAct::LowerTarget:
+		LowerTargetScore(S.Name);
 		break;
 	}
+}
+
+// 상대가 나를 죽인다 — 상대 ASC 로 Lyra 기본 피해 효과(DamageSelfDestruct 와 같은 효과 · 같은 SetByCaller, LyraHealthComponent.cpp:279-309)를 내게.
+// 맥락 = 상대 ASC 의 MakeEffectContext(시킨 쪽 = 상대 선수 상태 · 일으킨 것 = 상대 몸) — 처치 소식의 Instigator 가 상대가 된다
+void UMOBContentProbeSubsystem::FoeKillMe(const TCHAR* StepName)
+{
+	ACharacter* Ch = Me();
+	UAbilitySystemComponent* FA = FindASC(Foe.Get());
+	UAbilitySystemComponent* MA = FindASC(Ch);
+	const TSubclassOf<UGameplayEffect> GE = ULyraGameData::Get().DamageGameplayEffect_SetByCaller.LoadSynchronous();
+	bool bApplied = false;
+	if (FA && MA && GE)
+	{
+		const FGameplayEffectSpecHandle Spec = FA->MakeOutgoingSpec(GE, 1.f, FA->MakeEffectContext());
+		if (Spec.Data.IsValid())
+		{
+			Spec.Data->SetSetByCallerMagnitude(LyraGameplayTags::SetByCaller_Damage, FOE_KILL_DAMAGE);
+			FA->ApplyGameplayEffectSpecToTarget(*Spec.Data, MA);
+			bApplied = true;
+		}
 	}
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_FOEKILL step=%s frame=%d applied=%d ge=%s foe=%s myHp=%.1f"), StepName, Frame, bApplied ? 1 : 0, *GetNameSafe(GE), *GetNameSafe(Foe.Get()), HealthOf(Ch));
+}
+
+UActorComponent* UMOBContentProbeSubsystem::FindScoring() const
+{
+	const AGameStateBase* GS = GetWorld() ? GetWorld()->GetGameState() : nullptr;
+	if (!GS) return nullptr;
+	for (UActorComponent* C : GS->GetComponents())
+	{
+		if (C && C->GetClass()->GetName().StartsWith(TEXT("B_TeamDeathMatchScoring"))) return C;
+	}
+	return nullptr;
+}
+
+int32 UMOBContentProbeSubsystem::TeamScore(int32 TeamId) const
+{
+	static const FGameplayTag ElimTag = FGameplayTag::RequestGameplayTag(TEXT("ShooterGame.Score.Eliminations"));
+	const ULyraTeamSubsystem* Teams = GetWorld() ? GetWorld()->GetSubsystem<ULyraTeamSubsystem>() : nullptr;
+	return Teams ? Teams->GetTeamTagStackCount(TeamId, ElimTag) : -1;
+}
+
+// G-0-b3(묶음 20) — 목표 점수를 지금 두 팀 점수 중 큰 쪽 + 1 로 낮춘다. 다음에 다른 팀을 처치한 쪽이 이긴다
+// (B_TeamDeathMatchScoring.OnEliminationScored → 팀 1 · 2 차례로 GetTeamScore 「Victory」 → HandleVictory → Phase_PostGame, 그래프 원본).
+// 변수는 블루프린트 것이라 이름으로 넣고 화면 알림(OnRep_TargetScore)도 부른다 — 다리 ForceCountDown(MOBridgeSubsystem.cpp)과 같은 길
+void UMOBContentProbeSubsystem::LowerTargetScore(const TCHAR* StepName)
+{
+	UActorComponent* Scoring = FindScoring();
+	const int32 S1 = TeamScore(1);
+	const int32 S2 = TeamScore(2);
+	const double Before = ReadNumber(Scoring, TEXT("TargetScore"));
+	const int32 Want = FMath::Max(S1, S2) + 1;
+	bool bSet = false;
+	FNumericProperty* N = Scoring ? FindFProperty<FNumericProperty>(Scoring->GetClass(), TEXT("TargetScore")) : nullptr;
+	if (N)
+	{
+		void* Ptr = N->ContainerPtrToValuePtr<void>(Scoring);
+		if (N->IsFloatingPoint()) N->SetFloatingPointPropertyValue(Ptr, (double)Want);
+		else N->SetIntPropertyValue(Ptr, (int64)Want);
+		if (UFunction* F = Scoring->GetClass()->FindFunctionByName(TEXT("OnRep_TargetScore"))) Scoring->ProcessEvent(F, nullptr);
+		bSet = true;
+	}
+	// 끝 단계 길이 — Phase_PostGame 은 NewGameTime 을 기다린 뒤 능력 입력을 막고 맵을 다시 연다(그래프 원본)
+	const UClass* Post = LoadClass<UObject>(nullptr, TEXT("/ShooterCore/Experiences/Phases/Phase_PostGame.Phase_PostGame_C"));
+	const double NewGameTime = Post ? ReadNumber(Post->GetDefaultObject(), TEXT("NewGameTime")) : -1.0;
+	const ULyraTeamSubsystem* Teams = GetWorld()->GetSubsystem<ULyraTeamSubsystem>();
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	const int32 MyTeam = (Teams && PC) ? Teams->FindTeamFromObject(PC) : -1;
+	const int32 FoeTeam = (Teams && FoeCtl.IsValid()) ? Teams->FindTeamFromObject(FoeCtl.Get()) : -1;
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_TARGET step=%s frame=%d found=%d set=%d before=%.0f after=%.0f score1=%d score2=%d myTeam=%d foeTeam=%d countDown=%.0f newGameTime=%.3f"),
+		StepName, Frame, Scoring ? 1 : 0, bSet ? 1 : 0, Before, ReadNumber(Scoring, TEXT("TargetScore")), S1, S2, MyTeam, FoeTeam, ReadNumber(Scoring, TEXT("CountDownTime")), NewGameTime);
+}
+
+// G-0-b3 경기 단계 줄 — 단계(진행 · 끝) · 능력 입력 막힘(Gameplay.AbilityInputBlocked = GE_BlockAbilityInput, LyraAbilitySystemComponent.cpp:218) · 팀 점수 · 목표 점수가 바뀐 프레임에 한 줄.
+// 막힘은 선수 상태 ASC 로 본다(몸이 없어도 읽힌다). 끝 단계에서 내 입력이 막히면 그 프레임에 판을 끝낸다(Tick).
+// 이 도구는 Q 를 ASC 에 바로 누른다(PressTag) — 사람 키가 거기까지 오는지는 화면 입력 모드로 본다(CommonUI 「Menu」면 게임 쪽 키가 막힌다 — 마우스를 잡은 게임 화면이 아니면, CommonUIActionRouterBase.cpp:667 · 1540-1553)
+void UMOBContentProbeSubsystem::WatchPhase()
+{
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	const ULocalPlayer* LP = PC ? PC->GetLocalPlayer() : nullptr;
+	const UCommonUIActionRouterBase* Router = LP ? LP->GetSubsystem<UCommonUIActionRouterBase>() : nullptr;
+	const TCHAR* InputMode = Router ? LexToString(Router->GetActiveInputMode()) : TEXT("none");
+	static const FGameplayTag PlayingTag = FGameplayTag::RequestGameplayTag(TEXT("ShooterGame.GamePhase.Playing"));
+	static const FGameplayTag PostTag = FGameplayTag::RequestGameplayTag(TEXT("ShooterGame.GamePhase.PostGame"));
+	static const FGameplayTag Blocked = FGameplayTag::RequestGameplayTag(TEXT("Gameplay.AbilityInputBlocked"));
+	const ULyraGamePhaseSubsystem* Phases = GetWorld()->GetSubsystem<ULyraGamePhaseSubsystem>();
+	const UAbilitySystemComponent* MA = MyPSASC();
+	const UAbilitySystemComponent* FA = FoeCtl.IsValid() ? FindASC(FoeCtl->PlayerState) : nullptr;
+	const bool bPost = Phases && Phases->IsPhaseActive(PostTag);
+	const bool bMeBlocked = MA && MA->HasMatchingGameplayTag(Blocked);
+	if (bPost && PostGameFrame < 0) PostGameFrame = Frame;
+	const TCHAR* StepName = bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("-");
+	if (bMeBlocked && PostGameFrame >= 0 && !bPostBlocked)
+	{
+		bPostBlocked = true;
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_POSTBLOCK frame=%d step=%s stepT=%.4f postFrame=%d sincePost=%d"), Frame, StepName, StepTime, PostGameFrame, Frame - PostGameFrame);
+	}
+	const FString Sig = FString::Printf(TEXT("playing=%d post=%d meBlock=%d foeBlock=%d score1=%d score2=%d target=%.0f input=%s"), (Phases && Phases->IsPhaseActive(PlayingTag)) ? 1 : 0, bPost ? 1 : 0,
+		bMeBlocked ? 1 : 0, (FA && FA->HasMatchingGameplayTag(Blocked)) ? 1 : 0, TeamScore(1), TeamScore(2), ReadNumber(FindScoring(), TEXT("TargetScore")), InputMode);
+	if (Sig == LastPhaseSig) return;
+	LastPhaseSig = Sig;
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_PHASE frame=%d t=%.4f step=%s stepT=%.4f %s"), Frame, GetWorld()->GetTimeSeconds(), StepName, StepTime, *Sig);
 }
 
 void UMOBContentProbeSubsystem::FaceTo(double Pitch, double Yaw) const
@@ -2713,6 +2833,13 @@ void UMOBContentProbeSubsystem::DuringGrenade()
 		GrenDieFrame = Frame;
 		FrameEvents += TEXT("die;");
 		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GDIE step=%s frame=%d age=%d hp=%.1f"), S.Name, Frame, Frame - GrenSpawnFrame, HealthOf(Ch));
+	}
+	// 던진 뒤 상대에게 죽는 칸(G-0-b3 · 묶음 20) — 이 칸 수류탄이 생기고 FoeKillAfter 프레임 뒤 상대가 나를 죽인다. 그 처치로 상대 팀이 낮춘 목표 점수에 닿아 끝 단계가 되고 수류탄은 그 뒤에 터진다
+	if (G.FoeKillAfter >= 0 && GrenSpawnFrame >= 0 && GrenDieFrame < 0 && Frame - GrenSpawnFrame >= G.FoeKillAfter && Ch)
+	{
+		FoeKillMe(S.Name);
+		GrenDieFrame = Frame;
+		FrameEvents += TEXT("foekill;");
 	}
 	if (!Ch) return;
 	const bool bBeforePress = GrenPressFrame < 0;

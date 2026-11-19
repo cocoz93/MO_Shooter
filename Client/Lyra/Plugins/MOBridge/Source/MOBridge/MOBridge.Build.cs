@@ -35,6 +35,8 @@ public class MOBridge : ModuleRules
 			"MovieSceneCapture",
 			"Slate",
 			"SlateCore",
+			"CommonUI",		// the content probe reads the UI input mode (Menu = game keys do not reach the player) in the post-game phase
+			"CommonInput",
 			"LyraGame",
 		});
 	}

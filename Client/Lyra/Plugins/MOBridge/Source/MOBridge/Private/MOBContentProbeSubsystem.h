@@ -44,7 +44,9 @@ public:
 		// 수류탄 판(G-0) — Arg = GREN_SHOTS 차례(자리 · 피치 · 누르는 때). Q 는 칸 안에서 한 프레임 누른다(DuringGrenade)
 		GrenThrow,
 		// G-0-b2 죽음 · 부활 길 — 상대 · 내가 다시 생길 때까지 기다림(생기면 칸을 바로 끝낸다, 칸 길이 = 한도) · 상대가 나를 죽임(상대 ASC 로 피해 효과)
-		FoeRespawnWait, MeRespawnWait, FoeKillsMe };
+		FoeRespawnWait, MeRespawnWait, FoeKillsMe,
+		// G-0-b3 경기 끝 — 목표 점수를 지금 두 팀 점수 중 큰 쪽 + 1 로 낮춘다(다음 처치가 경기를 끝낸다)
+		LowerTarget };
 
 private:
 	bool WaitReady(float DeltaTime);
@@ -265,11 +267,21 @@ private:
 	TWeakObjectPtr<AController> FoeCtl;
 	TWeakObjectPtr<APawn> WaitFromPawn;		// 기다림 칸 — 이 몸이 아닌 산 몸이 생기면 끝
 	bool bStepDone = false;
-	int32 GrenDieFrame = -1;				// 던진 뒤 죽는 칸 — 스스로 죽은 프레임
+	int32 GrenDieFrame = -1;				// 던진 뒤 죽는 칸 — 스스로 죽은 프레임 · 상대에게 죽은 프레임(G-0-b3 FoeKillAfter)
 	FString LastLifeSig[2];
 	TArray<FGameplayMessageListenerHandle> VerbHandles;
 	void OnVerbMsg(FGameplayTag Channel, const FLyraVerbMessage& Msg);
 	void WatchLife();
 	void FlushShots(const TCHAR* StepName, double Now);
 	class UAbilitySystemComponent* MyPSASC() const;	// 내 선수 상태의 ASC — 몸이 없을 때(죽음 ~ 부활)도 쿨다운을 읽는다
+	void FoeKillMe(const TCHAR* StepName);
+
+	// G-0-b3 경기 끝(묶음 20) — 단계 줄(바뀐 때만) · 끝 단계가 처음 보인 프레임 · 내 능력 입력이 막혔나(막힌 프레임에 판을 끝낸다 — 다음 틱에 Lyra 가 맵을 다시 연다)
+	FString LastPhaseSig;
+	int32 PostGameFrame = -1;
+	bool bPostBlocked = false;
+	void WatchPhase();
+	void LowerTargetScore(const TCHAR* StepName);
+	class UActorComponent* FindScoring() const;		// 게임 상태의 B_TeamDeathMatchScoring 부품(목표 점수 · 남은 시간 변수)
+	int32 TeamScore(int32 TeamId) const;			// 팀 처치 점수(ShooterGame.Score.Eliminations) — 없으면 −1
 };
