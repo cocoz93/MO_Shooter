@@ -337,7 +337,8 @@ namespace
 
 	// 수류탄 판(G-0, grenade-plan.md) — 대시 판과 같은 집(PickDashHome, 여덟 방향 1100cm 빔). 상대는 숨겨 두고(사람 칸만 다시 켬) 던짐 칸마다 나 · 상대 체력을 1000 으로 둔다(피해 값만 본다).
 	// 던짐 칸은 5.1초 — GREN_PRESS_AT 에 Q 를 한 프레임 누른다. 쿨다운 5초(GE_Grenade_Cooldown) = 300프레임이 다음 칸 누름(306프레임 뒤) 전에 끝나고, 타이머 2초도 칸 안에 든다
-	enum class EGrenPlace : uint8 { Open, WallCam, WallGap, WallBack, FoeAt, Slope, Corner };
+	enum class EGrenPlace : uint8 { Open, WallCam, WallGap, WallBack, FoeAt, Slope, Corner, BlastHit, BlastCap, BlastCenter, BlastCrouch, WallLedge, WallRoof };
+	bool IsBlastPlace(EGrenPlace P) { return P >= EGrenPlace::BlastHit; }
 	struct FGrenShot { const TCHAR* Name; EGrenPlace Place; float Pitch; float Arg; bool bRun; bool bJump; };
 	const FGrenShot GREN_SHOTS[] = {
 		// 묶음 1 · 2 — 방향 · 피치(집, 몸 요 0). 하늘 둘(선이 안 맞는 갈래 — 짐작 1) · 수평 · 먼 바닥 둘 · 발밑(카메라가 위로 올라가 선 시작점도 바닥 위 — g0a4 카메라 z 542 · 시작 z 약 152 · 맞은 거리 118)
@@ -366,6 +367,21 @@ namespace
 		{ TEXT("foe_body"),     EGrenPlace::FoeAt,    0.f,   800.f,  false, false },	// 17
 		{ TEXT("foe_close"),    EGrenPlace::FoeAt,    0.f,   72.f,   false, false },	// 18
 		{ TEXT("foe_same"),     EGrenPlace::FoeAt,    0.f,   800.f,  false, false },	// 19
+		// 피해 칸(G-0-b · 묶음 7 · 8 · 9 · 10) — 집에서 피치 −20 으로 던져(멈춤 약 46프레임 뒤 · g0a4) 터지기 전(GREN_BLAST_AT)에 상대를 수류탄 둘레에 세운다. 상대는 집 반대(+X)쪽.
+		// BlastHit = 폭발 선(수류탄 → 상대 몸 가운데)이 상대 캡슐에 맞는 거리가 Arg · BlastCap = 캡슐 겉면까지 가장 짧은 거리가 Arg(겹침 450 경계 — 짐작 6) ·
+		// BlastCenter · BlastCrouch = 몸 가운데까지 수평 Arg(서서 · 앉아 · 같은 팀) · WallLedge · WallRoof = 벽 뒤(짐작 2 — Arg = 벽 면에서 상대 몸 가운데까지 수평)
+		{ TEXT("blast_hit45"),      EGrenPlace::BlastHit,    -20.f, 45.f,  false, false },	// 20
+		{ TEXT("blast_hit123"),     EGrenPlace::BlastHit,    -20.f, 123.f, false, false },	// 21
+		{ TEXT("blast_hit225"),     EGrenPlace::BlastHit,    -20.f, 225.f, false, false },	// 22
+		{ TEXT("blast_hit449"),     EGrenPlace::BlastHit,    -20.f, 449.f, false, false },	// 23
+		{ TEXT("blast_hit451"),     EGrenPlace::BlastHit,    -20.f, 451.f, false, false },	// 24
+		{ TEXT("blast_cap449"),     EGrenPlace::BlastCap,    -20.f, 449.f, false, false },	// 25
+		{ TEXT("blast_cap451"),     EGrenPlace::BlastCap,    -20.f, 451.f, false, false },	// 26
+		{ TEXT("blast_wall_ledge"), EGrenPlace::WallLedge,   -20.f, 150.f, false, false },	// 27
+		{ TEXT("blast_wall_roof"),  EGrenPlace::WallRoof,    -20.f, 100.f, false, false },	// 28
+		{ TEXT("blast_stand200"),   EGrenPlace::BlastCenter, -20.f, 200.f, false, false },	// 29
+		{ TEXT("blast_crouch200"),  EGrenPlace::BlastCrouch, -20.f, 200.f, false, false },	// 30
+		{ TEXT("blast_same200"),    EGrenPlace::BlastCenter, -20.f, 200.f, false, false },	// 31 같은 팀(앞 칸 FoeSameTeam 그대로)
 	};
 	const FGrenShot& GrenShotAt(float Arg) { return GREN_SHOTS[FMath::Clamp((int32)Arg, 0, (int32)UE_ARRAY_COUNT(GREN_SHOTS) - 1)]; }
 	const FStep GRENADE_SCRIPT[] = {
@@ -396,7 +412,20 @@ namespace
 		{ TEXT("foe_close"),     5.1f, EAct::GrenThrow,    18.f, false },
 		{ TEXT("foe_same_team"), 0.3f, EAct::FoeSameTeam,  0.f,  false },
 		{ TEXT("foe_same"),      5.1f, EAct::GrenThrow,    19.f, false },
+		// G-0-b 피해 칸은 G-0-a 칸 뒤에 붙인다(앞 칸들의 프레임이 그대로라 g0a 판과 줄째 견줄 수 있다 — g0a4 · g0b1 상대 칸 뺀 17칸 3,062/3,062 같음)
+		{ TEXT("blast_same200"),    5.1f, EAct::GrenThrow, 31.f, false },
 		{ TEXT("foe_setup3"),    0.5f, EAct::FoeSetup,     0.f,  false },
+		{ TEXT("blast_hit45"),      5.1f, EAct::GrenThrow, 20.f, false },
+		{ TEXT("blast_hit123"),     5.1f, EAct::GrenThrow, 21.f, false },
+		{ TEXT("blast_hit225"),     5.1f, EAct::GrenThrow, 22.f, false },
+		{ TEXT("blast_hit449"),     5.1f, EAct::GrenThrow, 23.f, false },
+		{ TEXT("blast_hit451"),     5.1f, EAct::GrenThrow, 24.f, false },
+		{ TEXT("blast_cap449"),     5.1f, EAct::GrenThrow, 25.f, false },
+		{ TEXT("blast_cap451"),     5.1f, EAct::GrenThrow, 26.f, false },
+		{ TEXT("blast_wall_ledge"), 5.1f, EAct::GrenThrow, 27.f, false },
+		{ TEXT("blast_wall_roof"),  5.1f, EAct::GrenThrow, 28.f, false },
+		{ TEXT("blast_stand200"),   5.1f, EAct::GrenThrow, 29.f, false },
+		{ TEXT("blast_crouch200"),  5.1f, EAct::GrenThrow, 30.f, false },
 		{ TEXT("foe_away"),      1.0f, EAct::FoeAway,      0.f,  false },
 		{ TEXT("end"),           0.5f, EAct::Home,         0.f,  false },
 	};
@@ -425,6 +454,31 @@ namespace
 	constexpr double GREN_CORNER_STAND = 800.0;	// 구석 칸 던질 자리 — 겨눔 점에서 대각 바깥 이만큼(제안값)
 	constexpr double GREN_CORNER_INSET = 30.0;	// 구석이 보이나 — 구석에서 대각 안쪽으로 이만큼 앞 점까지 선이 안 막히면
 	constexpr double GREN_AIM_MIN_FOE = 200.0;	// 상대가 이보다 멀면 몸 가운데를 겨눈다(바로 앞 칸은 피치 0 그대로)
+	// 피해 칸(G-0-b) — 세움 · 고침 · 마지막 잼 나이(생긴 뒤 프레임). 터짐 120 전, 멈춤(약 46) 뒤. 사이 4프레임 = 옮긴 몸이 다음 프레임 선 추적에 들어간 뒤 잰다(제안값)
+	constexpr int32 GREN_BLAST_AT = 96;
+	constexpr int32 GREN_BLAST_STEP = 4;
+	constexpr double GREN_FOE_FLOOR_GAP = 2.15;	// 서 있는 몸 가운데 = 바닥 + 반높이 + 이것(g0a4 GTRACE to z 142.15 · 바닥 50 · 반높이 90 — 이동이 띄워 두는 틈)
+	// 벽 뒤 칸 자리 — L_ShooterGym 충돌 덤프(map_gym.mocl, mocl_list.py) 상자 둘. 연습장엔 얇은 벽이 없어 「턱 위 · 지붕 위 과녁」으로 한다(벽 너머 바닥은 450 안에 없다).
+	// 턱 = x −250~750 · y −3000~−2000 · 윗면 150(높이 100)의 북쪽 면 y −2000. 지붕 = x 1000~1500 · y −3000~0 · 윗면 350(높이 300)의 서쪽 면 x 1000(y −1000~0 은 바닥에서 바로 선다).
+	// 수류탄은 면 앞 GREN_WALL_BLAST_GAP 바닥, 상대는 면 너머 Arg 윗면. 실행 때 면까지 선 · 윗면 높이를 재서 GWALLSET 줄에 적는다
+	constexpr double GREN_LEDGE_X = 250.0, GREN_LEDGE_FACE_Y = -2000.0;
+	constexpr double GREN_ROOF_Y = -500.0, GREN_ROOF_FACE_X = 1000.0;
+	constexpr double GREN_WALL_BLAST_GAP = 30.0;
+
+	// 선 L → C 가 캡슐(축 C ± (HH − R) · 반지름 R)에 처음 닿는 거리. 축 선분까지 거리 − R 은 선 위에서 볼록이고 C 에서 −R 이라 0 을 한 번만 지난다(이분법)
+	double RayCapsuleDist(const FVector& L, const FVector& C, double R, double HH)
+	{
+		const FVector A0 = C - FVector(0.0, 0.0, HH - R), A1 = C + FVector(0.0, 0.0, HH - R);
+		const auto F = [&](double T) { return FMath::PointDistToSegment(L + (C - L) * T, A0, A1) - R; };
+		if (F(0.0) <= 0.0) return 0.0;
+		double Lo = 0.0, Hi = 1.0;
+		for (int32 i = 0; i < 60; ++i)
+		{
+			const double M = 0.5 * (Lo + Hi);
+			(F(M) > 0.0 ? Lo : Hi) = M;
+		}
+		return Hi * FVector::Dist(L, C);
+	}
 
 	const TCHAR* const WEAPON_DEFS[3] = {
 		TEXT("/ShooterCore/Weapons/Pistol/WID_Pistol.WID_Pistol_C"),
@@ -2206,9 +2260,13 @@ void UMOBContentProbeSubsystem::LogBoom(AActor* G, int32 SpawnFrame) const
 	for (const UPrimitiveComponent* C : Comps) CompS += FString::Printf(TEXT("%s/%s "), *GetNameSafe(C ? C->GetOwner() : nullptr), *GetNameSafe(C));
 	const ACharacter* Ch = Me();
 	const ACharacter* F = Foe.Get();
-	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GBOOM frame=%d step=%s name=%s spawn=%d age=%d loc=%.6f,%.6f,%.6f over=%d comps=[%s] myHp=%.3f>%.3f foeHp=%.3f>%.3f"),
+	// foeCmp = 나와 상대 팀 비교(ELyraTeamComparison — 0 같은 팀 · 1 다른 팀 · 2 못 셈). 같은 팀이면 피해 0 이 기대값(팀 규칙 · 묶음 10)
+	const ULyraTeamSubsystem* TS = GetWorld()->GetSubsystem<ULyraTeamSubsystem>();
+	int32 TeamMe = -1, TeamFoe = -1;
+	const int32 FoeCmp = (TS && Ch && F) ? (int32)TS->CompareTeams(Ch, F, TeamMe, TeamFoe) : 2;
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GBOOM frame=%d step=%s name=%s spawn=%d age=%d loc=%.6f,%.6f,%.6f over=%d comps=[%s] myHp=%.3f>%.3f foeHp=%.3f>%.3f foeCmp=%d foeCrouched=%d"),
 		Frame, bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("-"), *G->GetName(), SpawnFrame, Frame - SpawnFrame, L.X, L.Y, L.Z, Over.Num(), *CompS.TrimEnd(),
-		PrevMyHp, HealthOf(Ch), PrevFoeHp, HealthOf(F));
+		PrevMyHp, HealthOf(Ch), PrevFoeHp, HealthOf(F), FoeCmp, (F && F->bIsCrouched) ? 1 : 0);
 	for (AActor* P : Over)
 	{
 		TArray<AActor*> Ignore = Over;
@@ -2414,6 +2472,19 @@ void UMOBContentProbeSubsystem::BeginGrenade()
 		if (!bGrenAim) FaceTo(0.0, 0.0);
 		break;
 	}
+	case EGrenPlace::BlastHit:
+	case EGrenPlace::BlastCap:
+	case EGrenPlace::BlastCenter:
+	case EGrenPlace::BlastCrouch:
+	case EGrenPlace::WallLedge:
+	case EGrenPlace::WallRoof:
+		// 던지는 동안 상대는 등 뒤 400(FoeSetup 자리) — 세우기는 터지기 전 BlastPass
+		if (ACharacter* F = Foe.Get()) F->UnCrouch();
+		PlaceFoe(-400.0, true);
+		FaceTo(G.Pitch, 0.0);
+		GrenBlastS = GrenBlastZ = 0.0;
+		GrenBlastDir = FVector::ZeroVector;
+		break;
 	}
 	GrenMyHpAtBegin = HealthOf(Ch);
 	GrenFoeHpAtBegin = HealthOf(Foe.Get());
@@ -2490,6 +2561,130 @@ void UMOBContentProbeSubsystem::DuringGrenade()
 		PressTag(GREN_TAG, false);
 		FrameEvents += TEXT("g_release;");
 	}
+	// 피해 칸 — 이 칸 수류탄의 나이가 GREN_BLAST_AT · + STEP · + 2 STEP 인 프레임에 세움 · 고침 · 잼
+	if (IsBlastPlace(G.Place) && GrenSpawnFrame >= 0)
+	{
+		const int32 Age = Frame - GrenSpawnFrame;
+		for (const FGrenRec& R : Grens)
+		{
+			if (R.SpawnFrame != GrenSpawnFrame || !R.A.IsValid()) continue;
+			for (int32 Pass = 0; Pass < 3; ++Pass)
+			{
+				if (Age == GREN_BLAST_AT + Pass * GREN_BLAST_STEP) BlastPass(R.A.Get(), Pass);
+			}
+		}
+	}
+}
+
+// 피해 칸 한 번 — Pass 0 에 상대를 세우고(벽 칸은 수류탄도 옮김 · 앉은 칸은 앉힘), 1 에 폭발 선 거리를 재서 거리 칸만 그만큼 고치고, 2 는 재기만 한다.
+// 잼 = B_Grenade 「Detonate」와 같은 선(LogBoom — TraceTypeQuery5 · 복잡 켬 · 수류탄 빼고) · 캡슐 겉면 최단 거리 · 몸 가운데 수평 거리.
+// Pass 0 의 잼은 옮긴 그 프레임 값인데도 새 자리를 본다(g0b1 — 앉은 칸 빼고 11/11 이 Pass 2 와 같음, 앉기는 다음 프레임 이동이 한다). 판정은 Pass 2 와 터짐 줄(GTRACE)로 한다
+void UMOBContentProbeSubsystem::BlastPass(AActor* G, int32 Pass)
+{
+	const FStep& S = StepAt(ScriptIdx(), Step);
+	const FGrenShot& Shot = GrenShotAt(S.Arg);
+	ACharacter* F = Foe.Get();
+	if (!G || !F) return;
+	const UCapsuleComponent* Cap = F->GetCapsuleComponent();
+	const double R = Cap->GetScaledCapsuleRadius();
+	const UProjectileMovementComponent* PM = G->FindComponentByClass<UProjectileMovementComponent>();
+	const bool bStopped = !PM || !PM->UpdatedComponent;
+	const bool bWall = Shot.Place == EGrenPlace::WallLedge || Shot.Place == EGrenPlace::WallRoof;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBCProbeBlast), false, Me());
+	Params.AddIgnoredActor(F);
+	Params.AddIgnoredActor(G);
+	const FCollisionResponseParams Response(Cap->GetCollisionResponseToChannels());
+	// 그 자리 바닥 높이(상대 캡슐 채널 · 위에서 내려 쏨) — 못 찾으면 수류탄 높이 − 3(멈춘 수류탄은 바닥 위 약 3, g0a4 GSTOP z 52.4~53.4)
+	const auto FloorAt = [&](double X, double Y, double& OutZ)
+	{
+		FHitResult H;
+		const bool bHit = GetWorld()->LineTraceSingleByChannel(H, FVector(X, Y, 1000.0), FVector(X, Y, -200.0), Cap->GetCollisionObjectType(), Params, Response);
+		OutZ = bHit ? H.ImpactPoint.Z : 0.0;
+		return bHit;
+	};
+	FString Set;
+	if (Pass == 0)
+	{
+		const double HH = Cap->GetScaledCapsuleHalfHeight();
+		FVector L = G->GetActorLocation();
+		double FloorZ = 0.0;
+		bool bFloor = false;
+		if (bWall)
+		{
+			// 수류탄 = 면 앞 GREN_WALL_BLAST_GAP 바닥(높이는 멈춘 그대로 — 같은 바닥 z 50), 상대 = 면 너머 Arg 윗면 · 수류탄을 본다
+			const bool bLedge = Shot.Place == EGrenPlace::WallLedge;
+			const FVector Out = bLedge ? FVector(0.0, 1.0, 0.0) : FVector(-1.0, 0.0, 0.0);	// 면에서 수류탄 쪽
+			const FVector FacePt = bLedge ? FVector(GREN_LEDGE_X, GREN_LEDGE_FACE_Y, L.Z) : FVector(GREN_ROOF_FACE_X, GREN_ROOF_Y, L.Z);
+			const FVector Gl = FacePt + Out * GREN_WALL_BLAST_GAP;
+			G->SetActorLocation(Gl, false, nullptr, ETeleportType::TeleportPhysics);
+			L = G->GetActorLocation();
+			GrenBlastDir = -Out;
+			GrenBlastS = GREN_WALL_BLAST_GAP + Shot.Arg;
+			FHitResult FH;
+			const bool bFace = GetWorld()->LineTraceSingleByChannel(FH, L, L - Out * 200.0, Lyra_TraceChannel_Weapon_Capsule, Params);
+			bFloor = FloorAt(L.X - Out.X * GrenBlastS, L.Y - Out.Y * GrenBlastS, FloorZ);
+			Set = FString::Printf(TEXT("moved=1 faceHit=%d faceDist=%.3f faceActor=%s topZ=%.3f"), bFace ? 1 : 0, FH.Distance, *GetNameSafe(FH.GetActor()), FloorZ);
+		}
+		else
+		{
+			GrenBlastDir = FVector(1.0, 0.0, 0.0);	// 집 반대쪽 — 던진 길 너머 빈 바닥
+			bFloor = FloorAt(L.X + GrenBlastS, L.Y, FloorZ);
+		}
+		if (!bFloor) FloorZ = L.Z - 3.0;
+		GrenBlastZ = FloorZ + HH + GREN_FOE_FLOOR_GAP;
+		if (Shot.Place == EGrenPlace::BlastCenter || Shot.Place == EGrenPlace::BlastCrouch)
+		{
+			GrenBlastS = Shot.Arg;
+		}
+		else if (Shot.Place == EGrenPlace::BlastCap)
+		{
+			// 수류탄이 축 선분 아래 끝보다 낮으면 가장 가까운 점 = 아래 끝 — 수평 = √((Arg + R)² − 높이 차²)
+			const double Dz = FMath::Max(0.0, (GrenBlastZ - (HH - R)) - L.Z);
+			GrenBlastS = FMath::Sqrt(FMath::Max(0.0, FMath::Square(Shot.Arg + R) - Dz * Dz));
+		}
+		else if (Shot.Place == EGrenPlace::BlastHit)
+		{
+			// 선이 캡슐에 닿는 거리는 수평 거리에 따라 는다 — 이분법으로 Arg 가 되는 수평 거리
+			double Lo = R + 0.01, Hi = 2000.0;
+			for (int32 i = 0; i < 60; ++i)
+			{
+				const double M = 0.5 * (Lo + Hi);
+				const FVector C(L.X + GrenBlastDir.X * M, L.Y + GrenBlastDir.Y * M, GrenBlastZ);
+				(RayCapsuleDist(L, C, R, HH) < Shot.Arg ? Lo : Hi) = M;
+			}
+			GrenBlastS = Hi;
+		}
+		const FRotator Face = (-GrenBlastDir).Rotation();
+		F->SetActorLocationAndRotation(FVector(L.X + GrenBlastDir.X * GrenBlastS, L.Y + GrenBlastDir.Y * GrenBlastS, GrenBlastZ), FRotator(0.0, Face.Yaw, 0.0), false, nullptr, ETeleportType::TeleportPhysics);
+		if (UCharacterMovementComponent* M = F->GetCharacterMovement()) M->StopMovementImmediately();
+		if (AController* C = F->GetController()) C->SetControlRotation(FRotator(0.0, Face.Yaw, 0.0));
+		if (Shot.Place == EGrenPlace::BlastCrouch) F->Crouch();
+		if (bWall)
+		{
+			UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GWALLSET frame=%d step=%s grenade=%.6f,%.6f,%.6f foe=%s %s"), Frame, S.Name, L.X, L.Y, L.Z, *F->GetActorLocation().ToString(), *Set);
+		}
+	}
+	const FVector L = G->GetActorLocation();
+	const FVector To = F->GetActorLocation();
+	FHitResult Hit;
+	const TArray<AActor*> NoIgnore;
+	const bool bHit = UKismetSystemLibrary::LineTraceSingle(G, L, To, TraceTypeQuery5, true, NoIgnore, EDrawDebugTrace::None, Hit, true);
+	const double HHNow = Cap->GetScaledCapsuleHalfHeight();
+	const FVector Cc = Cap->GetComponentLocation();
+	const double CapDist = FMath::PointDistToSegment(L, Cc - FVector(0.0, 0.0, HHNow - R), Cc + FVector(0.0, 0.0, HHNow - R)) - R;
+	const double Horiz = FVector::Dist2D(L, To);
+	double Fix = 0.0;
+	if (Pass == 1 && Shot.Place == EGrenPlace::BlastHit && bHit) Fix = Shot.Arg - Hit.Distance;
+	if (Pass == 1 && Shot.Place == EGrenPlace::BlastCap) Fix = Shot.Arg - CapDist;
+	if (Fix != 0.0)
+	{
+		GrenBlastS += Fix;
+		F->SetActorLocation(FVector(L.X + GrenBlastDir.X * GrenBlastS, L.Y + GrenBlastDir.Y * GrenBlastS, To.Z), false, nullptr, ETeleportType::TeleportPhysics);
+	}
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GBLAST frame=%d step=%s pass=%d place=%d target=%.3f stopped=%d grenade=%.6f,%.6f,%.6f foe=%.6f,%.6f,%.6f crouched=%d hh=%.3f ")
+		TEXT("hit=%d dist=%.6f hitActor=%s hitComp=%s pen=%d capDist=%.6f centerDist=%.6f horiz=%.6f s=%.6f fix=%.6f"),
+		Frame, S.Name, Pass, (int32)Shot.Place, Shot.Arg, bStopped ? 1 : 0, L.X, L.Y, L.Z, To.X, To.Y, To.Z, F->bIsCrouched ? 1 : 0, HHNow,
+		bHit ? 1 : 0, Hit.Distance, *GetNameSafe(Hit.GetActor()), *GetNameSafe(Hit.GetComponent()), Hit.bStartPenetrating ? 1 : 0, CapDist, FVector::Dist(L, To), Horiz, GrenBlastS, Fix);
 }
 
 // 던짐 칸 요약 한 줄(MOB_CPROBE_GREN) — 프레임 번호는 기록 표 frame 칸. spawnAfterPress = 생긴 프레임 − 누른 프레임, timerFrames = 터진 프레임 − 생긴 프레임(표 기대 120 또는 121)
@@ -2508,4 +2703,6 @@ void UMOBContentProbeSubsystem::EndGrenade()
 		S.Name, G.Name, (int32)G.Place, GrenPressFrame, GrenSpawnFrame, (GrenSpawnFrame >= 0 && GrenPressFrame >= 0) ? GrenSpawnFrame - GrenPressFrame : -1, GrenSpawns,
 		GrenFirstHitFrame, GrenHits, *GrenFirstHit, GrenBoomFrame, (GrenBoomFrame >= 0 && GrenSpawnFrame >= 0) ? GrenBoomFrame - GrenSpawnFrame : -1, bGone ? 1 : 0,
 		GrenCdAtPress, GrenadeCooldownLeft(), GrenMyHpAtBegin - HealthOf(Ch), GrenFoeHpAtBegin - HealthOf(Foe.Get()), (Ch && Ch->bIsCrouched) ? 1 : 0, *GrenWhere);
+	// 앉은 과녁 칸 — 다음 칸 전에 세운다
+	if (G.Place == EGrenPlace::BlastCrouch && Foe.IsValid()) Foe->UnCrouch();
 }

@@ -81,6 +81,8 @@ private:
 	int32 NearestWallDir() const;			// 집에서 가장 가까운 서 있는 벽의 축 방향(ClearAround, 0 · 2 · 4 · 6) · 없으면 -1
 	bool FindSurface(bool bCorner, FVector& OutPoint, FVector& OutStand, FString& OutWhat) const;	// 집 둘레 비스듬한 면 · 두 벽이 만나는 구석(과 그 구석을 대각으로 볼 던질 자리)을 찾는다
 	void AimAt(const FVector& Point) const;	// 카메라에서 그 점을 보게 조종 회전 · 몸 요를 돌린다(카메라 선이 그 점을 지나게)
+	// 피해 칸(G-0-b) — 멈춘 수류탄 둘레에 상대를 세운다(Pass 0 = 세움 · 1 = 재서 고침 · 2 = 재기만). 벽 칸은 수류탄도 정한 자리로 옮긴다. 줄 = MOB_CPROBE_GBLAST
+	void BlastPass(AActor* G, int32 Pass);
 	// 대시 판(D-0) — 칸 안에서 누르기 · 이동 입력 · 켜짐 가장자리를 맡고(DuringDash), 칸 끝에 요약 한 줄(EndDash, MOB_CPROBE_DASH)
 	static bool IsDashAct(EAct A) { return A == EAct::DashMove || A == EAct::DashNoInput || A == EAct::DashPitch || A == EAct::DashJumpApex || A == EAct::DashSpam
 		|| A == EAct::DashThen || A == EAct::HoldThenDash || A == EAct::ReloadDash || A == EAct::MeleeDash || A == EAct::DashWall || A == EAct::DashCrouchSame || A == EAct::DashTurn; }
@@ -249,5 +251,8 @@ private:
 	float PrevFoeHp = 0.f;
 	int32 GrenWallDir = -1;			// 벽 칸 — 고른 벽 방향(NearestWallDir)
 	int32 GrenAdjusts = 0;			// 벽 카메라 칸 — 몸 앞뒤 맞춤 횟수
+	double GrenBlastS = 0.0;		// 피해 칸 — 수류탄에서 상대 몸 가운데까지 수평 거리(GrenBlastDir 쪽) · 상대 몸 가운데 높이
+	double GrenBlastZ = 0.0;
+	FVector GrenBlastDir = FVector::ZeroVector;
 	FString GrenCsv;				// 수류탄마다 프레임마다 한 줄 → Saved/MOB/cprobe_<tag>_gren.csv
 };
