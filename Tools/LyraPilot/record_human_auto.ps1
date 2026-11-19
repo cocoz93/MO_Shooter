@@ -31,7 +31,10 @@ $resX, $resY = $Res -split 'x'
 if ($Only -ne 'pads') {
     # an old log of the same tag already holds MOB_WELCOME - move it aside so the wait below sees only this run
     if (Test-Path -LiteralPath $log) { Move-Item -LiteralPath $log -Destination "${base}-old-$(Get-Date -Format 'yyyyMMdd-HHmmss').log" -Force }
-    $srvArgs = @("--map=`"$map`"", "--port=$Port", '--exitWhenEmpty', '--warmup=5', "--matchSeconds=$MatchSeconds")
+    # --testStartAllWeapons (server and both bot groups): the bridge script fires the shotgun and holds melee with each of the three weapons.
+    # Respawning with the pistol only (Lyra rule, weapon pickup W-2) the server rejects those switches (W-5 runs w5ha / w5hb: switchRejected 12 / 15,
+    # C shots and E repeat rifle / shotgun FAIL). The bots get it too so their predicted bag matches the server
+    $srvArgs = @("--map=`"$map`"", "--port=$Port", '--exitWhenEmpty', '--warmup=5', "--matchSeconds=$MatchSeconds", '--testStartAllWeapons')
     if (Test-Path -LiteralPath $pads) { $srvArgs += "--pads=`"$pads`"" }
     $srv = Start-Process -FilePath "$repo\build\Server\Release\Server.exe" -ArgumentList $srvArgs -RedirectStandardOutput "${base}_server.txt" -RedirectStandardError "${base}_server_err.txt" -PassThru -WindowStyle Hidden
     $null = $srv.Handle
@@ -56,7 +59,7 @@ if ($Only -ne 'pads') {
         # push bots first: the server puts a new player on the smaller team (Room.cpp ChooseTeam), so the one joining right after me is on the other team
         # and my scripted melee hits it (a teammate gives MELEE_SAME_TEAM: no damage, no hit reaction - pilot ha1)
         if ($PushBots -gt 0) {
-            $botProcs += Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", "--bots=$PushBots", '--push', '--seed=7') -RedirectStandardOutput "${base}_pushbots.txt" -RedirectStandardError "${base}_pushbots_err.txt" -PassThru -WindowStyle Hidden
+            $botProcs += Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", "--bots=$PushBots", '--push', '--seed=7', '--testStartAllWeapons') -RedirectStandardOutput "${base}_pushbots.txt" -RedirectStandardError "${base}_pushbots_err.txt" -PassThru -WindowStyle Hidden
             Start-Sleep -Seconds 2
             # the other bots join only after the script: the push bot walks to the nearest player, so alone with me it sticks to me (bump, my melee hits an enemy),
             # and my teammates are not there to shoot it (pilot ha2: it spawned with its own team, stuck to them and died 3 times; my melee hit nobody)
@@ -68,7 +71,7 @@ if ($Only -ne 'pads') {
             "move: script done after {0:N1}s - other bots join" -f ((Get-Date) - $t0).TotalSeconds
         }
         if ($Bots -gt 0) {
-            $botProcs += Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", "--bots=$Bots") -RedirectStandardOutput "${base}_bots.txt" -RedirectStandardError "${base}_bots_err.txt" -PassThru -WindowStyle Hidden
+            $botProcs += Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", "--bots=$Bots", '--testStartAllWeapons') -RedirectStandardOutput "${base}_bots.txt" -RedirectStandardError "${base}_bots_err.txt" -PassThru -WindowStyle Hidden
         }
     }
     while ((Get-Date) -lt $deadline -and -not $lyra.HasExited) { Start-Sleep -Seconds 1 }

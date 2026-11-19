@@ -35,7 +35,9 @@ $botSeconds = [int]($HoldSec + 48.9 + 25)
 $afterMove = ''
 if ($Script -eq 'crouch') { $botSeconds = [int]($HoldSec + 4820 / 60 + 25); $afterMove = '-MOBRemoteShotAfterMove=70.22' }
 
-$srv = Start-Process -FilePath "$repo\build\Server\Release\Server.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", "--clips=`"$clips`"", '--debug', '--exitWhenEmpty', '--warmup=1', '--matchSeconds=500') -RedirectStandardOutput $srvOut -PassThru -WindowStyle Hidden
+# --testStartAllWeapons (server and bot): the bot poses with -Weapon (rifle by default). Respawning with the pistol only (Lyra rule, weapon pickup W-2)
+# the server rejects the switch (W-5 run w5r1: switchRejected=1) and the screen records pistol poses instead
+$srv = Start-Process -FilePath "$repo\build\Server\Release\Server.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", "--clips=`"$clips`"", '--debug', '--exitWhenEmpty', '--warmup=1', '--matchSeconds=500', '--testStartAllWeapons') -RedirectStandardOutput $srvOut -PassThru -WindowStyle Hidden
 $null = $srv.Handle   # without this ExitCode stays empty after the process ends
 Start-Sleep -Milliseconds 800
 $relay = Start-Process -FilePath "$repo\build\Tools\LagRelay\Release\LagRelay.exe" -ArgumentList @("--listen=$relayPort", "--target=$Port", "--delayMs=$DelayMs", "--jitterMs=$JitterMs", "--seconds=$TimeoutSec") -RedirectStandardOutput $relayOut -PassThru -WindowStyle Hidden
@@ -58,7 +60,7 @@ while ((Get-Date) -lt $deadline -and -not $lyra.HasExited) {
     Start-Sleep -Milliseconds 500
 }
 Start-Sleep -Seconds 3   # the 1 s warmup ends and the match starts before the bot joins
-$bot = Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", '--bots=1', "--script=$Script", "--scriptHold=$HoldSec", "--scriptWeapon=$Weapon", "--seconds=$botSeconds") -RedirectStandardOutput $botOut -PassThru -WindowStyle Hidden
+$bot = Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList @("--map=`"$map`"", "--port=$Port", '--bots=1', "--script=$Script", "--scriptHold=$HoldSec", "--scriptWeapon=$Weapon", "--seconds=$botSeconds", '--testStartAllWeapons') -RedirectStandardOutput $botOut -PassThru -WindowStyle Hidden
 $null = $bot.Handle
 
 $timedOut = $false
