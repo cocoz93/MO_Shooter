@@ -521,6 +521,7 @@ namespace
 		std::vector<wire::Kill> kills;
 		std::vector<wire::Match> matches;
 		std::vector<wire::Melee> melees;
+		std::vector<wire::Pickup> pickups;
 		std::vector<wire::PlayerState> history;
 		std::vector<uint32_t> historyTicks;		// history 와 같은 칸 — 그 상태가 어느 틱 것인가
 		wire::Result result = wire::Result();
@@ -587,6 +588,13 @@ namespace
 					melees.push_back(melee);
 					break;
 				}
+				case wire::Msg::S2C_PICKUP:
+				{
+					wire::Pickup pickup = wire::Pickup();
+					std::memcpy(&pickup, data, std::min(size, (int)sizeof(pickup)));
+					pickups.push_back(pickup);
+					break;
+				}
 				case wire::Msg::S2C_RESULT:
 					std::memcpy(&result, data, std::min(size, (int)sizeof(result)));
 					hasResult = true;
@@ -597,12 +605,16 @@ namespace
 			});
 		}
 
-		void Place(const Vec3& at, float hp)
+		void Place(const Vec3& at, float hp, uint8_t flags = 0, uint8_t ammoWeapon = 0, int16_t magazine = 0, int16_t spare = 0)
 		{
 			wire::DebugPlace place = wire::DebugPlace();
 			place.seq = ++seq;
 			place.x = at.x; place.y = at.y; place.z = at.z;
 			place.hp = hp;
+			place.flags = flags;
+			place.ammoWeapon = ammoWeapon;
+			place.magazine = magazine;
+			place.spare = spare;
 			net.SendPacket(place, wire::Msg::C2S_DEBUG_PLACE);
 		}
 	};
@@ -2026,6 +2038,216 @@ namespace
 		return placesSeen == stepCount && !log.empty() && events > 0;
 	}
 
+	// ─── 6-1. 무기 받침(--weapons, 컨텐츠 W-2) ─────────────
+	// Lyra 무기 판(record_content_probe.ps1 -Mode weapons, MOBContentProbeSubsystem.cpp WEAPONS_SCRIPT)을 같은 차례 · 같은 길이 · 같은 자리로 돌린다.
+	// 순간이동 · 탄 정하기 · 스스로 죽음은 시험 입력(C2S_DEBUG_PLACE, flags)으로, 무기 고르기 · 재장전은 보통 입력으로 한다.
+	// 여기는 구동과 기록만: 단계마다 첫 메시지를 서버가 쓴 틱(WPROBE startTick) · 내 상태의 든 무기 · 탄이 바뀐 틱(WPROBE seen)을 찍고,
+	// 서버 사건은 서버 출력의 PADEV · INVEV · PAD 줄을 그대로 옮겨 찍는다. 대조는 Tools/LyraPilot/check_weapon_pads.py
+	bool RunWeapons(int port, const std::string& serverLog)
+	{
+		ShotClient client;
+		if (!ConnectAndHello(client.net, port, client.welcome))
+		{
+			std::printf("WPROBE 접속 실패\n");
+			return false;
+		}
+		timeBeginPeriod(1);
+		// 자리 = Lyra 기록 cprobe_w0a.log — 집 MOB_CPROBE_READY home, 받침 위 MOB_CPROBE_STAND spot
+		const Vec3 home(4700.0, -250.0, -368.100);
+		const Vec3 spots[4] = {
+			Vec3(3377.4, -1830.0, -368.031),	// 0 = R1 소총(B_WeaponSpawner1)
+			Vec3(-3377.4, 1830.0, -368.031),	// 1 = R3 소총(B_WeaponSpawner3)
+			Vec3(-4586.5, 1008.4, -368.031),	// 2 = P7 권총(B_WeaponSpawner7)
+			Vec3(1472.0, -6.7, -1205.475),		// 3 = S5 샷건(B_WeaponSpawner5)
+		};
+		struct AmmoSet { uint8_t weapon; int16_t magazine, spare; };
+		const AmmoSet ammoSets[4] = { { 1, 10, 20 }, { 0, 4, 48 }, { 1, 10, 60 }, { 2, 2, 16 } };	// Lyra AMMO_SETS 와 같은 차례
+		enum class EAct { Home, Pad, Select, SetAmmo, Reload, Kill, None };
+		struct Step { const char* name; double seconds; EAct act; int arg; };
+		// WEAPONS_SCRIPT 와 같은 줄. settle 은 Lyra 에서 받침 정보만 찍는 단계라 집에 선다.
+		// Select 의 arg 는 무기 번호 — Lyra 는 칸 번호를 골랐고 그때 가방이 [권총, 소총, 샷건] 이라 칸 = 무기 번호다
+		const Step steps[] = {
+			{ "settle", 1.0, EAct::Home, 0 },
+			{ "rifle_r1", 14.0, EAct::Pad, 0 },
+			{ "away1", 1.0, EAct::Home, 0 },
+			{ "slot0", 1.5, EAct::Select, 0 },
+			{ "rifle_low", 0.5, EAct::SetAmmo, 0 },
+			{ "rifle_r3", 2.0, EAct::Pad, 1 },
+			{ "away2", 1.0, EAct::Home, 0 },
+			{ "pistol_p7", 2.0, EAct::Pad, 2 },
+			{ "away3", 1.0, EAct::Home, 0 },
+			{ "pistol_low", 0.5, EAct::SetAmmo, 1 },
+			{ "reload_press", 0.1, EAct::Reload, 0 },
+			{ "shotgun_s5", 3.0, EAct::Pad, 3 },
+			{ "away4", 1.0, EAct::Home, 0 },
+			{ "pistol_low2", 0.5, EAct::SetAmmo, 1 },
+			{ "reload_pistol", 3.0, EAct::Reload, 0 },
+			{ "slot1", 1.5, EAct::Select, 1 },
+			{ "rifle_low2", 0.5, EAct::SetAmmo, 2 },
+			{ "reload_rifle", 3.0, EAct::Reload, 0 },
+			{ "slot2", 1.5, EAct::Select, 2 },
+			{ "shotgun_low", 0.5, EAct::SetAmmo, 3 },
+			{ "reload_shotgun", 4.0, EAct::Reload, 0 },
+			{ "die", 15.0, EAct::Kill, 0 },
+			{ "end", 1.0, EAct::None, 0 },
+		};
+		PumpFor(&client, 1, 0.3);
+		// 보내는 무기 번호 = 다리 · 봇이 할 일과 같다 — 키로 고른 무기, 그리고 서버가 줍기 · 부활로 무기를 바꿨으면(내 집음 · 부활 소식 뒤 그 틱 상태의 든 무기) 그 무기.
+		// 「앞 입력과 달라졌을 때만 바꾼다」(Shared/Loadout.h) 규칙이라 줍기로 바뀐 뒤 옛 번호를 계속 보내도 되돌아가지 않고, 따라 맞춘 뒤에 키를 눌러야 바뀐다
+		uint8_t wanted = client.hasSelf ? client.self.weapon : 0;
+		size_t pickupsSeen = 0, spawnsSeen = 0, scanned = 0;
+		uint32_t adoptFromTick = 0;
+		bool adopt = false;
+		int32_t lastWeapon = -1, lastMag = -1, lastSpare = -1, lastSlots = -1;
+		constexpr int kStepCount = (int)(sizeof(steps) / sizeof(steps[0]));
+		uint32_t firstSeqs[kStepCount] = {};
+		int stepsSent = 0, stepsStarted = 0;
+		const auto scan = [&]()
+		{
+			for (; pickupsSeen < client.pickups.size(); ++pickupsSeen)
+			{
+				const wire::Pickup& m = client.pickups[pickupsSeen];
+				if ((m.reason == wire::PICKUP_TAKE || m.reason == wire::PICKUP_TAKE_RECHECK) && m.picker == client.welcome.playerId)
+				{
+					adoptFromTick = adopt ? std::max(adoptFromTick, m.tick) : m.tick;	// 둘 다 기다리면 늦은 쪽 — 그 틱 상태가 두 일을 다 담는다
+					adopt = true;
+				}
+			}
+			// 부활하면 가방이 [권총] 으로 돌아간다 — 그 틱 상태의 든 무기로 맞춘다(안 맞추면 죽기 전 고른 무기를 안 가진 무기로 계속 보낸다)
+			for (; spawnsSeen < client.spawns.size(); ++spawnsSeen)
+			{
+				if (client.spawns[spawnsSeen].player != client.welcome.playerId) continue;
+				adoptFromTick = adopt ? std::max(adoptFromTick, client.spawns[spawnsSeen].tick) : client.spawns[spawnsSeen].tick;
+				adopt = true;
+			}
+			for (; scanned < client.history.size(); ++scanned)
+			{
+				const wire::PlayerState& s = client.history[scanned];
+				const uint32_t tick = client.historyTicks[scanned];
+				// 단계 시작 = 그 단계 첫 입력을 서버가 쓴 틱(시험 입력은 그 뒤에 보내 같은 틱에 쓰인다). 상태의 lastSeq 로 안다
+				while (stepsStarted < stepsSent && s.lastSeq >= firstSeqs[stepsStarted])
+				{
+					std::printf("WPROBE step=%s startTick=%u\n", steps[stepsStarted].name, tick);
+					++stepsStarted;
+				}
+				const char* stepName = stepsStarted > 0 ? steps[stepsStarted - 1].name : "prime";
+				if ((int32_t)s.weapon != lastWeapon || s.magazine != lastMag || s.spare != lastSpare || (int32_t)s.quickSlots != lastSlots)
+				{
+					lastWeapon = s.weapon;
+					lastMag = s.magazine;
+					lastSpare = s.spare;
+					lastSlots = s.quickSlots;
+					std::printf("WPROBE seen tick=%u step=%s weapon=%u mag=%d spare=%d dead=%d slots=%u\n", tick, stepName, (unsigned)s.weapon, (int)s.magazine, (int)s.spare, (s.flags & wire::STATE_DEAD) ? 1 : 0, (unsigned)s.quickSlots);
+				}
+				if (adopt && tick >= adoptFromTick)
+				{
+					adopt = false;
+					if (s.weapon != wanted) std::printf("WPROBE adopt tick=%u weapon=%u>%u\n", tick, (unsigned)wanted, (unsigned)s.weapon);
+					wanted = s.weapon;
+				}
+			}
+		};
+		// 각본 앞 채우기 — 서버 입력 줄에 늘 2개가 서 있게 한다(한 틱에 꺼내는 한도 kMaxInputTokens = 8 을 먼저 다 쓰게 8 + 2 를 몰아 보냄).
+		// 입력이 틱마다 하나씩 꼭 쓰여야 서버 틱 = 입력 수 = Lyra 프레임이 된다 — 늦게 온 입력으로 빈 틱(starvedTicks)이 나면 단계가 밀린다(첫 판 311틱)
+		constexpr int kPrimeBurst = 8 + 2;
+		constexpr int kPrimeTicks = 60;
+		client.Place(home, client.hasSelf ? client.self.hp : 100.f);
+		for (int i = 0; i < kPrimeBurst; ++i) SendAim(client, home, home + Vec3(100, 0, 0), 0, 0, 0, wanted);
+		int scriptTicks = 0;
+		int stepEnds[kStepCount] = {};
+		for (int i = 0; i < kStepCount; ++i)
+		{
+			scriptTicks += (int)std::lround(steps[i].seconds * 60.0);
+			stepEnds[i] = scriptTicks;
+		}
+		// 단계 사이에 쉬지 않고 한 줄로 보낸다 — 단계마다 따로 돌리면 사이 0.05초(3틱)마다 입력이 빈다
+		int stepAt = -1;
+		RunTicks(&client, 1, kPrimeTicks + scriptTicks, [&](int i)
+		{
+			const int scriptTick = i - kPrimeTicks;
+			if (scriptTick < 0 || (stepAt >= 0 && scriptTick < stepEnds[stepAt]))
+			{
+				SendAim(client, home, home + Vec3(100, 0, 0), 0, 0, 0, wanted);
+				scan();
+				return;
+			}
+			// 단계 첫 틱 — 시험 입력(자리 · 탄 · 죽음)은 그 틱 입력 「뒤」에 보낸다. 시험 입력은 한도를 안 쓰고 줄에 닿는 대로 쓰여서(TickPlayerInputs),
+			// 입력 앞에 두면 앞 틱 마지막 입력과 같은 틱에 쓰인다. 뒤에 두면 이 단계 첫 입력과 같은 틱 = Lyra 가 그 단계 첫 프레임에 한 일
+			++stepAt;
+			const Step& step = steps[stepAt];
+			const float hpNow = client.hasSelf ? client.self.hp : 100.f;
+			firstSeqs[stepAt] = client.seq + 1;
+			stepsSent = stepAt + 1;
+			if (step.act == EAct::Select) wanted = (uint8_t)step.arg;
+			SendAim(client, home, home + Vec3(100, 0, 0), 0, 0, step.act == EAct::Reload ? (uint8_t)wire::BUTTON_RELOAD : (uint8_t)0, wanted);	// 재장전은 누른 입력 하나에만(EButton)
+			switch (step.act)
+			{
+			case EAct::Home: client.Place(home, hpNow); break;
+			case EAct::Pad: client.Place(spots[step.arg], hpNow); break;
+			case EAct::SetAmmo:
+			{
+				const AmmoSet& a = ammoSets[step.arg];
+				client.Place(home, hpNow, wire::DEBUG_PLACE_SET_AMMO, a.weapon, a.magazine, a.spare);
+				break;
+			}
+			case EAct::Kill: client.Place(home, hpNow, wire::DEBUG_PLACE_KILL); break;
+			case EAct::Select:
+			case EAct::Reload:
+			case EAct::None:
+				break;
+			}
+			scan();
+		}, [] { return false; });
+		PumpFor(&client, 1, 0.3);
+		scan();
+		timeEndPeriod(1);
+		client.net.Close();
+
+		// 받침 소식 전부(W-3) — 대조 도구가 종류 · 줍기 칸을 서버 PADEV 줄과 견준다. 소식은 그 틱 상태보다 먼저 오므로 입력 번호는 다 받은 뒤 상태로 본다:
+		// 그 틱 상태의 lastSeq(그 틱에 쓴 마지막 입력) · 앞 틱 상태의 lastSeq. 상태가 없으면 -1
+		for (const wire::Pickup& m : client.pickups)
+		{
+			int64_t stateSeq = -1, prevSeq = -1;
+			for (size_t i = 0; i < client.history.size(); ++i)
+			{
+				if (client.historyTicks[i] == m.tick) stateSeq = client.history[i].lastSeq;
+				if (client.historyTicks[i] + 1 == m.tick) prevSeq = client.history[i].lastSeq;
+			}
+			std::printf("WPROBE padmsg tick=%u pad=%u reason=%u picker=%u kind=%u give=%u weapon=%u slot=%u mag=%d spare=%d seq=%u stateSeq=%lld prevSeq=%lld\n", m.tick, (unsigned)m.pad,
+				(unsigned)m.reason, m.picker, (unsigned)m.kind, (unsigned)m.give, (unsigned)m.weapon, (unsigned)m.slot, (int)m.magazine, (int)m.spare, m.seq, (long long)stateSeq, (long long)prevSeq);
+		}
+
+		std::string log;
+		for (int i = 0; i < 100 && log.empty(); ++i)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			std::ifstream file(serverLog, std::ios::binary);
+			log.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+			if (log.find("SERVER kills=") == std::string::npos) log.clear();
+		}
+		int padEvents = 0, invEvents = 0;
+		size_t at = 0;
+		while (at < log.size())
+		{
+			size_t end = log.find('\n', at);
+			if (end == std::string::npos) end = log.size();
+			std::string line = log.substr(at, end - at);
+			if (!line.empty() && line.back() == '\r') line.pop_back();
+			const bool pad = line.rfind("PADEV ", 0) == 0;
+			const bool inv = line.rfind("INVEV ", 0) == 0;
+			if (pad || inv || line.rfind("SERVER pickups=", 0) == 0 || line.rfind("SERVER weaponPickups ", 0) == 0 || line.rfind("PADS ", 0) == 0 || line.rfind("PAD ", 0) == 0)
+			{
+				std::printf("%s\n", line.c_str());
+				if (pad) ++padEvents;
+				if (inv) ++invEvents;
+			}
+			at = end + 1;
+		}
+		const int stepCount = (int)(sizeof(steps) / sizeof(steps[0]));
+		std::printf("WPROBE player=%u 단계 %d 중 시작 확인 %d · 서버 출력 %s · 받침 사건 %d줄 · 가방 사건 %d줄\n", client.welcome.playerId, stepCount, stepsStarted, log.empty() ? "못 읽음" : "읽음", padEvents, invEvents);
+		return stepsStarted == stepCount && !log.empty() && padEvents > 0 && invEvents > 0;
+	}
+
 	// ─── 7. 근접(--melee, 컨텐츠 E-3) ─────────────────────
 	// Lyra 연습장 근접 판(record_content_probe.ps1 -Mode gym → cprobe_<tag>.log · .csv)의 칸마다 공격자 · 상대를 Lyra 자리에 놓고,
 	// 같은 요로 선 뒤 근접을 한 번 누른다. 견주는 것
@@ -2464,7 +2686,7 @@ int main(int argc, char** argv)
 	int port = 7791;
 	size_t rowLimit = (size_t)-1;
 	bool breakMirror = false, breakSpread = false, breakDamage = false, rulesOnly = false;
-	bool authorityOnly = false, rewindOnly = false, padsOnly = false;
+	bool authorityOnly = false, rewindOnly = false, padsOnly = false, weaponsOnly = false;
 	std::string meleeLog;
 	std::string serverLog;
 	std::string startsDump;
@@ -2480,6 +2702,7 @@ int main(int argc, char** argv)
 		else if (s == "--authority") authorityOnly = true;
 		else if (s == "--rewind") rewindOnly = true;
 		else if (s == "--pads") padsOnly = true;
+		else if (s == "--weapons") weaponsOnly = true;
 		else if (s.rfind("--melee=", 0) == 0) meleeLog = s.substr(8);
 		else if (s.rfind("--serverLog=", 0) == 0) serverLog = s.substr(12);
 		else if (s.rfind("--checkStarts=", 0) == 0) startsDump = s.substr(14);
@@ -2534,6 +2757,12 @@ int main(int argc, char** argv)
 		const bool padsOk = RunPads(port, serverLog);
 		std::printf("RESULT %s (받침 구동 — 대조는 check_pads.py)\n", padsOk ? "PASS" : "FAIL");
 		return padsOk ? 0 : 1;
+	}
+	if (weaponsOnly)
+	{
+		const bool weaponsOk = RunWeapons(port, serverLog);
+		std::printf("RESULT %s (무기 받침 구동 — 대조는 check_weapon_pads.py)\n", weaponsOk ? "PASS" : "FAIL");
+		return weaponsOk ? 0 : 1;
 	}
 	if (rulesOnly)
 	{

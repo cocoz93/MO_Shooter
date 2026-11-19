@@ -8,6 +8,7 @@
 #pragma once
 
 #include "GameProtocol.h"
+#include "Loadout.h"
 #include "MatchRules.h"
 #include "Movement.h"
 #include "Weapon.h"
@@ -37,6 +38,7 @@ namespace mo
 			AdsAbility ads;			// 조준은 걸음 속도를 바꾼다 — 다시 돌릴 때 이 입력 뒤 상태에서 잇는다
 			int16_t magazine = 0, spare = 0;
 			uint8_t weapon = 0;
+			uint8_t quickSlots = 0;	// 이 입력 뒤 가방(와이어 꼴 CLoadout::PackSlots) — 봇이 서버 상태와 견준다(W-3)
 			bool reloading = false;
 		};
 
@@ -59,6 +61,13 @@ namespace mo
 		// 서버가 시작 자리로 옮겼다 — 그 번호 뒤의 입력을 새 자리에서 다시 돌린다
 		void OnSpawn(double x, double y, double z, uint32_t lastSeq);	// 와이어 Spawn 은 double — float 로 줄이면 같은 입력을 돌려도 어긋난다
 
+		// 시험 자리 옮기기(C2S_DEBUG_PLACE)를 보낼 때(W-4 다리 무기 각본) — 다음 번호 하나를 이 옮기기에 쓰고, 서버 ApplyPlace(Room.cpp)와 같이
+		// 걸음 · 점프 키 · 이동 막음만 새로 놓는다. 무기 · 가방 · 조준 · 근접은 그대로(서버도 안 건드린다 — OnSpawn 과 다른 점).
+		// ammoWeapon < EWeapon::Count 면 그 무기 탄을 magazine · spare 로(DEBUG_PLACE_SET_AMMO). 돌려주는 값 = 보낼 DebugPlace.seq.
+		// 속도 0 · 걷기(falling 0)로 보내는 옮기기만 따라 한다. 죽음(DEBUG_PLACE_KILL)은 여기서 안 다룬다 — 죽음 소식이 BeginWaitSpawn 으로 온다.
+		// 그 번호의 서버 상태는 견주지 않고(부활 번호와 같은 자리), 그 번호로 집은 받침 소식(겹침을 옮긴 자리에서 다시 봄)은 이 칸에서 Give 한다
+		uint32_t OnPlace(double x, double y, double z, uint8_t ammoWeapon, int16_t magazine, int16_t spare);
+
 		// 내가 죽었다 — 부활 소식이 올 때까지 돌리지 않는다(서버도 죽은 동안 입력을 안 쓴다)
 		void BeginWaitSpawn() { _waitingSpawn = true; }
 
@@ -71,6 +80,25 @@ namespace mo
 		// 서버 근접 결과(S2C_MELEE 중 공격자가 나) — 그 입력의 밀기를 서버 값으로 바꾸고, 예측과 다르면 그 입력부터 걸음을 다시 돌린다.
 		// 서버는 이 소식을 그 입력을 돈 틱의 상태보다 먼저 보낸다(같은 연결, 판정이 입력 처리 안이고 상태는 틱 끝) — 상태를 맞춰 보기 전에 밀기가 고쳐져 있다
 		void OnMeleeResult(uint32_t seq, bool push, const Vec3& force);
+
+		// 서버 받침 소식 중 내가 무기 받침을 집은 것(W-3) — 무기 쪽(가방 · 탄 · 발사 문 · 조준 카메라)을 집기 직전으로 되살려 같은 Give 를 하고,
+		// 결과 · 칸 · 탄이 소식과 다르면 소식 값으로 고쳐 센다. 그 뒤 입력의 무기 쪽을 다시 돌린다(걸음은 무기를 안 보므로 그대로).
+		// 집기 직전 = 서버가 집은 자리. midInput(소식 PICKUP_TAKE) = 입력 seq 의 걸음 뒤 · 무기 순환 앞(Room.cpp ApplyInput 의 UpdatePadOverlaps) —
+		// 앞 입력 뒤 칸에서 seq 의 교체를 다시 하고 Give 뒤 seq 의 순환을 돈다. 아니면(다시 검사 PICKUP_TAKE_RECHECK = 그 틱 입력 뒤 TickPads) seq 입력 뒤 칸에서 Give.
+		// 부활 번호 그대로(seq = 부활 lastSeq)는 새 몸이 받침 안에 선 것이라 부활 칸에서 Give.
+		// 예측은 받침 겹침을 스스로 짐작하지 않는다 — 남이 먼저 집으면 갈린다(weapon-pickup-plan.md 「예측」). 서버는 이 소식을 그 틱 상태보다 먼저 보낸다
+		void OnPickup(uint32_t seq, bool midInput, uint8_t weapon, uint8_t give, uint8_t slot, int16_t magazine, int16_t spare);
+
+		struct PickupCounters
+		{
+			uint64_t received = 0;			// 받은 내 무기 줍기 소식
+			uint64_t rerun = 0;				// 그 칸에서 다시 돌림
+			uint64_t noSlot = 0;			// 그 번호 칸이 없음(부활 전 목숨 · 기다리는 중 · 너무 옛 번호) — 못 고친다. 0 이어야 한다
+			uint64_t resultDiffs = 0;		// 같은 Give 의 결과 · 칸이 소식과 다름 — 소식대로 고침. 0 이어야 한다
+			uint64_t ammoFixes = 0;			// Give 뒤 그 무기 탄이 소식과 다름 — 소식대로 고침. 0 이어야 한다
+			uint64_t meleeInWindow = 0;		// 다시 돌린 입력 중 근접을 켠 것 — 근접은 다시 안 돌린다(능력 길이가 무기마다 달라 갈릴 수 있다, 근접 셈이 잡는다)
+		};
+		const PickupCounters& GetPickupCounters() const { return _pickupCounters; }
 
 		// 서버가 이 번호까지 입력을 돌렸다 — 그 안에서 내가 켰는데 서버 결과가 안 온 근접(서버는 안 켰다)의 밀기를 지우고 다시 돌린다.
 		// Reconcile 이 처음에 부른다. 맞춰 보기만 하는 쪽(봇)은 FindComparable 앞에 부른다
@@ -102,6 +130,7 @@ namespace mo
 		const MoveState& GetMove() const { return _move; }
 		const CWeaponCycle& GetWeapon() const { return _weapons[_weapon]; }
 		uint8_t GetWeaponIndex() const { return _weapon; }
+		const CLoadout& GetLoadout() const { return _loadout; }		// 봇이 가진 무기 중에서 고르려고(W-3)
 		uint32_t GetSeq() const { return _seq; }
 		// 방금 돌린 입력의 무기 결과 — 쐈으면 이 입력 번호와 퍼짐으로 서버와 같은 탄 방향을 구한다(D15)
 		const WeaponEvents& GetLastWeaponEvents() const { return _lastWeaponEvents; }
@@ -110,13 +139,29 @@ namespace mo
 		bool IsAds() const { return _ads.active; }
 
 	private:
+		// 입력 하나 뒤의 무기 쪽 — 줍기 소식이 그 입력에서 다시 돌리려고 남긴다. 걸음 쪽은 Slot 에 있다
+		struct WeaponSnap
+		{
+			uint32_t seq = 0;
+			WeaponCycles weapons;
+			CLoadout loadout;
+			uint8_t weapon = 0;
+			CWeaponFireGate fireGate;
+			CAimCamera aimCamera;
+			bool meleeActive = false;	// 이 입력의 근접 능력이 켜져 있었나(StepMelee 뒤) — 무기 순환이 읽는다
+		};
+		// 줍기 소식이 오기까지의 입력 수만 있으면 된다 — 왕복 + 서버 줄. 지연 시험(lag.sh) 최대 편도 150ms · 흔들림 50ms 면 왕복 400ms ≈ 24입력, 128 = 2.1초
+		static constexpr uint32_t kWeaponSnapCount = 128;
+
 		void ApplyMove(const Slot& slot);		// 입력 + 그 입력에 붙은 밀기
 		void StepMelee(Slot& slot);			// 근접 능력 한 입력 — 서버 ApplyInput 처럼 걸음 앞
-		void ApplyWeapon(const Slot& slot);
+		void ApplyWeapon(const Slot& slot, bool meleeActive);
 		bool RerunMovesFrom(uint32_t seq);	// 그 앞 칸의 상태에서 seq 부터 걸음을 다시 돌린다
 		void Equip(const wire::Input& input);
 		void RememberMove(Slot& slot) const;
-		void RememberWeapon(Slot& slot) const;
+		void RememberWeapon(Slot& slot, bool meleeActive);		// 슬롯의 탄 · 가방 칸 + 무기 쪽 고리
+		void SaveWeapon(WeaponSnap& snap, uint32_t seq, bool meleeActive) const;
+		void LoadWeapon(const WeaponSnap& snap);
 
 		CMoveSim& _sim;
 		const MatchRules& _rules;
@@ -130,7 +175,16 @@ namespace mo
 		Slot _spawnBase;			// 부활 직후 상태 — 부활 뒤 첫 입력부터 다시 돌릴 때의 앞 칸
 		uint32_t _meleeAckedSeq = 0;	// AckMelee 가 본 마지막 번호
 		WeaponEvents _lastWeaponEvents;
-		uint8_t _weapon = 0;
+		CLoadout _loadout;		// 가방(W-2) — 서버 Room 과 같은 함수로 바꾼다
+		std::array<WeaponSnap, kWeaponSnapCount> _weaponSnaps;
+		WeaponSnap _spawnWeapon;	// 부활 직후 무기 쪽 — 부활 번호 그대로 집은 소식(새 몸이 받침 안에 섬)의 앞 칸
+		// 마지막 자리 옮기기(OnPlace) — 그 번호로 집은 소식의 앞 칸(탄 정하기 앞)과 집은 뒤 다시 걸 탄 정하기. 부활이 끈다
+		WeaponSnap _placeWeapon;
+		bool _placeActive = false;
+		uint8_t _placeAmmoWeapon = 0xFF;
+		int16_t _placeMagazine = 0, _placeSpare = 0;
+		PickupCounters _pickupCounters;
+		uint8_t _weapon = 0;		// 든 무기 = _loadout.Held()
 		bool _jumpHeld = false;
 		int _lockInputs = 0;
 		AdsAbility _ads;

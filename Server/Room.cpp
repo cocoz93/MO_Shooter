@@ -14,6 +14,9 @@ namespace mo
 		constexpr float kTickSeconds = 1.f / (float)wire::kTickRate;
 		constexpr double kPi = 3.14159265358979323846;
 
+		// 빠른 칸 한 칸을 로그용 수로 — 빈 칸 -1
+		int SlotNumber(uint8_t weapon) { return weapon == kNoWeapon ? -1 : (int)weapon; }
+
 		// 시선 허용 범위 — 다리는 yaw ±180·pitch ±90 안에서 보내고, 봇은 조준 오차로 각각 1도까지 넘는다
 		constexpr float kMaxAbsYawDegrees = 360.f;
 		constexpr float kMaxAbsPitchDegrees = 95.f;
@@ -502,7 +505,9 @@ namespace mo
 		player.melee.Reset();		// 죽음이 능력을 끈다 — 새 몸은 꺼진 채
 		player.yaw = slot.point.yawDegrees;
 		player.pitch = 0;
-		player.weapon = 0;
+		// 가방 — Lyra 는 죽은 몸이 치워질 때 비우고 새 몸에 권총만 준다(W-0 실측). 죽은 동안은 줍기 · 바꾸기가 없어 부활 때 비워도 보이는 것이 같다(제 판단)
+		player.loadout.Reset(_rules.startAllWeapons, player.weapons);
+		player.weapon = player.loadout.Held();
 		if (_animReady)
 		{
 			// 부활하면 처음 무기(권총)를 든다 — 자세도 그 묶음으로 처음부터, 부활 몽타주를 튼다
@@ -510,10 +515,6 @@ namespace mo
 			player.animWeapon = player.weapon;
 			DropAnimEvents(player);
 			PushAnimEvent(player, EAnimEvent::Spawn, player.weapon);
-		}
-		for (size_t i = 0; i < player.weapons.size(); ++i)
-		{
-			player.weapons[i].Init((EWeapon)i);		// 부활하면 탄을 다시 채운다 — 무기 줍기가 5단계라 처음 든 셋 그대로
 		}
 		player.immuneUntilTick = _tick + SecondsToTicks(_rules.spawnImmunitySeconds);
 		player.moveLockInputs = SpawnMoveLockInputs(_rules);
@@ -601,9 +602,10 @@ namespace mo
 	// 다시 검사 안에서(fromTimer = true) 건 타이머는 다음 틱부터 센다(다시 검사 +15 = 0.25초 × 60 이 − 1 없이 맞은 것과 같은 까닭)
 	bool CRoom::TryPickup(size_t padIndex, Player& player, bool fromTimer)
 	{
-		PadState& state = _padStates[padIndex];
+		const PadState& state = _padStates[padIndex];
 		if (!state.available || player.dead) return false;
 		const PickupPad& pad = (*_pickups.pads)[padIndex];
+		if (pad.kind != EPadKind::Heal) return TryWeaponPickup(padIndex, player, fromTimer);
 		const float maxHealth = (float)_rules.maxHealth;
 		if (!(player.hp < maxHealth))
 		{
@@ -613,12 +615,71 @@ namespace mo
 		}
 		const float before = player.hp;
 		player.hp = std::min(player.hp + (float)pad.heal, maxHealth);	// LyraHealthSet — 회복도 최대에서 잘린다
-		state.available = false;
-		state.readyTick = _tick + SecondsToTicks(pad.respawnSeconds) - (fromTimer ? 0u : 1u);
+		TakePad(padIndex, fromTimer);
 		++_stats.pickups;
 		if (fromTimer) ++_stats.pickupsFromRecheck;
 		if (_allowDebug) std::printf("PADEV tick=%u room=%u pad=%zu kind=%s player=%u hp=%.1f>%.1f ready=%u\n", _tick, _roomId, padIndex, fromTimer ? "takeRecheck" : "take", player.id, before, player.hp, state.readyTick);
 		SendPad(padIndex, fromTimer ? wire::PICKUP_TAKE_RECHECK : wire::PICKUP_TAKE, &player, player.hp - before, nullptr);
+		return true;
+	}
+
+	void CRoom::TakePad(size_t padIndex, bool fromTimer)
+	{
+		PadState& state = _padStates[padIndex];
+		state.available = false;
+		state.readyTick = _tick + SecondsToTicks((*_pickups.pads)[padIndex].respawnSeconds) - (fromTimer ? 0u : 1u);
+	}
+
+	// B_WeaponSpawner GiveWeapon(weapon-pickup-plan.md 「Lyra」 표 · W-0 실측) — 경기 끝 단계면 실패, 그 밖은 가방 Give 결과대로.
+	// 실패(예비 가득 · 경기 끝 · 빈 칸 없음)는 받침이 안 꺼지고 소식도 안 보낸다(체력 가득과 같은 길). 무기를 바꿨으면 바꾸기 몽타주를 튼다(키로 바꿀 때와 같은 사건)
+	bool CRoom::TryWeaponPickup(size_t padIndex, Player& player, bool fromTimer)
+	{
+		const PickupPad& pad = (*_pickups.pads)[padIndex];
+		EWeapon weapon = EWeapon::Pistol;
+		switch (pad.kind)
+		{
+		case EPadKind::Pistol: weapon = EWeapon::Pistol; break;
+		case EPadKind::Rifle: weapon = EWeapon::Rifle; break;
+		case EPadKind::Shotgun: weapon = EWeapon::Shotgun; break;
+		case EPadKind::Heal: return false;	// 부르는 쪽이 갈랐다
+		}
+		if (_phase == wire::EMatchPhase::PostGame)
+		{
+			++_stats.weaponPickupsPostGame;
+			if (_allowDebug) std::printf("PADEV tick=%u room=%u pad=%zu kind=full give=postGame player=%u weapon=%u\n", _tick, _roomId, padIndex, player.id, (unsigned)weapon);
+			return false;
+		}
+		const uint8_t heldBefore = player.weapon;
+		const EGiveResult result = player.loadout.Give(weapon, player.weapons);
+		switch (result)
+		{
+		case EGiveResult::NewEquipped: ++_stats.weaponPickupsNew; break;
+		case EGiveResult::NewNotEquipped: ++_stats.weaponPickupsNoSwitch; break;
+		case EGiveResult::Ammo: ++_stats.weaponPickupsAmmo; break;
+		case EGiveResult::Full: ++_stats.weaponPickupsFull; break;
+		case EGiveResult::NoSlot: ++_stats.weaponPickupsNoSlot; break;
+		}
+		const CWeaponCycle& cycle = player.weapons[(size_t)weapon];
+		if (!IsGiveTaken(result))
+		{
+			if (_allowDebug) std::printf("PADEV tick=%u room=%u pad=%zu kind=full give=%s player=%u weapon=%u mag=%d spare=%d\n", _tick, _roomId, padIndex, GiveResultName(result), player.id, (unsigned)weapon, cycle.GetMagazine(), cycle.GetSpare());
+			return false;
+		}
+		player.weapon = player.loadout.Held();
+		if (player.weapon != heldBefore)
+		{
+			++_stats.weaponChanges;
+			PushAnimEvent(player, EAnimEvent::Swap, player.weapon);
+		}
+		TakePad(padIndex, fromTimer);
+		if (fromTimer) ++_stats.weaponPickupsFromRecheck;
+		if (_allowDebug)
+		{
+			std::printf("PADEV tick=%u room=%u pad=%zu kind=%s give=%s player=%u weapon=%u mag=%d spare=%d held=%u slots=%d,%d,%d ready=%u\n", _tick, _roomId, padIndex,
+				fromTimer ? "takeRecheck" : "take", GiveResultName(result), player.id, (unsigned)weapon, cycle.GetMagazine(), cycle.GetSpare(), (unsigned)player.weapon,
+				SlotNumber(player.loadout.SlotWeapon(0)), SlotNumber(player.loadout.SlotWeapon(1)), SlotNumber(player.loadout.SlotWeapon(2)), _padStates[padIndex].readyTick);
+		}
+		SendPad(padIndex, fromTimer ? wire::PICKUP_TAKE_RECHECK : wire::PICKUP_TAKE, &player, 0.f, nullptr, (uint8_t)result, (uint8_t)weapon);
 		return true;
 	}
 
@@ -661,7 +722,7 @@ namespace mo
 	}
 
 	// S2C_PICKUP — only 가 있으면 그 사람에게만(들어올 때 현황), 없으면 방 전원
-	void CRoom::SendPad(size_t padIndex, wire::EPickupReason reason, const Player* picker, float heal, const Player* only)
+	void CRoom::SendPad(size_t padIndex, wire::EPickupReason reason, const Player* picker, float heal, const Player* only, uint8_t give, uint8_t weapon)
 	{
 		const PickupPad& pad = (*_pickups.pads)[padIndex];
 		const PadState& state = _padStates[padIndex];
@@ -681,6 +742,17 @@ namespace mo
 		msg.padCount = (uint8_t)PadCount();
 		msg.available = state.available ? 1 : 0;
 		msg.reason = reason;
+		msg.kind = (uint8_t)pad.kind;
+		msg.give = give;
+		msg.seq = picker ? picker->lastSeq : 0;
+		if (picker && give != wire::kPickupGiveNone && weapon < (uint8_t)EWeapon::Count)
+		{
+			const CWeaponCycle& cycle = picker->weapons[weapon];
+			msg.weapon = weapon;
+			msg.slot = (uint8_t)std::max(0, picker->loadout.SlotOf(weapon));
+			msg.magazine = (int16_t)cycle.GetMagazine();
+			msg.spare = (int16_t)cycle.GetSpare();
+		}
 		if (_allowDebug && reason == wire::PICKUP_SYNC) std::printf("PADEV tick=%u room=%u pad=%zu kind=sync to=%u available=%d ready=%u\n", _tick, _roomId, padIndex, only ? only->id : 0u, msg.available, msg.readyTick);
 		if (only) _sender.SendToSession(only->session, &msg, (int)sizeof(msg));
 		else SendToAll(&msg, (int)sizeof(msg));
@@ -712,6 +784,36 @@ namespace mo
 			player.animWeapon = player.weapon;
 			DropAnimEvents(player);
 		}
+		if ((place.flags & wire::DEBUG_PLACE_SET_AMMO) && place.ammoWeapon < (uint8_t)EWeapon::Count)
+		{
+			++_stats.debugAmmoSets;
+			player.weapons[place.ammoWeapon].SetAmmoForCheck(place.magazine, place.spare);
+		}
+		if (place.flags & wire::DEBUG_PLACE_KILL)
+		{
+			++_stats.debugKills;
+			KillPlayer(player, nullptr, player.weapon, false);
+		}
+	}
+
+	void CRoom::LogLoadouts()
+	{
+		for (const std::unique_ptr<Player>& player : _players)
+		{
+			char text[160];
+			int at = std::snprintf(text, sizeof(text), "slots=[");
+			for (size_t slot = 0; slot < kQuickSlotCount; ++slot)
+			{
+				const uint8_t weapon = player->loadout.SlotWeapon(slot);
+				const char* gap = slot + 1 < kQuickSlotCount ? " " : "";
+				if (weapon == kNoWeapon) at += std::snprintf(text + at, sizeof(text) - at, "-%s", gap);
+				else at += std::snprintf(text + at, sizeof(text) - at, "%s:%d/%d%s", GetWeaponDef((EWeapon)weapon).name, player->weapons[weapon].GetMagazine(), player->weapons[weapon].GetSpare(), gap);
+			}
+			std::snprintf(text + at, sizeof(text) - at, "] active=%u", (unsigned)player->loadout.ActiveSlot());
+			if (player->loggedLoadout == text) continue;
+			player->loggedLoadout = text;
+			std::printf("INVEV tick=%u room=%u player=%u dead=%d %s\n", _tick, _roomId, player->id, player->dead ? 1 : 0, text);
+		}
 	}
 
 	void CRoom::ApplyInput(Player& player, const wire::Input& input, const bool serverMade)
@@ -728,16 +830,25 @@ namespace mo
 		// 언리얼 CharacterMovement 의 ForcePositionUpdate 도 이동만 굴린다
 		if (!serverMade) player.fireGate.NextInput();
 
-		if (input.weapon >= (uint8_t)EWeapon::Count)
+		// 무기 바꾸기 — 앞 입력과 번호가 달라졌을 때만(Loadout.h). 빈 입력은 안 본다 — 빈 입력의 번호(지금 든 무기)가 「앞 입력 번호」가 되면
+		// 줍기로 바뀐 무기 뒤에 오는 클라의 옛 번호가 「달라짐」이 되어 무기가 되돌아간다
+		switch (serverMade ? ESwitchResult::Same : player.loadout.OnInputWeapon(input.weapon, player.weapons))
 		{
+		case ESwitchResult::Invalid:
 			++_stats.weaponIdRejected;
-		}
-		else if (input.weapon != player.weapon)
-		{
-			player.weapon = input.weapon;
-			player.weapons[player.weapon].Equip();
+			break;
+		case ESwitchResult::NotOwned:
+			++_stats.weaponSwitchRejected;
+			if (_allowDebug) std::printf("INVEV tick=%u room=%u player=%u reject weapon=%u\n", _tick, _roomId, player.id, (unsigned)input.weapon);	// 어느 입력이 거부됐나 — 수만으로는 출처를 못 가른다
+			break;
+		case ESwitchResult::Switched:
+			player.weapon = player.loadout.Held();
 			++_stats.weaponChanges;		// 자세 묶음은 이 틱의 UpdateAnimStates 가 따라 바꾼다
 			PushAnimEvent(player, EAnimEvent::Swap, player.weapon);
+			break;
+		case ESwitchResult::Same:
+		case ESwitchResult::AlreadyHeld:
+			break;
 		}
 
 		const bool jump = (input.buttons & wire::BUTTON_JUMP) != 0;
@@ -1735,6 +1846,7 @@ namespace mo
 			if (player->ads.active) out.flags |= wire::STATE_ADS;
 			if (player->move.crouched) out.flags |= wire::STATE_CROUCHED;
 			out.weapon = player->weapon;
+			out.quickSlots = player->loadout.PackSlots();
 			out.team = player->team;
 			out.moveX = player->dead ? (int8_t)0 : player->moveX;
 			out.moveY = player->dead ? (int8_t)0 : player->moveY;
@@ -1788,6 +1900,7 @@ namespace mo
 			TickPlayerInputs(*player);
 		}
 		TickPads();	// Lyra 도 이동(겹침 시작 집기) 뒤에 타이머(다시 켜짐 · 다시 검사)를 돌린다
+		if (_allowDebug) LogLoadouts();		// 부활 · 입력 · 받침이 다 돈 뒤 — 이 틱에 바뀐 가방을 한 줄로
 		UpdateAnimStates();
 		RecordRewindSamples();
 		const Clock::time_point inputsEnd = Clock::now();

@@ -23,16 +23,23 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/SkeletalBodySetup.h"
+#include "UnrealClient.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
 #include "UObject/UnrealType.h"
 
+#include "AbilitySystem/Abilities/LyraAbilitySimpleFailureMessage.h"
 #include "AbilitySystem/Attributes/LyraHealthSet.h"
 #include "AbilitySystem/LyraAbilitySystemComponent.h"
 #include "Camera/LyraCameraMode.h"
 #include "Character/LyraCharacter.h"
+#include "Character/LyraHealthComponent.h"
+#include "Equipment/LyraQuickBarComponent.h"
+#include "Inventory/LyraInventoryItemDefinition.h"
+#include "Inventory/LyraInventoryItemInstance.h"
+#include "Inventory/LyraInventoryManagerComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "Player/LyraPlayerState.h"
 #include "Equipment/LyraEquipmentDefinition.h"
@@ -185,10 +192,60 @@ namespace
 		{ TEXT("end"),                0.5f, EAct::Home,            0.f,   false },
 	};
 
+	// 무기 판(W-0, weapon-pickup-plan.md) — 받침 자리는 같은 플랜 「받침 자리」 표(dump3.txt, 소수 첫째). Arg = 이 표의 차례
+	const FVector WEAPON_PAD_SPOTS[4] = {
+		FVector(3377.4, -1830.0, -380.6),	// 0 = B_WeaponSpawner1 소총
+		FVector(-3377.4, 1830.0, -380.6),	// 1 = B_WeaponSpawner3 소총
+		FVector(-4586.5, 1008.4, -380.4),	// 2 = B_WeaponSpawner7 권총
+		FVector(1472.0, -6.7, -1218.1),		// 3 = B_WeaponSpawner5 샷건
+	};
+	// 탄 줄이기(SetAmmo 의 Arg = 이 표의 차례) — 쏘는 대신 탄 표식을 직접 바꾼다. 받침이 주는 것 · 재장전만 보려고(사격 규칙은 이미 대조 끝)
+	struct FAmmoSet { int32 Weapon; int32 Magazine; int32 Spare; };
+	const FAmmoSet AMMO_SETS[] = {
+		{ 1, 10, 20 },	// 0 = 소총 — 다른 소총 받침에서 예비만 60 까지 차고 탄창 10 은 그대로일 것
+		{ 0, 4, 48 },	// 1 = 권총 — 재장전할 거리(탄창 4 · 예비 가득)
+		{ 1, 10, 60 },	// 2 = 소총 — 재장전할 거리
+		{ 2, 2, 16 },	// 3 = 샷건 — 재장전할 거리
+	};
+	const FStep WEAPONS_SCRIPT[] = {
+		{ TEXT("settle"),         1.0f,  EAct::PadsDump,    0.f, false },	// 받침 15개 정보 · 처음 가방(경기 시작 초기화 뒤)
+		// 소총 받침에 서 있기 — 집음(새 무기 · 바로 듦) → 꺼짐 → 10초 → 켜짐 → 0.25초 뒤 서 있는 나를 다시 검사(예비 가득 → 실패 · 받침 그대로)
+		{ TEXT("rifle_r1"),       14.0f, EAct::WeaponPadOn, 0.f, false },
+		{ TEXT("away1"),          1.0f,  EAct::Away,        0.f, false },
+		{ TEXT("slot0"),          1.5f,  EAct::SelectSlot,  0.f, false },	// 권총으로 — 꺼내기 몽타주가 끝날 만큼
+		{ TEXT("rifle_low"),      0.5f,  EAct::SetAmmo,     0.f, false },
+		{ TEXT("rifle_r3"),       2.0f,  EAct::WeaponPadOn, 1.f, false },	// 가진 무기 — 예비만 채움 · 탄창 그대로 · 든 무기(권총) 그대로
+		{ TEXT("away2"),          1.0f,  EAct::Away,        0.f, false },
+		{ TEXT("pistol_p7"),      2.0f,  EAct::WeaponPadOn, 2.f, false },	// 권총 예비 가득 — 실패 · 받침 그대로
+		{ TEXT("away3"),          1.0f,  EAct::Away,        0.f, false },
+		{ TEXT("pistol_low"),     0.5f,  EAct::SetAmmo,     1.f, false },
+		{ TEXT("reload_press"),   0.1f,  EAct::ReloadPress, 0.f, false },	// 재장전을 켜 두고 —
+		{ TEXT("shotgun_s5"),     3.0f,  EAct::WeaponPadOn, 3.f, false },	// — 재장전 중에 새 무기 받침: 넣기만 · 안 듦(IgnorePickUpWhenReload)
+		{ TEXT("away4"),          1.0f,  EAct::Away,        0.f, false },
+		// 재장전만 — 태그 Event.Movement.Reload 구간 · 탄이 들어온 프레임을 서버 재장전 시간(Shared/Weapon.cpp reloadSeconds)과 견준다
+		{ TEXT("pistol_low2"),    0.5f,  EAct::SetAmmo,     1.f, false },
+		{ TEXT("reload_pistol"),  3.0f,  EAct::ReloadPress, 0.f, false },
+		{ TEXT("slot1"),          1.5f,  EAct::SelectSlot,  1.f, false },
+		{ TEXT("rifle_low2"),     0.5f,  EAct::SetAmmo,     2.f, false },
+		{ TEXT("reload_rifle"),   3.0f,  EAct::ReloadPress, 0.f, false },
+		{ TEXT("slot2"),          1.5f,  EAct::SelectSlot,  2.f, false },
+		{ TEXT("shotgun_low"),    0.5f,  EAct::SetAmmo,     3.f, false },
+		{ TEXT("reload_shotgun"), 4.0f,  EAct::ReloadPress, 0.f, false },
+		// 스스로 죽음 → 부활 뒤 가방(권총 하나일 것). 죽음 ~ 부활 동안에도 칸 시간은 흐른다 — 부활 대기 5초(Shared/MatchRules.h respawnSeconds = GA_AutoRespawn)보다 넉넉히
+		{ TEXT("die"),            15.0f, EAct::SelfDestruct, 0.f, false },
+		{ TEXT("end"),            1.0f,  EAct::None,        0.f, false },
+	};
+
 	const TCHAR* const WEAPON_DEFS[3] = {
 		TEXT("/ShooterCore/Weapons/Pistol/WID_Pistol.WID_Pistol_C"),
 		TEXT("/ShooterCore/Weapons/Rifle/WID_Rifle.WID_Rifle_C"),
 		TEXT("/ShooterCore/Weapons/Shotgun/WID_Shotgun.WID_Shotgun_C"),
+	};
+	// 가방 아이템 정의 — 다리 LoadWeaponClasses 와 같은 길
+	const TCHAR* const ITEM_DEFS[3] = {
+		TEXT("/ShooterCore/Weapons/Pistol/ID_Pistol.ID_Pistol_C"),
+		TEXT("/ShooterCore/Weapons/Rifle/ID_Rifle.ID_Rifle_C"),
+		TEXT("/ShooterCore/Weapons/Shotgun/ID_Shotgun.ID_Shotgun_C"),
 	};
 
 	constexpr float MATCH_SETTLE_SECONDS = 3.f;	// 몸 맞힘 촬영과 같은 절차 — 경기 시작 때 캐릭터가 한 번 바뀐다
@@ -203,7 +260,7 @@ namespace
 	constexpr float MELEE_SIDE_FORWARD = 250.f;	// 옆 거리 칸에서 상대를 세우는 앞 거리 — 맞는 앞 범위(150~520, gym1) 한가운데쯤
 	constexpr float WATCH_LOG_EVERY = 5.f;		// 다리 판 마지막 칸에서 점수를 적는 간격(초)
 
-	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장)
+	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침
 	const FStep& StepAt(int32 Script, int32 I)
 	{
 		switch (Script)
@@ -211,6 +268,7 @@ namespace
 		case 1: return PADS_SCRIPT[I];
 		case 2: return BRIDGE_SCRIPT[I];
 		case 3: return BUMP_SCRIPT[I];
+		case 4: return WEAPONS_SCRIPT[I];
 		default: return GYM_SCRIPT[I];
 		}
 	}
@@ -221,6 +279,7 @@ namespace
 		case 1: return UE_ARRAY_COUNT(PADS_SCRIPT);
 		case 2: return UE_ARRAY_COUNT(BRIDGE_SCRIPT);
 		case 3: return UE_ARRAY_COUNT(BUMP_SCRIPT);
+		case 4: return UE_ARRAY_COUNT(WEAPONS_SCRIPT);
 		default: return UE_ARRAY_COUNT(GYM_SCRIPT);
 		}
 	}
@@ -304,10 +363,12 @@ void UMOBContentProbeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	bPads = Mode == TEXT("pads");
 	bBridge = Mode == TEXT("bridge");
 	bBump = Mode == TEXT("bump");
+	bWeapons = Mode == TEXT("weapons");
 	bForceQuinn = FParse::Param(Cmd, TEXT("MOBCPQuinn"));
 	StartRealAt = FPlatformTime::Seconds();
 	GAreScreenMessagesEnabled = false;
-	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_INIT world=%s tag=%s mode=%s"), *GetNameSafe(GetWorld()), *Tag, bBridge ? TEXT("bridge") : (bPads ? TEXT("pads") : (bBump ? TEXT("bump") : TEXT("gym"))));
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_INIT world=%s tag=%s mode=%s"), *GetNameSafe(GetWorld()), *Tag,
+		bBridge ? TEXT("bridge") : (bPads ? TEXT("pads") : (bBump ? TEXT("bump") : (bWeapons ? TEXT("weapons") : TEXT("gym")))));
 }
 
 TStatId UMOBContentProbeSubsystem::GetStatId() const
@@ -341,6 +402,8 @@ void UMOBContentProbeSubsystem::Tick(float DeltaTime)
 		Finish(false);
 		return;
 	}
+	// 무기 판은 기다리는 동안(처음 생김 · 경기 시작 초기화)과 캐릭터가 없는 동안(죽음 ~ 부활)도 가방 · 받침을 본다
+	if (bWeapons) WatchWeapons();
 	if (!bReady)
 	{
 		if (!WaitReady(DeltaTime))
@@ -371,11 +434,11 @@ void UMOBContentProbeSubsystem::Tick(float DeltaTime)
 	}
 
 	// 도중에 내 캐릭터가 바뀌면(경기 시작 초기화 · 죽음) 그 뒤 값은 다른 판의 것이다 — 멈춘다. pads1 에서 경기 시작 초기화가 큰 받침 대기를 끊었다
-	// 다리 판은 봇에게 죽어 다시 생기는 것도 지금 클라의 모습이라 적기만 하고 이어 간다
+	// 다리 판은 봇에게 죽어 다시 생기는 것도 지금 클라의 모습이라 적기만 하고 이어 간다. 무기 판은 죽음 뒤 가방을 보려고 스스로 죽으니 이어 간다
 	if (Me() != ClearPawn.Get())
 	{
-		UE_LOG(LogMOBCProbe, Warning, TEXT("MOB_CPROBE_PAWN_CHANGED step=%d from=%s to=%s"), Step, *GetNameSafe(ClearPawn.Get()), *GetNameSafe(Me()));
-		if (!bBridge)
+		UE_LOG(LogMOBCProbe, Warning, TEXT("MOB_CPROBE_PAWN_CHANGED step=%d from=%s to=%s t=%.4f"), Step, *GetNameSafe(ClearPawn.Get()), *GetNameSafe(Me()), GetWorld()->GetTimeSeconds());
+		if (!bBridge && !bWeapons)
 		{
 			Finish(false);
 			return;
@@ -437,7 +500,8 @@ bool UMOBContentProbeSubsystem::Prepare()
 		M->MaxWalkSpeed, M->MaxWalkSpeedCrouched, M->GetCrouchedHalfHeight(), Ch->CrouchedEyeHeight, Ch->BaseEyeHeight,
 		Ch->GetCapsuleComponent()->GetScaledCapsuleRadius(), Ch->GetCapsuleComponent()->GetScaledCapsuleHalfHeight(), M->bCanWalkOffLedgesWhenCrouching ? 1 : 0, HealthOf(Ch));
 
-	if (bPads || bBridge)
+	// 무기 판도 받침을 그대로 둔다(아래 연습 판 갈래는 받침을 끈다)
+	if (bPads || bBridge || bWeapons)
 	{
 		Home = Ch->GetActorLocation();
 	}
@@ -747,6 +811,56 @@ void UMOBContentProbeSubsystem::BeginStep()
 		if (const UAbilitySystemComponent* ASC = FindASC(Ch)) SetHealthOf(Ch, ASC->GetNumericAttribute(ULyraHealthSet::GetMaxHealthAttribute()), S.Arg);
 		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_SETHP hp=%.1f"), HealthOf(Ch));
 		break;
+	case EAct::WeaponPadOn:
+		StandOn(WEAPON_PAD_SPOTS[FMath::Clamp((int32)S.Arg, 0, (int32)UE_ARRAY_COUNT(WEAPON_PAD_SPOTS) - 1)]);
+		break;
+	case EAct::SelectSlot:
+	{
+		// 키 1 · 2 · 3 의 결과를 직접 낸다 — 영웅 그래프 ChangeQuickbarSlot 은 그 칸에 아이템이 있을 때만 바꾸기 신호(게임플레이 이벤트, 크기 = 칸 번호)를 보낸다
+		// (C:\tmp\mob\pickup0\hero_flow.txt:4-32, 원본 기준). 신호를 받는 쪽의 다른 조건은 여기서 안 거친다 — 이 판은 받침 규칙만 본다
+		APlayerController* PC = GetWorld()->GetFirstPlayerController();
+		ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+		const int32 Want = (int32)S.Arg;
+		const bool bHas = Bar && Bar->GetSlots().IsValidIndex(Want) && Bar->GetSlots()[Want] != nullptr;
+		if (bHas) Bar->SetActiveSlotIndex(Want);
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_SLOT step=%s want=%d has=%d active=%d"), S.Name, Want, bHas ? 1 : 0, Bar ? Bar->GetActiveSlotIndex() : -1);
+		break;
+	}
+	case EAct::SetAmmo:
+	{
+		static const FGameplayTag MagTag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.MagazineAmmo"));
+		static const FGameplayTag SpareTag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.SpareAmmo"));
+		const FAmmoSet& A = AMMO_SETS[FMath::Clamp((int32)S.Arg, 0, (int32)UE_ARRAY_COUNT(AMMO_SETS) - 1)];
+		APlayerController* PC = GetWorld()->GetFirstPlayerController();
+		ULyraInventoryManagerComponent* Inv = PC ? PC->FindComponentByClass<ULyraInventoryManagerComponent>() : nullptr;
+		UClass* Def = LoadClass<ULyraInventoryItemDefinition>(nullptr, ITEM_DEFS[FMath::Clamp(A.Weapon, 0, 2)]);
+		ULyraInventoryItemInstance* Item = (Inv && Def) ? Inv->FindFirstItemStackByDefinition(Def) : nullptr;
+		const auto SetStack = [Item](const FGameplayTag& T, int32 Want)
+		{
+			const int32 Have = Item->GetStatTagStackCount(T);
+			if (Have < Want) Item->AddStatTagStack(T, Want - Have);
+			else if (Have > Want) Item->RemoveStatTagStack(T, Have - Want);
+		};
+		if (Item)
+		{
+			SetStack(MagTag, A.Magazine);
+			SetStack(SpareTag, A.Spare);
+		}
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_SETAMMO step=%s weapon=%d found=%d mag=%d spare=%d"), S.Name, A.Weapon, Item ? 1 : 0,
+			Item ? Item->GetStatTagStackCount(MagTag) : -1, Item ? Item->GetStatTagStackCount(SpareTag) : -1);
+		break;
+	}
+	case EAct::ReloadPress:
+		// 키 입력과 같은 길(능력 입력 표식). 한 프레임 누르고 뗀다(DuringStep)
+		PressTag(TEXT("InputTag.Weapon.Reload"), true);
+		ReloadPressFrame = Frame;
+		FrameEvents += TEXT("reload_press;");
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_RELOAD_PRESS step=%s frame=%d t=%.4f"), S.Name, Frame, GetWorld()->GetTimeSeconds());
+		break;
+	case EAct::SelfDestruct:
+		if (ULyraHealthComponent* HC = ULyraHealthComponent::FindHealthComponent(Ch)) HC->DamageSelfDestruct();
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_SELFDESTRUCT step=%s frame=%d t=%.4f hp=%.1f"), S.Name, Frame, GetWorld()->GetTimeSeconds(), HealthOf(Ch));
+		break;
 	}
 }
 
@@ -773,6 +887,12 @@ void UMOBContentProbeSubsystem::DuringStep()
 		Ch->StopJumping();
 		JumpPressFrame = -1;
 		FrameEvents += TEXT("jump_release;");
+	}
+	if (ReloadPressFrame >= 0 && Frame > ReloadPressFrame)
+	{
+		PressTag(TEXT("InputTag.Weapon.Reload"), false);
+		ReloadPressFrame = -1;
+		FrameEvents += TEXT("reload_release;");
 	}
 
 	const bool bMeleeActive = IsAbilityActive(TEXT("GA_Melee"));
@@ -1087,9 +1207,120 @@ void UMOBContentProbeSubsystem::LogBodies(const TCHAR* When) const
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_BODY when=%s forceQuinn=%d tries=%d me=[%s] foe=[%s]"), When, bForceQuinn ? 1 : 0, BodyTries, *Describe(Me()), *Describe(Foe.Get()));
 }
 
+// 가방 한 줄 — 빠른 칸(무기:탄창/예비) · 든 칸 · 가방 전체 아이템(빠른 칸 밖에 남은 것도 보려고) · 몸에 찬 장비
+FString UMOBContentProbeSubsystem::InventorySig() const
+{
+	static const FGameplayTag MagTag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.MagazineAmmo"));
+	static const FGameplayTag SpareTag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.SpareAmmo"));
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	const ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	const ULyraInventoryManagerComponent* Inv = PC ? PC->FindComponentByClass<ULyraInventoryManagerComponent>() : nullptr;
+	const auto Short = [](const ULyraInventoryItemInstance* I)
+	{
+		if (!I) return FString(TEXT("-"));
+		FString N = GetNameSafe(I->GetItemDef().Get());
+		N.RemoveFromStart(TEXT("ID_"));
+		N.RemoveFromEnd(TEXT("_C"));
+		return FString::Printf(TEXT("%s:%d/%d"), *N, I->GetStatTagStackCount(MagTag), I->GetStatTagStackCount(SpareTag));
+	};
+	FString S = TEXT("slots=[");
+	if (Bar)
+	{
+		const TArray<ULyraInventoryItemInstance*> Slots = Bar->GetSlots();
+		for (int32 i = 0; i < Slots.Num(); ++i) S += (i ? TEXT(" ") : TEXT("")) + Short(Slots[i]);
+	}
+	S += FString::Printf(TEXT("] active=%d items=["), Bar ? Bar->GetActiveSlotIndex() : -9);
+	if (Inv)
+	{
+		const TArray<ULyraInventoryItemInstance*> Items = Inv->GetAllItems();
+		for (int32 i = 0; i < Items.Num(); ++i) S += (i ? TEXT(" ") : TEXT("")) + Short(Items[i]);
+	}
+	S += TEXT("] equip=[");
+	const APawn* P = Me();
+	if (const ULyraEquipmentManagerComponent* EM = P ? P->FindComponentByClass<ULyraEquipmentManagerComponent>() : nullptr)
+	{
+		const TArray<ULyraEquipmentInstance*> Eq = EM->GetEquipmentInstancesOfType(ULyraEquipmentInstance::StaticClass());
+		for (int32 i = 0; i < Eq.Num(); ++i) S += (i ? TEXT(" ") : TEXT("")) + GetNameSafe(Eq[i] ? Eq[i]->GetClass() : nullptr);
+	}
+	return S + TEXT("]");
+}
+
+void UMOBContentProbeSubsystem::WatchWeapons()
+{
+	UWorld* World = GetWorld();
+	if (!FailMsgHandle.IsValid())
+	{
+		// 받침 그래프의 「Broadcast Failure Message」(받침에서 아무것도 못 받음 — ws_flow.txt:110-125)가 보내는 채널
+		static const FGameplayTag FailChannel = FGameplayTag::RequestGameplayTag(TEXT("Ability.UserFacingSimpleActivateFail.Message"));
+		FailMsgHandle = UGameplayMessageSubsystem::Get(this).RegisterListener(FailChannel, this, &UMOBContentProbeSubsystem::OnFailMsg);
+	}
+	const double Now = World->GetTimeSeconds();
+	const TCHAR* StepName = bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("wait");
+
+	const FString Sig = InventorySig();
+	if (Sig != LastInvSig)
+	{
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_INV frame=%d t=%.4f step=%s stepT=%.4f pawn=%s %s"), Frame, Now, StepName, StepTime, *GetNameSafe(Me()), *Sig);
+		LastInvSig = Sig;
+		if (bReady) PendingShots.Emplace(Frame + 20, FString::Printf(TEXT("inv%02d_%s"), ++ShotCount, StepName));
+	}
+	for (int32 i = 0; i < PendingShots.Num(); ++i)
+	{
+		if (Frame < PendingShots[i].Key) continue;
+		const FString Path = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("cprobe_%s_%s.png"), *Tag, *PendingShots[i].Value);
+		FScreenshotRequest::RequestScreenshot(Path, true, false);
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_SHOT frame=%d t=%.4f step=%s path=%s"), Frame, Now, StepName, *Path);
+		PendingShots.RemoveAt(i);
+		break;
+	}
+
+	for (TActorIterator<ALyraWeaponSpawner> It(World); It; ++It)
+	{
+		float Pct = 0.f;
+		const int32 Avail = PadAvailable(*It, Pct) ? 1 : 0;
+		const FString Name = It->GetName();
+		const int32* Last = LastWeaponPadAvail.Find(Name);
+		if (!Last || *Last != Avail)
+		{
+			UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_WPAD frame=%d t=%.4f step=%s stepT=%.4f pad=%s avail=%d pct=%.4f"), Frame, Now, StepName, StepTime, *Name, Avail, Pct);
+			LastWeaponPadAvail.Add(Name, Avail);
+		}
+	}
+
+	// 재장전 — 태그 개수와 켜진 재장전 능력(이름에 Reload). 탄이 들어온 프레임은 위 가방 줄의 탄창 칸이 바뀐 프레임이다
+	static const FGameplayTag ReloadTag = FGameplayTag::RequestGameplayTag(TEXT("Event.Movement.Reload"), false);
+	const UAbilitySystemComponent* ASC = FindASC(Me());
+	const int32 TagN = ASC ? ASC->GetGameplayTagCount(ReloadTag) : -1;
+	FString Abil;
+	if (ASC)
+	{
+		for (const FGameplayAbilitySpec& Spec : ASC->GetActivatableAbilities())
+		{
+			if (Spec.Ability && Spec.IsActive() && Spec.Ability->GetClass()->GetName().Contains(TEXT("Reload"))) Abil += (Abil.IsEmpty() ? TEXT("") : TEXT(" ")) + Spec.Ability->GetClass()->GetName();
+		}
+	}
+	if (TagN != LastReloadTag || Abil != LastReloadAbilities)
+	{
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_RELOAD frame=%d t=%.4f step=%s stepT=%.4f tag=%d abilities=[%s]"), Frame, Now, StepName, StepTime, TagN, *Abil);
+		LastReloadTag = TagN;
+		LastReloadAbilities = Abil;
+	}
+}
+
+void UMOBContentProbeSubsystem::OnFailMsg(FGameplayTag Channel, const FLyraAbilitySimpleFailureMessage& Msg)
+{
+	++FailMsgs;
+	const TCHAR* StepName = bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("wait");
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_FAILMSG frame=%d t=%.4f step=%s stepT=%.4f n=%d pc=%s tags=%s reason=\"%s\""), Frame, GetWorld()->GetTimeSeconds(),
+		StepName, StepTime, FailMsgs, *GetNameSafe(Msg.PlayerController), *Msg.FailureTags.ToStringSimple(), *Msg.UserFacingReason.ToString());
+	PendingShots.Emplace(Frame + 10, FString::Printf(TEXT("fail%02d_a_%s"), FailMsgs, StepName));
+	PendingShots.Emplace(Frame + 40, FString::Printf(TEXT("fail%02d_b_%s"), FailMsgs, StepName));
+}
+
 void UMOBContentProbeSubsystem::Finish(bool bOk)
 {
 	bDone = true;
+	if (FailMsgHandle.IsValid()) FailMsgHandle.Unregister();
 	LogBodies(TEXT("end"));
 	const FString Path = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("cprobe_%s.csv"), *Tag);
 	const bool bSaved = FFileHelper::SaveStringToFile(Csv, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);

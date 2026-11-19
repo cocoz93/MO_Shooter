@@ -67,7 +67,7 @@ namespace
 		double measureSeconds = 0;
 		mo::RewindOptions rewind;
 		std::string clipsPath;
-		std::string padsPath;		// 체력 받침(컨텐츠 B) — 리포 밖 파일(Tools/LyraPilot/make_pads.py). 없으면 받침 없는 판
+		std::string padsPath;		// 받침(체력 · 무기, 컨텐츠 B · W-1) — 리포 밖 파일(Tools/LyraPilot/make_pads.py). 없으면 받침 없는 판
 		mo::AnimOptions anim;
 		mo::PickupOptions pickups;	// 받침 목록은 main 이 들고 있다 — 방은 가리키기만
 	};
@@ -103,6 +103,7 @@ namespace
 			else if (s == "--exitWhenEmpty") out.exitWhenEmpty = true;
 			else if (s == "--debug") out.debug = true;
 			else if (s == "--testNoPawnBlock") out.rules.pawnBlock = false;	// 시험 전용 — 사람끼리 막기를 끈다(MatchRules.h · 봇도 같이 줘야 한다)
+			else if (s == "--testStartAllWeapons") out.rules.startAllWeapons = true;	// 시험 전용 — 세 무기로 부활(무기 줍기 전 동작, MatchRules.h · 봇도 같이 줘야 한다)
 			else if (s == "--rewindShadow") out.rewind.shadow = true;
 			else if (s == "--rewindLog") out.rewind.log = true;
 			else if (s == "--rewindNoSpread") out.rewind.noSpread = true;
@@ -562,12 +563,17 @@ int main(int argc, char** argv)
 			return 1;
 		}
 	}
+	size_t weaponPads = 0;
+	for (const mo::PickupPad& pad : pads)
+	{
+		if (pad.kind != mo::EPadKind::Heal) ++weaponPads;
+	}
 	if (!pads.empty()) args.pickups.pads = &pads;
-	std::printf("PADS count=%zu file=%s\n", pads.size(), args.padsPath.empty() ? "-" : args.padsPath.c_str());
+	std::printf("PADS count=%zu heal=%zu weapon=%zu file=%s\n", pads.size(), pads.size() - weaponPads, weaponPads, args.padsPath.empty() ? "-" : args.padsPath.c_str());
 	for (size_t i = 0; i < pads.size(); ++i)
 	{
 		const mo::PickupPad& pad = pads[i];
-		std::printf("PAD %zu name=%s at=(%.3f,%.3f,%.3f) r=%.1f hh=%.1f heal=%g respawn=%g recheck=%g\n", i, pad.name.c_str(),
+		std::printf("PAD %zu kind=%s name=%s at=(%.3f,%.3f,%.3f) r=%.1f hh=%.1f heal=%g respawn=%g recheck=%g\n", i, mo::PadKindName(pad.kind), pad.name.c_str(),
 			pad.location.x, pad.location.y, pad.location.z, pad.radius, pad.halfHeight, pad.heal, pad.respawnSeconds, pad.recheckSeconds);
 	}
 
@@ -744,6 +750,10 @@ int main(int argc, char** argv)
 	}
 	std::printf("SERVER pickups=%llu fromRecheck=%llu fullHealth=%llu padRespawns=%llu padRechecks=%llu\n", (unsigned long long)room.pickups, (unsigned long long)room.pickupsFromRecheck,
 		(unsigned long long)room.pickupsFullHealth, (unsigned long long)room.padRespawns, (unsigned long long)room.padRechecks);
+	std::printf("SERVER weaponPickups new=%llu noSwitch=%llu ammo=%llu full=%llu noSlot=%llu postGame=%llu fromRecheck=%llu switchRejected=%llu debugAmmoSets=%llu debugKills=%llu\n",
+		(unsigned long long)room.weaponPickupsNew, (unsigned long long)room.weaponPickupsNoSwitch, (unsigned long long)room.weaponPickupsAmmo, (unsigned long long)room.weaponPickupsFull,
+		(unsigned long long)room.weaponPickupsNoSlot, (unsigned long long)room.weaponPickupsPostGame, (unsigned long long)room.weaponPickupsFromRecheck, (unsigned long long)room.weaponSwitchRejected,
+		(unsigned long long)room.debugAmmoSets, (unsigned long long)room.debugKills);
 	std::printf("SERVER kills=%llu assists=%llu falls=%llu spawns=%llu spawnsFromFallback=%llu phaseChanges=%llu finished=%d\n",
 		(unsigned long long)room.kills, (unsigned long long)room.assists, (unsigned long long)room.falls, (unsigned long long)room.spawns, (unsigned long long)room.spawnsFromFallback, (unsigned long long)room.phaseChanges, firstFinished ? 1 : 0);
 	if (firstFinished)

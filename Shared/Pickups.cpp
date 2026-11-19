@@ -32,11 +32,24 @@ namespace mo
 			out = std::strtod(s.c_str(), &end);
 			return end && end != s.c_str() && *end == '\0' && std::isfinite(out);
 		}
+
+		bool ToKind(const std::string& s, EPadKind& out)
+		{
+			for (EPadKind kind : { EPadKind::Heal, EPadKind::Pistol, EPadKind::Rifle, EPadKind::Shotgun })
+			{
+				if (s == PadKindName(kind))
+				{
+					out = kind;
+					return true;
+				}
+			}
+			return false;
+		}
 	}
 
 	EPadsLoad ParsePickupPads(const char* text, size_t size, std::vector<PickupPad>& out, size_t& outBadLine)
 	{
-		constexpr size_t kFields = 10;
+		constexpr size_t kFields = 11;
 		std::vector<PickupPad> pads;
 		outBadLine = 0;
 		size_t lineNo = 0;
@@ -54,18 +67,19 @@ namespace mo
 
 			PickupPad pad;
 			double v[8] = {};
-			bool ok = n == kFields && f[0] == "PAD" && !f[1].empty();
-			for (size_t i = 0; ok && i < 8; ++i) ok = ToNumber(f[2 + i], v[i]);
+			bool ok = n == kFields && f[0] == "PAD" && ToKind(f[1], pad.kind) && !f[2].empty();
+			for (size_t i = 0; ok && i < 8; ++i) ok = ToNumber(f[3 + i], v[i]);
 			if (ok)
 			{
-				pad.name = f[1];
+				pad.name = f[2];
 				pad.location = Vec3(v[0], v[1], v[2]);
 				pad.radius = v[3];
 				pad.halfHeight = v[4];
 				pad.heal = v[5];
 				pad.respawnSeconds = v[6];
 				pad.recheckSeconds = v[7];
-				ok = pad.radius > 0 && pad.halfHeight > 0 && pad.heal > 0 && pad.respawnSeconds > 0 && pad.recheckSeconds >= 0;
+				const bool healOk = pad.kind == EPadKind::Heal ? pad.heal > 0 : pad.heal == 0;
+				ok = pad.radius > 0 && pad.halfHeight > 0 && healOk && pad.respawnSeconds > 0 && pad.recheckSeconds >= 0;
 			}
 			if (!ok)
 			{
@@ -92,6 +106,18 @@ namespace mo
 		case EPadsLoad::BadLine: return "bad line";
 		case EPadsLoad::NoPads: return "no PAD line";
 		case EPadsLoad::TooMany: return "too many pads";
+		}
+		return "?";
+	}
+
+	const char* PadKindName(EPadKind kind)
+	{
+		switch (kind)
+		{
+		case EPadKind::Heal: return "heal";
+		case EPadKind::Pistol: return "pistol";
+		case EPadKind::Rifle: return "rifle";
+		case EPadKind::Shotgun: return "shotgun";
 		}
 		return "?";
 	}

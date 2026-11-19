@@ -48,15 +48,16 @@ namespace mo
 			else ++_meleeCounters.pushesIgnored;
 		}
 		ApplyMove(slot);
-		ApplyWeapon(slot);
+		ApplyWeapon(slot, _melee.IsActive());
 		RememberMove(slot);
-		RememberWeapon(slot);
+		RememberWeapon(slot, _melee.IsActive());
 	}
 
 	void CSelfPrediction::OnSpawn(double x, double y, double z, uint32_t lastSeq)
 	{
 		_waitingSpawn = false;
 		_compareFromSeq = lastSeq;
+		_placeActive = false;		// 이 번호 칸은 부활 칸이다(죽음 옮기기 번호와 같을 수 있다 — DEBUG_PLACE_KILL 뒤 입력 없이 부활)
 		_move = MoveState();
 		_move.location = Vec3(x, y, z);
 		_move.maxSpeed = _maxWalkSpeed;
@@ -65,11 +66,12 @@ namespace mo
 		_lockInputs = SpawnMoveLockInputs(_rules);
 		_ads.Reset();
 		_aimCamera.Reset();
-		_weapon = 0;
-		for (size_t i = 0; i < _weapons.size(); ++i) _weapons[i].Init((EWeapon)i);
+		_loadout.Reset(_rules.startAllWeapons, _weapons);		// 서버 SpawnPlayer 와 같다 — [권총, 빈, 빈](시험 옵션이면 세 무기)
+		_weapon = _loadout.Held();
 		_fireGate = CWeaponFireGate();
 		_melee.Reset();		// 죽음이 능력을 끈다 — 새 몸은 꺼진 채 시작한다
 		RememberMove(_spawnBase);
+		SaveWeapon(_spawnWeapon, lastSeq, false);
 		_meleeAckedSeq = lastSeq;
 
 		// 서버는 이 번호 뒤의 입력을 새 자리에서 쓴다 — 여기도 똑같이 다시 돌린다.
@@ -84,10 +86,43 @@ namespace mo
 			Equip(slot.input);
 			StepMelee(slot);
 			ApplyMove(slot);
-			ApplyWeapon(slot);
+			ApplyWeapon(slot, _melee.IsActive());
 			RememberMove(slot);
-			RememberWeapon(slot);
+			RememberWeapon(slot, _melee.IsActive());
 		}
+	}
+
+	uint32_t CSelfPrediction::OnPlace(double x, double y, double z, uint8_t ammoWeapon, int16_t magazine, int16_t spare)
+	{
+		const uint32_t seq = ++_seq;
+		Slot& slot = _ring[seq % kRingSize];
+		slot = Slot();
+		slot.seq = seq;
+		// 서버 ApplyPlace 와 같은 차례 — 걸음 새로(멈춤 · 걷기) · 바닥 다시 찾기 · 점프 키 · 이동 막음 지움 · 죽음 지움, 그 뒤 탄 정하기
+		_waitingSpawn = false;
+		_compareFromSeq = seq;
+		_move = MoveState();
+		_move.location = Vec3(x, y, z);
+		_move.mode = EMoveMode::Walking;
+		_move.maxSpeed = _maxWalkSpeed;
+		_sim.RefreshFloor(_move);
+		_jumpHeld = false;
+		_lockInputs = 0;
+		// 옮기기 앞 번호의 근접 결과는 부활처럼 닫는다 — 그 밀기를 고쳐 옮기기 앞 걸음부터 다시 돌리면 옮긴 자리를 덮는다(OnMeleeResult 도 이 번호 앞은 안 받는다)
+		_meleeAckedSeq = seq;
+		RememberMove(_spawnBase);
+		// 서버는 겹침(받침 집기)을 탄 정하기 앞에 본다 — 이 번호로 집은 소식의 앞 칸은 탄 정하기 앞 무기 쪽, 집은 뒤 탄 정하기를 다시 건다(OnPickup)
+		const bool meleeActive = _melee.IsActive();
+		SaveWeapon(_placeWeapon, seq, meleeActive);
+		_placeActive = true;
+		_placeAmmoWeapon = ammoWeapon;
+		_placeMagazine = magazine;
+		_placeSpare = spare;
+		if (ammoWeapon < (uint8_t)EWeapon::Count) _weapons[ammoWeapon].SetAmmoForCheck(magazine, spare);
+		SaveWeapon(_spawnWeapon, seq, meleeActive);		// 다음 입력이 이어 받는 칸 = 탄 정하기 뒤
+		RememberWeapon(slot, meleeActive);
+		slot.valid = false;		// 이 번호의 서버 상태는 견주지 않는다(FindComparable 이 _compareFromSeq 로도 거른다)
+		return seq;
 	}
 
 	const CSelfPrediction::Slot* CSelfPrediction::FindComparable(const wire::PlayerState& server) const
@@ -150,11 +185,8 @@ namespace mo
 
 	void CSelfPrediction::Equip(const wire::Input& input)
 	{
-		if (input.weapon < (uint8_t)EWeapon::Count && input.weapon != _weapon)
-		{
-			_weapon = input.weapon;
-			_weapons[_weapon].Equip();
-		}
+		// 서버 ApplyInput 과 같은 함수 — 앞 입력과 번호가 달라졌고 가진 무기일 때만 바꾼다(Loadout.h)
+		if (_loadout.OnInputWeapon(input.weapon, _weapons) == ESwitchResult::Switched) _weapon = _loadout.Held();
 	}
 
 	void CSelfPrediction::OnMeleeResult(uint32_t seq, bool push, const Vec3& force)
@@ -175,6 +207,83 @@ namespace mo
 		slot.meleePush = push;
 		slot.meleePushForce = serverForce;
 		RerunMovesFrom(seq);
+	}
+
+	void CSelfPrediction::OnPickup(uint32_t seq, bool midInput, uint8_t weapon, uint8_t give, uint8_t slotIndex, int16_t magazine, int16_t spare)
+	{
+		++_pickupCounters.received;
+		const bool atSpawn = seq == _compareFromSeq;
+		if (atSpawn) midInput = false;		// 부활 · 자리 옮기기 안에서 집음 — 입력이 아니다
+		const uint32_t baseSeq = midInput ? seq - 1 : seq;
+		const bool atPlace = atSpawn && _placeActive;		// 자리 옮기기 안에서 집음 — 앞 칸은 탄 정하기 앞(OnPlace)
+		const WeaponSnap& base = atPlace ? _placeWeapon : baseSeq == _compareFromSeq ? _spawnWeapon : _weaponSnaps[baseSeq % kWeaponSnapCount];
+		Slot& at = _ring[seq % kRingSize];
+		const WeaponSnap& atSnap = _weaponSnaps[seq % kWeaponSnapCount];
+		const bool atKnown = !atSpawn && at.seq == seq && atSnap.seq == seq;
+		if (_waitingSpawn || seq < _compareFromSeq || seq > _seq || base.seq != baseSeq || (!atSpawn && !atKnown) || weapon >= (uint8_t)EWeapon::Count || slotIndex >= kQuickSlotCount)
+		{
+			++_pickupCounters.noSlot;
+			return;
+		}
+		++_pickupCounters.rerun;
+		// 걸음 쪽 · 마지막 무기 결과는 그대로 둔다 — 다시 도는 것은 무기 쪽뿐이고, 걸음 값은 입력마다 그 슬롯 값을 빌려 쓴다
+		const MoveState move = _move;
+		const AdsAbility ads = _ads;
+		const WeaponEvents events = _lastWeaponEvents;
+		const WeaponSnap start = base;
+		const bool atMelee = atKnown ? atSnap.meleeActive : false;		// RememberWeapon 이 이 칸을 덮기 전에 읽는다
+		// 집기 직전 — 입력 중이면 앞 입력 뒤 칸 + 이 입력의 교체(AddInput 처럼 걸음 앞이지만 무기 쪽만 보므로 순서는 같다)
+		const auto beforeGive = [&]()
+		{
+			LoadWeapon(start);
+			if (midInput)
+			{
+				_move = at.move;		// 무기 순환이 읽는 속도 · 공중 · 앉음 = 이 입력 걸음 뒤
+				_ads = at.ads;
+				Equip(at.input);
+			}
+		};
+		beforeGive();
+		const EGiveResult result = _loadout.Give((EWeapon)weapon, _weapons);
+		if ((uint8_t)result != give || _loadout.SlotOf(weapon) != (int)slotIndex)
+		{
+			++_pickupCounters.resultDiffs;
+			beforeGive();
+			const bool isNew = give == (uint8_t)EGiveResult::NewEquipped || give == (uint8_t)EGiveResult::NewNotEquipped;
+			if (isNew) _weapons[weapon].Init((EWeapon)weapon);
+			_loadout.ForceGive(weapon, slotIndex, give == (uint8_t)EGiveResult::NewEquipped);
+		}
+		_weapon = _loadout.Held();
+		CWeaponCycle& cycle = _weapons[weapon];
+		if (cycle.GetMagazine() != magazine || cycle.GetSpare() != spare)
+		{
+			++_pickupCounters.ammoFixes;
+			cycle.SetAmmoForCheck(magazine, spare);
+		}
+		if (midInput) ApplyWeapon(at, atMelee);		// 서버처럼 집은 뒤 이 입력의 무기 순환
+		if (atPlace)
+		{
+			SaveWeapon(_placeWeapon, seq, start.meleeActive);		// 같은 번호 소식이 하나 더 와도(받침 둘에 겹침) 집은 뒤에서 잇는다
+			if (_placeAmmoWeapon < (uint8_t)EWeapon::Count) _weapons[_placeAmmoWeapon].SetAmmoForCheck(_placeMagazine, _placeSpare);	// 서버 ApplyPlace 차례 — 집기 뒤 탄 정하기
+		}
+		if (atSpawn) SaveWeapon(_spawnWeapon, seq, start.meleeActive);		// 부활 칸은 늘 꺼짐 · 자리 옮기기 칸은 옮길 때 값(OnPlace)
+		else RememberWeapon(at, atMelee);
+		for (uint32_t next = seq + 1; next <= _seq; ++next)
+		{
+			Slot& later = _ring[next % kRingSize];
+			const WeaponSnap& old = _weaponSnaps[next % kWeaponSnapCount];
+			if (later.seq != next || old.seq != next) continue;
+			const bool meleeActive = old.meleeActive;
+			if (later.meleeStarted) ++_pickupCounters.meleeInWindow;
+			_move = later.move;		// 무기 순환이 읽는 속도 · 공중 · 앉음 = 이 입력 걸음 뒤(AddInput 과 같은 자리)
+			_ads = later.ads;
+			Equip(later.input);
+			ApplyWeapon(later, meleeActive);
+			RememberWeapon(later, meleeActive);
+		}
+		_move = move;
+		_ads = ads;
+		_lastWeaponEvents = events;
 	}
 
 	void CSelfPrediction::AckMelee(uint32_t lastSeq)
@@ -264,7 +373,7 @@ namespace mo
 		_sim.Tick(_move, moveInput, kTick);
 	}
 
-	void CSelfPrediction::ApplyWeapon(const Slot& slot)
+	void CSelfPrediction::ApplyWeapon(const Slot& slot, bool meleeActive)
 	{
 		const wire::Input& input = slot.input;
 		WeaponMotion motion;
@@ -275,7 +384,7 @@ namespace mo
 		WeaponInput weaponInput;
 		weaponInput.fireHeld = (input.buttons & wire::BUTTON_FIRE) != 0;
 		weaponInput.reloadPressed = (input.buttons & wire::BUTTON_RELOAD) != 0;
-		weaponInput.meleeActive = _melee.IsActive();
+		weaponInput.meleeActive = meleeActive;
 		weaponInput.meleeStarted = slot.meleeStarted;
 		// 서버와 같은 순서(Room.cpp ApplyInput)
 		_fireGate.NextInput();
@@ -293,12 +402,34 @@ namespace mo
 		slot.ads = _ads;
 	}
 
-	void CSelfPrediction::RememberWeapon(Slot& slot) const
+	void CSelfPrediction::RememberWeapon(Slot& slot, bool meleeActive)
 	{
 		slot.valid = true;
 		slot.magazine = (int16_t)_weapons[_weapon].GetMagazine();
 		slot.spare = (int16_t)_weapons[_weapon].GetSpare();
 		slot.weapon = _weapon;
+		slot.quickSlots = _loadout.PackSlots();
 		slot.reloading = _weapons[_weapon].IsReloading();
+		SaveWeapon(_weaponSnaps[slot.seq % kWeaponSnapCount], slot.seq, meleeActive);
+	}
+
+	void CSelfPrediction::SaveWeapon(WeaponSnap& snap, uint32_t seq, bool meleeActive) const
+	{
+		snap.seq = seq;
+		snap.weapons = _weapons;
+		snap.loadout = _loadout;
+		snap.weapon = _weapon;
+		snap.fireGate = _fireGate;
+		snap.aimCamera = _aimCamera;
+		snap.meleeActive = meleeActive;
+	}
+
+	void CSelfPrediction::LoadWeapon(const WeaponSnap& snap)
+	{
+		_weapons = snap.weapons;
+		_loadout = snap.loadout;
+		_weapon = snap.weapon;
+		_fireGate = snap.fireGate;
+		_aimCamera = snap.aimCamera;
 	}
 }

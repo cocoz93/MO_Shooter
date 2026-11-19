@@ -168,6 +168,11 @@ private:
 	ALyraWeaponSpawner* BindPad(int32 Index);
 	void ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects);
 	float ApplyPadHeal(const mo::wire::Pickup& M, ALyraWeaponSpawner* Actor);
+	void ApplyWeaponPickup(const mo::wire::Pickup& M, ALyraWeaponSpawner* Actor);	// 무기 받침 집음(W-4) — 내 몸이면 받침 그래프 GiveWeapon, 남의 몸이면 줍기 신호만
+	FString DescribeLyraBag(int32* OutActive) const;	// Lyra 빠른 칸 셋의 무기 번호(빈 칸 -) — 로그 · 1초 대조용
+	bool LyraBagMatches(uint8 PackedSlots, uint8 HeldWeapon) const;	// Lyra 빠른 칸 셋 · 든 칸이 서버 빠른 칸(와이어 quickSlots) · 든 무기와 같은가
+	void SetLyraItemAmmo(uint8 WeaponIndex, int32 Magazine, int32 Spare);	// 빠른 칸의 그 무기 아이템 탄 — 없으면 안 함
+	void TickWeaponScript(double T);		// -MOBWeaponScript 각본(W-4) — 이 프레임의 고른 칸 · 재장전 · 보낼 시험 자리 옮기기를 정한다
 	void RequestEventShot(const TCHAR* Name, double Delay, int32 MaxCount);
 	void TickRecord(double T);
 	void DrainGrabber();
@@ -196,6 +201,23 @@ private:
 	float BreakPadsAt = -1;
 	bool bBreakPadHeal = false;		// 일부러 틀림 — 다음 회복 효과를 건너뜀
 	bool bBreakPadDrop = false;		// 일부러 틀림 — 다음 받침 소식을 버림
+	int32 BreakBag = 0;				// -MOBBreakBag=N 일부러 틀림(비트, W-4) — 1 = 다음 내 줍기에 받침과 다른 무기로 GiveWeapon · 2 = 다음 내 줍기를 예측에 안 넘김 · 4 = 다음 1초 대조 직전 든 칸 아이템을 뺌
+	// 무기 각본(-MOBWeaponScript, W-4) — 서버 프로브 무기 각본(ServerProbe RunWeapons)과 같은 차례 · 길이를 프로브가 안 쓰는 받침 넷에서 돈다.
+	// 자리 · 탄 · 죽음은 시험 입력(C2S_DEBUG_PLACE)으로, 칸 고르기 · 재장전은 보통 입력(키 1 · 2 · 3 · R 과 같은 길)으로
+	bool bWeaponScript = false;
+	int32 WsStep = -1;
+	double WsStepStart = 0;
+	int32 WsSlot = -1;				// 각본이 고른 빠른 칸 — -1 = 안 고름
+	bool bWsPlacePending = false;	// 이 프레임 첫 입력 뒤에 보낼 자리 옮기기
+	FVector WsPlaceAt = FVector::ZeroVector;
+	uint8 WsPlaceFlags = 0, WsAmmoWeapon = 0xFF;
+	int16 WsAmmoMag = 0, WsAmmoSpare = 0;
+	int64 WsPlaces = 0;
+	int32 WsPadIndex[4] = { INDEX_NONE, INDEX_NONE, INDEX_NONE, INDEX_NONE };	// 각본 받침 넷의 서버 받침 번호
+	int64 WsNoPad = 0;				// 못 찾은 각본 받침 — 0 이어야 각본이 다 돈 것
+	bool bWsReloadPending = false;	// 재장전 단추를 실은 입력이 아직 안 나갔다
+	int64 WsReloadMark = 0;			// 누를 때의 InputsReload
+	int32 AutoSlot = -1;			// 자동 입력이 고른 빠른 칸(-1 = 무기 번호 AutoWeapon 그대로 — -MOBAutoWeapon 고정)
 	bool bSimpleAnim = false;
 	bool bServerAnim = false;		// -MOBServerAnim — 남의 캐릭터 자세를 서버가 보낸 상태로 정한다(후보 1, D32)
 	bool bAnimBonesChecked = false;
@@ -345,6 +367,7 @@ private:
 		uint32 CooldownTicks = 0;
 		FVector Location = FVector::ZeroVector;
 		TWeakObjectPtr<ALyraWeaponSpawner> Actor;
+		uint8 Kind = 0;					// 소식 kind = EPadKind 숫자(W-4) — 체력이면 회복, 무기면 가방
 	};
 	TArray<FMOBPad> Pads;
 	// msgs = 받은 받침 소식(takes · readies · syncs = 까닭별), badIndex = 번호가 칸 수 밖, noActor = 받을 때 맵 받침을 못 찾은 소식,
@@ -354,6 +377,22 @@ private:
 	int64 PadMsgs = 0, PadTakes = 0, PadReadies = 0, PadSyncs = 0, PadBadIndex = 0, PadNoActor = 0, PadBound = 0;
 	int64 PadHeals = 0, PadHealBeforeFix = 0, PadHealMismatch = 0, PadHealNoPawn = 0, PadStateChecks = 0, PadStateDiff = 0;
 	int32 PadDiffLinesLeft = 10;
+	// 무기 받침(W-4) — takesMine · takesOther = 무기 받침 집음 소식(내 것 · 남의 것), gives = 내 몸에 받침 그래프 GiveWeapon 을 부른 수,
+	// giveDiff = 그 뒤 Lyra 빠른 칸 · 든 칸 · 그 무기 탄이 서버 소식과 다른 수(탄은 그 자리에서, 칸은 그 틱 상태의 가방 맞추기가 서버 값으로 고친다),
+	// cues = 남의 몸에 줍기 신호를 튼 수, noPawn = 집은 사람 몸 · 가방 · 맵 받침이 없던 수, bad = 줍기 칸이 빈 집음 소식(무기 번호 밖)
+	int64 PadWeaponTakesMine = 0, PadWeaponTakesOther = 0, PadWeaponGives = 0, PadWeaponGiveDiff = 0, PadWeaponCues = 0, PadWeaponNoPawn = 0, PadWeaponBad = 0;
+	int32 WeaponGiveLinesLeft = 30;
+	// 내 가방 맞추기(W-4) — states = 맞춰 본 상태, diffStates = 맞추기 전 Lyra 빠른 칸(무기 아이템 · 칸 밖 무기 아이템)이 서버 빠른 칸과 달랐던 상태,
+	// adds · removes = 칸에 넣고 뺀 아이템, strays = 빠른 칸 밖에 남은 무기 아이템을 지운 수, check1s · diff1s = 1초마다 Lyra 빠른 칸 · 든 칸을 마지막 서버 상태와 견준 수 · 다른 수
+	int64 BagStates = 0, BagDiffStates = 0, BagAdds = 0, BagRemoves = 0, BagStrays = 0, BagCheck1s = 0, BagDiff1s = 0;
+	int32 BagDiffLinesLeft = 30;
+	uint8 LastServerQuickSlots = 0;
+	uint8 LastServerHeld = 0xFF;	// 마지막 살아 있는 상태의 든 무기 — 0xFF = 아직 없음 · 죽음
+	double LastSelfSpawnAt = -1.0;	// 내 부활 소식을 받은 시각(FPlatformTime) — 가방 다름 줄이 부활 뒤 몇 초인지 찍는다
+	// 예측 ↔ 서버 가방 · 탄(W-4, 봇 CompareSelf 와 같은 식) — invCompared = 견준 상태, invMulti = 그중 서버가 무기 둘 이상 든 줄,
+	// invDiff = 빠른 칸 다름, ammoDiff = 든 무기 · 탄창 · 예비 다름(경기 끝 단계 전만 — 그 단계는 서버가 사격 입력을 지운다)
+	int64 InvCompared = 0, InvMulti = 0, InvDiff = 0, AmmoCompared = 0, AmmoDiff = 0;
+	int32 InvDiffLinesLeft = 20;
 	uint32 LastStateTick = 0;		// 마지막으로 받은 상태의 틱 — 받침 소식은 그 틱의 상태보다 먼저 나가므로, 이 틱까지의 서버 사건은 다 받았어야 한다
 	int32 HpDiffLinesLeft = 20;
 	int64 HpFixes = 0;

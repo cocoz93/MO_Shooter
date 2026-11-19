@@ -11,7 +11,8 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 10;		// 10 = 근접 단추 BUTTON_MELEE · 근접 결과 S2C_MELEE · 피해 · 처치 소식의 무기 번호 근접 kWeaponMelee(컨텐츠 E-3)
+		constexpr uint32_t kProtocolVersion = 11;		// 11 = 상태의 빠른 칸 quickSlots · 받침 소식의 종류 · 줍기 결과 · 무기 · 칸 · 탄 · 입력 번호 · 시험 입력의 탄 정하기 · 죽음(컨텐츠 W-2 · W-3)
+														// 10 = 근접 단추 BUTTON_MELEE · 근접 결과 S2C_MELEE · 피해 · 처치 소식의 무기 번호 근접 kWeaponMelee(컨텐츠 E-3)
 														// 9 = 체력 받침 상태 S2C_PICKUP(컨텐츠 B-3)
 														// 7 = 애니 꼬리에 앉기 묶음 비중 · 겹침 칸 번호에 앉은 전환 14개(컨텐츠 D-3, D62) · 앉기 버튼 BUTTON_CROUCH · 상태 STATE_CROUCHED(D-5)
 														// 6 = 애니 꼬리에 조준 묶음 비중 · 겹침 칸 번호에 조준 전환 12개(컨텐츠 C-3, D60) · 조준 버튼 BUTTON_ADS · 상태 STATE_ADS(C-4, D61)
@@ -118,6 +119,13 @@ namespace mo
 			float viewAlpha;		// viewTick 에서 다음 틱까지의 비율 0~1 — 틱 간격이 달리기로 약 8cm 라 정수 틱만으로는 모자란다
 		};
 
+		// 시험 입력 DebugPlace 의 덧붙임(flags) — 0 이면 자리 · 체력만(전부터의 뜻)
+		enum EDebugPlaceFlag : uint8_t
+		{
+			DEBUG_PLACE_SET_AMMO = 1 << 0,	// 놓은 뒤 ammoWeapon 의 탄창 · 예비를 magazine · spare 로 — 무기 줍기 대조(W-2). Lyra 기록기가 쏘는 대신 탄 표식을 바꾼 단계와 같다
+			DEBUG_PLACE_KILL = 1 << 1,		// 놓은 뒤 스스로 죽음 — Lyra 기록기의 DamageSelfDestruct(처치자 없음)
+		};
+
 		// 시험용 — 입력과 같은 순서로 처리한다
 		struct DebugPlace
 		{
@@ -127,6 +135,9 @@ namespace mo
 			double vx, vy, vz;
 			float hp;
 			uint8_t falling;
+			uint8_t flags;			// EDebugPlaceFlag
+			uint8_t ammoWeapon;		// DEBUG_PLACE_SET_AMMO 의 무기(EWeapon)
+			int16_t magazine, spare;
 		};
 
 		struct Welcome
@@ -152,6 +163,7 @@ namespace mo
 			uint8_t weapon;
 			uint8_t team;
 			int8_t moveX, moveY;	// 누름 방향(127 = 1.0) — 남의 캐릭터 애니가 가속으로 읽는다. 판정에는 안 쓴다
+			uint8_t quickSlots;		// 빠른 칸 셋(W-3) — 칸 i 가 비트 2i · 2i+1, 0 = 빈 칸 · 1 + 무기 번호. 읽고 쓰기는 CLoadout::PackSlots · UnpackSlot(Loadout.h). 든 칸 = weapon 이 든 칸
 		};
 
 		// 애니 상태 한 사람치. S2C_STATE 의 players[count] 바로 뒤에 같은 차례로 붙는다(꼬리, 클립 파일을 준 서버만).
@@ -313,7 +325,15 @@ namespace mo
 			uint8_t padCount;		// 서버 받침 수 — 받는 쪽이 칸을 미리 잡는다(kMaxPickupPads 255 라 한 바이트)
 			uint8_t available;		// 1 = 켜짐
 			uint8_t reason;			// EPickupReason
+			// 아래는 W-3 — 받침 종류는 늘, 줍기 칸은 무기 받침을 집었을 때만(그 밖은 give = kPickupGiveNone · 나머지 0)
+			uint8_t kind;			// 받침 종류 EPadKind(Pickups.h) 숫자 — 0 체력 · 1 권총 · 2 소총 · 3 샷건. 봇이 체력 받침만 찾아가려고
+			uint8_t give;			// 줍기 결과 EGiveResult(Loadout.h) 숫자 — 집은 것만 오므로 새 무기(듦) · 새 무기(재장전 중이라 안 듦) · 탄 채움 셋 중 하나
+			uint8_t weapon;			// 집은 무기 번호
+			uint8_t slot;			// 그 무기가 든 빠른 칸
+			int16_t magazine, spare;	// 집은 뒤 그 무기 탄창 · 예비
+			uint32_t seq;			// 집은 사람이 서버에서 마지막으로 쓴 입력 번호 — 그 입력 뒤에 집었다(다시 검사로 집었으면 그 틱까지 쓴 입력). 예측이 이 입력부터 무기 쪽을 다시 돌린다
 		};
+		inline constexpr uint8_t kPickupGiveNone = 0xFF;
 
 		// 근접 한 번(E-3) — 맞음 · 같은 팀 · 벽 · 빗나감 모두 보낸다(공격자 몽타주는 늘 돈다). 피해는 따로 S2C_DAMAGE(무기 번호 kWeaponMelee)로도 간다
 		struct Melee
@@ -373,7 +393,7 @@ namespace mo
 		}
 		static_assert(sizeof(Shot) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 		static_assert(sizeof(Result) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
-		static_assert(sizeof(Pickup) == 44, "받침 소식 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
+		static_assert(sizeof(Pickup) == 56, "받침 소식 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 		static_assert(sizeof(Melee) == 38, "근접 소식 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 	}
 }

@@ -1,17 +1,21 @@
 ﻿#pragma once
 
 #include "Subsystems/WorldSubsystem.h"
+#include "GameFramework/GameplayMessageSubsystem.h"
+#include "GameplayTagContainer.h"
 
 #include "MOBContentProbeSubsystem.generated.h"
 
 class ACharacter;
 class ALyraWeaponSpawner;
+struct FLyraAbilitySimpleFailureMessage;
 
 /**
  * 컨텐츠 확인 기록 — 조준 · 앉기 · 근접 · 체력 받침의 Lyra 실행값을 정해진 각본으로 찍는다. 서버 없이 돈다(content-add-plan.md 0-3).
  * 에셋에서 읽은 값(content-add-progress.md 0-3 표)이 실제 실행에서도 같은지 보는 것이 목적이다. 판정 대조용 정밀 기록은 각 단계의 기록 도구가 맡는다.
  * 명령줄 -MOBContentProbe=<tag> 일 때만 켜진다. -MOBCPMode=gym(기본, 맵 L_ShooterGym?NumBots=1) | pads(맵 L_Expanse?NumBots=0)
  * | bridge(내 서버에 붙은 지금 클라 — run_game.ps1 의 LyraArgs 로 넘긴다. 0-2 「지금 키를 누르면 무슨 일이 나나」)
+ * | weapons(맵 L_Expanse?NumBots=0 — 무기 받침 · 가방 · 재장전 태그, weapon-pickup-plan.md W-0)
  * 산출물 = Saved/MOB/cprobe_<tag>.csv(매 프레임 한 줄) · 로그의 MOB_CPROBE 줄(사건마다 요약)
  */
 UCLASS()
@@ -27,7 +31,8 @@ public:
 	virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Always; }
 
 	// 각본 한 칸이 하는 일. 칸이 시작할 때 한 번 한다(Melee 는 칸 안 0.3초에 누른다, MeleeSpam 은 칸 내내 누른다)
-	enum class EAct : uint8 { None, Home, AdsPress, AdsRelease, CrouchToggle, Equip, FoeSetup, FoeSameTeam, MeleeAt, MeleeAtBack, MeleeAtSide, MeleeHere, MeleeSpam, PadsDump, PadOn, Away, SetHealth, Watch, MeleeJumpAt, BumpStillAt, BumpAt, BumpStillSideAt, BumpSideAt, FoeCrouchToggle };
+	enum class EAct : uint8 { None, Home, AdsPress, AdsRelease, CrouchToggle, Equip, FoeSetup, FoeSameTeam, MeleeAt, MeleeAtBack, MeleeAtSide, MeleeHere, MeleeSpam, PadsDump, PadOn, Away, SetHealth, Watch, MeleeJumpAt, BumpStillAt, BumpAt, BumpStillSideAt, BumpSideAt, FoeCrouchToggle,
+		WeaponPadOn, SelectSlot, SetAmmo, ReloadPress, SelfDestruct };
 
 private:
 	bool WaitReady(float DeltaTime);
@@ -46,7 +51,11 @@ private:
 	void GoHome() const;
 	void PlaceFoe(double Distance, bool bFacingMe, double Side = 0.0) const;
 	void LogScores(const TCHAR* When) const;
-	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : 0)); }
+	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : 0))); }
+	// 무기 판(W-0) — 매 프레임 가방 · 무기 받침 · 재장전 태그를 살펴 바뀐 때만 로그(MOB_CPROBE_INV · _WPAD · _RELOAD). 캐릭터가 없어도(죽음 ~ 부활) 돈다
+	void WatchWeapons();
+	FString InventorySig() const;
+	void OnFailMsg(FGameplayTag Channel, const FLyraAbilitySimpleFailureMessage& Msg);
 	static bool IsMeleeOnce(EAct A) { return A == EAct::MeleeAt || A == EAct::MeleeAtBack || A == EAct::MeleeAtSide || A == EAct::MeleeHere || A == EAct::MeleeJumpAt; }
 	// F-1 부딪힘 칸 — 순간이동으로 시작해 나는 +X 로 걷는다. FoeWalks 면 상대도 -X 로 걷는다(마주 걷기)
 	static bool IsBump(EAct A) { return A == EAct::BumpStillAt || A == EAct::BumpAt || A == EAct::BumpStillSideAt || A == EAct::BumpSideAt; }
@@ -70,6 +79,7 @@ private:
 	bool bPads = false;
 	bool bBridge = false;
 	bool bBump = false;		// F-1 부딪힘 각본(연습장, -MOBCPMode=bump)
+	bool bWeapons = false;	// W-0 무기 받침 각본(L_Expanse, -MOBCPMode=weapons)
 	bool bReady = false;
 	bool bDone = false;
 	TWeakObjectPtr<APawn> ClearPawn;
@@ -121,4 +131,16 @@ private:
 	// 받침 판 — 체력 · 받침 상태가 바뀐 때를 적는다
 	float LastHp = -1.f;
 	int32 LastPadAvail[2] = { -1, -1 };
+
+	// 무기 판 — 앞 프레임에 본 값(바뀐 때만 적으려고)
+	FString LastInvSig;
+	TMap<FString, int32> LastWeaponPadAvail;	// 받침 이름 → 켜짐
+	int32 LastReloadTag = -1;
+	FString LastReloadAbilities;
+	int32 ReloadPressFrame = -1;		// 재장전 누른 프레임(다음 프레임에 뗀다)
+	FGameplayMessageListenerHandle FailMsgHandle;
+	int32 FailMsgs = 0;
+	// 화면 사진(UI 포함) — 가방이 바뀐 뒤 · 실패 알림 뒤. 빠른 칸 그림 · 실패 문구가 화면에 뜨는지 본다. 한 프레임에 한 장
+	TArray<TPair<int32, FString>> PendingShots;	// 찍을 프레임 → 이름
+	int32 ShotCount = 0;
 };

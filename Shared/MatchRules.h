@@ -32,6 +32,10 @@ namespace mo
 		// 사람끼리 막기(컨텐츠 F) — Lyra 는 산 사람 캡슐끼리 막고 미끄러뜨린다(F-1 실측). 늘 켠다(D83 · 11-17 사용자 판정 「옵션빼고 기본으로 막자」).
 		// 끄기는 시험 전용 — 서버 · 봇 --testNoPawnBlock. 회귀 봇 한 판이 서버 ↔ 같은 코드 위치 차이 0 을 엄격히 보려고 둔다(봇끼리 부딪히면 남 자리를 늦게 알아 갈린다)
 		bool pawnBlock = true;
+
+		// 처음 무기(무기 줍기 W-2) — Lyra 는 권총 하나만 준다(영웅 InitialInventoryItems, D97 · W-0 실측). 세 무기로 시작은 시험 전용 —
+		// 서버 · 봇 --testStartAllWeapons. 세 무기를 전제로 한 기존 시험이 기준선을 지키게 하려고 둔다(Loadout.h)
+		bool startAllWeapons = false;
 	};
 
 	inline uint32_t SecondsToTicks(double seconds)

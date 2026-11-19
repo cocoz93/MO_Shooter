@@ -2,6 +2,7 @@
 
 #include "AnimState.h"
 #include "GameProtocol.h"
+#include "Loadout.h"
 #include "MapCollision.h"
 #include "MatchRules.h"
 #include "Movement.h"
@@ -11,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 // 방 하나. 방 안 상태는 게임 스레드 하나만 만지므로 잠금이 없다.
@@ -86,6 +88,8 @@ namespace mo
 		uint64_t starvedTicks = 0;			// 입력이 안 와서 그 틱에 꺼낼 것이 없음
 		uint64_t idleMoves = 0;				// 입력 없이 오래 지나 빈 입력으로 움직임(공중에 멈추지 않게)
 		uint64_t debugPlaces = 0;
+		uint64_t debugAmmoSets = 0;			// 시험 입력이 탄을 정함(DEBUG_PLACE_SET_AMMO)
+		uint64_t debugKills = 0;			// 시험 입력이 죽임(DEBUG_PLACE_KILL)
 		uint64_t statesSent = 0;
 		uint64_t shots = 0;
 		uint64_t firesBlockedPostGame = 0;	// 경기 끝 단계의 발사 입력 — GE_BlockAbilityInput
@@ -113,6 +117,15 @@ namespace mo
 		uint64_t pickupsFullHealth = 0;		// 켜진 받침에 닿았지만 체력이 가득 차 안 집음(GiveWeapon 이 false)
 		uint64_t padRespawns = 0;			// 대기가 끝나 다시 켜짐
 		uint64_t padRechecks = 0;			// 다시 켜진 뒤 서 있는 사람을 다시 본 횟수
+		// 무기 받침(W-2) — 위 pickups · pickupsFromRecheck 는 체력 받침만 센다(회귀 「받침갈래」가 체력 회복 수와 맞춰 본다). 대기 · 다시 검사는 같은 규칙이라 위 둘이 같이 센다
+		uint64_t weaponPickupsNew = 0;			// 없던 무기를 넣고 바로 듦
+		uint64_t weaponPickupsNoSwitch = 0;		// 없던 무기 — 재장전 중이라 넣기만(IgnorePickUpWhenReload)
+		uint64_t weaponPickupsAmmo = 0;			// 가진 무기 예비를 기본값까지 채움
+		uint64_t weaponPickupsFull = 0;			// 가진 무기 예비가 이미 기본값 — 실패, 받침 안 꺼짐
+		uint64_t weaponPickupsNoSlot = 0;		// 빈 칸 없음 — 무기 셋 · 칸 셋이라 0 이어야 한다
+		uint64_t weaponPickupsPostGame = 0;		// 경기 끝 단계라 실패(GiveWeapon 의 IsPhaseActive(PostGame)) — 받침 안 꺼짐
+		uint64_t weaponPickupsFromRecheck = 0;	// 집은 것(새 무기 · 탄) 중 다시 검사로 집은 것
+		uint64_t weaponSwitchRejected = 0;		// 입력이 안 가진 무기를 고름 — 든 무기 그대로(빈 칸 키)
 		uint64_t falls = 0;					// 떨어져 죽음
 		uint64_t spawns = 0;
 		uint64_t spawnsFromFallback = 0;	// 적이 없거나 자리가 모두 찜돼 무작위·대체 자리로
@@ -257,9 +270,11 @@ namespace mo
 			int64_t session = 0;
 			uint8_t team = 0;
 			MoveState move;
-			std::array<CWeaponCycle, (size_t)EWeapon::Count> weapons;
+			WeaponCycles weapons;			// 무기마다 탄 · 순환. 가진 무기인지는 loadout 이 안다
+			CLoadout loadout;				// 빠른 칸 · 든 칸(W-2) — 부활 · 입력 · 받침이 이 함수로만 바꾼다
+			std::string loggedLoadout;		// 시험 출력 INVEV 가 마지막으로 찍은 가방(--debug 일 때만 쓴다)
 			CWeaponFireGate fireGate;
-			uint8_t weapon = 0;
+			uint8_t weapon = 0;				// 든 무기 = loadout.Held(). 여기저기서 읽는 값이라 바꿀 때마다 따라 맞춘다
 			float hp = 0;
 			float yaw = 0, pitch = 0;
 			int8_t moveX = 0, moveY = 0;	// 마지막 누름 방향 — 상태 패킷에 실어 보낸다
@@ -353,6 +368,7 @@ namespace mo
 		void TickPlayerInputs(Player& player);
 		void ApplyInput(Player& player, const wire::Input& input, bool serverMade = false);	// serverMade = 입력이 늦어 서버가 만든 빈 입력
 		void ApplyPlace(Player& player, const wire::DebugPlace& place);
+		void LogLoadouts();		// 시험 출력(--debug) — 가방(칸 · 든 칸 · 가진 무기 탄)이 바뀐 사람마다 INVEV 한 줄. Lyra 기록기 MOB_CPROBE_INV 와 같은 꼴
 		bool IsStartOccupied(const StartSlot& slot) const;
 		int ChooseStart(const Player& player);
 		void SpawnPlayer(Player& player);
@@ -361,9 +377,12 @@ namespace mo
 		bool OverlapsPad(const MoveState& move, const PickupPad& pad) const;
 		void UpdatePadOverlaps(Player& player);
 		bool TryPickup(size_t padIndex, Player& player, bool fromTimer);
+		bool TryWeaponPickup(size_t padIndex, Player& player, bool fromTimer);	// TryPickup 의 무기 받침 갈래(W-2)
+		void TakePad(size_t padIndex, bool fromTimer);		// 집힌 받침을 끈다 — 체력 · 무기 공통(대기 틱 규칙)
 		void TickPads();
 		void ResetPads();
-		void SendPad(size_t padIndex, wire::EPickupReason reason, const Player* picker, float heal, const Player* only);
+		// give · weapon = 무기 받침을 집었을 때 줍기 결과(EGiveResult 숫자)와 무기 — 칸 · 탄은 picker 가방에서 읽는다(W-3)
+		void SendPad(size_t padIndex, wire::EPickupReason reason, const Player* picker, float heal, const Player* only, uint8_t give = wire::kPickupGiveNone, uint8_t weapon = 0);
 		size_t PadCount() const { return _pickups.pads ? _pickups.pads->size() : 0; }
 		bool IsImmune(const Player& player) const;
 		Vec3 ResolveAimStart(const Player& player, const Vec3& locationBeforeMove, const Vec3& aim);

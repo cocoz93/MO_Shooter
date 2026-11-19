@@ -237,6 +237,8 @@ namespace mo
 		void Init(EWeapon weapon);
 		void Init(const WeaponDef& def);	// 대조 도구가 값을 일부러 틀릴 때
 		void Equip();
+		// 무기 받침이 가진 무기에 탄을 줄 때 — 예비를 기본값(startSpareAmmo)까지. 더한 수를 돌려준다(이미 기본값 이상이면 0, 탄창은 그대로)
+		int32_t TopUpSpare();
 		WeaponEvents Tick(float deltaTime, const WeaponInput& input, const WeaponMotion& motion);
 
 		int32_t GetMagazine() const { return _magazine; }

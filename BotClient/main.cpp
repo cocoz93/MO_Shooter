@@ -36,6 +36,7 @@
 #include "MatchRules.h"
 #include "Movement.h"
 #include "NetClient.h"
+#include "Pickups.h"
 #include "Prediction.h"
 #include "Weapon.h"
 
@@ -116,6 +117,7 @@ namespace
 		bool crouchToggle = false;		// --crouch — 앉기 키를 가끔 누른다(D-5). 꺼져 있으면 기존 시험과 같은 입력
 		bool meleeNear = false;			// --melee — 적이 가까이 보이면 근접 단추를 누른다(E-3). 꺼져 있으면 기존 시험과 같은 입력
 		bool pawnBlock = true;			// 사람끼리 막기(D83 늘 켬) — 예측이 남 캡슐을 보고 어긋나면 고친다. --testNoPawnBlock(시험 전용 · 서버도 같이)이면 끄고 위치 차이 0 을 엄격히 본다
+		bool startAllWeapons = false;	// --testStartAllWeapons(시험 전용 · 서버도 같이) — 세 무기로 부활(무기 줍기 전 동작). 예측의 가방이 서버와 같게(W-2)
 		bool push = false;				// --push — 쏘지 않고 가장 가까운 사람 쪽으로 걷는다(F-2 보정 양 측정)
 		bool breakMelee = false;			// --breakMelee — 화면 판정 밀기를 반으로(일부러 틀림)
 		std::string judgeClips;			// 주면 봇이 화면 역할로 탄마다 자기 판정을 남긴다(후보 1, 7단계). measureView 를 함께 켠다
@@ -533,6 +535,15 @@ namespace
 		uint64_t GetVelDiff() const { return _velDiff; }
 		uint64_t GetAmmoDiff() const { return _ammoDiff; }
 		uint64_t GetFlagDiff() const { return _flagDiff; }
+		uint64_t GetInvDiff() const { return _invDiff; }
+		uint64_t GetInvMulti() const { return _invMulti; }
+		uint64_t GetWeaponPickupsMine() const { return _weaponPickupsMine; }
+		uint64_t GetWeaponSeekStarts() const { return _weaponSeekStarts; }
+		uint64_t GetWeaponSeekTicks() const { return _weaponSeekTicks; }
+		uint64_t GetWeaponTakesSought() const { return _weaponTakesSought; }
+		uint64_t GetWeaponSeekAmmoStarts() const { return _weaponSeekAmmoStarts; }
+		uint64_t GetSpareOutTicks() const { return _spareOutTicks; }
+		const CSelfPrediction::PickupCounters& GetPickupFixes() const { return _self.GetPickupCounters(); }
 		uint64_t GetAdsCompared() const { return _adsCompared; }
 		uint64_t GetAdsDiff() const { return _adsDiff; }
 		uint64_t GetLockDiff() const { return _lockDiff; }
@@ -643,8 +654,8 @@ namespace
 			ClearPawns();
 			// 근접 몸 앞 = 서버 player.yaw — 부활이 시작 자리 요로 놓는다. 그 뒤 입력을 이미 보냈으면 서버도 그 입력의 요로 바꿔 둔다(마지막 보낸 요 그대로)
 			if (_self.GetSeq() <= spawn.lastSeq) _meleeYaw = spawn.yaw;
-			_chosenWeapon = (uint8_t)(_rng.NextFloat() * (float)EWeapon::Count);
-			if (_chosenWeapon >= (uint8_t)EWeapon::Count) _chosenWeapon = 0;
+			// 가진 무기 중에서 고른다(W-3) — 부활 가방은 예측이 서버와 같은 Reset 으로 만들었다(권총 하나, 시험 옵션이면 셋). 난수는 전처럼 한 번 — 세 무기면 칸 차례 = 무기 번호라 고른 값이 전과 같다
+			_chosenWeapon = PickOwnedWeapon(_rng.NextFloat());
 			_stuckCheckAt = Vec3(spawn.x, spawn.y, spawn.z);
 			_stuckTicks = 0;
 			_detourLeft = 0;
@@ -830,6 +841,7 @@ namespace
 			bool known = false;
 			bool available = false;
 			Vec3 at;
+			uint8_t kind = 0;		// 받침 소식 kind = EPadKind 숫자(W-3) — 체력 받침 · 무기 받침 찾아가기를 가른다
 		};
 
 		// 받침 소식(컨텐츠 B-3 · B-4) — 들어올 때 받침마다 현황이 오므로 자리 · 켜짐을 여기서만 안다
@@ -846,22 +858,53 @@ namespace
 			pad.known = true;
 			pad.available = m.available != 0;
 			pad.at = Vec3(m.x, m.y, m.z);
+			pad.kind = m.kind;
 			const bool take = m.reason == wire::PICKUP_TAKE || m.reason == wire::PICKUP_TAKE_RECHECK;
-			if (take && m.picker == _welcome.playerId)
+			if (!take || m.picker != _welcome.playerId) return;
+			if (m.kind == (uint8_t)EPadKind::Heal)
 			{
 				++_padHealsMine;
 				if (_padSeeking) ++_padHealsSought;	// 찾아가던 중에 받은 회복 — 갈래가 실제로 받침에 닿았다
 			}
+			else if (m.give != wire::kPickupGiveNone)
+			{
+				++_weaponPickupsMine;
+				if (_weaponSeeking) ++_weaponTakesSought;	// 무기 받침을 찾아가던 중에 집음 — 갈래가 실제로 받침에 닿았다(W-5)
+				// 예측 가방 · 탄을 서버 값으로 — 그 입력부터 무기 쪽을 다시 돌린다(W-3). 이 소식은 그 틱 상태보다 먼저 와서 맞춰 보기 전에 고쳐진다
+				_self.OnPickup(m.seq, m.reason == wire::PICKUP_TAKE, m.weapon, m.give, m.slot, m.magazine, m.spare);
+				// 서버가 무기를 바꿨으면 고른 무기도 따라 맞춘다 — 「앞 입력과 달라졌을 때만 바꾼다」(Loadout.h)라 옛 번호를 보내도 안 되돌아가지만,
+				// 탄이 떨어져 다음 무기로 넘길 때(NextOwnedWeapon) 기준이 든 무기여야 한다. 다리 · 서버 프로브도 같은 규칙(W-2 기록)
+				if (m.give == (uint8_t)EGiveResult::NewEquipped) _chosenWeapon = m.weapon;
+			}
 		}
 
-		// 다쳤으면 같은 층에서 가장 가까운 켜진 받침(수평 거리). 없으면 nullptr
-		const Pad* NearestOpenPad(const Vec3& at) const
+		// 무기 받침이 주는 무기 — 서버 TryWeaponPickup(Room.cpp)의 종류 → 무기와 같은 짝. 체력 받침은 kNoWeapon
+		static uint8_t PadWeapon(uint8_t kind)
+		{
+			switch ((EPadKind)kind)
+			{
+			case EPadKind::Pistol: return (uint8_t)EWeapon::Pistol;
+			case EPadKind::Rifle: return (uint8_t)EWeapon::Rifle;
+			case EPadKind::Shotgun: return (uint8_t)EWeapon::Shotgun;
+			case EPadKind::Heal: break;
+			}
+			return kNoWeapon;
+		}
+
+		// 무기 받침 찾아가기(W-5, weapon-pickup-plan.md 「봇」) — 같은 층에서 가장 가까운(수평 거리) 켜진 무기 받침 중
+		// 안 가진 무기의 받침, 또는 든 무기의 예비가 바닥났으면 그 무기 받침. 가진 무기 · 든 무기는 서버 상태 값으로 본다(체력 갈래가 서버 체력을 보는 것과 같다). 없으면 nullptr
+		const Pad* NearestWantedWeaponPad(const Vec3& at, const wire::PlayerState& self) const
 		{
 			const Pad* best = nullptr;
 			double bestD = 0;
 			for (const Pad& pad : _pads)
 			{
-				if (!pad.known || !pad.available || std::fabs(pad.at.z - at.z) > kPadSameFloorZ) continue;
+				const uint8_t weapon = PadWeapon(pad.kind);
+				if (!pad.known || !pad.available || weapon == kNoWeapon || std::fabs(pad.at.z - at.z) > kPadSameFloorZ) continue;
+				bool owned = false;
+				for (size_t s = 0; s < kQuickSlotCount; ++s) owned = owned || CLoadout::UnpackSlot(self.quickSlots, s) == weapon;
+				const bool outOfSpare = weapon == self.weapon && self.spare <= 0;
+				if (owned && !outOfSpare) continue;
 				const double dx = pad.at.x - at.x, dy = pad.at.y - at.y;
 				const double d = dx * dx + dy * dy;
 				if (!best || d < bestD)
@@ -871,6 +914,55 @@ namespace
 				}
 			}
 			return best;
+		}
+
+		// 다쳤으면 같은 층에서 가장 가까운 켜진 받침(수평 거리). 없으면 nullptr
+		const Pad* NearestOpenPad(const Vec3& at) const
+		{
+			const Pad* best = nullptr;
+			double bestD = 0;
+			for (const Pad& pad : _pads)
+			{
+				if (!pad.known || !pad.available || pad.kind != (uint8_t)EPadKind::Heal || std::fabs(pad.at.z - at.z) > kPadSameFloorZ) continue;	// 무기 받침 찾아가기는 NearestWantedWeaponPad
+				const double dx = pad.at.x - at.x, dy = pad.at.y - at.y;
+				const double d = dx * dx + dy * dy;
+				if (!best || d < bestD)
+				{
+					best = &pad;
+					bestD = d;
+				}
+			}
+			return best;
+		}
+
+		// 가진 무기 하나 — r(0 이상 1 미만)을 빠른 칸 차례의 가진 무기 수로 나눈다. 세 무기면 전과 같은 값(r × 3)
+		uint8_t PickOwnedWeapon(float r) const
+		{
+			const CLoadout& bag = _self.GetLoadout();
+			uint8_t owned[kQuickSlotCount] = {};
+			int count = 0;
+			for (size_t i = 0; i < kQuickSlotCount; ++i)
+			{
+				if (bag.SlotWeapon(i) != kNoWeapon) owned[count++] = bag.SlotWeapon(i);
+			}
+			if (count == 0) return 0;
+			int at = (int)(r * (float)count);
+			if (at >= count) at = 0;
+			return owned[at];
+		}
+
+		// 빠른 칸 차례로 다음 가진 무기 — 세 무기면 전과 같은 값((무기 + 1) % 3). 하나뿐이면 그대로
+		uint8_t NextOwnedWeapon(uint8_t from) const
+		{
+			const CLoadout& bag = _self.GetLoadout();
+			int slot = bag.SlotOf(from);
+			if (slot < 0) slot = bag.ActiveSlot();
+			for (size_t step = 1; step <= kQuickSlotCount; ++step)
+			{
+				const uint8_t weapon = bag.SlotWeapon(((size_t)slot + step) % kQuickSlotCount);
+				if (weapon != kNoWeapon) return weapon;
+			}
+			return from;
 		}
 
 		// 사람끼리 막기(F-2) — 내 예측이 볼 남 캡슐. 남 자리는 마지막으로 받은 상태라 서버가 내 입력을 굴린 순간의 자리와 다르다 — 그 차이가 보정으로 나온다.
@@ -957,6 +1049,9 @@ namespace
 			// 앉음 — 이동 상태라 단계와 상관없이 본다. 켜진 줄 수를 같이 센다
 			if ((p.flags & wire::STATE_CROUCHED) != 0) ++_crouchCompared;
 			if (((p.flags & wire::STATE_CROUCHED) != 0) != slot.move.crouched) { ++_flagDiff; ++_crouchDiff; bad = true; }
+			// 가방(W-3) — 줍기 · 부활만 바꾸고 둘 다 경기 끝 단계와 상관없는 길이라 단계와 상관없이 본다. 무기 둘 이상 든 줄 수를 같이 센다(가방 비교가 실제로 돌았나)
+			if (CLoadout::UnpackSlot(p.quickSlots, 1) != kNoWeapon) ++_invMulti;
+			if (p.quickSlots != slot.quickSlots) { ++_invDiff; bad = true; }
 			if (bad && _firstBadSeq == 0) _firstBadSeq = p.lastSeq;
 		}
 
@@ -1394,6 +1489,23 @@ namespace
 				++_padSeekTicks;
 			}
 			_padSeeking = padTarget != nullptr;
+			// 무기 받침 갈래(W-5) — 체력 받침을 찾아가지 않을 때만(체력이 낮으면 체력 받침이 먼저). 이동만 바꾸는 것은 체력 갈래와 같다
+			const bool alive = selfState != _players.end() && !(selfState->second.flags & wire::STATE_DEAD);
+			const Pad* weaponTarget = !padTarget && alive ? NearestWantedWeaponPad(at, selfState->second) : nullptr;
+			if (alive && selfState->second.spare <= 0) ++_spareOutTicks;	// 든 무기 예비가 바닥난 틱 — 예비 찾아가기가 0 일 때 「안 바닥남」 · 「같은 층에 받침 없음」을 가른다
+			if (weaponTarget)
+			{
+				const double dx = weaponTarget->at.x - at.x, dy = weaponTarget->at.y - at.y;
+				const double horizontal = std::sqrt(dx * dx + dy * dy);
+				if (horizontal > 1.0) toward = Vec3(dx / horizontal, dy / horizontal, 0);
+				if (!_weaponSeeking)
+				{
+					++_weaponSeekStarts;
+					if (PadWeapon(weaponTarget->kind) == selfState->second.weapon) ++_weaponSeekAmmoStarts;	// 든 무기 받침 = 예비가 바닥나 찾아감(나머지는 안 가진 무기)
+				}
+				++_weaponSeekTicks;
+			}
+			_weaponSeeking = weaponTarget != nullptr;
 			// --push(F-2) — 팀 상관없이 가장 가까운 산 사람 쪽으로 곧장 걷는다. 부딪힘 · 미끄러짐이 계속 일어나야 보정 양을 잴 수 있다
 			if (_push)
 			{
@@ -1418,7 +1530,7 @@ namespace
 				}
 			}
 			// --melee 는 옆걸음 없이 곧장 다가간다 — 근접 거리까지 붙어야 근접 갈래가 경기 중에 돈다(옆걸음이면 거의 경기 끝 단계에서만 붙었다)
-			const bool strafe = !_push && canShoot && nearest < kStrafeRange && !_padSeeking && !_meleeNear;
+			const bool strafe = !_push && canShoot && nearest < kStrafeRange && !_padSeeking && !_weaponSeeking && !_meleeNear;
 
 			// 막힘 — 30틱에 30cm 도 못 가면 돌아간다(--push 는 막히는 것이 목적이라 안 돌아간다)
 			if (++_stuckTicks >= 30)
@@ -1467,7 +1579,7 @@ namespace
 			const CWeaponCycle& cycle = _self.GetWeapon();
 			if (cycle.GetMagazine() == 0 && cycle.GetSpare() == 0)
 			{
-				_chosenWeapon = (uint8_t)((_chosenWeapon + 1) % (int)EWeapon::Count);
+				_chosenWeapon = NextOwnedWeapon(_chosenWeapon);		// 가진 무기 중 다음(W-3)
 				input.weapon = _chosenWeapon;
 			}
 			else if (cycle.GetMagazine() == 0 && !cycle.IsReloading() && !_self.IsWaitingSpawn())
@@ -1555,6 +1667,8 @@ namespace
 		// 받침(컨텐츠 B-4) — 서버 받침 번호 차례
 		std::vector<Pad> _pads;
 		bool _padSeeking = false;
+		bool _weaponSeeking = false;	// 무기 받침 찾아가는 중(W-5)
+		uint64_t _weaponSeekStarts = 0, _weaponSeekTicks = 0, _weaponTakesSought = 0, _weaponSeekAmmoStarts = 0, _spareOutTicks = 0;
 		uint64_t _padMsgs = 0, _padBad = 0, _padSeekStarts = 0, _padSeekTicks = 0, _padHealsMine = 0, _padHealsSought = 0;
 
 		// 측정 모드 — 화면에 해당하는 상태 기록. 6틱 지연 + 왕복 300ms(18틱) + 여유로 32칸
@@ -1625,6 +1739,7 @@ namespace
 		Clock::time_point _stateTime;
 		bool _hasStateTime = false;
 		uint64_t _compared = 0, _posDiff = 0, _velDiff = 0, _ammoDiff = 0, _flagDiff = 0;
+		uint64_t _invDiff = 0, _invMulti = 0, _weaponPickupsMine = 0;	// 가방(W-3) — 빠른 칸이 서버와 다른 비교 줄 · 무기 둘 이상 든 비교 줄 · 내가 집은 무기 받침
 		uint64_t _lockDiff = 0, _lockCompared = 0;		// 이동 막음(부활 직후) 깃발이 서버와 다른 줄 — flagDiff 안에도 든다
 		uint64_t _adsCompared = 0, _adsDiff = 0, _adsInputs = 0;	// 서버가 조준 켜짐으로 보낸 비교 줄 · 그중 어긋남 · 조준을 누른 입력
 		bool _adsWhenShooting = false;		// --ads
@@ -1700,6 +1815,7 @@ namespace
 			else if (s == "--crouch") out.crouchToggle = true;
 			else if (s == "--melee") out.meleeNear = true;
 			else if (s == "--testNoPawnBlock") out.pawnBlock = false;
+			else if (s == "--testStartAllWeapons") out.startAllWeapons = true;
 			else if (s == "--push") out.push = true;
 			else if (s == "--breakMelee") out.breakMelee = true;
 			else if (s == "--breakRecord") out.breakRecord = true;
@@ -1740,6 +1856,7 @@ int main(int argc, char** argv)
 	CMoveSim sim(map, params);	// 틱 사이에 들고 가는 것이 MoveState 뿐이라 봇끼리 나눠 쓴다
 	MatchRules rules;
 	rules.pawnBlock = args.pawnBlock;
+	rules.startAllWeapons = args.startAllWeapons;
 
 	JudgeShared judge;
 	const bool judging = !args.judgeClips.empty();
@@ -1869,10 +1986,11 @@ int main(int argc, char** argv)
 	}
 	if (args.seconds > 0)
 	{
-		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, pawnReconciles = 0;
+		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, pawnReconciles = 0, invDiff = 0;
 		for (const std::unique_ptr<CBot>& bot : bots)
 		{
 			compared += bot->GetCompared();
+			invDiff += bot->GetInvDiff();
 			posDiff += bot->GetPosDiff();
 			velDiff += bot->GetVelDiff();
 			ammoDiff += bot->GetAmmoDiff();
@@ -1913,11 +2031,11 @@ int main(int argc, char** argv)
 		// 대신 맞춰 본 줄이 있어야 하고 예측의 이상한 겹침은 0. 막기를 끈 판(--testNoPawnBlock)만 위치 · 속도 차이 0 을 엄격히 본다
 		const MoveCounters& predCount = sim.GetCounters();
 		const bool moveOk = args.pawnBlock ? (pawnReconciles > 0 && predCount.pawnOddSimplex == 0) : (posDiff == 0 && velDiff == 0);
-		const bool pass = compared > 0 && moveOk && ammoDiff == 0 && flagDiff == 0 && botsOpen == bots.size();
-		std::printf("LOADBOT bots=%d open=%zu compared=%llu posDiff=%llu velDiff=%llu ammoDiff=%llu flagDiff=%llu states=%llu stateGaps=%zu stateGapP50Ms=%.2f stateGapP99Ms=%.2f stateGapMaxMs=%.2f loopP99Ms=%.2f loopMaxMs=%.2f cpuPercent=%.1f pawnBlock=%d pawnReconciles=%llu predOdd=%llu\n",
+		const bool pass = compared > 0 && moveOk && ammoDiff == 0 && flagDiff == 0 && invDiff == 0 && botsOpen == bots.size();
+		std::printf("LOADBOT bots=%d open=%zu compared=%llu posDiff=%llu velDiff=%llu ammoDiff=%llu flagDiff=%llu states=%llu stateGaps=%zu stateGapP50Ms=%.2f stateGapP99Ms=%.2f stateGapMaxMs=%.2f loopP99Ms=%.2f loopMaxMs=%.2f cpuPercent=%.1f pawnBlock=%d pawnReconciles=%llu predOdd=%llu invDiff=%llu\n",
 			args.bots, botsOpen, (unsigned long long)compared, (unsigned long long)posDiff, (unsigned long long)velDiff, (unsigned long long)ammoDiff, (unsigned long long)flagDiff, (unsigned long long)states, stateGapsMs.size(),
 			percentile(stateGapsMs, 0.5), percentile(stateGapsMs, 0.99), percentile(stateGapsMs, 1.0), percentile(loopGapsMs, 0.99), percentile(loopGapsMs, 1.0), args.measureSeconds > 0 ? (cpuEnd - cpuBegin) / args.measureSeconds * 100.0 : 0.0,
-			args.pawnBlock ? 1 : 0, (unsigned long long)pawnReconciles, (unsigned long long)predCount.pawnOddSimplex);
+			args.pawnBlock ? 1 : 0, (unsigned long long)pawnReconciles, (unsigned long long)predCount.pawnOddSimplex, (unsigned long long)invDiff);
 		std::printf("RESULT %s\n", pass ? "PASS" : "FAIL");
 		return pass ? 0 : 1;
 	}
@@ -1955,6 +2073,8 @@ int main(int argc, char** argv)
 	CSelfPrediction::MeleeCounters meleeFixes;
 	uint64_t meleePendingLeft = 0;
 	uint64_t padMsgs = 0, padBad = 0, padSeekStarts = 0, padSeekTicks = 0, padHealsMine = 0, padHealsSought = 0;
+	uint64_t invDiff = 0, invMulti = 0, weaponPickupsMine = 0, weaponSeekStarts = 0, weaponSeekTicks = 0, weaponTakesSought = 0, weaponSeekAmmoStarts = 0, spareOutTicks = 0;
+	CSelfPrediction::PickupCounters pickupFixes;
 	size_t padCountMax = 0;
 	uint64_t shotsWhileDead = 0, damageOutside = 0, damageImmune = 0, recordDiff = 0, tallyDiff = 0, noResult = 0, immuneHits = 0;
 	uint64_t assistsCounted = 0, assistKillDiff = 0, assistDiff = 0;
@@ -1993,6 +2113,23 @@ int main(int argc, char** argv)
 		padSeekTicks += bot.GetPadSeekTicks();
 		padHealsMine += bot.GetPadHealsMine();
 		padHealsSought += bot.GetPadHealsSought();
+		invDiff += bot.GetInvDiff();
+		invMulti += bot.GetInvMulti();
+		weaponPickupsMine += bot.GetWeaponPickupsMine();
+		weaponSeekStarts += bot.GetWeaponSeekStarts();
+		weaponSeekTicks += bot.GetWeaponSeekTicks();
+		weaponTakesSought += bot.GetWeaponTakesSought();
+		weaponSeekAmmoStarts += bot.GetWeaponSeekAmmoStarts();
+		spareOutTicks += bot.GetSpareOutTicks();
+		{
+			const CSelfPrediction::PickupCounters& fixes = bot.GetPickupFixes();
+			pickupFixes.received += fixes.received;
+			pickupFixes.rerun += fixes.rerun;
+			pickupFixes.noSlot += fixes.noSlot;
+			pickupFixes.resultDiffs += fixes.resultDiffs;
+			pickupFixes.ammoFixes += fixes.ammoFixes;
+			pickupFixes.meleeInWindow += fixes.meleeInWindow;
+		}
 		padCountMax = std::max(padCountMax, bot.GetPadCount());
 		posMax = std::max(posMax, bot.GetPosMax());
 		if (firstBad == 0 && bot.GetFirstBadSeq() != 0)
@@ -2056,6 +2193,14 @@ int main(int argc, char** argv)
 	// 받침(컨텐츠 B-4) — healsMine 합 = 서버 SERVER pickups(봇만 든 판). healsSought = 찾아가던 중에 받은 회복(갈래가 실제로 닿았나)
 	std::printf("BOT pads count=%zu msgs=%llu bad=%llu seekStarts=%llu seekTicks=%llu healsMine=%llu healsSought=%llu\n", padCountMax, (unsigned long long)padMsgs,
 		(unsigned long long)padBad, (unsigned long long)padSeekStarts, (unsigned long long)padSeekTicks, (unsigned long long)padHealsMine, (unsigned long long)padHealsSought);
+	// 무기 받침(W-3) — pickupsMine 합 = 서버 SERVER weaponPickups new + noSwitch + ammo(봇만 든 판). 예측이 받은 수 received = rerun + noSlot,
+	// invMulti = 무기 둘 이상 든 비교 줄(가방 비교가 실제로 돌았나). 세는 자리를 받음 · 다시 돌림 · 칸 없음으로 나눠 0 이 「안 지나감」인지 가린다.
+	// seekStarts · seekTicks · sought = 무기 받침 찾아가기(W-5) 시작 수 · 틱 수 · 찾아가던 중에 집은 수(갈래가 실제로 닿았나).
+	// seekAmmoStarts = 그중 든 무기 예비가 바닥나 찾아간 수, spareOutTicks = 산 채로 든 무기 예비가 0 인 틱
+	std::printf("BOT weapons pickupsMine=%llu received=%llu rerun=%llu noSlot=%llu resultDiffs=%llu ammoFixes=%llu meleeInWindow=%llu invDiff=%llu invMulti=%llu seekStarts=%llu seekTicks=%llu sought=%llu seekAmmoStarts=%llu spareOutTicks=%llu\n",
+		(unsigned long long)weaponPickupsMine, (unsigned long long)pickupFixes.received, (unsigned long long)pickupFixes.rerun, (unsigned long long)pickupFixes.noSlot,
+		(unsigned long long)pickupFixes.resultDiffs, (unsigned long long)pickupFixes.ammoFixes, (unsigned long long)pickupFixes.meleeInWindow, (unsigned long long)invDiff, (unsigned long long)invMulti,
+		(unsigned long long)weaponSeekStarts, (unsigned long long)weaponSeekTicks, (unsigned long long)weaponTakesSought, (unsigned long long)weaponSeekAmmoStarts, (unsigned long long)spareOutTicks);
 	std::printf("BOT 규칙: kills=%llu damages=%llu shots=%llu spawns=%llu | 죽은 뒤 발사=%llu 대기·경기 뒤 피해=%llu 무적 중 피해=%llu | 적이 맞았는데 피해 0(무적 분모)=%llu\n",
 		(unsigned long long)first.GetChecks().kills, (unsigned long long)first.GetChecks().damages, (unsigned long long)first.GetChecks().shots, (unsigned long long)first.GetChecks().spawnsSeen,
 		(unsigned long long)shotsWhileDead, (unsigned long long)damageOutside, (unsigned long long)damageImmune, (unsigned long long)immuneHits);
@@ -2081,6 +2226,7 @@ int main(int argc, char** argv)
 	if (args.pawnBlock && (pawnReconciles == 0 || predCount.pawnOddSimplex != 0)) ok = false;
 	if (args.push && args.pawnBlock && predCount.pawnHits == 0) ok = false;		// 막기를 켜고 밀었는데 예측이 한 번도 안 닿음 = 갈래가 안 돎
 	if (padBad != 0) ok = false;
+	if (invDiff != 0 || pickupFixes.noSlot != 0 || pickupFixes.resultDiffs != 0 || pickupFixes.ammoFixes != 0 || pickupFixes.received != weaponPickupsMine) ok = false;
 	// 근접 — 규칙 위반 · 피해 소식 짝 · 켠 입력 어긋남은 늘 0. --melee 판은 내 근접 결과가 하나 이상(갈래가 실제로 돌았다)
 	if (melee.badShape != 0 || melee.badDead != 0 || melee.badPost != 0 || melee.badDamage != 0 || melee.badZero != 0 || meleePendingLeft != 0) ok = false;
 	if (melee.noGuess != 0 || meleeFixes.startMismatches != 0 || meleeFixes.rerunsMissed != 0 || meleeFixes.pushesIgnored != 0) ok = false;

@@ -611,13 +611,16 @@ int main(int argc, char** argv)
 				pred.AddInput(input, i == kReplayPushSeq ? &replayForce : nullptr);
 			}
 		};
-		CSelfPrediction straight(replaySim, rules, moveParams.maxWalkSpeed);
+		// 예측기는 힙에 둔다 — 하나가 약 550KB(입력 고리 1024칸 약 508KB + 무기 쪽 고리 128칸 약 43KB, W-3)라 둘만 스택에 둬도 1MB 를 넘는다(0xC00000FD, 11-19 회귀)
+		const std::unique_ptr<CSelfPrediction> straightOwner = std::make_unique<CSelfPrediction>(replaySim, rules, moveParams.maxWalkSpeed);
+		CSelfPrediction& straight = *straightOwner;
 		runInputs(straight);
 		const Vec3 straightEnd = straight.GetMove().location;
 		const double straightSlide = std::hypot(straightEnd.x - replayStart.x, straightEnd.y - replayStart.y);
 		for (const uint32_t ack : { 9u, 10u, 11u, 12u, 13u, 20u })
 		{
-			CSelfPrediction pred(replaySim, rules, moveParams.maxWalkSpeed);
+			const std::unique_ptr<CSelfPrediction> predOwner = std::make_unique<CSelfPrediction>(replaySim, rules, moveParams.maxWalkSpeed);
+			CSelfPrediction& pred = *predOwner;
 			runInputs(pred);
 			wire::PlayerState server = wire::PlayerState();
 			server.lastSeq = ack;
@@ -663,7 +666,7 @@ int main(int argc, char** argv)
 		const auto fixCase = [&](const char* name, uint32_t meleeSeq, bool press, const Vec3* predPush, EServer server, const Vec3* serverForce, uint32_t ack,
 			uint64_t wantHitFixes, uint64_t wantForceFixes, uint64_t wantUnconfirmed, uint64_t wantIgnored)
 		{
-			// 예측기 하나가 고리 1024칸이라 크다 — 위의 둘과 같이 스택에 두면 넘친다(0xC00000FD)
+			// 예측기 하나가 고리 1024칸이라 크다 — 스택에 두면 넘친다(0xC00000FD, 위 「예측기는 힙에 둔다」)
 			const std::unique_ptr<CSelfPrediction> refOwner = std::make_unique<CSelfPrediction>(replaySim, rules, moveParams.maxWalkSpeed);
 			const std::unique_ptr<CSelfPrediction> predOwner = std::make_unique<CSelfPrediction>(replaySim, rules, moveParams.maxWalkSpeed);
 			CSelfPrediction& ref = *refOwner;

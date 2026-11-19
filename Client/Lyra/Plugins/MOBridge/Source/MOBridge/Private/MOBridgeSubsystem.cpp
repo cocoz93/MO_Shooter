@@ -5,6 +5,7 @@
 #include "MatchRules.h"
 #include "Movement.h"
 #include "Prediction.h"
+#include "Pickups.h"
 #include "Weapon.h"
 #include "AnimClips.h"
 #include "AnimPose.h"
@@ -73,6 +74,9 @@
 #include "EngineUtils.h"
 #include "Weapons/LyraWeaponSpawner.h"
 #include "Inventory/LyraInventoryItemDefinition.h"
+#include "Equipment/LyraPickupDefinition.h"
+#include "UObject/UnrealType.h"
+#include "GameplayCueFunctionLibrary.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/AudioComponent.h"
 #include "Components/LightComponent.h"
@@ -449,6 +453,9 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	FParse::Value(Cmd, TEXT("MOBAutoWeapon="), AutoWeaponFixed);
 	bEventShots = FParse::Param(Cmd, TEXT("MOBEventShots"));
 	bHumanCheck = FParse::Param(Cmd, TEXT("MOBHumanCheck"));
+	bWeaponScript = FParse::Param(Cmd, TEXT("MOBWeaponScript"));
+	if (bWeaponScript) bAutoInput = true;		// 각본이 자동 입력 깃발(재장전 · 칸)을 쓴다 — 키보드는 안 본다
+	FParse::Value(Cmd, TEXT("MOBBreakBag="), BreakBag);
 	bKeepPickups = FParse::Param(Cmd, TEXT("MOBKeepPickups"));
 	FParse::Value(Cmd, TEXT("MOBStandHp="), StandHp);
 	FParse::Value(Cmd, TEXT("MOBBreakPadsAt="), BreakPadsAt);
@@ -522,7 +529,11 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 
 	PumpSocket();
 	if (bQuitting) return;
-	if (bAutoInput && !(bHumanCheck && TickHumanScript(T))) TickAutoInput(T);
+	if (bAutoInput && !(bHumanCheck && TickHumanScript(T)))
+	{
+		if (bWeaponScript) TickWeaponScript(T);
+		else TickAutoInput(T);
+	}
 	TickInput(Now);
 	TickAbilityFire();
 	TickAbilityMelee();
@@ -758,8 +769,9 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 		if (M.player == PlayerId && bWelcomed)
 		{
 			bHasSpawn = true;
-			Weapon = 0;
+			Weapon = 0;			// 부활 가방 = [권총, …] 의 권총(Loadout Reset) — 세 무기 시험 옵션이어도 든 것은 권총
 			AutoWeapon = 0;
+			LastSelfSpawnAt = FPlatformTime::Seconds();
 			const FVector At(M.x, M.y, M.z);
 			APlayerController* PC = GetWorld()->GetFirstPlayerController();
 			APawn* Pawn = PC ? PC->GetPawn() : nullptr;
@@ -974,6 +986,25 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 		const bool bServerCrouch = (P.flags & wire::STATE_CROUCHED) != 0;
 		if (bServerCrouch) ++CrouchComparedOn;
 		if (bServerCrouch != S->move.crouched) ++CrouchFlagDiff;
+		// 가방 · 탄(W-4) — 봇 CompareSelf 와 같은 식. 가방은 줍기 · 부활만 바꾸고 둘 다 경기 끝 단계와 상관없어 늘 본다(무기 둘 이상 든 줄을 같이 센다).
+		// 탄 · 든 무기는 경기 끝 단계 전만 — 그 단계는 서버가 사격 입력을 지운다(그 경계를 입력 번호로는 모른다)
+		++InvCompared;
+		if (mo::CLoadout::UnpackSlot(P.quickSlots, 1) != mo::kNoWeapon) ++InvMulti;
+		const bool bInvDiff = P.quickSlots != S->quickSlots;
+		bool bAmmoDiff = false;
+		if (bInvDiff) ++InvDiff;
+		if (MatchPhase < (uint8)wire::EMatchPhase::PostGame)
+		{
+			++AmmoCompared;
+			bAmmoDiff = P.weapon != S->weapon || P.magazine != S->magazine || P.spare != S->spare;
+			if (bAmmoDiff) ++AmmoDiff;
+		}
+		if ((bInvDiff || bAmmoDiff) && InvDiffLinesLeft > 0)
+		{
+			--InvDiffLinesLeft;
+			UE_LOG(LogMOB, Warning, TEXT("MOB_INV_DIFF seq=%u server=%u,%u,%d,%d predicted=%u,%u,%d,%d"), P.lastSeq, P.quickSlots, P.weapon, (int32)P.magazine, (int32)P.spare,
+				S->quickSlots, S->weapon, (int32)S->magazine, (int32)S->spare);
+		}
 	}
 	mo::CSelfPrediction::ReconcileResult R;
 	{
@@ -1820,11 +1851,23 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		bPrevAdsKey = bAds;
 	}
 
+	// 키 1 · 2 · 3 = 빠른 칸 0 · 1 · 2(W-4, Lyra 빠른 칸 키와 같은 뜻) — 그 칸의 무기를 내 예측 가방(서버와 같은 함수로 바뀐다)에서 읽어 무기 번호로 보낸다.
+	// 빈 칸이면 안 바꾼다(Lyra 도 빈 칸 고르기는 아무 일 없음). 와이어는 무기 번호 그대로 — 서버가 가방에 없는 번호를 거부한다
 	uint8 Wanted = Weapon;
-	if (bAutoInput) Wanted = AutoWeapon;
-	else if (PC->IsInputKeyDown(EKeys::One)) Wanted = (uint8)mo::EWeapon::Pistol;
-	else if (PC->IsInputKeyDown(EKeys::Two)) Wanted = (uint8)mo::EWeapon::Rifle;
-	else if (PC->IsInputKeyDown(EKeys::Three)) Wanted = (uint8)mo::EWeapon::Shotgun;
+	int32 WantSlot = INDEX_NONE;
+	if (bAutoInput)
+	{
+		if (AutoSlot >= 0) WantSlot = AutoSlot;
+		else Wanted = AutoWeapon;
+	}
+	else if (PC->IsInputKeyDown(EKeys::One)) WantSlot = 0;
+	else if (PC->IsInputKeyDown(EKeys::Two)) WantSlot = 1;
+	else if (PC->IsInputKeyDown(EKeys::Three)) WantSlot = 2;
+	if (WantSlot >= 0 && WantSlot < (int32)mo::kQuickSlotCount)
+	{
+		const uint8 SlotWeapon = Core->Prediction.GetLoadout().SlotWeapon((size_t)WantSlot);
+		if (SlotWeapon != mo::kNoWeapon) Wanted = SlotWeapon;
+	}
 	if (Wanted != Weapon) ++InputsWeaponChange;
 	Weapon = Wanted;
 
@@ -1938,6 +1981,38 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		++InputsSent;
 		if (bFire) ++InputsFire;
 		if (bJump) ++InputsJump;
+	}
+
+	// 무기 각본의 시험 자리 옮기기(W-4) — 이 프레임 입력 「뒤」에 보낸다. 서버는 옮기기를 입력 줄에 같이 세워 차례대로 쓰고(TickPlayerInputs) 한도를 안 쓴다 —
+	// 입력 앞에 두면 앞 틱 마지막 입력과 같은 틱에 쓰인다(프로브 RunWeapons 와 같은 까닭). 번호는 예측이 하나 잡고 서버 ApplyPlace 를 따라 한다(OnPlace)
+	if (bWsPlacePending)
+	{
+		bWsPlacePending = false;
+		wire::DebugPlace Place = wire::DebugPlace();
+		Place.h.size = sizeof(Place);
+		Place.h.type = (uint16)wire::Msg::C2S_DEBUG_PLACE;
+		const bool bSetAmmo = (WsPlaceFlags & wire::DEBUG_PLACE_SET_AMMO) != 0;
+		{
+			const FMOBCore::FPawnScope PawnScope(*Core);
+			Place.seq = Core->Prediction.OnPlace(WsPlaceAt.X, WsPlaceAt.Y, WsPlaceAt.Z, bSetAmmo ? WsAmmoWeapon : (uint8)0xFF, WsAmmoMag, WsAmmoSpare);
+		}
+		Seq = Place.seq;
+		Place.x = WsPlaceAt.X;
+		Place.y = WsPlaceAt.Y;
+		Place.z = WsPlaceAt.Z;
+		Place.hp = ServerHp > 0.f ? ServerHp : 100.f;	// 체력은 그대로 — 서버 ApplyPlace 가 이 값으로 놓는다
+		Place.flags = WsPlaceFlags;
+		Place.ammoWeapon = WsAmmoWeapon;
+		Place.magazine = WsAmmoMag;
+		Place.spare = WsAmmoSpare;
+		QueuePacket(&Place, sizeof(Place));
+		++WsPlaces;
+		// Lyra 쪽 같은 탄 정하기 — 빠른 칸의 그 무기 아이템. 든 무기면 다음 상태가 어차피 맞추고, 안 든 무기는 다음 줍기(탄 채움)의 앞 값이 된다
+		if (bSetAmmo) SetLyraItemAmmo(WsAmmoWeapon, WsAmmoMag, WsAmmoSpare);
+		SelfCur = ToFVector(Core->Prediction.GetMove().location);
+		SelfPrev = SelfCur;
+		VisualError = FVector::ZeroVector;
+		UE_LOG(LogMOB, Log, TEXT("MOB_WS_PLACE step=%d seq=%u at=(%.1f,%.1f,%.1f) flags=%u ammo=%u,%d,%d"), WsStep, Place.seq, Place.x, Place.y, Place.z, Place.flags, Place.ammoWeapon, (int32)Place.magazine, (int32)Place.spare);
 	}
 }
 
@@ -2483,7 +2558,172 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 		}
 		bAutoReloadPressed = bAutoReload;
 	}
-	AutoWeapon = AutoWeaponFixed >= 0 ? (uint8)AutoWeaponFixed : (uint8)((int32)(S / 10.0) % (int32)mo::EWeapon::Count);
+	// 무기 — 10초마다 다음 빠른 칸(W-4, 키 1 · 2 · 3 과 같은 길 — 빈 칸이면 안 바꾼다). 세 무기로 시작한 판(--testStartAllWeapons)은 칸 i = 무기 i 라 예전 무기 번호 순환과 같다.
+	// -MOBAutoWeapon= 은 무기 번호 고정 그대로
+	if (AutoWeaponFixed >= 0)
+	{
+		AutoWeapon = (uint8)AutoWeaponFixed;
+		AutoSlot = -1;
+	}
+	else
+	{
+		AutoSlot = (int32)(S / 10.0) % (int32)mo::kQuickSlotCount;
+	}
+}
+
+// ─────────────────────────────────────────────────────────────
+//  무기 각본(-MOBWeaponScript, W-4) — 서버 프로브 RunWeapons(Tools/ServerProbe/main.cpp)와 같은 줄 · 같은 길이를
+//  프로브가 안 쓰는 받침 넷에서 돈다(프로브 R1 · R3 · P7 · S5 ↔ 여기 R2 · R4 · P8 · S6). 두 사람이 같은 판에서 같이 돌아도 받침이 안 겹친다.
+//  자리 · 탄 · 죽음 = 시험 입력(C2S_DEBUG_PLACE — TickInput 끝에서 보냄), 칸 고르기 · 재장전 = 보통 입력(키 1 · 2 · 3 · R 과 같은 길).
+//  움직임 · 사격 · 조준 · 근접 · 앉기 · 점프 없음, 시선 고정(요 0)
+// ─────────────────────────────────────────────────────────────
+namespace
+{
+	enum class EWsAct : uint8 { Home, Pad, Select, SetAmmo, Reload, Kill, None };
+	struct FWsStep { const TCHAR* Name; double Seconds; EWsAct Act; int32 Arg; };
+	// Select 의 Arg = 빠른 칸(프로브는 무기 번호 — 그때 가방이 [권총, 소총, 샷건] 이라 같은 무기를 든다)
+	const FWsStep kWsSteps[] = {
+		{ TEXT("settle"), 1.0, EWsAct::Home, 0 },
+		{ TEXT("rifle_r2"), 14.0, EWsAct::Pad, 0 },
+		{ TEXT("away1"), 1.0, EWsAct::Home, 0 },
+		{ TEXT("slot0"), 1.5, EWsAct::Select, 0 },
+		{ TEXT("rifle_low"), 0.5, EWsAct::SetAmmo, 0 },
+		{ TEXT("rifle_r4"), 2.0, EWsAct::Pad, 1 },
+		{ TEXT("away2"), 1.0, EWsAct::Home, 0 },
+		{ TEXT("pistol_p8"), 2.0, EWsAct::Pad, 2 },
+		{ TEXT("away3"), 1.0, EWsAct::Home, 0 },
+		{ TEXT("pistol_low"), 0.5, EWsAct::SetAmmo, 1 },
+		{ TEXT("reload_press"), 0.1, EWsAct::Reload, 0 },
+		{ TEXT("shotgun_s6"), 3.0, EWsAct::Pad, 3 },
+		{ TEXT("away4"), 1.0, EWsAct::Home, 0 },
+		{ TEXT("pistol_low2"), 0.5, EWsAct::SetAmmo, 1 },
+		{ TEXT("reload_pistol"), 3.0, EWsAct::Reload, 0 },
+		{ TEXT("slot1"), 1.5, EWsAct::Select, 1 },
+		{ TEXT("rifle_low2"), 0.5, EWsAct::SetAmmo, 2 },
+		{ TEXT("reload_rifle"), 3.0, EWsAct::Reload, 0 },
+		{ TEXT("slot2"), 1.5, EWsAct::Select, 2 },
+		{ TEXT("shotgun_low"), 0.5, EWsAct::SetAmmo, 3 },
+		{ TEXT("reload_shotgun"), 4.0, EWsAct::Reload, 0 },
+		{ TEXT("die"), 15.0, EWsAct::Kill, 0 },
+		{ TEXT("end"), 1.0, EWsAct::None, 0 },
+	};
+	constexpr int32 kWsStepCount = UE_ARRAY_COUNT(kWsSteps);
+	// 집 = 프로브 집(4700, -250, -368.1)의 맞은편. 받침 위 선 자리 = 프로브 받침 자리의 맞은편(맵이 원점 대칭) — 프로브 값이 Lyra 기록(cprobe_w0a)의 선 자리다.
+	// 받침 번호는 서버 받침 소식(받침 파일 값)에서 종류가 같고 이 자리에서 60 안인 것으로 찾는다 — 못 찾으면 그 칸을 건너뛰고 센다(WsNoPad)
+	const FVector kWsHome(-4700.0, 250.0, -368.1);
+	struct FWsSpot { mo::EPadKind Kind; FVector Stand; };
+	const FWsSpot kWsSpots[4] = {
+		{ mo::EPadKind::Rifle, FVector(12.1, 1634.6, 95.9) },			// 0 = R2 소총(B_WeaponSpawner2) — 새 무기, 든다
+		{ mo::EPadKind::Rifle, FVector(0.0, -1623.7, 95.9) },			// 1 = R4 소총(B_WeaponSpawner4) — 가진 무기, 예비 채움
+		{ mo::EPadKind::Pistol, FVector(4586.5, -1008.4, -368.031) },	// 2 = P8 권총(B_WeaponSpawner8) — 예비 가득, 실패(소식 없음)
+		{ mo::EPadKind::Shotgun, FVector(-1472.0, 0.0, -1205.475) },	// 3 = S6 샷건(B_WeaponSpawner6) — 재장전 중 새 무기, 안 든다
+	};
+	struct FWsAmmo { uint8 Weapon; int16 Magazine, Spare; };
+	const FWsAmmo kWsAmmo[4] = { { 1, 10, 20 }, { 0, 4, 48 }, { 1, 10, 60 }, { 2, 2, 16 } };	// 프로브 ammoSets 와 같은 차례
+}
+
+void UMOBridgeSubsystem::TickWeaponScript(double T)
+{
+	bAutoFire = false;
+	bAutoAds = false;
+	bAutoMelee = false;
+	bAutoCrouch = false;
+	bAutoJump = false;
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ACharacter* Ch = PC ? Cast<ACharacter>(PC->GetPawn()) : nullptr;
+	if (!Ch || !Core || !bHasSpawn || T < kAutoStart || (WsStep < 0 && MatchPhase != (uint8)wire::EMatchPhase::Playing))
+	{
+		AutoSlot = -1;
+		AutoWeapon = Weapon;
+		return;
+	}
+	PC->SetControlRotation(FRotator::ZeroRotator);
+
+	if (WsStep < 0)
+	{
+		// 받침 찾기 — 판 시작 현황(PICKUP_SYNC)이 와 있다
+		for (int32 i = 0; i < 4; ++i)
+		{
+			WsPadIndex[i] = INDEX_NONE;
+			for (int32 p = 0; p < Pads.Num(); ++p)
+			{
+				if (Pads[p].bKnown && Pads[p].Kind == (uint8)kWsSpots[i].Kind && FVector::Dist2D(Pads[p].Location, kWsSpots[i].Stand) < 60.0) WsPadIndex[i] = p;
+			}
+			if (WsPadIndex[i] == INDEX_NONE) ++WsNoPad;
+		}
+		UE_LOG(LogMOB, Log, TEXT("MOB_WS_PADS r2=%d r4=%d p8=%d s6=%d noPad=%lld"), WsPadIndex[0], WsPadIndex[1], WsPadIndex[2], WsPadIndex[3], WsNoPad);
+	}
+	const bool bAdvance = WsStep < 0 || (WsStep < kWsStepCount && T - WsStepStart >= kWsSteps[WsStep].Seconds);
+	if (bAdvance)
+	{
+		++WsStep;
+		WsStepStart = T;
+		if (WsStep < kWsStepCount)
+		{
+			const FWsStep& St = kWsSteps[WsStep];
+			UE_LOG(LogMOB, Log, TEXT("MOB_WS_STEP step=%d name=%s t=%.2f seq=%u"), WsStep, St.Name, T, Seq);
+			WsPlaceFlags = 0;
+			WsAmmoWeapon = 0xFF;
+			WsAmmoMag = 0;
+			WsAmmoSpare = 0;
+			switch (St.Act)
+			{
+			case EWsAct::Home:
+				WsPlaceAt = kWsHome;
+				bWsPlacePending = true;
+				break;
+			case EWsAct::Pad:
+				if (WsPadIndex[St.Arg] == INDEX_NONE) break;
+				WsPlaceAt = kWsSpots[St.Arg].Stand;
+				bWsPlacePending = true;
+				break;
+			case EWsAct::SetAmmo:
+				WsPlaceAt = kWsHome;
+				WsPlaceFlags = wire::DEBUG_PLACE_SET_AMMO;
+				WsAmmoWeapon = kWsAmmo[St.Arg].Weapon;
+				WsAmmoMag = kWsAmmo[St.Arg].Magazine;
+				WsAmmoSpare = kWsAmmo[St.Arg].Spare;
+				bWsPlacePending = true;
+				break;
+			case EWsAct::Kill:
+				WsPlaceAt = kWsHome;
+				WsPlaceFlags = wire::DEBUG_PLACE_KILL;
+				bWsPlacePending = true;
+				break;
+			case EWsAct::Select:
+				WsSlot = St.Arg;
+				break;
+			case EWsAct::Reload:
+				bWsReloadPending = true;
+				WsReloadMark = InputsReload;
+				break;
+			case EWsAct::None:
+				break;
+			}
+		}
+	}
+	// 칸 고르기 — 키처럼 그 칸 무기로 바뀔 때까지(TickInput 이 입력을 낸 프레임에 바꾼다). 빈 칸이면 안 바뀜(키와 같다)
+	if (WsSlot >= 0)
+	{
+		const uint8 SlotWeapon = Core->Prediction.GetLoadout().SlotWeapon((size_t)WsSlot);
+		if (SlotWeapon == mo::kNoWeapon || Weapon == SlotWeapon) WsSlot = -1;
+	}
+	AutoSlot = WsSlot;
+	AutoWeapon = Weapon;
+	// 재장전 — 단추가 실린 입력이 나갈 때까지 누르고(이 프레임에 입력이 없을 수 있다) 그 뒤 뗀다. Lyra 입력 표식에도 같이(자동 입력과 같은 길)
+	if (bWsReloadPending && InputsReload > WsReloadMark) bWsReloadPending = false;
+	bAutoReload = bWsReloadPending;
+	if (bAutoReload != bAutoReloadPressed)
+	{
+		static const FGameplayTag ReloadTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Reload"), false);
+		ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch));
+		if (LASC && ReloadTag.IsValid())
+		{
+			if (bAutoReload) LASC->AbilityInputTagPressed(ReloadTag);
+			else LASC->AbilityInputTagReleased(ReloadTag);
+		}
+		bAutoReloadPressed = bAutoReload;
+	}
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2686,6 +2926,7 @@ bool UMOBridgeSubsystem::TickHumanScript(double T)
 		}
 	}
 	AutoWeapon = St.Weapon;
+	AutoSlot = -1;		// 각본은 무기 번호로 고른다(W-4 칸 고르기 아님)
 	bAutoCrouch = HcStepClock < HcCrouchUntil;
 	if (St.Act == EHcAct::CrouchWalk)
 	{
@@ -3051,6 +3292,15 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_PADS pads=%d msgs=%lld takes=%lld readies=%lld syncs=%lld badIndex=%lld noActor=%lld bound=%lld heals=%lld healBeforeFix=%lld healMismatch=%lld healNoPawn=%lld stateChecks=%lld stateDiff=%lld lastStateTick=%u"),
 		Pads.Num(), PadMsgs, PadTakes, PadReadies, PadSyncs, PadBadIndex, PadNoActor, PadBound, PadHeals, PadHealBeforeFix, PadHealMismatch, PadHealNoPawn, PadStateChecks, PadStateDiff, LastStateTick);
+	// 무기 받침 · 가방(W-4) — 판정은 Tools/LyraPilot/check_pads_bridge.py --weapons(서버 PADEV 줄과 견준다). 예측 줍기 칸은 봇 「BOT weapons」 줄과 같은 이름
+	{
+		const mo::CSelfPrediction::PickupCounters PickupFix = Core ? Core->Prediction.GetPickupCounters() : mo::CSelfPrediction::PickupCounters();
+		UE_LOG(LogMOB, Log, TEXT("MOB_WEAPONPADS takesMine=%lld takesOther=%lld gives=%lld giveDiff=%lld cues=%lld noPawn=%lld bad=%lld bagStates=%lld bagDiffStates=%lld bagAdds=%lld bagRemoves=%lld bagStrays=%lld bag1s=%lld bagDiff1s=%lld invCompared=%lld invMulti=%lld invDiff=%lld ammoCompared=%lld ammoDiff=%lld received=%llu rerun=%llu noSlot=%llu resultDiffs=%llu ammoFixes=%llu meleeInWindow=%llu places=%lld noPad=%lld steps=%d"),
+			PadWeaponTakesMine, PadWeaponTakesOther, PadWeaponGives, PadWeaponGiveDiff, PadWeaponCues, PadWeaponNoPawn, PadWeaponBad, BagStates, BagDiffStates, BagAdds, BagRemoves, BagStrays,
+			BagCheck1s, BagDiff1s, InvCompared, InvMulti, InvDiff, AmmoCompared, AmmoDiff,
+			(unsigned long long)PickupFix.received, (unsigned long long)PickupFix.rerun, (unsigned long long)PickupFix.noSlot, (unsigned long long)PickupFix.resultDiffs, (unsigned long long)PickupFix.ammoFixes, (unsigned long long)PickupFix.meleeInWindow,
+			WsPlaces, WsNoPad, WsStep);
+	}
 	if (bHumanCheck) LogHumanCheck();
 	if (!bAbilityOwnTimer)
 	{
@@ -3301,6 +3551,36 @@ void UMOBridgeSubsystem::TickPickups(double Now)
 		A->SetActorEnableCollision(false);
 		ApplyPadLook(*A, Pads[i].bAvailable, false);
 	}
+
+	// 1초마다 — 내 Lyra 빠른 칸 · 든 칸이 마지막 서버 상태의 가방 · 든 무기와 같은가(W-4). 상태마다 맞추므로(SyncSelfWeapon) 다르면 그 사이 Lyra 가 혼자 바꾼 것이다.
+	// 죽은 동안은 쉰다(LastServerHeld 0xFF)
+	if (LastServerHeld != 0xFF && bHasSpawn)
+	{
+		if (BreakBag & 4)
+		{
+			BreakBag &= ~4;
+			APlayerController* PC = GetWorld()->GetFirstPlayerController();
+			ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+			if (Bar && Bar->GetActiveSlotIndex() != INDEX_NONE)
+			{
+				const int32 Slot = Bar->GetActiveSlotIndex();
+				Bar->RemoveItemFromSlot(Slot);
+				UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_BAG removedActive slot=%d"), Slot);
+			}
+		}
+		++BagCheck1s;
+		if (!LyraBagMatches(LastServerQuickSlots, LastServerHeld))
+		{
+			++BagDiff1s;
+			if (BagDiffLinesLeft > 0)
+			{
+				--BagDiffLinesLeft;
+				int32 Active = INDEX_NONE;
+				const FString Bag = DescribeLyraBag(&Active);
+				UE_LOG(LogMOB, Warning, TEXT("MOB_BAG_DIFF_1S server=%u weapon=%u lyra=%s active=%d"), LastServerQuickSlots, LastServerHeld, *Bag, Active);
+			}
+		}
+	}
 }
 
 // 점프대 · 순간이동 찾기 — 청사진 클래스라 C++ 헤더가 없다. 부모 줄을 따라 이름으로 가른다(B_Launcher_Up · B_Launcher_Push 는 B_Launcher_C 자식,
@@ -3439,15 +3719,24 @@ void UMOBridgeSubsystem::HandlePickup(const wire::Pickup& M)
 	Pad.ReadyTick = M.readyTick;
 	Pad.CooldownTicks = M.cooldownTicks;
 	Pad.Location = FVector(M.x, M.y, M.z);
+	Pad.Kind = M.kind;
 	ALyraWeaponSpawner* Actor = bKeepPickups ? nullptr : Pad.Actor.Get();
 	if (!Actor && !bKeepPickups) Actor = BindPad(M.pad);	// 묶을 때 지금 상태로 그린다
 	if (!Actor) ++PadNoActor;
 	// 효과는 집음 · 다시 켜짐만 — 현황(들어올 때 · 경기 시작)은 상태만 맞춘다. Lyra 도 새로 놓은 받침은 효과 없이 켜진다
 	if (Actor) ApplyPadLook(*Actor, Pad.bAvailable, M.reason != wire::PICKUP_SYNC);
-	const float LyraHp = bTake && !bKeepPickups ? ApplyPadHeal(M, Actor) : -1.f;
+	// 받침 종류로 가른다(W-4) — 체력 받침은 회복, 무기 받침은 가방. 무기 받침 집음은 줍기 칸(give)이 늘 차 있다(서버 SendPad)
+	const bool bHealPad = M.kind == (uint8)mo::EPadKind::Heal;
+	const float LyraHp = bTake && !bKeepPickups && bHealPad ? ApplyPadHeal(M, Actor) : -1.f;
+	if (bTake && !bKeepPickups && !bHealPad)
+	{
+		if (M.give == wire::kPickupGiveNone || M.weapon >= (uint8)mo::EWeapon::Count) ++PadWeaponBad;
+		else ApplyWeaponPickup(M, Actor);
+	}
 	static const TCHAR* ReasonNames[] = { TEXT("take"), TEXT("takeRecheck"), TEXT("ready"), TEXT("sync") };
-	UE_LOG(LogMOB, Log, TEXT("MOB_PAD tick=%u pad=%u reason=%s avail=%u ready=%u picker=%u heal=%.1f hpAfter=%.1f lyraHp=%.1f actor=%d"), M.tick, M.pad,
-		M.reason < UE_ARRAY_COUNT(ReasonNames) ? ReasonNames[M.reason] : TEXT("?"), M.available, M.readyTick, M.picker, M.heal, M.hpAfter, LyraHp, Actor ? 1 : 0);
+	UE_LOG(LogMOB, Log, TEXT("MOB_PAD tick=%u pad=%u reason=%s avail=%u ready=%u picker=%u heal=%.1f hpAfter=%.1f lyraHp=%.1f actor=%d kind=%u give=%u weapon=%u slot=%u mag=%d spare=%d seq=%u"), M.tick, M.pad,
+		M.reason < UE_ARRAY_COUNT(ReasonNames) ? ReasonNames[M.reason] : TEXT("?"), M.available, M.readyTick, M.picker, M.heal, M.hpAfter, LyraHp, Actor ? 1 : 0,
+		M.kind, M.give, M.weapon, M.slot, (int32)M.magazine, (int32)M.spare, M.seq);
 	// 사람 확인 — 내가 집은 받침: 집은 순간 · 대기 중 셋(대기의 1/4 · 2/4 · 3/4) · 다시 생긴 순간을 찍는다.
 	// 준비 뒤 6초 안은 Lyra 로딩 화면이 남아 있어 안 찍는다(파일럿 ha1 — 2.28 · 3.10초 집음 사진이 로딩 화면. 6 은 제 판단)
 	const bool bHcShotOk = bHumanCheck && ReadyAt > 0 && FPlatformTime::Seconds() - ReadyAt >= 6.0;
@@ -3544,6 +3833,181 @@ float UMOBridgeSubsystem::ApplyPadHeal(const wire::Pickup& M, ALyraWeaponSpawner
 		ASC->SetNumericAttributeBase(ULyraHealthSet::GetHealthAttribute(), M.hpAfter);
 	}
 	return HC->GetHealth();
+}
+
+// 무기 아이템 탄 표식(Lyra 무기 아이템 ID_* 의 SetStats 조각이 처음 값을 넣는 그 표식)
+static const FGameplayTag& MOBMagazineTag()
+{
+	static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.MagazineAmmo"));
+	return Tag;
+}
+
+static const FGameplayTag& MOBSpareTag()
+{
+	static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("Lyra.ShooterGame.Weapon.SpareAmmo"));
+	return Tag;
+}
+
+// 받침 자기 무기 자료 — ALyraWeaponSpawner::WeaponDefinition 은 protected 라 속성 이름으로 읽는다(MOBContentProbeSubsystem.cpp PropText 와 같은 길)
+static const ULyraPickupDefinition* MOBPadWeaponDefinition(const ALyraWeaponSpawner* Pad)
+{
+	static const FObjectPropertyBase* Prop = CastField<FObjectPropertyBase>(ALyraWeaponSpawner::StaticClass()->FindPropertyByName(TEXT("WeaponDefinition")));
+	return Prop && Pad ? Cast<ULyraPickupDefinition>(Prop->GetObjectPropertyValue_InContainer(Pad)) : nullptr;
+}
+
+static void MOBSetItemStack(ULyraInventoryItemInstance& Item, const FGameplayTag& Stack, int32 Want)
+{
+	const int32 Have = Item.GetStatTagStackCount(Stack);
+	if (Have < Want) Item.AddStatTagStack(Stack, Want - Have);
+	else if (Have > Want) Item.RemoveStatTagStack(Stack, Have - Want);
+}
+
+// 무기 받침 집음(W-4) — 서버가 정한 결과(give · 칸 · 탄)를 Lyra 에 옮긴다.
+// 내 몸: 예측에 같은 Give 를 넘기고(OnPickup — 소식은 그 틱 상태보다 먼저 온다), 받침 자기 그래프 GiveWeapon 을 부른다(Lyra 가 겹침으로 집을 때 부르는 그 함수 —
+//   새 무기면 빈 첫 칸에 넣고 재장전 중(Event.Movement.Reload)이 아니면 든다 · 가진 무기면 예비를 기본값까지 채운다 · 효과 신호를 낸다).
+//   그 뒤 Lyra 빠른 칸 · 든 칸 · 그 무기 탄을 소식과 견준다. 다르면 세고 탄만 소식대로 고친다 — 칸은 그 틱 상태의 가방 맞추기(SyncSelfWeapon)가 서버 값으로 고친다.
+// 남의 몸: Lyra 는 남의 가방을 안 그린다(남은 든 무기만 보인다 — SyncRemoteWeapon) — 그래프가 내는 줍기 신호(효과 · 소리)만 그 몸에 튼다
+void UMOBridgeSubsystem::ApplyWeaponPickup(const wire::Pickup& M, ALyraWeaponSpawner* Actor)
+{
+	static const FGameplayTag PickupCue = FGameplayTag::RequestGameplayTag(TEXT("GameplayCue.ShooterGame.Interact.WeaponPickup"));
+	APawn* Pawn = FindPlayerPawn(M.picker);
+	if (M.picker != PlayerId)
+	{
+		++PadWeaponTakesOther;
+		if (!Pawn || !Actor)
+		{
+			++PadWeaponNoPawn;
+			return;
+		}
+		FGameplayCueParameters Params;
+		Params.Instigator = Actor;
+		UGameplayCueFunctionLibrary::ExecuteGameplayCueOnActor(Pawn, PickupCue, Params);
+		++PadWeaponCues;
+		return;
+	}
+
+	++PadWeaponTakesMine;
+	if (Core)
+	{
+		if (BreakBag & 2)
+		{
+			BreakBag &= ~2;
+			UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_BAG skippedPrediction tick=%u pad=%u seq=%u"), M.tick, M.pad, M.seq);
+		}
+		else
+		{
+			Core->Prediction.OnPickup(M.seq, M.reason == wire::PICKUP_TAKE, M.weapon, M.give, M.slot, M.magazine, M.spare);
+		}
+	}
+	// 줍기로 든 무기가 바뀌었으면 보내는 무기 번호도 따른다 — 「앞 입력과 달라졌을 때만 바꾼다」(Loadout.h OnInputWeapon) 규칙이라 옛 번호를 계속 보내면
+	// 되돌아가지는 않지만, 그 옛 무기 칸 키를 눌러도 번호가 안 바뀌어 못 돌아간다(프로브 RunWeapons 의 adopt 와 같은 일)
+	if (M.give == (uint8)mo::EGiveResult::NewEquipped)
+	{
+		Weapon = M.weapon;
+		AutoWeapon = M.weapon;
+	}
+
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	const ULyraPickupDefinition* PadDef = MOBPadWeaponDefinition(Actor);
+	if (!Pawn || !Bar || !PadDef)
+	{
+		++PadWeaponNoPawn;
+		return;
+	}
+	LoadWeaponClasses();
+	TSubclassOf<ULyraInventoryItemDefinition> GiveDef = PadDef->InventoryItemDefinition;
+	if (BreakBag & 1)
+	{
+		BreakBag &= ~1;
+		const int32 Wrong = ((int32)M.weapon + 1) % (int32)mo::EWeapon::Count;
+		GiveDef = WeaponItemDefs.IsValidIndex(Wrong) ? WeaponItemDefs[Wrong].Get() : nullptr;
+		UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_BAG wrongGive tick=%u pad=%u weapon=%u gave=%d"), M.tick, M.pad, M.weapon, Wrong);
+	}
+	const int32 ActiveBefore = Bar->GetActiveSlotIndex();
+	int32 ActiveDummy = INDEX_NONE;
+	const FString BagBefore = DescribeLyraBag(&ActiveDummy);
+	Actor->GiveWeapon(GiveDef, Pawn);
+	++PadWeaponGives;
+
+	// 견주기 — 소식의 칸에 그 무기가 하나만 있고, 새로 들었으면 든 칸 = 그 칸 · 아니면 든 칸 그대로(Lyra 그래프는 탄 채움 · 재장전 중 새 무기에 칸을 안 바꾼다), 탄 = 소식
+	UClass* WantDef = WeaponItemDefs.IsValidIndex(M.weapon) ? WeaponItemDefs[M.weapon].Get() : nullptr;
+	const TArray<ULyraInventoryItemInstance*> Slots = Bar->GetSlots();
+	int32 Copies = 0;
+	for (const ULyraInventoryItemInstance* Item : Slots) Copies += Item && Item->GetItemDef() == WantDef ? 1 : 0;
+	ULyraInventoryItemInstance* Item = Slots.IsValidIndex(M.slot) ? Slots[M.slot] : nullptr;
+	const bool bSlotOk = WantDef && Item && Item->GetItemDef() == WantDef && Copies == 1;
+	const int32 WantActive = M.give == (uint8)mo::EGiveResult::NewEquipped ? (int32)M.slot : ActiveBefore;
+	const int32 ActiveAfter = Bar->GetActiveSlotIndex();
+	const int32 Mag = Item ? Item->GetStatTagStackCount(MOBMagazineTag()) : -1;
+	const int32 Spare = Item ? Item->GetStatTagStackCount(MOBSpareTag()) : -1;
+	const bool bAmmoOk = Mag == (int32)M.magazine && Spare == (int32)M.spare;
+	int32 Active = INDEX_NONE;
+	const FString BagAfter = DescribeLyraBag(&Active);
+	UE_LOG(LogMOB, Log, TEXT("MOB_WEAPON_GIVE tick=%u pad=%u seq=%u give=%u weapon=%u slot=%u mag=%d spare=%d lyraBefore=%s active=%d lyraAfter=%s active=%d lyraMag=%d lyraSpare=%d ok=%d"),
+		M.tick, M.pad, M.seq, M.give, M.weapon, M.slot, (int32)M.magazine, (int32)M.spare, *BagBefore, ActiveBefore, *BagAfter, ActiveAfter, Mag, Spare,
+		bSlotOk && ActiveAfter == WantActive && bAmmoOk ? 1 : 0);
+	if (bSlotOk && ActiveAfter == WantActive && bAmmoOk) return;
+	++PadWeaponGiveDiff;
+	if (WeaponGiveLinesLeft > 0)
+	{
+		--WeaponGiveLinesLeft;
+		UE_LOG(LogMOB, Warning, TEXT("MOB_WEAPON_GIVE_DIFF tick=%u pad=%u give=%u weapon=%u slot=%u slotOk=%d copies=%d active=%d want=%d mag=%d/%d spare=%d/%d"),
+			M.tick, M.pad, M.give, M.weapon, M.slot, bSlotOk ? 1 : 0, Copies, ActiveAfter, WantActive, Mag, (int32)M.magazine, Spare, (int32)M.spare);
+	}
+	if (bSlotOk && !bAmmoOk)
+	{
+		MOBSetItemStack(*Item, MOBMagazineTag(), M.magazine);
+		MOBSetItemStack(*Item, MOBSpareTag(), M.spare);
+	}
+}
+
+FString UMOBridgeSubsystem::DescribeLyraBag(int32* OutActive) const
+{
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	const ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	if (OutActive) *OutActive = Bar ? Bar->GetActiveSlotIndex() : INDEX_NONE;
+	if (!Bar) return TEXT("none");
+	FString Out;
+	for (const ULyraInventoryItemInstance* Item : Bar->GetSlots())
+	{
+		if (!Out.IsEmpty()) Out += TEXT(",");
+		const int32 W = Item ? WeaponItemDefs.IndexOfByKey(Item->GetItemDef().Get()) : INDEX_NONE;
+		Out += !Item ? FString(TEXT("-")) : W == INDEX_NONE ? FString(TEXT("?")) : FString::FromInt(W);
+	}
+	return Out;
+}
+
+bool UMOBridgeSubsystem::LyraBagMatches(uint8 PackedSlots, uint8 HeldWeapon) const
+{
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	const ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	if (!Bar) return false;
+	const TArray<ULyraInventoryItemInstance*> Slots = Bar->GetSlots();
+	int32 HeldSlot = INDEX_NONE;
+	for (int32 S = 0; S < (int32)mo::kQuickSlotCount; ++S)
+	{
+		const uint8 W = mo::CLoadout::UnpackSlot(PackedSlots, (size_t)S);
+		const UClass* Want = W < WeaponItemDefs.Num() ? WeaponItemDefs[W].Get() : nullptr;
+		const ULyraInventoryItemInstance* Have = Slots.IsValidIndex(S) ? Slots[S] : nullptr;
+		if ((Have ? Have->GetItemDef().Get() : nullptr) != Want) return false;
+		if (W == HeldWeapon) HeldSlot = S;
+	}
+	return HeldSlot != INDEX_NONE && Bar->GetActiveSlotIndex() == HeldSlot;
+}
+
+void UMOBridgeSubsystem::SetLyraItemAmmo(uint8 WeaponIndex, int32 Magazine, int32 Spare)
+{
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	const ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	const UClass* Def = WeaponItemDefs.IsValidIndex(WeaponIndex) ? WeaponItemDefs[WeaponIndex].Get() : nullptr;
+	if (!Bar || !Def) return;
+	for (ULyraInventoryItemInstance* Item : Bar->GetSlots())
+	{
+		if (!Item || Item->GetItemDef() != Def) continue;
+		MOBSetItemStack(*Item, MOBMagazineTag(), Magazine);
+		MOBSetItemStack(*Item, MOBSpareTag(), Spare);
+	}
 }
 
 void UMOBridgeSubsystem::HandleKill(const wire::Kill& M)
@@ -3775,6 +4239,7 @@ void UMOBridgeSubsystem::SyncSelfWeapon(const wire::PlayerState& P)
 	if (P.flags & wire::STATE_DEAD)
 	{
 		bWasReloading = false;
+		LastServerHeld = 0xFF;		// 1초 가방 대조를 쉰다 — 죽은 동안 Lyra 가 몸 · 장비를 정리한다
 		return;
 	}
 	const bool bReloading = (P.flags & wire::STATE_RELOADING) != 0;
@@ -3794,26 +4259,69 @@ void UMOBridgeSubsystem::SyncSelfWeapon(const wire::PlayerState& P)
 	if (!Bar || !Inv || !PC->GetPawn() || P.weapon >= (uint8)mo::EWeapon::Count) return;
 	LoadWeaponClasses();
 
-	int32 WantSlot = INDEX_NONE;
-	for (int32 W = 0; W < WeaponItemDefs.Num(); ++W)
+	// 가방(W-4) — Lyra 빠른 칸 셋을 서버 빠른 칸(quickSlots)과 같게 한다. 줍기는 받침 소식 때 Lyra 그래프가 먼저 넣었다(ApplyWeaponPickup) —
+	// 여기는 그 밖의 것(부활로 [권총] 되돌림 · 놓친 소식 · Lyra 가 혼자 넣은 아이템)을 서버 값으로 되돌리고 센다. 빠른 칸 밖에 남은 무기 아이템도 지운다
+	// (전에는 첫 판 범위 세 무기를 늘 다 넣어 뒀다 — 서버 가방이 생기기 전)
+	++BagStates;
+	bool bBagDiff = false;
+	FString BagBefore;
+	int32 ActiveBefore = INDEX_NONE;
+	const auto NoteDiff = [&]()
 	{
-		UClass* Def = WeaponItemDefs[W];
-		if (!Def) continue;
-		int32 Found = INDEX_NONE;
+		if (bBagDiff) return;
+		bBagDiff = true;
+		BagBefore = DescribeLyraBag(&ActiveBefore);
+	};
+	int32 WantSlot = INDEX_NONE;
+	for (int32 S = 0; S < (int32)mo::kQuickSlotCount; ++S)
+	{
+		const uint8 W = mo::CLoadout::UnpackSlot(P.quickSlots, (size_t)S);
+		UClass* Want = W < WeaponItemDefs.Num() ? WeaponItemDefs[W].Get() : nullptr;
+		if (W == P.weapon) WantSlot = S;
+		if (W != mo::kNoWeapon && !Want) continue;		// 무기 클래스를 못 읽었다(MOB_WEAPON_CLASS item=0) — 건드리지 않는다
 		const TArray<ULyraInventoryItemInstance*> Slots = Bar->GetSlots();
-		for (int32 S = 0; S < Slots.Num(); ++S)
+		ULyraInventoryItemInstance* Have = Slots.IsValidIndex(S) ? Slots[S] : nullptr;
+		if ((Have ? Have->GetItemDef().Get() : nullptr) == Want) continue;
+		NoteDiff();
+		if (Have)
 		{
-			if (Slots[S] && Slots[S]->GetItemDef() == Def) Found = S;
+			Bar->RemoveItemFromSlot(S);		// 든 칸이면 Lyra 가 내려놓고 든 칸을 비운다 — 아래 SetActiveSlotIndex 가 다시 든다
+			Inv->RemoveItemInstance(Have);
+			++BagRemoves;
 		}
-		if (Found == INDEX_NONE)
+		if (Want)
 		{
-			Found = Bar->GetNextFreeItemSlot();
-			if (Found == INDEX_NONE) continue;
-			if (ULyraInventoryItemInstance* Item = Inv->AddItemDefinition(Def, 1)) Bar->AddItemToSlot(Found, Item);
-			UE_LOG(LogMOB, Log, TEXT("MOB_QUICKBAR_ADD weapon=%d slot=%d"), W, Found);
+			if (ULyraInventoryItemInstance* Item = Inv->AddItemDefinition(Want, 1))
+			{
+				Bar->AddItemToSlot(S, Item);
+				++BagAdds;
+			}
 		}
-		if (W == (int32)P.weapon) WantSlot = Found;
 	}
+	{
+		const TArray<ULyraInventoryItemInstance*> SlotsNow = Bar->GetSlots();
+		for (ULyraInventoryItemInstance* Item : Inv->GetAllItems())
+		{
+			if (!Item || !WeaponItemDefs.Contains(Item->GetItemDef().Get()) || SlotsNow.Contains(Item)) continue;
+			NoteDiff();
+			Inv->RemoveItemInstance(Item);
+			++BagStrays;
+		}
+	}
+	if (bBagDiff)
+	{
+		++BagDiffStates;
+		if (BagDiffLinesLeft > 0)
+		{
+			--BagDiffLinesLeft;
+			int32 ActiveAfter = INDEX_NONE;
+			const FString BagAfter = DescribeLyraBag(&ActiveAfter);
+			UE_LOG(LogMOB, Log, TEXT("MOB_BAG_DIFF seq=%u server=%u weapon=%u lyraBefore=%s active=%d lyraAfter=%s active=%d sinceSpawn=%.2f"), P.lastSeq, P.quickSlots, P.weapon,
+				*BagBefore, ActiveBefore, *BagAfter, ActiveAfter, LastSelfSpawnAt > 0 ? FPlatformTime::Seconds() - LastSelfSpawnAt : -1.0);
+		}
+	}
+	LastServerQuickSlots = P.quickSlots;
+	LastServerHeld = P.weapon;
 	if (WantSlot == INDEX_NONE) return;
 	if (Bar->GetActiveSlotIndex() != WantSlot)
 	{

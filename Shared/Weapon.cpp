@@ -633,6 +633,14 @@ namespace mo
 		ResetCycleForCheck();
 	}
 
+	int32_t CWeaponCycle::TopUpSpare()
+	{
+		const int32_t add = _def->startSpareAmmo - _spare;
+		if (add <= 0) return 0;
+		_spare += add;
+		return add;
+	}
+
 	void CWeaponCycle::StartReload()
 	{
 		_reloadLeft = _def->reloadSeconds;
