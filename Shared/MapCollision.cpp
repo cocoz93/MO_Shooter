@@ -467,8 +467,8 @@ namespace mo
 
 	void CMapCollision::Clear()
 	{
-		_move = Tree();
-		_weapon = Tree();
+		_simple = Tree();
+		_complex = Tree();
 		_prims.clear();
 		_objectCount = _triangleCount = _degenerateCount = 0;
 	}
@@ -493,13 +493,13 @@ namespace mo
 		if (std::memcmp(cursor, "MOCL", 4) != 0) return EMapLoad::BadMagic;
 		cursor += 4;
 		const uint32_t version = readU32();
-		if (version != 2) return EMapLoad::BadVersion;	// 1 은 뒷면·속 찬 물체 표시가 없어 판정이 조용히 달라진다
+		if (version != 3) return EMapLoad::BadVersion;	// 1 은 뒷면·속 찬 물체 표시가, 2 는 수류탄 · 폭발 선 깃발이 없어 판정이 조용히 달라진다
 		const uint32_t objectCount = readU32();
 		const uint32_t triangleCount = readU32();
 		cursor += 24;	// 범위는 쓰지 않는다
 
-		_move.tris.reserve(triangleCount);
-		_weapon.tris.reserve(triangleCount);
+		_simple.tris.reserve(triangleCount);
+		_complex.tris.reserve(triangleCount);
 
 		uint32_t seenTriangles = 0;
 		for (uint32_t object = 0; object < objectCount; ++object)
@@ -514,8 +514,8 @@ namespace mo
 				if (left() < (size_t)triCount * 36) return EMapLoad::Truncated;
 				if (flags & MAP_SOLID)
 				{
-					if (flags & MAP_BLOCK_MOVE) AddSolid(_move, cursor, triCount, object, flags);
-					if (flags & MAP_BLOCK_WEAPON) AddSolid(_weapon, cursor, triCount, object, flags);
+					if (flags & kSimpleFlags) AddSolid(_simple, cursor, triCount, object, flags);
+					if (flags & kComplexFlags) AddSolid(_complex, cursor, triCount, object, flags);
 				}
 				for (uint32_t i = 0; i < triCount; ++i)
 				{
@@ -531,8 +531,8 @@ namespace mo
 						++_degenerateCount;
 						continue;
 					}
-					if (flags & MAP_BLOCK_MOVE) _move.tris.push_back(tri);
-					if (flags & MAP_BLOCK_WEAPON) _weapon.tris.push_back(tri);
+					if (flags & kSimpleFlags) _simple.tris.push_back(tri);
+					if (flags & kComplexFlags) _complex.tris.push_back(tri);
 				}
 				seenTriangles += triCount;
 			}
@@ -566,8 +566,8 @@ namespace mo
 
 		_objectCount = objectCount;
 		_triangleCount = triangleCount;
-		Build(_move);
-		Build(_weapon);
+		BuildGrouped(_simple, MAP_BLOCK_MOVE);
+		BuildGrouped(_complex, MAP_BLOCK_WEAPON);
 		return EMapLoad::Ok;
 	}
 
@@ -597,10 +597,11 @@ namespace mo
 		tree.solids.push_back(solid);
 	}
 
-	const CMapCollision::Solid* CMapCollision::FindSolidAt(const Tree& tree, const Vec3& point)
+	const CMapCollision::Solid* CMapCollision::FindSolidAt(const Tree& tree, const Vec3& point, uint32_t blockFlag)
 	{
 		for (const Solid& solid : tree.solids)
 		{
+			if (!(solid.flags & blockFlag)) continue;
 			if (point.x < solid.min[0] || point.x > solid.max[0]
 				|| point.y < solid.min[1] || point.y > solid.max[1]
 				|| point.z < solid.min[2] || point.z > solid.max[2])
@@ -754,6 +755,55 @@ namespace mo
 		tree.nodes.shrink_to_fit();
 	}
 
+	// 주 깃발(이동 · 무기) 삼각형만으로 먼저 나무를 짓고, 나머지(수류탄만 · 폭발 선만)는 따로 지어 새 뿌리 아래 옆 가지로 붙인다
+	// - 왜: 주 깃발 질의는 옆 가지 삼각형을 모두 거르므로 주 가지만 판 2 때와 같은 차례로 돈다. 같은 시간 동점에서 먼저 만나는
+	//   삼각형까지 같아 이동 · 무기 결과가 그대로다. 한 나무로 지으면 동점 차례가 바뀐다(expanse 면 법선 8건이 달라짐, G-1-a)
+	void CMapCollision::BuildGrouped(Tree& tree, uint32_t mainFlag)
+	{
+		const auto split = std::stable_partition(tree.tris.begin(), tree.tris.end(), [&](const Tri& tri) { return (tri.flags & mainFlag) != 0; });
+		const uint32_t mainTris = (uint32_t)(split - tree.tris.begin());
+		if (mainTris == 0 || mainTris == tree.tris.size())
+		{
+			Build(tree);
+			return;
+		}
+		Tree side;
+		side.tris.assign(split, tree.tris.end());
+		tree.tris.resize(mainTris);
+		Build(tree);
+		Build(side);
+
+		// 새 번호 — 뿌리 0 · 주 뿌리 1 · 옆 뿌리 2 · 주 나머지 i + 2 · 옆 나머지 j + 주 마디 수 + 1. 형제는 계속 붙어 있다
+		const uint32_t mainNodes = (uint32_t)tree.nodes.size();
+		const auto mainIndex = [&](uint32_t i) { return i == 0 ? 1u : i + 2; };
+		const auto sideIndex = [&](uint32_t j) { return j == 0 ? 2u : j + mainNodes + 1; };
+		std::vector<Node> nodes(1 + mainNodes + side.nodes.size());
+		for (uint32_t i = 0; i < mainNodes; ++i)
+		{
+			Node node = tree.nodes[i];
+			if (node.count == 0) node.first = mainIndex(node.first);
+			nodes[mainIndex(i)] = node;
+		}
+		for (uint32_t j = 0; j < (uint32_t)side.nodes.size(); ++j)
+		{
+			Node node = side.nodes[j];
+			if (node.count == 0) node.first = sideIndex(node.first);
+			else node.first += mainTris;
+			nodes[sideIndex(j)] = node;
+		}
+		Node& root = nodes[0];
+		for (int k = 0; k < 3; ++k)
+		{
+			root.min[k] = std::min(nodes[1].min[k], nodes[2].min[k]);
+			root.max[k] = std::max(nodes[1].max[k], nodes[2].max[k]);
+		}
+		root.first = 1;
+		root.count = 0;
+		tree.nodes.swap(nodes);
+		tree.tris.reserve(tree.tris.size() + side.tris.size());	// 딱 맞게 — 그냥 붙이면 배열이 1.5배쯤 늘어 메모리 셈이 50MB 뜬다(expanse)
+		tree.tris.insert(tree.tris.end(), side.tris.begin(), side.tris.end());
+	}
+
 	bool CMapCollision::Raycast(const Vec3& start, const Vec3& end, uint32_t blockFlag, RayHit& out) const
 	{
 		const Vec3 delta = end - start;
@@ -761,7 +811,7 @@ namespace mo
 		if (length < 1e-9) return false;
 		const Vec3 dir = delta * (1.0 / length);
 
-		if (const Solid* solid = FindSolidAt(TreeFor(blockFlag), start))
+		if (const Solid* solid = FindSolidAt(TreeFor(blockFlag), start, blockFlag))
 		{
 			out.distance = 0;
 			out.normal = dir * -1.0;
@@ -795,6 +845,7 @@ namespace mo
 					for (uint32_t i = 0; i < node.count; ++i)
 					{
 						const Tri& tri = tree.tris[node.first + i];
+						if (!(tri.flags & blockFlag)) continue;
 						const Vec3 a = VertexOf(tri.v, 0), b = VertexOf(tri.v, 1), c = VertexOf(tri.v, 2);
 						double t;
 						Vec3 cross;
@@ -941,8 +992,13 @@ namespace mo
 
 	bool CMapCollision::SweepCapsule(const Vec3& start, const Vec3& end, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out) const
 	{
+		return SweepCapsule(start, end, Vec3(0, 0, 1), radius, halfHeight, blockFlag, out);
+	}
+
+	bool CMapCollision::SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out) const
+	{
 		const double axisHalf = std::max(0.0, halfHeight - radius);
-		const Vec3 up(0, 0, axisHalf);
+		const Vec3 up = axis * axisHalf;
 		const Vec3 s0 = start - up;
 		const Vec3 s1 = start + up;
 		const Vec3 delta = end - start;
@@ -994,7 +1050,8 @@ namespace mo
 		if (!tree.nodes.empty())
 		{
 			const Slab slab(start, delta);
-			const double pad[3] = { radius, radius, axisHalf + radius };
+			// 축 선분을 감싸는 상자 반폭 — 똑바로 서면 { r, r, axisHalf + r } 와 같다
+			const double pad[3] = { std::fabs(axis.x) * axisHalf + radius, std::fabs(axis.y) * axisHalf + radius, std::fabs(axis.z) * axisHalf + radius };
 			uint32_t stack[kMaxStack];
 			int top = 0;
 			if (slab.Enter(tree.nodes[0], pad, best) != kInf) stack[top++] = 0;
@@ -1007,6 +1064,7 @@ namespace mo
 					for (uint32_t i = 0; i < node.count; ++i)
 					{
 						const Tri& tri = tree.tris[node.first + i];
+						if (!(tri.flags & blockFlag)) continue;
 						const Vec3 a = VertexOf(tri.v, 0), b = VertexOf(tri.v, 1), c = VertexOf(tri.v, 2);
 
 						// Chaos FTriangleMeshSweepVisitor 와 같은 규칙 — 뒷면 쪽으로 가면 겹쳐 있어도 통과,
@@ -1104,7 +1162,7 @@ namespace mo
 		// 면만 판정하므로 속이 찬 물체 한가운데서 시작하면 위에서 안 걸린다
 		if (!penetrating)
 		{
-			if (const Solid* solid = FindSolidAt(tree, start))
+			if (const Solid* solid = FindSolidAt(tree, start, blockFlag))
 			{
 				Vec3 normal(0, 0, 1);
 				double depth = 0;
@@ -1198,6 +1256,7 @@ namespace mo
 				for (uint32_t i = 0; i < node.count; ++i)
 				{
 					const Tri& tri = tree.tris[node.first + i];
+					if (!(tri.flags & blockFlag)) continue;
 					const Vec3 a = VertexOf(tri.v, 0), b = VertexOf(tri.v, 1), c = VertexOf(tri.v, 2);
 					if (tri.flags & MAP_SOLID)
 					{
@@ -1225,7 +1284,7 @@ namespace mo
 			ClosestSegmentSegment(s0, s1, prim.a, prim.b, c1, c2);
 			if (Length(c1 - c2) <= radius + prim.radius) return true;
 		}
-		return FindSolidAt(tree, center) != nullptr;
+		return FindSolidAt(tree, center, blockFlag) != nullptr;
 	}
 
 	size_t CMapCollision::GetTreeTriangleCount(uint32_t blockFlag) const
@@ -1240,10 +1299,10 @@ namespace mo
 
 	size_t CMapCollision::GetMemoryBytes() const
 	{
-		return _move.tris.capacity() * sizeof(Tri) + _move.nodes.capacity() * sizeof(Node)
-			+ _weapon.tris.capacity() * sizeof(Tri) + _weapon.nodes.capacity() * sizeof(Node)
-			+ (_move.solids.capacity() + _weapon.solids.capacity()) * sizeof(Solid)
-			+ (_move.planes.capacity() + _weapon.planes.capacity()) * sizeof(Plane)
+		return _simple.tris.capacity() * sizeof(Tri) + _simple.nodes.capacity() * sizeof(Node)
+			+ _complex.tris.capacity() * sizeof(Tri) + _complex.nodes.capacity() * sizeof(Node)
+			+ (_simple.solids.capacity() + _complex.solids.capacity()) * sizeof(Solid)
+			+ (_simple.planes.capacity() + _complex.planes.capacity()) * sizeof(Plane)
 			+ _prims.capacity() * sizeof(Prim);
 	}
 }

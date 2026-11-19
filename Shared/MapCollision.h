@@ -27,6 +27,8 @@ namespace mo
 		MAP_MOVABLE = 4,			// 움직일 수 있다고 표시된 물체
 		MAP_CULL_BACKFACE = 8,		// 뒷면으로 오는 광선·캡슐은 통과 — 한 면짜리 메시. 캡슐은 처음부터 겹쳐 있어도 통과한다(Chaos 와 같음)
 		MAP_SOLID = 16,				// 속이 찬 볼록 물체 — 안에서 쏜 광선은 거리 0 에 맞는다
+		MAP_BLOCK_GRENADE = 32,		// 수류탄 몸(WorldDynamic)을 막는다 — 단순 충돌. 이동과 거의 같지만 사람만 막는 벽 · 수류탄만 막는 물체가 있다(G-0-d)
+		MAP_BLOCK_BLAST = 64,		// 폭발 선(Weapon_Capsule 채널, 복잡 충돌)을 막는다. 무기 광선과 거의 같다(G-0-d)
 	};
 
 	enum class EMapLoad
@@ -69,12 +71,16 @@ namespace mo
 		// 다시 부르면 이전 내용을 버린다
 		EMapLoad LoadFromMemory(const void* data, size_t size);
 
-		// blockFlag = MAP_BLOCK_WEAPON 또는 MAP_BLOCK_MOVE. 가장 가까운 것 하나를 돌려준다
+		// blockFlag = MAP_BLOCK_* 중 하나(이동 · 무기 · 수류탄 · 폭발 선). 가장 가까운 것 하나를 돌려준다
 		bool Raycast(const Vec3& start, const Vec3& end, uint32_t blockFlag, RayHit& out) const;
 
 		// 똑바로 선 캡슐을 중심 기준으로 start → end 로 옮겨 처음 닿는 곳을 찾는다
 		// halfHeight = 캡슐 전체 높이의 절반(언리얼 GetScaledCapsuleHalfHeight 와 같은 뜻)
 		bool SweepCapsule(const Vec3& start, const Vec3& end, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out) const;
+
+		// 기운 캡슐 — axis = 캡슐 축의 단위 벡터(언리얼 캡슐 회전의 위쪽). 쓸기 동안 회전은 그대로다(언리얼 쓸기도 시작 회전 하나)
+		// 위 함수는 axis = (0, 0, 1) 인 이 함수다
+		bool SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out) const;
 
 		// 이 자리에 똑바로 선 캡슐을 두면 무언가와 겹치나. 뒷면 규칙을 쓰지 않는다(언리얼 겹침 검사와 같음)
 		bool OverlapCapsule(const Vec3& center, double radius, double halfHeight, uint32_t blockFlag) const;
@@ -83,7 +89,7 @@ namespace mo
 		uint32_t GetTriangleCount() const { return _triangleCount; }			// 파일 기준
 		uint32_t GetDegenerateCount() const { return _degenerateCount; }		// 넓이 0 이라 뺀 삼각형
 		uint32_t GetPrimitiveCount() const { return (uint32_t)_prims.size(); }	// 구·캡슐
-		size_t GetTreeTriangleCount(uint32_t blockFlag) const;
+		size_t GetTreeTriangleCount(uint32_t blockFlag) const;	// 그 깃발이 쓰는 나무(단순 · 복잡) 기준 — 같은 나무의 다른 깃발 삼각형도 센다
 		size_t GetTreeNodeCount(uint32_t blockFlag) const;
 		size_t GetMemoryBytes() const;
 
@@ -137,16 +143,21 @@ namespace mo
 		};
 
 		void Clear();
-		const Tree& TreeFor(uint32_t blockFlag) const { return blockFlag == MAP_BLOCK_MOVE ? _move : _weapon; }
+		// 나무는 모양 갈래로 둘 — 단순 충돌(이동 · 수류탄) · 복잡 충돌(무기 · 폭발 선). 한 나무에 깃발이 다른 물체가 섞이므로 질의는 깃발로 거른다
+		// - 왜 깃발마다 나무를 두지 않나: expanse 는 둘이 거의 같아(다른 물체 53 · 1개) 120만 삼각형 나무가 둘 더 생긴다
+		static constexpr uint32_t kSimpleFlags = MAP_BLOCK_MOVE | MAP_BLOCK_GRENADE;
+		static constexpr uint32_t kComplexFlags = MAP_BLOCK_WEAPON | MAP_BLOCK_BLAST;
+		const Tree& TreeFor(uint32_t blockFlag) const { return (blockFlag & kSimpleFlags) ? _simple : _complex; }
 		static void Build(Tree& tree);
+		static void BuildGrouped(Tree& tree, uint32_t mainFlag);
 		static void AddSolid(Tree& tree, const uint8_t* triangles, uint32_t count, uint32_t object, uint32_t flags);
-		static const Solid* FindSolidAt(const Tree& tree, const Vec3& point);
+		static const Solid* FindSolidAt(const Tree& tree, const Vec3& point, uint32_t blockFlag);
 		static const Solid* FindSolidOf(const Tree& tree, uint32_t object);
 		// 맞은 점 근처에서 이동 방향과 가장 맞서는 면의 법선(언리얼 FindFaceIndex 와 같은 규칙)
 		static Vec3 OpposingNormal(const Tree& tree, const Tri& hitTri, const Vec3& point, const Vec3& dir);
 
-		Tree _move;
-		Tree _weapon;
+		Tree _simple;
+		Tree _complex;
 		std::vector<Prim> _prims;
 		uint32_t _objectCount = 0;
 		uint32_t _triangleCount = 0;
