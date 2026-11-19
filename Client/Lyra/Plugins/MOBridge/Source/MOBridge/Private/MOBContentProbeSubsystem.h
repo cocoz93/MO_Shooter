@@ -17,6 +17,7 @@ struct FLyraAbilitySimpleFailureMessage;
  * | bridge(내 서버에 붙은 지금 클라 — run_game.ps1 의 LyraArgs 로 넘긴다. 0-2 「지금 키를 누르면 무슨 일이 나나」)
  * | weapons(맵 L_Expanse?NumBots=0 — 무기 받침 · 가방 · 재장전 태그, weapon-pickup-plan.md W-0)
  * | dash(맵 L_ShooterGym?NumBots=1 — 대시 방향 · 힘 · 막기 · 끊기 · 쿨다운, dash-plan.md D-0)
+ * | grenade(맵 L_ShooterGym?NumBots=1 — 수류탄 방향 · 날아감 · 튕김 · 터짐 · 폭발 판정 · 쿨다운, grenade-plan.md G-0)
  * 산출물 = Saved/MOB/cprobe_<tag>.csv(매 프레임 한 줄) · 로그의 MOB_CPROBE 줄(사건마다 요약)
  */
 UCLASS()
@@ -36,7 +37,9 @@ public:
 		WeaponPadOn, SelectSlot, SetAmmo, ReloadPress, SelfDestruct,
 		// 대시 판(D-0) — 대시는 칸 안 DASH_PRESS_AT 에 한 프레임 누른다(DashSpam 은 매 프레임, DashJumpApex 는 떨어지기 시작한 프레임, MeleeDash 는 근접이 켜진 프레임)
 		// DashTurn(D-2) = 앞으로 걷다가 누르는 프레임에 이동 입력을 Arg 각으로 바꾼다 — 대시가 「앞 입력」을 쓰나 「이번 입력」을 쓰나
-		DashMove, DashNoInput, DashPitch, DashJumpApex, DashSpam, DashThen, HoldThenDash, ReloadDash, MeleeDash, DashWall, DashCrouchSame, DashTurn, StandUp, FoeShow, FoeAway };
+		DashMove, DashNoInput, DashPitch, DashJumpApex, DashSpam, DashThen, HoldThenDash, ReloadDash, MeleeDash, DashWall, DashCrouchSame, DashTurn, StandUp, FoeShow, FoeAway,
+		// 수류탄 판(G-0) — Arg = GREN_SHOTS 차례(자리 · 피치 · 누르는 때). Q 는 칸 안에서 한 프레임 누른다(DuringGrenade)
+		GrenThrow };
 
 private:
 	bool WaitReady(float DeltaTime);
@@ -55,7 +58,29 @@ private:
 	void GoHome() const;
 	void PlaceFoe(double Distance, bool bFacingMe, double Side = 0.0) const;
 	void LogScores(const TCHAR* When) const;
-	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? 5 : 0)))); }
+	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? 5 : (bGrenade ? 6 : 0))))); }
+	// 수류탄 판(G-0, grenade-plan.md) — 생김 · 부딪힘 · 튕김 · 멈춤은 엔진 알림을 받은 그 자리에서 적고(MOB_CPROBE_GSPAWN · _GHIT · _GBOUNCE · _GSTOP),
+	// 터짐(메시 숨김)은 틱에서 보고 폭발 판정을 같은 식으로 다시 해 본다(MOB_CPROBE_GBOOM — 겹친 성분은 comps 칸 · _GTRACE). 칸 끝 요약 = MOB_CPROBE_GREN
+	void OnActorSpawned(AActor* A);
+	UFUNCTION()
+	void OnGrenadeHit(AActor* SelfActor, AActor* OtherActor, FVector NormalImpulse, const FHitResult& Hit);
+	// 튕김 · 멈춤 알림엔 수류탄이 없다 — 맞은 자리에 가장 가까운 살아 있는 수류탄으로 고른다
+	UFUNCTION()
+	void OnGrenadeBounce(const FHitResult& ImpactResult, const FVector& ImpactVelocity);
+	UFUNCTION()
+	void OnGrenadeStop(const FHitResult& ImpactResult);
+	const AActor* NearestGrenade(const FVector& Where, double& OutDist) const;
+	void BeginGrenade();
+	void DuringGrenade();
+	void EndGrenade();
+	void WatchGrenades();
+	void LogBoom(AActor* G, int32 SpawnFrame) const;
+	// 능력 GA_Grenade 의 방향 고르기를 그대로 해 본다(카메라 + 방향 × 450 ~ × 3150 무기 채널 선, 나 빼고 · 맞은 점 또는 끝점을 놓을 자리에서 보는 회전)
+	void LogAimTrace(const TCHAR* Which, const FVector& CamLoc, const FRotator& CamRot, const FVector& SpawnLoc) const;
+	float GrenadeCooldownLeft() const;		// GE_Grenade_Cooldown 효과의 남은 초, 없으면 0
+	int32 NearestWallDir() const;			// 집에서 가장 가까운 서 있는 벽의 축 방향(ClearAround, 0 · 2 · 4 · 6) · 없으면 -1
+	bool FindSurface(bool bCorner, FVector& OutPoint, FVector& OutStand, FString& OutWhat) const;	// 집 둘레 비스듬한 면 · 두 벽이 만나는 구석(과 그 구석을 대각으로 볼 던질 자리)을 찾는다
+	void AimAt(const FVector& Point) const;	// 카메라에서 그 점을 보게 조종 회전 · 몸 요를 돌린다(카메라 선이 그 점을 지나게)
 	// 대시 판(D-0) — 칸 안에서 누르기 · 이동 입력 · 켜짐 가장자리를 맡고(DuringDash), 칸 끝에 요약 한 줄(EndDash, MOB_CPROBE_DASH)
 	static bool IsDashAct(EAct A) { return A == EAct::DashMove || A == EAct::DashNoInput || A == EAct::DashPitch || A == EAct::DashJumpApex || A == EAct::DashSpam
 		|| A == EAct::DashThen || A == EAct::HoldThenDash || A == EAct::ReloadDash || A == EAct::MeleeDash || A == EAct::DashWall || A == EAct::DashCrouchSame || A == EAct::DashTurn; }
@@ -96,6 +121,7 @@ private:
 	bool bBump = false;		// F-1 부딪힘 각본(연습장, -MOBCPMode=bump)
 	bool bWeapons = false;	// W-0 무기 받침 각본(L_Expanse, -MOBCPMode=weapons)
 	bool bDash = false;		// D-0 대시 각본(연습장, -MOBCPMode=dash)
+	bool bGrenade = false;	// G-0 수류탄 각본(연습장, -MOBCPMode=grenade)
 	bool bReady = false;
 	bool bDone = false;
 	TWeakObjectPtr<APawn> ClearPawn;
@@ -187,4 +213,41 @@ private:
 	float DashFoeHpAtStep = 0.f;
 	double ClearNormalZ[8] = {};		// ClearAround — 그 방향에서 맞은 면의 법선 Z(안 맞으면 1). 벽 칸은 서 있는 면만 벽으로 본다
 	double ClearDist[8] = {};			// ClearAround — 방향 i × 45도로 캡슐이 벽에 닿기까지(cm). 대시 판은 고른 집 자리의 값(벽 칸이 쓴다)
+
+	// 수류탄 판(G-0) — 생긴 수류탄마다(터짐 · 사라짐을 틱에서 본다). 프레임 번호는 기록 표 frame 칸과 같다
+	struct FGrenRec
+	{
+		TWeakObjectPtr<AActor> A;
+		FString Name;
+		int32 SpawnFrame = -1;
+		int32 BoomFrame = -1;
+		bool bGone = false;
+	};
+	TArray<FGrenRec> Grens;
+	FDelegateHandle SpawnedHandle;
+	// 칸마다 다시 채운다(BeginGrenade)
+	int32 GrenPressFrame = -1;
+	int32 GrenSpawnFrame = -1;		// 이 칸에서 처음 생긴 수류탄 · 그 수류탄의 첫 부딪힘 · 터짐 프레임
+	int32 GrenFirstHitFrame = -1;
+	int32 GrenBoomFrame = -1;
+	int32 GrenHits = 0;
+	int32 GrenSpawns = 0;
+	int32 GrenJumpFrame = -1;		// 점프 칸 — 점프를 누른 프레임
+	float GrenCdAtPress = -1.f;
+	float GrenMyHpAtBegin = 0.f;
+	float GrenFoeHpAtBegin = 0.f;
+	FString GrenFirstHit;
+	FString GrenWhere;				// 자리 잡기 요약(벽 · 면 · 상대 거리)
+	FVector GrenAimPoint = FVector::ZeroVector;	// 겨눌 점(면 · 구석 · 상대) — Q 를 누를 때까지 매 프레임 겨눈다(AimAt)
+	bool bGrenAim = false;
+	// 한 줄 앞 기록(WriteRow)의 카메라 · 내 자리 — 대조군. WriteRow 는 그 프레임 카메라 갱신 전에 돌아서 N 줄 카메라 = N−1 프레임 끝 갱신 값 = N 프레임 입력 처리(능력)가
+	// 읽는 값이다(g0a1 · g0a3 · g0a4 생김 20/20 — 짐작 4). 이 값(N−1 줄)은 갱신 하나 앞이라 카메라가 움직이는 칸에서 능력 값과 다르다. 생김 줄에 지금 값과 같이 적는다
+	FVector PrevCamLoc = FVector::ZeroVector;
+	FRotator PrevCamRot = FRotator::ZeroRotator;
+	FVector PrevMeLoc = FVector::ZeroVector;
+	float PrevMyHp = 0.f;			// 앞 프레임 끝 체력 — 터짐 줄에 지금 값과 같이(피해는 Detonate 안에서 바로 들어간다)
+	float PrevFoeHp = 0.f;
+	int32 GrenWallDir = -1;			// 벽 칸 — 고른 벽 방향(NearestWallDir)
+	int32 GrenAdjusts = 0;			// 벽 카메라 칸 — 몸 앞뒤 맞춤 횟수
+	FString GrenCsv;				// 수류탄마다 프레임마다 한 줄 → Saved/MOB/cprobe_<tag>_gren.csv
 };

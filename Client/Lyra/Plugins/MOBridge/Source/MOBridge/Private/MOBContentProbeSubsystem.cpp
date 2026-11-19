@@ -18,6 +18,7 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/ProjectileMovementComponent.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformTime.h"
 #include "Kismet/KismetSystemLibrary.h"
@@ -334,6 +335,97 @@ namespace
 		return FVector(FMath::RoundToDouble(FMath::Cos(A)), FMath::RoundToDouble(FMath::Sin(A)), 0.0);
 	}
 
+	// 수류탄 판(G-0, grenade-plan.md) — 대시 판과 같은 집(PickDashHome, 여덟 방향 1100cm 빔). 상대는 숨겨 두고(사람 칸만 다시 켬) 던짐 칸마다 나 · 상대 체력을 1000 으로 둔다(피해 값만 본다).
+	// 던짐 칸은 5.1초 — GREN_PRESS_AT 에 Q 를 한 프레임 누른다. 쿨다운 5초(GE_Grenade_Cooldown) = 300프레임이 다음 칸 누름(306프레임 뒤) 전에 끝나고, 타이머 2초도 칸 안에 든다
+	enum class EGrenPlace : uint8 { Open, WallCam, WallGap, WallBack, FoeAt, Slope, Corner };
+	struct FGrenShot { const TCHAR* Name; EGrenPlace Place; float Pitch; float Arg; bool bRun; bool bJump; };
+	const FGrenShot GREN_SHOTS[] = {
+		// 묶음 1 · 2 — 방향 · 피치(집, 몸 요 0). 하늘 둘(선이 안 맞는 갈래 — 짐작 1) · 수평 · 먼 바닥 둘 · 발밑(카메라가 위로 올라가 선 시작점도 바닥 위 — g0a4 카메라 z 542 · 시작 z 약 152 · 맞은 거리 118)
+		{ TEXT("sky_p45"),      EGrenPlace::Open,     45.f,  0.f,    false, false },	// 0
+		{ TEXT("sky_p60"),      EGrenPlace::Open,     60.f,  0.f,    false, false },	// 1
+		{ TEXT("p0"),           EGrenPlace::Open,     0.f,   0.f,    false, false },	// 2
+		{ TEXT("floor_m20"),    EGrenPlace::Open,     -20.f, 0.f,    false, false },	// 3
+		{ TEXT("floor_m35"),    EGrenPlace::Open,     -35.f, 0.f,    false, false },	// 4 바닥 → 멈춤(묶음 3)
+		{ TEXT("feet_m60"),     EGrenPlace::Open,     -60.f, 0.f,    false, false },	// 5
+		// 달리며 · 점프 중 · 앉은 채(앉기는 각본 칸이 켠다)
+		{ TEXT("run_p0"),       EGrenPlace::Open,     0.f,   0.f,    true,  false },	// 6
+		{ TEXT("jump_p0"),      EGrenPlace::Open,     0.f,   0.f,    false, true  },	// 7
+		{ TEXT("crouch_p0"),    EGrenPlace::Open,     0.f,   0.f,    false, false },	// 8
+		// 가까운 벽 — Arg = 카메라에서 벽까지(시선 방향). 350 = 선 시작점(450)보다 안(처음 300 은 캡슐이 벽에 닿아도 321 까지라 못 맞췄다 — g0a1) · 480 · 510 = 맞은 거리 30 · 60(「< 45」 경계 앞뒤). 1000 = 벽 튕김(묶음 3)
+		{ TEXT("wall_cam350"),  EGrenPlace::WallCam,  0.f,   350.f,  false, false },	// 9
+		{ TEXT("wall_cam480"),  EGrenPlace::WallCam,  0.f,   480.f,  false, false },	// 10
+		{ TEXT("wall_cam510"),  EGrenPlace::WallCam,  0.f,   510.f,  false, false },	// 11
+		{ TEXT("wall_cam1000"), EGrenPlace::WallCam,  0.f,   1000.f, false, false },	// 12
+		// 던진 사람 바로 앞 벽(캡슐 겉면 2cm — 0.16초 안에 벽, 되돌아오면 내 몸 · 묶음 4 · 6 자기) · 등이 벽(카메라가 벽에 밀림 — 묶음 18)
+		{ TEXT("wall_front"),   EGrenPlace::WallGap,  0.f,   2.f,    false, false },	// 13
+		{ TEXT("wall_back"),    EGrenPlace::WallBack, 0.f,   2.f,    false, false },	// 14
+		// 비스듬한 면(미끄러짐) · 구석(두 벽) — FindSurface 가 찾은 점을 겨눈다(구석은 그 점을 대각으로 보는 자리로 옮겨서 · 묶음 3)
+		{ TEXT("slope"),        EGrenPlace::Slope,    0.f,   0.f,    false, false },	// 15
+		{ TEXT("corner"),       EGrenPlace::Corner,   0.f,   0.f,    false, false },	// 16
+		// 사람 — Arg = 앞 거리. 800 은 몸 가운데를 겨눔(묶음 1 사람 몸 · 6 적이면 바로 터짐 / 같은 팀이면 튕김), 72 는 캡슐이 2cm 떨어진 바로 앞 적(던진 사람 캡슐 안에서 터짐)
+		{ TEXT("foe_body"),     EGrenPlace::FoeAt,    0.f,   800.f,  false, false },	// 17
+		{ TEXT("foe_close"),    EGrenPlace::FoeAt,    0.f,   72.f,   false, false },	// 18
+		{ TEXT("foe_same"),     EGrenPlace::FoeAt,    0.f,   800.f,  false, false },	// 19
+	};
+	const FGrenShot& GrenShotAt(float Arg) { return GREN_SHOTS[FMath::Clamp((int32)Arg, 0, (int32)UE_ARRAY_COUNT(GREN_SHOTS) - 1)]; }
+	const FStep GRENADE_SCRIPT[] = {
+		{ TEXT("settle"),        1.0f, EAct::Home,         0.f,  false },
+		{ TEXT("foe_setup"),     0.5f, EAct::FoeSetup,     0.f,  false },	// 다른 팀 · 체력 1000(숨긴 채)
+		{ TEXT("sky_p45"),       5.1f, EAct::GrenThrow,    0.f,  false },
+		{ TEXT("sky_p60"),       5.1f, EAct::GrenThrow,    1.f,  false },
+		{ TEXT("p0"),            5.1f, EAct::GrenThrow,    2.f,  false },
+		{ TEXT("floor_m20"),     5.1f, EAct::GrenThrow,    3.f,  false },
+		{ TEXT("floor_m35"),     5.1f, EAct::GrenThrow,    4.f,  false },
+		{ TEXT("feet_m60"),      5.1f, EAct::GrenThrow,    5.f,  false },
+		{ TEXT("run_p0"),        5.1f, EAct::GrenThrow,    6.f,  false },
+		{ TEXT("jump_p0"),       5.1f, EAct::GrenThrow,    7.f,  false },
+		{ TEXT("crouch"),        0.8f, EAct::CrouchToggle, 0.f,  false },
+		{ TEXT("crouch_p0"),     5.1f, EAct::GrenThrow,    8.f,  false },
+		{ TEXT("stand"),         0.8f, EAct::StandUp,      0.f,  false },
+		{ TEXT("wall_cam350"),   5.1f, EAct::GrenThrow,    9.f,  false },
+		{ TEXT("wall_cam480"),   5.1f, EAct::GrenThrow,    10.f, false },
+		{ TEXT("wall_cam510"),   5.1f, EAct::GrenThrow,    11.f, false },
+		{ TEXT("wall_cam1000"),  5.1f, EAct::GrenThrow,    12.f, false },
+		{ TEXT("wall_front"),    5.1f, EAct::GrenThrow,    13.f, false },
+		{ TEXT("wall_back"),     5.1f, EAct::GrenThrow,    14.f, false },
+		{ TEXT("slope"),         5.1f, EAct::GrenThrow,    15.f, false },
+		{ TEXT("corner"),        5.1f, EAct::GrenThrow,    16.f, false },
+		{ TEXT("foe_show"),      0.3f, EAct::FoeShow,      0.f,  false },
+		{ TEXT("foe_setup2"),    0.5f, EAct::FoeSetup,     0.f,  false },
+		{ TEXT("foe_body"),      5.1f, EAct::GrenThrow,    17.f, false },
+		{ TEXT("foe_close"),     5.1f, EAct::GrenThrow,    18.f, false },
+		{ TEXT("foe_same_team"), 0.3f, EAct::FoeSameTeam,  0.f,  false },
+		{ TEXT("foe_same"),      5.1f, EAct::GrenThrow,    19.f, false },
+		{ TEXT("foe_setup3"),    0.5f, EAct::FoeSetup,     0.f,  false },
+		{ TEXT("foe_away"),      1.0f, EAct::FoeAway,      0.f,  false },
+		{ TEXT("end"),           0.5f, EAct::Home,         0.f,  false },
+	};
+	const TCHAR* const GREN_TAG = TEXT("InputTag.Weapon.Grenade");	// Q(IMC_ShooterGame) → GA_Grenade, 켜기 = OnInputTriggered
+	constexpr float GREN_PRESS_AT = 0.5f;		// 칸 시작에서 Q 까지 — 겨눔(AimAt)이 모이고 벽 거리 맞춤 두 번이 끝난 뒤(제안값)
+	constexpr float GREN_ADJUST_AT0 = 0.2f;		// 벽 카메라 칸 — 몸 앞뒤 맞춤 두 번(순간이동 뒤 카메라가 따라온 다음, 제안값)
+	constexpr float GREN_ADJUST_AT1 = 0.35f;
+	constexpr int32 GREN_RUN_AFTER = 10;		// 달리며 칸 — 누른 뒤 이 프레임까지 더 달린다(켜지는 다음 프레임이 달리는 중이도록)
+	constexpr float GREN_JUMP_AT = 0.3f;		// 점프 칸 — 점프 누름(점프 능력 InputTag.Jump)
+	constexpr int32 GREN_JUMP_THROW_AFTER = 12;	// 점프 누른 뒤 Q 까지 — 오르는 중(제안값)
+	// GA_Grenade 방향 고르기 · B_Grenade 폭발 값 — grenade-plan.md 「Lyra」 표(원본 기준). 시험판(LogAimTrace · LogBoom)이 같은 식으로 다시 해 본다
+	constexpr double GREN_TRACE_START = 450.0;	// Start Trace Offset — 선 시작 = 카메라 + 방향 × 450
+	constexpr double GREN_TRACE_RANGE = 3150.0;	// Default Targeting Range — 선 끝 = 카메라 + 방향 × 3150
+	constexpr double GREN_CTL_BELOW = 45.0;		// 맞은 거리가 이 아래면 조종 회전 그대로(ga_flow.txt:142-144 Less_DoubleDouble B=45)
+	constexpr double GREN_RADIUS = 450.0;		// Radius — 폭발 구 · 등급 나눗수
+	constexpr double GREN_WALL_START_GAP = 700.0;	// 벽 카메라 칸 첫 자리 — 캡슐이 벽에서 이만큼. 카메라 거리는 맞춤 두 번이 재서 맞춘다
+	constexpr double GREN_WALL_MIN_GAP = 2.0;	// 맞춤이 몸을 벽 안으로 밀지 않게 — 캡슐 겉면 최소 간격(가장 가까워도 wall_front 와 같음)
+	constexpr double GREN_SURF_TRACE = 3000.0;	// 구석 찾기 옆 선 길이
+	constexpr double GREN_SLOPE_NZ_MIN = 0.2;	// 비스듬한 면 — 맞은 면 법선 Z 가 이 사이(바닥 1 · 벽 0 이 아닌 것, 제안값)
+	constexpr double GREN_SLOPE_NZ_MAX = 0.985;	// 약 10도. 처음 0.9 는 이 맵 비탈(g0a1 집 둘레 Cube7 0.966 · Cube6_0 밑면 −0.342 → 윗면 약 0.94)을 다 뺐다
+	constexpr double GREN_SLOPE_GRID = 2500.0;	// 비스듬한 면 격자 — 집 둘레 ±이만큼(구석 선 · 방향 선 3150 안)
+	constexpr double GREN_SLOPE_STEP = 100.0;	// 격자 간격(51 × 51 선 — 던짐 칸 시작에 한 번)
+	constexpr double GREN_SLOPE_DROP_FROM = 1500.0;	// 격자 선 — 집 높이 위 이만큼에서 아래로 두 배 길이
+	constexpr double GREN_CORNER_FROM_WALL = 60.0;	// 구석 찾기 — 벽 a 앞 이만큼에서 옆으로 쏜다(벽 겉 굴곡에 안 걸리게, 제안값)
+	constexpr double GREN_CORNER_Z = 60.0;		// 구석 겨눔 높이 — 바닥 위(제안값)
+	constexpr double GREN_CORNER_STAND = 800.0;	// 구석 칸 던질 자리 — 겨눔 점에서 대각 바깥 이만큼(제안값)
+	constexpr double GREN_CORNER_INSET = 30.0;	// 구석이 보이나 — 구석에서 대각 안쪽으로 이만큼 앞 점까지 선이 안 막히면
+	constexpr double GREN_AIM_MIN_FOE = 200.0;	// 상대가 이보다 멀면 몸 가운데를 겨눈다(바로 앞 칸은 피치 0 그대로)
+
 	const TCHAR* const WEAPON_DEFS[3] = {
 		TEXT("/ShooterCore/Weapons/Pistol/WID_Pistol.WID_Pistol_C"),
 		TEXT("/ShooterCore/Weapons/Rifle/WID_Rifle.WID_Rifle_C"),
@@ -358,7 +450,7 @@ namespace
 	constexpr float MELEE_SIDE_FORWARD = 250.f;	// 옆 거리 칸에서 상대를 세우는 앞 거리 — 맞는 앞 범위(150~520, gym1) 한가운데쯤
 	constexpr float WATCH_LOG_EVERY = 5.f;		// 다리 판 마지막 칸에서 점수를 적는 간격(초)
 
-	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장)
+	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장) · 6 = 수류탄(연습장)
 	const FStep& StepAt(int32 Script, int32 I)
 	{
 		switch (Script)
@@ -368,6 +460,7 @@ namespace
 		case 3: return BUMP_SCRIPT[I];
 		case 4: return WEAPONS_SCRIPT[I];
 		case 5: return DASH_SCRIPT[I];
+		case 6: return GRENADE_SCRIPT[I];
 		default: return GYM_SCRIPT[I];
 		}
 	}
@@ -380,6 +473,7 @@ namespace
 		case 3: return UE_ARRAY_COUNT(BUMP_SCRIPT);
 		case 4: return UE_ARRAY_COUNT(WEAPONS_SCRIPT);
 		case 5: return UE_ARRAY_COUNT(DASH_SCRIPT);
+		case 6: return UE_ARRAY_COUNT(GRENADE_SCRIPT);
 		default: return UE_ARRAY_COUNT(GYM_SCRIPT);
 		}
 	}
@@ -465,11 +559,12 @@ void UMOBContentProbeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	bBump = Mode == TEXT("bump");
 	bWeapons = Mode == TEXT("weapons");
 	bDash = Mode == TEXT("dash");
+	bGrenade = Mode == TEXT("grenade");
 	bForceQuinn = FParse::Param(Cmd, TEXT("MOBCPQuinn"));
 	StartRealAt = FPlatformTime::Seconds();
 	GAreScreenMessagesEnabled = false;
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_INIT world=%s tag=%s mode=%s"), *GetNameSafe(GetWorld()), *Tag,
-		bBridge ? TEXT("bridge") : (bPads ? TEXT("pads") : (bBump ? TEXT("bump") : (bWeapons ? TEXT("weapons") : (bDash ? TEXT("dash") : TEXT("gym"))))));
+		bBridge ? TEXT("bridge") : (bPads ? TEXT("pads") : (bBump ? TEXT("bump") : (bWeapons ? TEXT("weapons") : (bDash ? TEXT("dash") : (bGrenade ? TEXT("grenade") : TEXT("gym")))))));
 }
 
 TStatId UMOBContentProbeSubsystem::GetStatId() const
@@ -535,11 +630,12 @@ void UMOBContentProbeSubsystem::Tick(float DeltaTime)
 	}
 
 	// 도중에 내 캐릭터가 바뀌면(경기 시작 초기화 · 죽음) 그 뒤 값은 다른 판의 것이다 — 멈춘다. pads1 에서 경기 시작 초기화가 큰 받침 대기를 끊었다
-	// 다리 판은 봇에게 죽어 다시 생기는 것도 지금 클라의 모습이라 적기만 하고 이어 간다. 무기 판은 죽음 뒤 가방을 보려고 스스로 죽으니 이어 간다
+	// 다리 판은 봇에게 죽어 다시 생기는 것도 지금 클라의 모습이라 적기만 하고 이어 간다. 무기 판은 죽음 뒤 가방을 보려고 스스로 죽으니 이어 간다.
+	// 수류탄 판도 이어 간다(던진 사람이 죽은 뒤 터짐 · 부활 뒤 쿨다운 — 묶음 11)
 	if (Me() != ClearPawn.Get())
 	{
 		UE_LOG(LogMOBCProbe, Warning, TEXT("MOB_CPROBE_PAWN_CHANGED step=%d from=%s to=%s t=%.4f"), Step, *GetNameSafe(ClearPawn.Get()), *GetNameSafe(Me()), GetWorld()->GetTimeSeconds());
-		if (!bBridge && !bWeapons)
+		if (!bBridge && !bWeapons && !bGrenade)
 		{
 			Finish(false);
 			return;
@@ -554,6 +650,7 @@ void UMOBContentProbeSubsystem::Tick(float DeltaTime)
 		Foe->OnActorHit.AddDynamic(this, &UMOBContentProbeSubsystem::OnPawnHit);
 		bHitsBound = true;
 	}
+	if (bGrenade) WatchGrenades();
 	DuringStep();
 	WriteRow();
 	StepTime += DeltaTime;
@@ -580,7 +677,10 @@ bool UMOBContentProbeSubsystem::WaitReady(float DeltaTime)
 	static const FGameplayTag Immune = FGameplayTag::RequestGameplayTag(TEXT("Gameplay.DamageImmunity"));
 	// 다리 판은 Lyra 경기 흐름을 다리가 막아(BlockLyraReset) 무적이 언제 풀리는지 정해져 있지 않다 → 캐릭터만 보고 더 오래 기다린다(서버 접속 · 첫 위치 받기)
 	const bool bImmuneBlocks = !bBridge && ASC && ASC->HasMatchingGameplayTag(Immune);
-	if (!ASC || bImmuneBlocks || Ch != ClearPawn.Get())
+	// 기다리는 동안 연습장 봇에게 죽으면(g0a2 — 준비 때 hp 0 · 죽은 몸은 충돌이 꺼져 집 고르기 선이 하나도 안 맞고 첫 던짐이 막혔다) 그 몸으로 시작하지 않는다.
+	// 새 몸이 생기면 처음부터 다시 센다. 다리 판은 서버가 체력을 정하므로 뺀다
+	const bool bDeadBlocks = !bBridge && ASC && HealthOf(Ch) <= 0.f;
+	if (!ASC || bImmuneBlocks || bDeadBlocks || Ch != ClearPawn.Get())
 	{
 		ClearPawn = Ch;
 		ClearSeconds = 0.f;
@@ -631,7 +731,8 @@ bool UMOBContentProbeSubsystem::Prepare()
 		GoHome();
 		PlaceFoe(-400.0, true);
 		// 대시 판 — 상대는 대시 길(뒤 대시가 등 뒤 400 을 지난다)을 막지 않게 숨기고, 집 둘레에서 여덟 방향이 빈 자리를 집으로 고른다(MOB_CPROBE_DASHHOME · CLEAR 줄)
-		if (bDash)
+		// 수류탄 판도 같은 집 · 같은 숨김(사람 칸에서만 다시 켬)
+		if (bDash || bGrenade)
 		{
 			SetFoeActive(false);
 			PickDashHome();
@@ -646,6 +747,17 @@ bool UMOBContentProbeSubsystem::Prepare()
 	// 대시 판만 칸을 더한다(다른 판 기록은 바이트째 그대로) — 능력 켜짐 넷 · 쿨다운 남은 초 · 든 무기 탄창 · 조종 피치 · 요 ·
 	// 마지막 이동 입력(이번 프레임 이동이 가져간 것 = 대시가 방향으로 쓰는 값) · 이 프레임에 넣은 이동 입력(다음 프레임 이동이 가져간다)
 	if (bDash) Csv += TEXT(",dashActive,fireActive,reloadActive,jumpActive,dashCooldown,mag,ctlPitch,ctlYaw,lastInX,lastInY,inX,inY");
+	// 수류탄 판만 — 살아 있는 수류탄 수 · 쿨다운 남은 초 · 카메라 자리 · 회전 · camBack(카메라 → 몸을 시선 방향으로 잰 거리 = 사격 시작점까지, 다리 TargetingStart 식) ·
+	// 조종 회전 · 능력 켜짐 넷. 수류탄마다 자리 · 속도 · 회전은 따로 cprobe_<tag>_gren.csv(WatchGrenades)
+	if (bGrenade)
+	{
+		Csv += TEXT(",gLive,gCooldown,camX,camY,camZ,camPitch,camYaw,camBack,ctlPitch,ctlYaw,grenadeActive,fireActive,reloadActive,dashActive");
+		GrenCsv = TEXT("frame,name,age,x,y,z,vx,vy,vz,pitch,yaw,roll,hidden,pmActive,sim,sliding\n");
+		SpawnedHandle = World->AddOnActorSpawnedHandler(FOnActorSpawned::FDelegate::CreateUObject(this, &UMOBContentProbeSubsystem::OnActorSpawned));
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GPARAMS aimChannel=%d boomChannel=%d boomObject=%d weaponChannel=%d weaponCapsuleChannel=%d shots=%d"),
+			(int32)UEngineTypes::ConvertToCollisionChannel(TraceTypeQuery4), (int32)UEngineTypes::ConvertToCollisionChannel(TraceTypeQuery5),
+			(int32)UEngineTypes::ConvertToCollisionChannel(ObjectTypeQuery3), (int32)Lyra_TraceChannel_Weapon, (int32)Lyra_TraceChannel_Weapon_Capsule, (int32)UE_ARRAY_COUNT(GREN_SHOTS));
+	}
 	Csv += TEXT("\n");
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_READY pawn=%s home=%s steps=%d"), *GetNameSafe(Ch), *Home.ToString(), StepCount(ScriptIdx()));
 	return true;
@@ -1070,6 +1182,9 @@ void UMOBContentProbeSubsystem::BeginStep()
 		PlaceFoe(-400.0, true);
 		SetFoeActive(false);
 		break;
+	case EAct::GrenThrow:
+		BeginGrenade();
+		break;
 	}
 }
 
@@ -1289,6 +1404,10 @@ void UMOBContentProbeSubsystem::DuringStep()
 	{
 		DuringDash();
 	}
+	else if (bGrenade && S.Act == EAct::GrenThrow)
+	{
+		DuringGrenade();
+	}
 
 	if (bPads && Ch)
 	{
@@ -1319,6 +1438,11 @@ void UMOBContentProbeSubsystem::EndStep()
 	if (bDash && IsDashAct(S.Act))
 	{
 		EndDash();
+		return;
+	}
+	if (bGrenade && S.Act == EAct::GrenThrow)
+	{
+		EndGrenade();
 		return;
 	}
 	if (IsMeleeOnce(S.Act))
@@ -1605,6 +1729,24 @@ void UMOBContentProbeSubsystem::WriteRow()
 			IsAbilityActive(TEXT("GA_Hero_Jump")) ? 1 : 0, DashCooldownLeft(), ActiveMagazine(), FRotator::NormalizeAxis(CR.Pitch), FRotator::NormalizeAxis(CR.Yaw),
 			LastIn.X, LastIn.Y, FrameIn.X, FrameIn.Y);
 	}
+	if (bGrenade)
+	{
+		const APlayerCameraManager* Cam = PC ? PC->PlayerCameraManager : nullptr;
+		const FVector CL = Cam ? Cam->GetCameraLocation() : FVector::ZeroVector;
+		const FRotator CR = Cam ? Cam->GetCameraRotation() : FRotator::ZeroRotator;
+		const FRotator Ctl = PC ? PC->GetControlRotation() : FRotator::ZeroRotator;
+		int32 Live = 0;
+		for (const FGrenRec& R : Grens) Live += R.A.IsValid() ? 1 : 0;
+		Csv += FString::Printf(TEXT(",%d,%.4f,%.5f,%.5f,%.5f,%.6f,%.6f,%.5f,%.6f,%.6f,%d,%d,%d,%d"), Live, GrenadeCooldownLeft(), CL.X, CL.Y, CL.Z,
+			FRotator::NormalizeAxis(CR.Pitch), FRotator::NormalizeAxis(CR.Yaw), (P - CL) | CR.Vector(), FRotator::NormalizeAxis(Ctl.Pitch), FRotator::NormalizeAxis(Ctl.Yaw),
+			IsAbilityActive(TEXT("GA_Grenade")) ? 1 : 0, IsAbilityActive(TEXT("GA_Weapon_Fire")) ? 1 : 0, IsAbilityActive(TEXT("GA_Weapon_Reload_")) ? 1 : 0,
+			IsAbilityActive(TEXT("GA_Hero_Dash")) ? 1 : 0);
+		PrevCamLoc = CL;
+		PrevCamRot = CR;
+		PrevMeLoc = P;
+		PrevMyHp = HealthOf(Ch);
+		PrevFoeHp = HealthOf(F);
+	}
 	Csv += TEXT("\n");
 	PrevHand = Hand;
 	bPrevHandValid = true;
@@ -1854,10 +1996,516 @@ void UMOBContentProbeSubsystem::Finish(bool bOk)
 {
 	bDone = true;
 	if (FailMsgHandle.IsValid()) FailMsgHandle.Unregister();
+	if (SpawnedHandle.IsValid() && GetWorld()) GetWorld()->RemoveOnActorSpawnedHandler(SpawnedHandle);
 	LogBodies(TEXT("end"));
+	if (bGrenade)
+	{
+		const FString GPath = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("cprobe_%s_gren.csv"), *Tag);
+		const bool bGSaved = FFileHelper::SaveStringToFile(GrenCsv, *GPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GDONE saved=%d path=%s grenades=%d"), bGSaved ? 1 : 0, *GPath, Grens.Num());
+	}
 	const FString Path = FPaths::ProjectSavedDir() / TEXT("MOB") / FString::Printf(TEXT("cprobe_%s.csv"), *Tag);
 	const bool bSaved = FFileHelper::SaveStringToFile(Csv, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_DONE ok=%d saved=%d path=%s frames=%d steps=%d realSec=%.1f"),
 		bOk ? 1 : 0, bSaved ? 1 : 0, *Path, Frame, FMath::Max(Step, 0), FPlatformTime::Seconds() - StartRealAt);
 	FPlatformMisc::RequestExit(false, TEXT("MOBContentProbe"));
+}
+
+// 수류탄 판(G-0) — 생긴 수류탄을 붙잡는다. 엔진은 생성이 다 끝난 뒤(BeginPlay 뒤 — 0.16초 타이머 · 던진 사람 무시가 걸린 뒤, World.cpp OnActorFinishedSpawning) 이 알림을 준다.
+// 능력이 방향을 고른 그 실행 줄 안이라 지금 카메라 · 조종 회전 · 내 자리 = 능력이 읽은 값이다(짐작 4). 한 줄 앞 기록 값(Prev*)도 대조로 적는다
+void UMOBContentProbeSubsystem::OnActorSpawned(AActor* A)
+{
+	if (!A || !A->GetClass()->GetName().StartsWith(TEXT("B_Grenade"))) return;
+	FGrenRec& R = Grens.AddDefaulted_GetRef();
+	R.A = A;
+	R.Name = A->GetName();
+	R.SpawnFrame = Frame;
+	++GrenSpawns;
+	if (GrenSpawnFrame < 0) GrenSpawnFrame = Frame;
+	FrameEvents += TEXT("g_spawn;");
+	A->OnActorHit.AddDynamic(this, &UMOBContentProbeSubsystem::OnGrenadeHit);
+	UProjectileMovementComponent* PM = A->FindComponentByClass<UProjectileMovementComponent>();
+	if (PM)
+	{
+		PM->OnProjectileBounce.AddDynamic(this, &UMOBContentProbeSubsystem::OnGrenadeBounce);
+		PM->OnProjectileStop.AddDynamic(this, &UMOBContentProbeSubsystem::OnGrenadeStop);
+	}
+	const ACharacter* Ch = Me();
+	const APlayerController* PC = Ch ? Cast<APlayerController>(Ch->GetController()) : nullptr;
+	const APlayerCameraManager* Cam = PC ? PC->PlayerCameraManager : nullptr;
+	const FVector CamLoc = Cam ? Cam->GetCameraLocation() : FVector::ZeroVector;
+	const FRotator CamRot = Cam ? Cam->GetCameraRotation() : FRotator::ZeroRotator;
+	const FRotator Ctl = PC ? PC->GetControlRotation() : FRotator::ZeroRotator;
+	const FVector L = A->GetActorLocation();
+	const FRotator Rot = A->GetActorRotation();
+	const FVector V = PM ? PM->Velocity : FVector::ZeroVector;
+	const FVector MeL = Ch ? Ch->GetActorLocation() : FVector::ZeroVector;
+	const UCharacterMovementComponent* M = Ch ? Ch->GetCharacterMovement() : nullptr;
+	const FVector MeV = M ? M->Velocity : FVector::ZeroVector;
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GSPAWN frame=%d step=%s name=%s instigator=%s loc=%.10f,%.10f,%.10f rot=%.10f,%.10f,%.10f vel=%.10f,%.10f,%.10f ")
+		TEXT("me=%.10f,%.10f,%.10f mePrev=%.10f,%.10f,%.10f meVel=%.6f,%.6f,%.6f meYaw=%.10f crouched=%d mode=%d ")
+		TEXT("cam=%.10f,%.10f,%.10f camRot=%.10f,%.10f camPrev=%.10f,%.10f,%.10f camRotPrev=%.10f,%.10f ctl=%.10f,%.10f"),
+		Frame, bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("-"), *R.Name, *GetNameSafe(A->GetInstigator()), L.X, L.Y, L.Z, Rot.Pitch, Rot.Yaw, Rot.Roll, V.X, V.Y, V.Z,
+		MeL.X, MeL.Y, MeL.Z, PrevMeLoc.X, PrevMeLoc.Y, PrevMeLoc.Z, MeV.X, MeV.Y, MeV.Z, Ch ? Ch->GetActorRotation().Yaw : 0.0, (Ch && Ch->bIsCrouched) ? 1 : 0,
+		M ? (int32)M->MovementMode.GetValue() : -1,
+		CamLoc.X, CamLoc.Y, CamLoc.Z, CamRot.Pitch, CamRot.Yaw, PrevCamLoc.X, PrevCamLoc.Y, PrevCamLoc.Z, PrevCamRot.Pitch, PrevCamRot.Yaw, Ctl.Pitch, Ctl.Yaw);
+	LogAimTrace(TEXT("now"), CamLoc, CamRot, L);
+	LogAimTrace(TEXT("prev"), PrevCamLoc, PrevCamRot, L);
+}
+
+// GA_Grenade 「Get Spawn Rotation」 그대로 해 본다(ga_flow.txt:95-139) — 카메라 + 방향 × 450 에서 × 3150 까지 무기 채널 선(TraceTypeQuery4 · 복잡 끔 · 내 캐릭터 빼고).
+// 맞은 거리 < 45 면 조종 회전(안 맞으면 거리 0 → 이 갈래, 짐작 1), 아니면 놓을 자리에서 맞은 점(안 맞으면 끝점)을 보는 회전(FindLookAtRotation = MakeFromX).
+// 첫 속도 = 그 회전으로 돌린 정규화(1, 0, 0.15) × 2500. 실제 생긴 회전 · 속도(GSPAWN)와 견주면 능력이 어느 카메라 값을 썼나가 갈린다
+void UMOBContentProbeSubsystem::LogAimTrace(const TCHAR* Which, const FVector& CamLoc, const FRotator& CamRot, const FVector& SpawnLoc) const
+{
+	ACharacter* Ch = Me();
+	const APlayerController* PC = Ch ? Cast<APlayerController>(Ch->GetController()) : nullptr;
+	const FVector Dir = CamRot.Vector();
+	const FVector Start = CamLoc + Dir * GREN_TRACE_START;
+	const FVector End = CamLoc + Dir * GREN_TRACE_RANGE;
+	TArray<AActor*> Ignore;
+	if (Ch) Ignore.Add(Ch);
+	FHitResult Hit;
+	const bool bHit = UKismetSystemLibrary::LineTraceSingle(this, Start, End, TraceTypeQuery4, false, Ignore, EDrawDebugTrace::None, Hit, true);
+	const bool bCtl = Hit.Distance < GREN_CTL_BELOW;
+	const FRotator Ctl = PC ? PC->GetControlRotation() : FRotator::ZeroRotator;
+	const FVector Target = bHit ? Hit.Location : End;
+	const FRotator Look = FRotationMatrix::MakeFromX(Target - SpawnLoc).Rotator();
+	const FRotator Pick = bCtl ? Ctl : Look;
+	const FVector V = Pick.Quaternion().RotateVector(FVector(1.0, 0.0, 0.15).GetSafeNormal()) * 2500.0;
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GAIM frame=%d which=%s hit=%d dist=%.6f actor=%s comp=%s hitLoc=%.6f,%.6f,%.6f normal=%.5f,%.5f,%.5f branch=%s pick=%.10f,%.10f,%.10f velPred=%.6f,%.6f,%.6f"),
+		Frame, Which, bHit ? 1 : 0, Hit.Distance, *GetNameSafe(Hit.GetActor()), *GetNameSafe(Hit.GetComponent()), Hit.Location.X, Hit.Location.Y, Hit.Location.Z,
+		Hit.ImpactNormal.X, Hit.ImpactNormal.Y, Hit.ImpactNormal.Z, bCtl ? TEXT("ctl") : (bHit ? TEXT("hit") : TEXT("end")), Pick.Pitch, Pick.Yaw, Pick.Roll, V.X, V.Y, V.Z);
+}
+
+// 수류탄이 막혀 부딪힐 때마다(BP ReceiveHit 과 같은 알림 — 엔진이 그것 다음에 이 대리자를 부른다). vel = 부딪힌 걸음의 처음 속도(튕김 셈 전).
+// comp · objType = 맞은 쪽 성분(사람이면 캡슐인지 메시인지 — 짐작 6)
+void UMOBContentProbeSubsystem::OnGrenadeHit(AActor* SelfActor, AActor* OtherActor, FVector NormalImpulse, const FHitResult& Hit)
+{
+	const UProjectileMovementComponent* PM = SelfActor ? SelfActor->FindComponentByClass<UProjectileMovementComponent>() : nullptr;
+	const FVector V = PM ? PM->Velocity : FVector::ZeroVector;
+	int32 SpawnF = -1;
+	for (const FGrenRec& R : Grens)
+	{
+		if (R.A.Get() == SelfActor) SpawnF = R.SpawnFrame;
+	}
+	const TCHAR* Who = !OtherActor ? TEXT("-") : (OtherActor == Me() ? TEXT("me") : (OtherActor == Foe.Get() ? TEXT("foe") : TEXT("world")));
+	if (SpawnF >= 0 && SpawnF == GrenSpawnFrame)
+	{
+		++GrenHits;
+		if (GrenFirstHitFrame < 0)
+		{
+			GrenFirstHitFrame = Frame;
+			GrenFirstHit = FString::Printf(TEXT("%s/%s/%s"), Who, *GetNameSafe(OtherActor), *GetNameSafe(Hit.GetComponent()));
+		}
+	}
+	FrameEvents += FString::Printf(TEXT("g_hit_%s;"), Who);
+	const UPrimitiveComponent* OC = Hit.GetComponent();
+	const FVector GL = SelfActor ? SelfActor->GetActorLocation() : FVector::ZeroVector;
+	const FRotator GR = SelfActor ? SelfActor->GetActorRotation() : FRotator::ZeroRotator;
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GHIT frame=%d step=%s name=%s age=%d who=%s other=%s comp=%s objType=%d bone=%s time=%.7f dist=%.7f pen=%d penDepth=%.6f ")
+		TEXT("normal=%.8f,%.8f,%.8f impactN=%.8f,%.8f,%.8f loc=%.8f,%.8f,%.8f impact=%.8f,%.8f,%.8f start=%.8f,%.8f,%.8f end=%.8f,%.8f,%.8f vel=%.6f,%.6f,%.6f grenLoc=%.8f,%.8f,%.8f grenRot=%.8f,%.8f,%.8f"),
+		Frame, bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("-"), *GetNameSafe(SelfActor), SpawnF >= 0 ? Frame - SpawnF : -1, Who, *GetNameSafe(OtherActor), *GetNameSafe(OC),
+		OC ? (int32)OC->GetCollisionObjectType() : -1, *Hit.BoneName.ToString(), Hit.Time, Hit.Distance, Hit.bStartPenetrating ? 1 : 0, Hit.PenetrationDepth,
+		Hit.Normal.X, Hit.Normal.Y, Hit.Normal.Z, Hit.ImpactNormal.X, Hit.ImpactNormal.Y, Hit.ImpactNormal.Z, Hit.Location.X, Hit.Location.Y, Hit.Location.Z,
+		Hit.ImpactPoint.X, Hit.ImpactPoint.Y, Hit.ImpactPoint.Z, Hit.TraceStart.X, Hit.TraceStart.Y, Hit.TraceStart.Z, Hit.TraceEnd.X, Hit.TraceEnd.Y, Hit.TraceEnd.Z,
+		V.X, V.Y, V.Z, GL.X, GL.Y, GL.Z, GR.Pitch, GR.Yaw, GR.Roll);
+}
+
+const AActor* UMOBContentProbeSubsystem::NearestGrenade(const FVector& Where, double& OutDist) const
+{
+	const AActor* Best = nullptr;
+	OutDist = -1.0;
+	for (const FGrenRec& R : Grens)
+	{
+		const AActor* A = R.A.Get();
+		if (!A) continue;
+		const double D = FVector::Dist(A->GetActorLocation(), Where);
+		if (!Best || D < OutDist)
+		{
+			Best = A;
+			OutDist = D;
+		}
+	}
+	return Best;
+}
+
+// 튕김 — 엔진이 튕긴 속도를 셈한 바로 뒤(ProjectileMovementComponent HandleImpact). impactVel = 부딪힌 순간 속도, newVel = 튕긴 뒤(최대 속도 자르기 전) · 미끄러짐 깃발
+void UMOBContentProbeSubsystem::OnGrenadeBounce(const FHitResult& ImpactResult, const FVector& ImpactVelocity)
+{
+	double D = -1.0;
+	const AActor* G = NearestGrenade(ImpactResult.Location, D);
+	const UProjectileMovementComponent* PM = G ? G->FindComponentByClass<UProjectileMovementComponent>() : nullptr;
+	const FVector V = PM ? PM->Velocity : FVector::ZeroVector;
+	FrameEvents += TEXT("g_bounce;");
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GBOUNCE frame=%d name=%s match=%.4f other=%s impactVel=%.6f,%.6f,%.6f newVel=%.6f,%.6f,%.6f normal=%.8f,%.8f,%.8f time=%.7f sliding=%d"),
+		Frame, *GetNameSafe(G), D, *GetNameSafe(ImpactResult.GetActor()), ImpactVelocity.X, ImpactVelocity.Y, ImpactVelocity.Z, V.X, V.Y, V.Z,
+		ImpactResult.Normal.X, ImpactResult.Normal.Y, ImpactResult.Normal.Z, ImpactResult.Time, (PM && PM->bIsSliding) ? 1 : 0);
+}
+
+// 멈춤 — 튕긴 뒤 속도가 멈춤 문턱(25) 아래라 걸음을 끝냄(엔진 StopSimulating)
+void UMOBContentProbeSubsystem::OnGrenadeStop(const FHitResult& ImpactResult)
+{
+	double D = -1.0;
+	const AActor* G = NearestGrenade(ImpactResult.Location, D);
+	const FVector L = G ? G->GetActorLocation() : FVector::ZeroVector;
+	FrameEvents += TEXT("g_stop;");
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GSTOP frame=%d name=%s match=%.4f other=%s loc=%.8f,%.8f,%.8f normal=%.8f,%.8f,%.8f"),
+		Frame, *GetNameSafe(G), D, *GetNameSafe(ImpactResult.GetActor()), L.X, L.Y, L.Z, ImpactResult.Normal.X, ImpactResult.Normal.Y, ImpactResult.Normal.Z);
+}
+
+// 수류탄 판 매 프레임(내 틱 = 그 프레임 걸음 뒤) — 살아 있는 수류탄마다 GrenCsv 한 줄. 터짐 = 메시가 숨은 첫 프레임(Detonate 가 신호 → 숨김 → 날아감 끔 → 겹침 · 피해를
+// 한 실행 줄에 다 한다), 사라짐 = 액터가 지워짐(꼬리 NS_Trail 이 끝난 뒤)
+void UMOBContentProbeSubsystem::WatchGrenades()
+{
+	for (FGrenRec& R : Grens)
+	{
+		AActor* A = R.A.Get();
+		if (!A)
+		{
+			if (!R.bGone)
+			{
+				R.bGone = true;
+				FrameEvents += TEXT("g_gone;");
+				UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GGONE frame=%d name=%s spawn=%d boom=%d"), Frame, *R.Name, R.SpawnFrame, R.BoomFrame);
+			}
+			continue;
+		}
+		const USceneComponent* Root = A->GetRootComponent();
+		const bool bHidden = Root && Root->bHiddenInGame;
+		const UProjectileMovementComponent* PM = A->FindComponentByClass<UProjectileMovementComponent>();
+		if (bHidden && R.BoomFrame < 0)
+		{
+			R.BoomFrame = Frame;
+			if (R.SpawnFrame == GrenSpawnFrame && GrenBoomFrame < 0) GrenBoomFrame = Frame;
+			FrameEvents += TEXT("g_boom;");
+			LogBoom(A, R.SpawnFrame);
+		}
+		const FVector L = A->GetActorLocation();
+		const FRotator Rt = A->GetActorRotation();
+		const FVector V = PM ? PM->Velocity : FVector::ZeroVector;
+		GrenCsv += FString::Printf(TEXT("%d,%s,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d\n"), Frame, *R.Name, Frame - R.SpawnFrame, L.X, L.Y, L.Z, V.X, V.Y, V.Z,
+			Rt.Pitch, Rt.Yaw, Rt.Roll, bHidden ? 1 : 0, (PM && PM->IsActive()) ? 1 : 0, (PM && PM->UpdatedComponent) ? 1 : 0, (PM && PM->bIsSliding) ? 1 : 0);
+	}
+}
+
+// 터짐 다시 해 보기 — B_Grenade 「Detonate」 그대로(b_flow.txt): 수류탄 자리에서 반경 450 구 겹침(물체 종류 Pawn = ObjectTypeQuery3 · 액터 거르개 Pawn) →
+// 사람마다 무시 목록 = 겹친 사람 전부에서 그 사람만 뺀 것 → 수류탄 → 그 사람 자리 선(TraceTypeQuery5 = Weapon_Capsule · 복잡 켬 · 수류탄 빼고) → 무엇이든 맞으면 피해,
+// 등급 = clamp(맞은 거리 ÷ 450, 0.1, 1). 같은 구로 성분 겹침도 적는다(사람 몸에서 캡슐 · 메시 중 무엇이 겹치나 — 짐작 6). 체력은 앞 프레임 끝 값 > 지금 값
+void UMOBContentProbeSubsystem::LogBoom(AActor* G, int32 SpawnFrame) const
+{
+	const FVector L = G->GetActorLocation();
+	TArray<TEnumAsByte<EObjectTypeQuery>> Types;
+	Types.Add(ObjectTypeQuery3);
+	const TArray<AActor*> NoIgnore;
+	TArray<AActor*> Over;
+	UKismetSystemLibrary::SphereOverlapActors(G, L, GREN_RADIUS, Types, APawn::StaticClass(), NoIgnore, Over);
+	TArray<UPrimitiveComponent*> Comps;
+	UKismetSystemLibrary::SphereOverlapComponents(G, L, GREN_RADIUS, Types, nullptr, NoIgnore, Comps);
+	FString CompS;
+	for (const UPrimitiveComponent* C : Comps) CompS += FString::Printf(TEXT("%s/%s "), *GetNameSafe(C ? C->GetOwner() : nullptr), *GetNameSafe(C));
+	const ACharacter* Ch = Me();
+	const ACharacter* F = Foe.Get();
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GBOOM frame=%d step=%s name=%s spawn=%d age=%d loc=%.6f,%.6f,%.6f over=%d comps=[%s] myHp=%.3f>%.3f foeHp=%.3f>%.3f"),
+		Frame, bReady ? StepAt(ScriptIdx(), Step).Name : TEXT("-"), *G->GetName(), SpawnFrame, Frame - SpawnFrame, L.X, L.Y, L.Z, Over.Num(), *CompS.TrimEnd(),
+		PrevMyHp, HealthOf(Ch), PrevFoeHp, HealthOf(F));
+	for (AActor* P : Over)
+	{
+		TArray<AActor*> Ignore = Over;
+		Ignore.Remove(P);
+		FHitResult Hit;
+		const bool bHit = UKismetSystemLibrary::LineTraceSingle(G, L, P->GetActorLocation(), TraceTypeQuery5, true, Ignore, EDrawDebugTrace::None, Hit, true);
+		// 캡슐 겉면까지 — 수류탄 중심에서 캡슐 축 선분까지 최단 거리 − 반지름(450 경계 · 벽 뒤 칸이 이것으로 가른다)
+		double CapDist = -1.0;
+		if (const ACharacter* PCh = Cast<ACharacter>(P))
+		{
+			const UCapsuleComponent* Cap = PCh->GetCapsuleComponent();
+			const double R = Cap->GetScaledCapsuleRadius(), HH = Cap->GetScaledCapsuleHalfHeight();
+			const FVector C = Cap->GetComponentLocation();
+			CapDist = FMath::PointDistToSegment(L, C - FVector(0.0, 0.0, HH - R), C + FVector(0.0, 0.0, HH - R)) - R;
+		}
+		const FVector To = P->GetActorLocation();
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GTRACE frame=%d name=%s who=%s pawn=%s hit=%d dist=%.6f level=%.6f hitActor=%s hitComp=%s pen=%d to=%.6f,%.6f,%.6f centerDist=%.6f capDist=%.6f"),
+			Frame, *G->GetName(), P == Ch ? TEXT("me") : (P == F ? TEXT("foe") : TEXT("other")), *GetNameSafe(P), bHit ? 1 : 0, Hit.Distance,
+			FMath::Clamp((double)Hit.Distance / GREN_RADIUS, 0.1, 1.0), *GetNameSafe(Hit.GetActor()), *GetNameSafe(Hit.GetComponent()), Hit.bStartPenetrating ? 1 : 0,
+			To.X, To.Y, To.Z, FVector::Dist(L, To), CapDist);
+	}
+}
+
+// 쿨다운 남은 초 — GE_Grenade_Cooldown 효과(정의 클래스 이름으로 고른다 — 쿨다운 표식 이름을 몰라도 된다)
+float UMOBContentProbeSubsystem::GrenadeCooldownLeft() const
+{
+	const UAbilitySystemComponent* A = FindASC(Me());
+	if (!A) return -1.f;
+	FGameplayEffectQuery Q;
+	Q.CustomMatchDelegate.BindLambda([](const FActiveGameplayEffect& E) { return E.Spec.Def && E.Spec.Def->GetClass()->GetName().Contains(TEXT("GE_Grenade_Cooldown")); });
+	float Left = 0.f;
+	for (const float L : A->GetActiveEffectsTimeRemaining(Q)) Left = FMath::Max(Left, L);
+	return Left;
+}
+
+// 대시 판 벽 칸(DashWall)과 같은 고르기 — 축 방향 넷 중 서 있는 면이 가장 가까운 것
+int32 UMOBContentProbeSubsystem::NearestWallDir() const
+{
+	int32 Best = -1;
+	for (int32 i = 0; i < 8; i += 2)
+	{
+		if (ClearDist[i] < DASH_CLEAR_TRACE && FMath::Abs(ClearNormalZ[i]) < DASH_WALL_NORMAL_Z && (Best < 0 || ClearDist[i] < ClearDist[Best])) Best = i;
+	}
+	return Best;
+}
+
+// 집에서 겨눌 면 찾기(무기 채널 선 · 나 · 상대 빼고). 눈에서 그 점까지 선이 안 막혀야 후보, 눈에서 가장 가까운 것.
+// 비스듬한 면: 집 둘레 ±GREN_SLOPE_GRID 를 GREN_SLOPE_STEP 간격 격자로 위에서 내려 쏴 첫 면의 법선 Z 가 GREN_SLOPE_NZ_MIN~MAX 인 점.
+//   (처음 판은 눈에서 요 · 피치를 돌려 쐈는데 g0a1 에서 하나도 못 찾았다 — 이 맵 비탈은 눈높이 아래 멀리 있고 상한 0.9 에도 걸렸다)
+// 구석: 집 둘레 축 벽(ClearAround) a 마다 그 벽 GREN_CORNER_FROM_WALL 앞에서 벽을 따라 양옆(b = a ± 90도)으로 선을 쏴 서 있는 면(법선이 쏜 쪽을 마주봄)에
+//   맞으면 두 면이 만나는 점(바닥 위 GREN_CORNER_Z). 처음 판은 이웃한 축 벽 둘을 집에서 바로 찾았는데 g0a1 집은 둘레 축 벽이 하나뿐(+X)이라 0 이었다.
+//   던질 자리(OutStand) = 그 점에서 대각 바깥 GREN_CORNER_STAND 바닥 위 — 캡슐이 안 겹치고 그 자리 눈에서 보여야 후보. 집에서 던지면(g0a3, 2155cm) 거의 벽 하나로만 날아가
+//   벽 하나 · 바닥만 맞았다. 대각으로 들어가야 두 벽을 잇달아 맞는다
+bool UMOBContentProbeSubsystem::FindSurface(bool bCorner, FVector& OutPoint, FVector& OutStand, FString& OutWhat) const
+{
+	const ACharacter* Ch = Me();
+	if (!Ch) return false;
+	const UCapsuleComponent* Cap = Ch->GetCapsuleComponent();
+	const FVector Body = Ch->GetActorLocation();
+	const FVector Eye = Body + FVector(0.0, 0.0, Ch->BaseEyeHeight);
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBCProbeSurf), false, Ch);
+	if (Foe.IsValid()) Params.AddIgnoredActor(Foe.Get());
+	bool bFound = false;
+	double BestD = 0.0;
+	OutStand = FVector::ZeroVector;
+	OutWhat = bCorner ? TEXT("corner none") : TEXT("slope none");
+	// From → 점 선이 그 점 앞 20 안에서만 맞으면 보인다
+	auto Visible = [&](const FVector& From, const FVector& Pt)
+	{
+		FHitResult V;
+		return !GetWorld()->LineTraceSingleByChannel(V, From, Pt, Lyra_TraceChannel_Weapon, Params) || FVector::Dist(V.ImpactPoint, Pt) < 20.0;
+	};
+	if (!bCorner)
+	{
+		const int32 N = FMath::RoundToInt32(GREN_SLOPE_GRID / GREN_SLOPE_STEP);
+		int32 Cands = 0, Hidden = 0;
+		for (int32 ix = -N; ix <= N; ++ix)
+		{
+			for (int32 iy = -N; iy <= N; ++iy)
+			{
+				const FVector Top(Body.X + ix * GREN_SLOPE_STEP, Body.Y + iy * GREN_SLOPE_STEP, Body.Z + GREN_SLOPE_DROP_FROM);
+				FHitResult H;
+				if (!GetWorld()->LineTraceSingleByChannel(H, Top, Top - FVector(0.0, 0.0, 2.0 * GREN_SLOPE_DROP_FROM), Lyra_TraceChannel_Weapon, Params)) continue;
+				const double Nz = H.ImpactNormal.Z;
+				if (Nz < GREN_SLOPE_NZ_MIN || Nz > GREN_SLOPE_NZ_MAX) continue;
+				++Cands;
+				const FVector Pt = H.ImpactPoint + H.ImpactNormal * 5.0;
+				const double D = FVector::Dist(Eye, Pt);
+				if (bFound && D >= BestD) continue;
+				if (!Visible(Eye, Pt))
+				{
+					++Hidden;
+					continue;
+				}
+				bFound = true;
+				BestD = D;
+				OutPoint = Pt;
+				OutWhat = FString::Printf(TEXT("slope at=%.1f,%.1f,%.1f dist=%.1f nz=%.4f actor=%s comp=%s"), Pt.X, Pt.Y, Pt.Z, D, Nz, *GetNameSafe(H.GetActor()), *GetNameSafe(H.GetComponent()));
+			}
+		}
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GSLOPE grid=%d cands=%d hidden=%d found=%d %s"), (2 * N + 1) * (2 * N + 1), Cands, Hidden, bFound ? 1 : 0, *OutWhat);
+		return bFound;
+	}
+	const double R = Cap->GetScaledCapsuleRadius();
+	const double HH = Cap->GetScaledCapsuleHalfHeight();
+	const double FloorZ = Body.Z - HH;
+	const FCollisionResponseParams Response(Cap->GetCollisionResponseToChannels());
+	for (int32 a = 0; a < 8; a += 2)
+	{
+		if (ClearDist[a] >= DASH_CLEAR_TRACE || FMath::Abs(ClearNormalZ[a]) >= DASH_WALL_NORMAL_Z) continue;
+		const FVector DA = KeyInput(a * 45.f);
+		const double WallA = ClearDist[a] + R;	// 집 → 벽 a 면(축 방향 캡슐 쓸기 거리 + 반지름)
+		const FVector S = Home + DA * (WallA - GREN_CORNER_FROM_WALL);
+		for (const int32 b : { (a + 2) % 8, (a + 6) % 8 })
+		{
+			const FVector DB = KeyInput(b * 45.f);
+			FHitResult H;
+			const bool bHit = GetWorld()->LineTraceSingleByChannel(H, S, S + DB * GREN_SURF_TRACE, Lyra_TraceChannel_Weapon, Params);
+			const bool bWallB = bHit && FMath::Abs(H.ImpactNormal.Z) < DASH_WALL_NORMAL_Z && (H.ImpactNormal | DB) < -0.7;
+			FVector C = S + DA * GREN_CORNER_FROM_WALL + DB * H.Distance;
+			C.Z = FloorZ + GREN_CORNER_Z;
+			const FVector Diag = (DA + DB).GetSafeNormal();
+			const FVector Aim = C - Diag * GREN_CORNER_INSET;
+			// 던질 자리 — 대각 바깥 바닥(위에서 내려 쏨, 집 고르기와 같은 높이 규칙) · 캡슐이 아무것도 안 겹침 · 그 자리 눈에서 겨눔 점이 보임
+			const FVector XY = Aim - Diag * GREN_CORNER_STAND;
+			FHitResult Floor;
+			bool bStand = bWallB && GetWorld()->LineTraceSingleByChannel(Floor, FVector(XY.X, XY.Y, Body.Z + 200.0), FVector(XY.X, XY.Y, Body.Z - 600.0), Cap->GetCollisionObjectType(), Params, Response);
+			const FVector Stand(XY.X, XY.Y, Floor.ImpactPoint.Z + HH + 3.0);
+			bStand = bStand && !GetWorld()->OverlapBlockingTestByChannel(Stand, FQuat::Identity, Cap->GetCollisionObjectType(), FCollisionShape::MakeCapsule(R, HH), Params, Response);
+			const bool bSeen = bStand && Visible(Stand + FVector(0.0, 0.0, Ch->BaseEyeHeight), Aim);
+			const double D = FVector::Dist(Eye, Aim);
+			UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GCORNER a=%d b=%d hit=%d sideDist=%.1f normal=%.3f,%.3f,%.3f wallB=%d corner=%s stand=%s standOk=%d seen=%d dist=%.1f actor=%s"), a, b, bHit ? 1 : 0,
+				H.Distance, H.ImpactNormal.X, H.ImpactNormal.Y, H.ImpactNormal.Z, bWallB ? 1 : 0, *C.ToString(), *Stand.ToString(), bStand ? 1 : 0, bSeen ? 1 : 0, D, *GetNameSafe(H.GetActor()));
+			if (!bSeen || (bFound && D >= BestD)) continue;
+			bFound = true;
+			BestD = D;
+			OutPoint = Aim;
+			OutStand = Stand;
+			OutWhat = FString::Printf(TEXT("corner a=%d b=%d at=%.1f,%.1f,%.1f stand=%.1f,%.1f,%.1f wallA=%.1f side=%.1f actorB=%s"), a, b, Aim.X, Aim.Y, Aim.Z, Stand.X, Stand.Y, Stand.Z, WallA,
+				H.Distance, *GetNameSafe(H.GetActor()));
+		}
+	}
+	return bFound;
+}
+
+// 카메라에서 그 점을 보게 — 몸 요 · 조종 회전을 돌린다(FaceTo). 카메라는 조종 회전을 따라 몸 둘레를 돌므로 누를 때까지 매 프레임 다시 불러 모은다
+void UMOBContentProbeSubsystem::AimAt(const FVector& Point) const
+{
+	const ACharacter* Ch = Me();
+	const APlayerController* PC = Ch ? Cast<APlayerController>(Ch->GetController()) : nullptr;
+	if (!PC || !PC->PlayerCameraManager) return;
+	const FRotator R = (Point - PC->PlayerCameraManager->GetCameraLocation()).Rotation();
+	FaceTo(R.Pitch, R.Yaw);
+}
+
+// 던짐 칸 시작 — 자리 · 방향(GREN_SHOTS) · 나 · 상대 체력 1000. 겨눔 · 벽 거리 맞춤 · 누르기는 DuringGrenade
+void UMOBContentProbeSubsystem::BeginGrenade()
+{
+	const FStep& S = StepAt(ScriptIdx(), Step);
+	const FGrenShot& G = GrenShotAt(S.Arg);
+	ACharacter* Ch = Me();
+	GrenPressFrame = GrenSpawnFrame = GrenFirstHitFrame = GrenBoomFrame = GrenJumpFrame = GrenWallDir = -1;
+	GrenHits = GrenSpawns = GrenAdjusts = 0;
+	GrenCdAtPress = -1.f;
+	GrenFirstHit.Reset();
+	GrenWhere.Reset();
+	bGrenAim = false;
+	if (Ch) Ch->ConsumeMovementInputVector();	// 순간이동으로 시작 — 앞 칸 이동 입력을 비운다(대시 칸과 같은 까닭)
+	SetHealthOf(Ch, 1000.f, 1000.f);
+	SetHealthOf(Foe.Get(), 1000.f, 1000.f);
+	GoHome();
+	switch (G.Place)
+	{
+	case EGrenPlace::Open:
+		FaceTo(G.Pitch, 0.0);
+		break;
+	case EGrenPlace::WallCam:
+	case EGrenPlace::WallGap:
+	case EGrenPlace::WallBack:
+		// 가장 가까운 벽 쪽 — 캡슐 겉면이 벽에서 Arg(벽 카메라 칸은 GREN_WALL_START_GAP) 떨어진 자리, 벽을 본다(등 칸은 벽을 등진다)
+		GrenWallDir = NearestWallDir();
+		if (Ch && GrenWallDir >= 0)
+		{
+			const FVector Dir = KeyInput(GrenWallDir * 45.f);
+			const double Gap = G.Place == EGrenPlace::WallCam ? GREN_WALL_START_GAP : G.Arg;
+			Ch->SetActorLocation(Home + Dir * FMath::Max(0.0, ClearDist[GrenWallDir] - Gap), false, nullptr, ETeleportType::TeleportPhysics);
+			FaceTo(G.Pitch, GrenWallDir * 45.0 + (G.Place == EGrenPlace::WallBack ? 180.0 : 0.0));
+		}
+		GrenWhere = FString::Printf(TEXT("wallDir=%d wallDist=%.1f"), GrenWallDir, GrenWallDir >= 0 ? ClearDist[GrenWallDir] : -1.0);
+		break;
+	case EGrenPlace::FoeAt:
+		PlaceFoe(G.Arg, true);
+		bGrenAim = G.Arg > GREN_AIM_MIN_FOE && Foe.IsValid();
+		if (bGrenAim) GrenAimPoint = Foe->GetActorLocation();
+		else FaceTo(G.Pitch, 0.0);
+		break;
+	case EGrenPlace::Slope:
+	case EGrenPlace::Corner:
+	{
+		FVector Stand;
+		bGrenAim = FindSurface(G.Place == EGrenPlace::Corner, GrenAimPoint, Stand, GrenWhere);
+		if (bGrenAim && Ch && !Stand.IsZero()) Ch->SetActorLocation(Stand, false, nullptr, ETeleportType::TeleportPhysics);
+		if (!bGrenAim) FaceTo(0.0, 0.0);
+		break;
+	}
+	}
+	GrenMyHpAtBegin = HealthOf(Ch);
+	GrenFoeHpAtBegin = HealthOf(Foe.Get());
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GPLACE step=%s shot=%s place=%d pitch=%.1f arg=%.1f run=%d jump=%d me=%s aim=%d aimAt=%s myHp=%.1f foeHp=%.1f %s"),
+		S.Name, G.Name, (int32)G.Place, G.Pitch, G.Arg, G.bRun ? 1 : 0, G.bJump ? 1 : 0, Ch ? *Ch->GetActorLocation().ToString() : TEXT("-"), bGrenAim ? 1 : 0,
+		*GrenAimPoint.ToString(), GrenMyHpAtBegin, GrenFoeHpAtBegin, *GrenWhere);
+}
+
+// 던짐 칸 한 프레임 — 겨눔(누를 때까지 매 프레임) · 벽 카메라 거리 맞춤(두 번) · 달리기 · 점프 · Q 누름(한 프레임)과 뗌.
+// 여기서 누른 Q 는 다음 프레임 입력 처리에서 켜진다(대시 판과 같은 차례)
+void UMOBContentProbeSubsystem::DuringGrenade()
+{
+	const FStep& S = StepAt(ScriptIdx(), Step);
+	const FGrenShot& G = GrenShotAt(S.Arg);
+	ACharacter* Ch = Me();
+	if (!Ch) return;
+	const bool bBeforePress = GrenPressFrame < 0;
+	if (bGrenAim && bBeforePress) AimAt(GrenAimPoint);
+	// 벽 카메라 거리 — 카메라에서 시선 방향 무기 채널 선(나 빼고)이 벽에 닿는 거리를 재 몸을 벽 쪽으로 (잰 거리 − Arg) 옮긴다.
+	// 캡슐 겉면이 벽에서 GREN_WALL_MIN_GAP 보다 가까워지면 거기서 멈춘다(clamped=1 — 그 칸은 정한 카메라 거리가 안 된다)
+	if (G.Place == EGrenPlace::WallCam && GrenWallDir >= 0 && bBeforePress && GrenAdjusts < 2 && StepTime >= (GrenAdjusts == 0 ? GREN_ADJUST_AT0 : GREN_ADJUST_AT1))
+	{
+		const APlayerController* PC = Cast<APlayerController>(Ch->GetController());
+		const APlayerCameraManager* Cam = PC ? PC->PlayerCameraManager : nullptr;
+		FHitResult H;
+		bool bHit = false;
+		FVector CL = FVector::ZeroVector;
+		if (Cam)
+		{
+			CL = Cam->GetCameraLocation();
+			FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBCProbeWallCam), false, Ch);
+			bHit = GetWorld()->LineTraceSingleByChannel(H, CL, CL + Cam->GetCameraRotation().Vector() * GREN_TRACE_RANGE, Lyra_TraceChannel_Weapon, Params);
+		}
+		const FVector Dir = KeyInput(GrenWallDir * 45.f);
+		const double Along = (Ch->GetActorLocation() - Home) | Dir;
+		const double MaxAlong = ClearDist[GrenWallDir] - GREN_WALL_MIN_GAP;
+		const double NewAlong = bHit ? FMath::Min(Along + (H.Distance - G.Arg), MaxAlong) : Along;
+		if (bHit) Ch->SetActorLocation(Ch->GetActorLocation() + Dir * (NewAlong - Along), false, nullptr, ETeleportType::TeleportPhysics);
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GADJUST step=%s n=%d hit=%d camDist=%.3f want=%.1f along=%.3f>%.3f clamped=%d actor=%s cam=%s"), S.Name, GrenAdjusts, bHit ? 1 : 0,
+			H.Distance, G.Arg, Along, NewAlong, (bHit && NewAlong >= MaxAlong) ? 1 : 0, *GetNameSafe(H.GetActor()), *CL.ToString());
+		++GrenAdjusts;
+	}
+	// 달리며 칸 — 칸 처음부터 누른 뒤 GREN_RUN_AFTER 프레임까지 몸 앞으로
+	if (G.bRun && (bBeforePress || Frame <= GrenPressFrame + GREN_RUN_AFTER)) Ch->AddMovementInput(Ch->GetActorForwardVector(), 1.f);
+	bool bPress = false;
+	if (G.bJump)
+	{
+		if (GrenJumpFrame < 0 && StepTime >= GREN_JUMP_AT)
+		{
+			PressTag(TEXT("InputTag.Jump"), true);
+			GrenJumpFrame = Frame;
+			FrameEvents += TEXT("jump_press;");
+		}
+		else if (GrenJumpFrame >= 0 && Frame == GrenJumpFrame + 1)
+		{
+			PressTag(TEXT("InputTag.Jump"), false);
+			FrameEvents += TEXT("jump_release;");
+		}
+		bPress = bBeforePress && GrenJumpFrame >= 0 && Frame >= GrenJumpFrame + GREN_JUMP_THROW_AFTER;
+	}
+	else
+	{
+		bPress = bBeforePress && StepTime >= GREN_PRESS_AT;
+	}
+	if (bPress)
+	{
+		PressTag(GREN_TAG, true);
+		GrenPressFrame = Frame;
+		GrenCdAtPress = GrenadeCooldownLeft();
+		FrameEvents += TEXT("g_press;");
+	}
+	else if (GrenPressFrame >= 0 && Frame == GrenPressFrame + 1)
+	{
+		PressTag(GREN_TAG, false);
+		FrameEvents += TEXT("g_release;");
+	}
+}
+
+// 던짐 칸 요약 한 줄(MOB_CPROBE_GREN) — 프레임 번호는 기록 표 frame 칸. spawnAfterPress = 생긴 프레임 − 누른 프레임, timerFrames = 터진 프레임 − 생긴 프레임(표 기대 120 또는 121)
+void UMOBContentProbeSubsystem::EndGrenade()
+{
+	const FStep& S = StepAt(ScriptIdx(), Step);
+	const FGrenShot& G = GrenShotAt(S.Arg);
+	const ACharacter* Ch = Me();
+	bool bGone = false;
+	for (const FGrenRec& R : Grens)
+	{
+		if (GrenSpawnFrame >= 0 && R.SpawnFrame == GrenSpawnFrame) bGone = R.bGone;
+	}
+	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GREN step=%s shot=%s place=%d press=%d spawn=%d spawnAfterPress=%d spawns=%d firstHit=%d hits=%d hitWhat=[%s] boom=%d timerFrames=%d gone=%d ")
+		TEXT("cdAtPress=%.4f cdEnd=%.4f myDmg=%.3f foeDmg=%.3f crouched=%d where=[%s]"),
+		S.Name, G.Name, (int32)G.Place, GrenPressFrame, GrenSpawnFrame, (GrenSpawnFrame >= 0 && GrenPressFrame >= 0) ? GrenSpawnFrame - GrenPressFrame : -1, GrenSpawns,
+		GrenFirstHitFrame, GrenHits, *GrenFirstHit, GrenBoomFrame, (GrenBoomFrame >= 0 && GrenSpawnFrame >= 0) ? GrenBoomFrame - GrenSpawnFrame : -1, bGone ? 1 : 0,
+		GrenCdAtPress, GrenadeCooldownLeft(), GrenMyHpAtBegin - HealthOf(Ch), GrenFoeHpAtBegin - HealthOf(Foe.Get()), (Ch && Ch->bIsCrouched) ? 1 : 0, *GrenWhere);
 }

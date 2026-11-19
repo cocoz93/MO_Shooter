@@ -1,13 +1,15 @@
 param(
     [string]$Tag = 'probe',
-    [ValidateSet('gym', 'pads', 'bump', 'weapons', 'dash')][string]$Mode = 'gym',
+    [ValidateSet('gym', 'pads', 'bump', 'weapons', 'dash', 'grenade')][string]$Mode = 'gym',
     [int]$TimeoutSec = 420,
     [string]$ExtraArgs = ''
 )
 # Runs Lyra alone (no server) through a fixed script and records what Lyra itself does for aim (ADS), crouch, melee and health pads.
 # Needs the MOBridge plugin mode -MOBContentProbe (MOBContentProbeSubsystem). gym = L_ShooterGym with one bot (aim, crouch, melee);
 # pads = L_Expanse without bots (health pads); weapons = L_Expanse without bots (weapon pads, quick bar, reload tag - weapon-pickup-plan W-0);
-# dash = L_ShooterGym with one bot, the bot hidden (dash directions, force, blocked and cancelled abilities, cooldown - dash-plan D-0). Results: Saved\MOB\cprobe_<Tag>.csv (one row per frame) and MOB_CPROBE lines in the log.
+# dash = L_ShooterGym with one bot, the bot hidden (dash directions, force, blocked and cancelled abilities, cooldown - dash-plan D-0).
+# grenade = L_ShooterGym with one bot, the bot hidden except in the foe throws (throw aim, flight, bounces, fuse, blast - grenade-plan G-0; one row per grenade per frame in cprobe_<Tag>_gren.csv).
+# Results: Saved\MOB\cprobe_<Tag>.csv (one row per frame) and MOB_CPROBE lines in the log.
 # The third mode (bridge = today's client attached to our server) runs through run_game.ps1 instead:
 #   run_game.ps1 -Tag b1 -Bots 8 -ServerArgs '--warmup=2 --matchSeconds=120' -LyraArgs '-MOBContentProbe=b1 -MOBCPMode=bridge'
 $proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
