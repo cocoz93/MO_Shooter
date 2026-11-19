@@ -68,6 +68,15 @@ struct FMOBMeleeGuess
 	float Distance = 0.f;
 };
 
+// 남의 대시 효과 하나(D-5) — 서버 대시 소식을 받아 두었다가 화면 시점(ShownRenderTick)이 그 틱에 닿을 때 그 몸에 낸다
+struct FMOBPendingDashCue
+{
+	uint32 Player = 0;
+	uint32 Tick = 0;			// 서버가 그 대시 입력을 돌린 틱
+	FVector Force = FVector::ZeroVector;
+	double ReceivedAt = 0;		// 받은 때(FPlatformTime) — 효과까지 기다린 시간을 잰다
+};
+
 /**
  * Lyra 와 매치 서버를 잇는다 — 입력을 서버로 보내고 서버 결과를 받는다. 판정은 전부 서버 몫.
  * 와이어 형식 = MO_Shooter/Shared/GameProtocol.h(봇과 같은 한 벌).
@@ -95,6 +104,10 @@ struct FMOBMeleeGuess
  *   -MOBStandHp=N               -MOBStandAt 의 부활 뒤 첫 자리 옮김 체력(받침 시험 — 다친 채 받침 위에 선다). 준 때만 그 뒤 20초마다 알림은 서버가 본 지금 체력으로 보낸다(조용히 체력을 바꾸지 않게)
  *   -MOBAutoMelee               자동 입력에 근접을 더한다 — 적이 4m 안이면 누르고 있고, 아니면 6초마다 0.1초 누른다. -MOBAutoAim 과 같이 켜면 적이 10m 안에 보여도 다가간다(6초 중 4초). 없으면 기존 자동 입력 그대로
  *   -MOBBreakMeleeBlock         일부러 틀리기 — Lyra 근접 능력의 입력 표식을 안 떼어 Lyra 가 키로 혼자 근접을 켠다(MOB_MELEE lyraSelf 가 늘어야 한다)
+ *   -MOBAutoDash                자동 입력에 대시를 더한다 — 3.6초마다 두 번: 걷는 방향이 바뀌는 프레임(누른 입력의 이동 ≠ 앞 입력 이동) · 1.8초 뒤 한 방향 걷기 구간의 한가운데.
+ *                               사람 키처럼 Lyra 입력 표식에도 누름을 넣고, 다리는 그다음 프레임에 읽는다(사람 키는 Lyra 입력 처리가 다리보다 먼저 본다)
+ *   -MOBBreakDashBlock          일부러 틀리기 — Lyra 대시 능력의 입력 표식을 안 떼어 Lyra 가 키로 혼자 대시를 켠다(MOB_DASH2 lyraSelf 가 늘어야 한다)
+ *   -MOBBreakDashDir            일부러 틀리기 — 다리가 대시를 켤 때 마지막 이동 입력을 앞 입력 것으로 안 바꾼다(MOB_DASH2 montMismatch 가 늘어야 한다 — dirSwapMattered 만큼)
  *   -MOBBreakPadsAt=N           일부러 틀리기 — 준비된 뒤 N초에 묶인 받침 하나의 Lyra 켜짐을 뒤집고 · 다음 회복 효과를 건너뛰고 · 다음 받침 소식 하나를 버린다(check_pads_bridge.py 가 잡는지 보려고)
  *   -MOBBreakDevices            일부러 틀리기 — 점프대 · 순간이동의 겹침을 안 끈다(MOB_DEVICES overlap 이 늘어야 한다 — 끈 판의 0 이 「못 셌다」가 아님을 보려고)
  *   -MOBHumanCheck              사람 확인 자동화(MyDocs human-check-auto-plan.md) — 자동 입력 앞에 각본(샷건 조준 · 허리 사격, 앉기 · 앉은 채 점프, 무기별 근접 누른 채)을 돌리고
@@ -154,6 +167,7 @@ private:
 	void TickInput(double Now);
 	void TickAbilityFire();
 	void TickAbilityMelee();
+	void TickAbilityDash();
 	FMOBMeleeGuess JudgeMelee(mo::Vec3& OutPush);
 	void TickAutoInput(double T);
 	bool TickHumanScript(double T);		// -MOBHumanCheck 각본 — 이 프레임 입력을 맡았으면 true(끝났으면 false = 자동 입력으로)
@@ -166,6 +180,7 @@ private:
 	void HandlePickup(const mo::wire::Pickup& M);
 	void HandleMelee(const mo::wire::Melee& M);
 	void HandleDash(const mo::wire::Dash& M);
+	void TickRemoteDashCues();		// 매 프레임(TickRemotes 뒤) — 받아 둔 남의 대시 효과 중 화면 시점이 닿은 것을 낸다
 	ALyraWeaponSpawner* BindPad(int32 Index);
 	void ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects);
 	float ApplyPadHeal(const mo::wire::Pickup& M, ALyraWeaponSpawner* Actor);
@@ -224,6 +239,9 @@ private:
 	bool bAnimBonesChecked = false;
 	bool bBreakMeleeBlock = false;	// -MOBBreakMeleeBlock — 일부러 틀림: Lyra 근접 능력의 입력 표식을 안 뗀다(Lyra 가 혼자 켜 lyraSelf 가 는다)
 	bool bAutoMeleeOn = false;		// -MOBAutoMelee — 자동 입력에 근접을 더한다
+	bool bBreakDashBlock = false;	// -MOBBreakDashBlock — 일부러 틀림: Lyra 대시 능력의 입력 표식을 안 뗀다(Lyra 가 혼자 켜 lyraSelf 가 는다)
+	bool bBreakDashDir = false;		// -MOBBreakDashDir — 일부러 틀림: 켤 때 마지막 이동 입력을 앞 입력 것으로 안 바꾼다(montMismatch 가 는다)
+	bool bAutoDashOn = false;		// -MOBAutoDash — 자동 입력에 대시를 더한다
 	bool bBreakCrouchBlock = false;	// -MOBBreakCrouchBlock — 일부러 틀림: 앉기 막기 갈고리가 어긋남을 세기만 하고 안 되돌린다. Lyra 가 혼자 앉으며 캡슐을 옮겨 내 캐릭터 밀림(selfDriftOver1cm)이 늘어야 한다(D-5-c)
 	bool bAbilityOwnTimer = false;	// -MOBAbilityOwnTimer — 내 사격 능력을 Lyra 자기 타이머 · 원본 난수로 둔다(고치기 전 동작과 견줄 때만, D53)
 	bool bRayCheck = false;			// -MOBRayCheck — 같은 자세에 엔진 광선과 TraceBody 를 쏴 견준다(5단계)
@@ -464,6 +482,8 @@ private:
 	bool bAutoReload = false;
 	bool bAutoCrouch = false;
 	bool bAutoMelee = false;
+	bool bAutoDash = false;			// 다리가 읽는 대시 키 — 자동 입력이 누른 다음 프레임부터(bAutoDashKey 의 한 프레임 뒤)
+	bool bAutoDashKey = false;		// 자동 입력이 이 프레임에 누른 대시 키 — Lyra 입력 표식 누름 · 뗌은 이것으로
 	uint8 AutoWeapon = 0;
 	int32 AutoWeaponFixed = -1;		// -MOBAutoWeapon=N — 자동 시험의 무기를 고정한다(-1 = 10초마다 바꿈). 무기별 대조에 쓴다
 
@@ -477,8 +497,38 @@ private:
 	// Lyra 근접 능력 — 예측이 켠 근접(켤 차례로 둠) · 켬 · 켜기 실패 · 능력 칸 없음 · 기다리다 버림 · 기다린 프레임 · 다리가 안 켰는데 켜짐(Lyra 혼자) · 입력 표식을 뗀 칸
 	int64 MeleeQueued = 0, MeleeDriven = 0, MeleeActivateFail = 0, MeleeNoSpec = 0, MeleeDropped = 0, MeleeWaitFrames = 0, LyraMeleeSelf = 0, LyraMeleeStripped = 0;
 	bool bMeleePending = false;
-	// 대시(D-3) — 받은 서버 대시 소식(내 것 · 남의 것). 남의 몸 효과는 D-5
+	// 대시(D-3) — 받은 서버 대시 소식(내 것 · 남의 것)
 	int64 DashMine = 0, DashOthers = 0;
+	// 대시 다리(D-5) — 단추를 실은 입력 · 예측이 켠 대시(켤 차례로 둠) · 다리가 켬 · 켜기 실패 · 능력 칸 없음 · 기다리다 버림 · 기다린 프레임 ·
+	// 다리가 안 켰는데 켜짐(Lyra 혼자) · 입력 표식을 뗀 칸 · 켠 뒤 몽타주를 본 수 · 그중 예측 방향과 다른 몽타주 · 대시 몽타주가 없음 ·
+	// 이번 입력 이동과 앞 입력 이동이 고르는 방향이 달랐던 켬(바꿔 넣기가 몽타주를 가른 수 — -MOBBreakDashDir 이면 montMismatch 가 이만큼 는다) ·
+	// 앞 입력 이동을 Lyra 날 값 대신 예측 앞 칸의 걸음 이동으로 넣은 켬(둘이 고르는 방향이 달랐다 — 부활 뒤 이동 막음 등) · 방향별 켬
+	int64 InputsDash = 0, DashQueued = 0, DashDriven = 0, DashActivateFail = 0, DashNoSpec = 0, DashDropped = 0, DashWaitFrames = 0, LyraDashSelf = 0, LyraDashStripped = 0;
+	int64 DashMontChecked = 0, DashMontageMismatch = 0, DashMontNone = 0, DashDirSwapMattered = 0, DashPrevFromSlot = 0, DashDirCount[4] = {};
+	// 남의 대시 효과 — 낸 수 · 몸 · 능력 시스템이 없어 못 냄 · 쌓여 버림 · 받은 뒤 낼 때까지 기다린 초 합 · 최대
+	int64 DashCues = 0, DashCueNoPawn = 0, DashCueDropped = 0;
+	double DashCueWaitSum = 0, DashCueWaitMax = 0;
+	TArray<FMOBPendingDashCue> PendingDashCues;
+	// 대시 중 내 자리 고침 — 서버 상태의 입력 번호가 최근 대시 시작부터 켜짐 길이(mo::kDashActiveInputs) 안인 고침 수 · 최대 cm
+	int64 DashCorrections = 0;
+	double DashCorrectionMax = 0;
+	uint32 DashStartSeqs[4] = {};	// 예측이 켠 최근 대시의 입력 번호(돌림 칸) — MOB_CORR dashAgo
+	int32 DashStartNext = 0;
+	bool bDashPending = false;
+	bool bDashWasDown = false;
+	bool bLyraDashWasActive = false;
+	uint32 DashPendingSeq = 0;
+	uint64 DashPendingFrame = 0;
+	uint8 DashPendingDir = 0;
+	FVector DashPendingPrevMove = FVector::ZeroVector;	// 켤 때 마지막 이동 입력으로 넣을 값 = 대시 입력의 앞 입력 이동(Lyra 날 값 — 예측 앞 칸의 걸음 이동과 고르는 방향이 다르면 그 값)
+	float DashPendingPrevYaw = 0;		// 예측이 방향을 고른 몸 요 = 대시 입력의 앞 입력 요(CDashAbility _prevYaw)
+	bool bDashPendingPrevYaw = false;	// 앞 칸을 찾아 위 요를 안다
+	uint64 DashLastStartFrame = 0;		// 내 Lyra 대시가 마지막으로 켜진 프레임(다리가 켬 · Lyra 혼자) — MOB_SELF_DRIFT dashFramesAgo
+	FVector LastInputRawMove = FVector::ZeroVector;		// 마지막으로 보낸 입력의 Lyra 이동(정규화 전)
+	uint64 DashMontCheckFrame = 0;	// 0 = 볼 것 없음
+	uint8 DashMontCheckDir = 0;
+	uint32 DashMontCheckSeq = 0;
+	int32 DashMontLinesLeft = 20;
 	uint32 MeleePendingSeq = 0;
 	uint64 MeleePendingFrame = 0;
 	bool bLyraMeleeWasActive = false;

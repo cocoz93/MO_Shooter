@@ -201,6 +201,11 @@ namespace
 	// 예측이 켠 근접을 Lyra 능력이 아직 켜져 있어 못 켤 때 기다리는 프레임 상한. 능력 길이(0.54초, 0-2 cpb1) < 예측 간격(34입력 0.567초)이라
 	// 보통 안 기다린다 — 여섯 = 다리 판 약 73프레임/초에서 0.08초(제 판단). 넘으면 그 근접은 Lyra 몽타주 없이 지나간다(MeleeDropped)
 	constexpr uint64 kMaxMeleeWaitFrames = 6;
+	// Lyra 대시 능력(GA_Hero_Dash) 칸 — 근접과 같은 까닭으로 손잡이로 기억한다(TickAbilityDash)
+	FGameplayAbilitySpecHandle GDashSpecHandle;
+	// 예측이 켠 대시를 Lyra 가 못 켤 때 다시 해 보는 프레임 상한. Lyra 쿨다운 1.5초가 예측 91입력(1.517초)보다 짧지만, 다리는 입력을 만든 프레임에 켜므로
+	// 앞 대시를 늦은 프레임(끊김)에 켰으면 두 켬의 간격이 1.5초 아래로 줄 수 있다 — 근접과 같은 여섯(제 판단). 넘으면 그 대시는 Lyra 몽타주 없이 지나간다(DashDropped)
+	constexpr uint64 kMaxDashWaitFrames = 6;
 	void KeepBridgeCrouch(ULyraCharacterMovementComponent* Self, FVector&, float)
 	{
 		const ACharacter* C = Self->GetCharacterOwner();
@@ -479,6 +484,9 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bBreakMeleeBlock = FParse::Param(Cmd, TEXT("MOBBreakMeleeBlock"));
 	bBreakDevices = FParse::Param(Cmd, TEXT("MOBBreakDevices"));
 	bAutoMeleeOn = FParse::Param(Cmd, TEXT("MOBAutoMelee"));
+	bBreakDashBlock = FParse::Param(Cmd, TEXT("MOBBreakDashBlock"));
+	bBreakDashDir = FParse::Param(Cmd, TEXT("MOBBreakDashDir"));
+	bAutoDashOn = FParse::Param(Cmd, TEXT("MOBAutoDash"));
 	FParse::Value(Cmd, TEXT("MOBRayBreak="), RayBreak);
 	bViewClamp = !FParse::Param(Cmd, TEXT("MOBNoViewClamp"));
 	FParse::Value(Cmd, TEXT("MOBBreakAt="), BreakAt);
@@ -537,6 +545,7 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 	TickInput(Now);
 	TickAbilityFire();
 	TickAbilityMelee();
+	TickAbilityDash();
 	if (bHumanCheck) SampleHumanCheck(T);
 	if (Core && BreakPredictAt > 0 && T >= BreakPredictAt)
 	{
@@ -591,6 +600,7 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 	}
 	TickSelfVisual(Now, DeltaTime);
 	TickRemotes(Now);
+	TickRemoteDashCues();
 	TickPickups(Now);
 	TickDevices(Now);
 	FlushSend();
@@ -1034,6 +1044,19 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 	++Corrections;
 	CorrectionSum += Distance;
 	CorrectionMax = FMath::Max(CorrectionMax, Distance);
+	// 대시 중 고침(D-5) — 서버 상태의 입력 번호가 예측이 켠 최근 대시부터 몇 입력 뒤인가(-1 = 앞에 켠 대시 없음)
+	int64 DashAgo = -1;
+	for (const uint32 DashSeq : DashStartSeqs)
+	{
+		if (DashSeq == 0 || DashSeq > P.lastSeq) continue;
+		const int64 Ago = (int64)P.lastSeq - (int64)DashSeq;
+		if (DashAgo < 0 || Ago < DashAgo) DashAgo = Ago;
+	}
+	if (DashAgo >= 0 && DashAgo < mo::kDashActiveInputs)
+	{
+		++DashCorrections;
+		DashCorrectionMax = FMath::Max(DashCorrectionMax, Distance);
+	}
 	// 처음 80줄 + 3cm 이상은 늘 — 상한만 두면 판 뒤쪽 큰 보정이 안 남는다(판 hc1 최대 15.85cm 가 80줄 밖이었다)
 	const uint64 HitsNow = Core->Sim.GetCounters().pawnHits;
 	if (CorrLinesLeft > 0 || Distance >= 3.0)
@@ -1048,10 +1071,10 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 			if (NearestRemote < 0.0 || D < NearestRemote) NearestRemote = D;
 		}
 		// 크기 · 방향 · 서버 깃발 · 남이 나를 친 근접 / 내가 친 근접 뒤 몇 초(-1 = 없음) · 지난 보정 뒤 남 캡슐에 새로 닿은 수 · 가장 가까운 남
-		UE_LOG(LogMOB, Log, TEXT("MOB_CORR t=%.2f seq=%u dist=%.2f d=(%.2f,%.2f,%.2f) flags=%u meleeOnMeAgo=%.2f myMeleeHitAgo=%.2f pawnHitsNew=%llu nearestRemote=%.1f"),
+		UE_LOG(LogMOB, Log, TEXT("MOB_CORR t=%.2f seq=%u dist=%.2f d=(%.2f,%.2f,%.2f) flags=%u meleeOnMeAgo=%.2f myMeleeHitAgo=%.2f pawnHitsNew=%llu nearestRemote=%.1f dashAgo=%lld"),
 			NowSec - ReadyAt, P.lastSeq, Distance, Delta.X, Delta.Y, Delta.Z, P.flags,
 			LastMeleeOnMeAt > 0 ? NowSec - LastMeleeOnMeAt : -1.0, LastMyMeleeHitAt > 0 ? NowSec - LastMyMeleeHitAt : -1.0,
-			(unsigned long long)(HitsNow - CorrLastPawnHits), NearestRemote);
+			(unsigned long long)(HitsNow - CorrLastPawnHits), NearestRemote, DashAgo);
 	}
 	CorrLastPawnHits = HitsNow;
 	SelfCur = After;
@@ -1102,9 +1125,12 @@ void UMOBridgeSubsystem::TickSelfVisual(double Now, float DeltaTime)
 			}
 			const FVector Moved = Ch->GetActorLocation() - SelfLastSet;
 			const UCharacterMovementComponent* CMC = Ch->GetCharacterMovement();
-			UE_LOG(LogMOB, Log, TEXT("MOB_SELF_DRIFT frame=%llu seq=%u drift=%.2f moved=(%.2f,%.2f,%.2f) lyraMelee=%d nearestRemote=%.1f mode=%d crouched=%d"),
+			// 대시(D-5) — Lyra 대시 능력이 켜져 있나 · 마지막으로 켜진 뒤 몇 프레임(-1 = 없음) · 캡슐 반높이(웅크림 바뀜이 자리를 옮기나)
+			const UCapsuleComponent* Capsule = Ch->GetCapsuleComponent();
+			UE_LOG(LogMOB, Log, TEXT("MOB_SELF_DRIFT frame=%llu seq=%u drift=%.2f moved=(%.2f,%.2f,%.2f) lyraMelee=%d nearestRemote=%.1f mode=%d crouched=%d lyraDash=%d dashFramesAgo=%lld capsuleHalf=%.1f"),
 				(unsigned long long)GFrameCounter, Seq, Drift, Moved.X, Moved.Y, Moved.Z, bLyraMeleeWasActive ? 1 : 0, NearestRemote,
-				CMC ? (int32)CMC->MovementMode.GetValue() : -1, Ch->IsCrouched() ? 1 : 0);
+				CMC ? (int32)CMC->MovementMode.GetValue() : -1, Ch->IsCrouched() ? 1 : 0, bLyraDashWasActive ? 1 : 0,
+				DashLastStartFrame ? (long long)(GFrameCounter - DashLastStartFrame) : -1LL, Capsule ? Capsule->GetUnscaledCapsuleHalfHeight() : -1.0f);
 		}
 	}
 
@@ -1755,6 +1781,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	// Lyra 입력은 AddMovementInput 을 앞·옆 따로 불러 대각선이면 길이가 1 을 넘는다. 서버 입력은 길이 1 이하가 약속이다
 	FVector Move = Ch->GetLastMovementInputVector();
 	Move.Z = 0;
+	const FVector RawMove = Move;	// 대시(D-5) — 다음 대시의 「앞 입력 이동」으로 Lyra 능력에 넣을 날 값(TickAbilityDash)
 	InputRawMax = FMath::Max(InputRawMax, Move.Size());
 	if (FMath::Abs(Move.X) > 0.01 && FMath::Abs(Move.Y) > 0.01) ++InputsDiagonal;
 	if (Move.SizeSquared() > 1.0) Move.Normalize();
@@ -1834,6 +1861,8 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	const bool bAds = bAutoInput ? bAutoAds : PC->IsInputKeyDown(EKeys::RightMouseButton);
 	// 근접 = C · E(IMC_ShooterGame 의 IA_Melee, 0-1 원본 기준). 누르고 있는 동안 입력마다 단추를 싣는다 — 켜지는 것은 능력 간격마다(서버 · 예측 CMeleeAbility)
 	const bool bMelee = bAutoInput ? bAutoMelee : (PC->IsInputKeyDown(EKeys::C) || PC->IsInputKeyDown(EKeys::E));
+	// 대시 = 왼쪽 Shift(IMC_Default 의 IA_Ability_Dash, Pressed 트리거 — 원본 기준). 누른 입력 하나에만 단추를 싣는다(서버 · 예측도 누름 하나에 한 번)
+	const bool bDashDown = bAutoInput ? bAutoDash : PC->IsInputKeyDown(EKeys::LeftShift);
 	// D61 확인 — 서버는 이 입력부터 조준이다. Lyra 도 같은 프레임에 최대 속도를 바꾸나(0 = 같은 프레임). 이 함수는 그 프레임 Lyra 입력 처리 뒤에 돈다
 	if (const UCharacterMovementComponent* AdsMove = Ch->GetCharacterMovement())
 	{
@@ -1918,6 +1947,10 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		bCrouchWasDown = bCrouchDown;
 		if (bAds) { In.buttons |= wire::BUTTON_ADS; ++InputsAds; }
 		if (bMelee) { In.buttons |= wire::BUTTON_MELEE; ++InputsMelee; }
+		// 경기 끝 단계엔 싣지 않는다 — Lyra 는 능력 입력을 막고(GE_BlockAbilityInput) 서버도 안 켜는데, 예측은 단계를 몰라 켰다가 고친다(판 dsh1 unconfirmed 6).
+		// 봇 --dash 와 같은 규칙(BotClient/main.cpp _phase != PostGame)
+		if (bDashDown && !bDashWasDown && MatchPhase != (uint8)wire::EMatchPhase::PostGame) { In.buttons |= wire::BUTTON_DASH; ++InputsDash; }
+		bDashWasDown = bDashDown;
 
 		// 번호를 붙이고 여기서도 돌린다 — 서버 답을 기다리지 않고 바로 움직이려고
 		// 근접(E-3) — 이 입력이 근접을 켜면 넣기 전에 화면 판정을 해, 맞음이면 밀기를 같이 넣는다(봇과 같은 길, D75). Lyra 근접 능력은 TickAbilityMelee 가 켠다
@@ -1925,12 +1958,47 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		FMOBMeleeGuess MeleeGuess;
 		mo::Vec3 MeleePush;
 		if (bMeleeStarts) MeleeGuess = JudgeMelee(MeleePush);
+		const uint64 DashStartedBefore = Core->Prediction.GetDashCounters().started;
 		{
 			const FMOBCore::FPawnScope PawnScope(*Core);	// 화면 판정(JudgeMelee) 뒤에 넘긴다 — 봇과 같은 차례
 			Core->Prediction.AddInput(In, bMeleeStarts && MeleeGuess.Kind == wire::MELEE_HIT ? &MeleePush : nullptr);
 		}
 		Seq = In.seq;
 		MeleeYaw = In.yaw;
+		// 대시(D-5) — 예측이 이 입력에 대시를 켰으면 Lyra 대시 능력은 TickAbilityDash 가 켠다. 방향 = 예측이 고른 방향(그 칸의 dashDir)
+		if (Core->Prediction.GetDashCounters().started != DashStartedBefore)
+		{
+			wire::PlayerState Probe = wire::PlayerState();
+			Probe.lastSeq = In.seq;
+			const mo::CSelfPrediction::Slot* DashSlot = Core->Prediction.FindComparable(Probe);
+			if (bDashPending) ++DashDropped;	// 앞 대시를 아직 못 켰다
+			bDashPending = true;
+			DashPendingSeq = In.seq;
+			DashPendingFrame = GFrameCounter;
+			DashPendingDir = DashSlot ? DashSlot->dashDir : 0xFF;	// 0xFF = 칸을 못 찾음 — 몽타주 대조에서 뺀다
+			// 앞 입력 이동 = Lyra 날 값(길이 그대로 — 효과의 방향 값이 원본과 같게). 다만 예측이 쓴 앞 칸 걸음 이동(부활 뒤 이동 막음이면 0)과 고르는 방향이
+			// 다르면 그 값을 넣는다 — 몽타주는 서버 · 예측 방향을 따른다(판 dsh2 seq 2388: 날 값 (-1, 1) · 예측 0 → 오른 ↔ 앞)
+			DashPendingPrevMove = LastInputRawMove;
+			bDashPendingPrevYaw = false;
+			wire::PlayerState PrevProbe = wire::PlayerState();
+			PrevProbe.lastSeq = In.seq - 1;
+			if (const mo::CSelfPrediction::Slot* PrevSlot = Core->Prediction.FindComparable(PrevProbe))
+			{
+				DashPendingPrevYaw = PrevSlot->input.yaw;
+				bDashPendingPrevYaw = true;
+				const mo::Vec3 Used(PrevSlot->dashMove.x, PrevSlot->dashMove.y, 0);
+				if (mo::SelectDashDir(Used, PrevSlot->input.yaw) != mo::SelectDashDir(mo::Vec3(LastInputRawMove.X, LastInputRawMove.Y, 0), PrevSlot->input.yaw))
+				{
+					DashPendingPrevMove = FVector(Used.x, Used.y, 0);
+					++DashPrevFromSlot;
+				}
+			}
+			++DashQueued;
+			if (DashPendingDir < 4) ++DashDirCount[DashPendingDir];
+			DashStartSeqs[DashStartNext] = In.seq;
+			DashStartNext = (DashStartNext + 1) % UE_ARRAY_COUNT(DashStartSeqs);
+		}
+		LastInputRawMove = RawMove;
 		if (bMeleeStarts)
 		{
 			MeleeGuesses.Add(In.seq, MeleeGuess);
@@ -2196,7 +2264,19 @@ void UMOBridgeSubsystem::HandleDash(const wire::Dash& M)
 {
 	if (M.player != PlayerId)
 	{
+		// 남의 대시(D-5) — 몽타주는 서버 애니 상태가 낸다(-MOBServerAnim). 효과는 그 몸이 그 틱 상태로 넘어갈 때 낸다(TickRemoteDashCues) —
+		// 받자마자 내면 화면의 남 몸(보간 지연만큼 뒤)이 아직 안 움직였는데 효과가 먼저 나온다
 		++DashOthers;
+		if (PendingDashCues.Num() >= 32)
+		{
+			PendingDashCues.RemoveAt(0);	// 화면 시계가 안 가는 동안 쌓인 것 — 32 = 받고 낼 때까지(판 dsh1 · dsh2 최대 0.37초) 쌓일 수보다 넉넉한 상한(제 판단)
+			++DashCueDropped;
+		}
+		FMOBPendingDashCue& Cue = PendingDashCues.AddDefaulted_GetRef();
+		Cue.Player = M.player;
+		Cue.Tick = M.tick;
+		Cue.Force = FVector(M.forceX, M.forceY, M.forceZ);
+		Cue.ReceivedAt = FPlatformTime::Seconds();
 		return;
 	}
 	++DashMine;
@@ -2205,6 +2285,187 @@ void UMOBridgeSubsystem::HandleDash(const wire::Dash& M)
 		const FMOBCore::FPawnScope PawnScope(*Core);	// 그 입력부터 다시 돌리는 걸음도 남 캡슐을 본다(근접과 같다)
 		Core->Prediction.OnDashResult(M.seq, M.dir, mo::Vec3(M.forceX, M.forceY, M.forceZ));
 	}
+}
+
+// 남의 대시 효과 — GA_Hero_Dash 가 켤 때 내는 신호와 같은 값(원본 기준: 신호 GameplayCue.Character.Dash · NormalizedMagnitude = RootMotionDuration 0.25 ·
+// RawMagnitude = Strength 1850 · Normal = 방향 · Location 0 · 능력 · 효과 단계 1). 방향은 소식의 힘(단위 벡터 × 1850)을 정규화한 것 —
+// 원본은 정규화 전 방향(앞이면 카메라 앞 × (1, 1, 1.2), 그 밖이면 이동 입력 날 값)이라 길이가 다를 수 있다. 시점 = 그 몸을 보간하는 화면 틱이 대시 틱의 앞 틱을 넘은 첫 프레임
+void UMOBridgeSubsystem::TickRemoteDashCues()
+{
+	static const FGameplayTag DashCueTag = FGameplayTag::RequestGameplayTag(TEXT("GameplayCue.Character.Dash"), false);
+	const double NowSec = FPlatformTime::Seconds();
+	for (int32 i = 0; i < PendingDashCues.Num();)
+	{
+		const FMOBPendingDashCue& C = PendingDashCues[i];
+		if (ShownRenderTick < 1.0 || ShownRenderTick <= (double)C.Tick - 1.0)
+		{
+			++i;
+			continue;
+		}
+		APawn* Pawn = FindPlayerPawn(C.Player);
+		UAbilitySystemComponent* ASC = FindASC(Pawn);
+		if (!ASC || !DashCueTag.IsValid()) ++DashCueNoPawn;
+		else
+		{
+			FGameplayCueParameters Params;
+			Params.NormalizedMagnitude = mo::kDashForceDuration;
+			Params.RawMagnitude = mo::kDashStrength;
+			Params.Normal = C.Force.GetSafeNormal();
+			Params.Location = FVector::ZeroVector;
+			Params.AbilityLevel = 1;
+			Params.GameplayEffectLevel = 1;
+			ASC->ExecuteGameplayCue(DashCueTag, Params);
+			++DashCues;
+			const double Wait = NowSec - C.ReceivedAt;
+			DashCueWaitSum += Wait;
+			DashCueWaitMax = FMath::Max(DashCueWaitMax, Wait);
+		}
+		PendingDashCues.RemoveAt(i);
+	}
+}
+
+// Lyra 대시 능력(GA_Hero_Dash)을 예측이 켠 대시 입력에서 켠다(근접 TickAbilityMelee 와 같은 꼴). 능력 칸의 입력 표식(InputTag.Ability.Dash)을 떼어
+// Shift 로는 Lyra 가 혼자 못 켠다. 켠 능력이 내 몽타주 · 효과 · 소리 · 쿨다운 표시를 낸다. 힘은 Lyra 이동 계산이 쉬어(NoLyraMove) 내 자리를 안 바꾼다 — 자리는 예측이다.
+// 방향: 능력은 켤 때 GetLastMovementInputVector 로 몽타주를 고른다. 사람 키면 Lyra 는 입력 처리(이동 계산 앞)에서 켜 앞 프레임 이동을 보지만, 다리는 이동 계산 뒤에 켜
+// 이번 입력 이동을 본다 — 켜는 동안만 마지막 이동 입력을 앞 입력 이동(예측이 방향을 고른 값과 같은 쪽, CDashAbility::TryActivate · TickInput 의 DashPendingPrevMove)으로
+// 바꿔 놓고 되돌린다(-MOBBreakDashDir 이면 안 바꾼다)
+void UMOBridgeSubsystem::TickAbilityDash()
+{
+	static const FGameplayTag DashInputTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.Dash"), false);
+	static const TCHAR* const MontNames[4] = { TEXT("AM_MM_Dash_Forward"), TEXT("AM_MM_Dash_Backward"), TEXT("AM_MM_Dash_Left"), TEXT("AM_MM_Dash_Right") };	// EDashDir 차례
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ACharacter* Ch = PC ? Cast<ACharacter>(PC->GetPawn()) : nullptr;
+	ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch));
+
+	// 켠 다음 프레임에 내 메시에 있는 대시 몽타주 — 예측 방향의 몽타주여야 한다. 맨 위 몽타주만 보면 같은 프레임에 튼 다른 몽타주에 가린다
+	// (판 dsh2 seq 1956: 빈 탄창으로 쥔 사격이 낸 AM_MM_Pistol_DryFire) — 섞여 빠지는 중인 것까지 몽타주 칸을 다 훑는다
+	if (DashMontCheckFrame && GFrameCounter >= DashMontCheckFrame)
+	{
+		DashMontCheckFrame = 0;
+		const UAnimInstance* AI = Ch && Ch->GetMesh() ? Ch->GetMesh()->GetAnimInstance() : nullptr;
+		FString DashName, TopName(TEXT("none"));
+		if (AI)
+		{
+			if (const UAnimMontage* Top = AI->GetCurrentActiveMontage()) TopName = Top->GetName();
+			for (const FAnimMontageInstance* Inst : AI->MontageInstances)
+			{
+				const FString Name = Inst && Inst->Montage ? Inst->Montage->GetName() : FString();
+				if (!Name.StartsWith(TEXT("AM_MM_Dash_"))) continue;
+				DashName = Name;
+				if (DashMontCheckDir < 4 && Name == MontNames[DashMontCheckDir]) break;
+			}
+		}
+		++DashMontChecked;
+		const bool bSame = DashMontCheckDir < 4 && DashName == MontNames[DashMontCheckDir];
+		if (DashName.IsEmpty()) ++DashMontNone;
+		else if (!bSame) ++DashMontageMismatch;
+		if (!bSame && DashMontLinesLeft > 0)
+		{
+			--DashMontLinesLeft;
+			UE_LOG(LogMOB, Log, TEXT("MOB_DASH_MONT seq=%u want=%d got=%s top=%s"), DashMontCheckSeq, (int32)DashMontCheckDir, DashName.IsEmpty() ? TEXT("none") : *DashName, *TopName);
+		}
+	}
+
+	const FGameplayAbilitySpec* Spec = nullptr;
+	if (LASC && DashInputTag.IsValid())
+	{
+		for (FGameplayAbilitySpec& Each : LASC->GetActivatableAbilities())
+		{
+			if (!Each.Ability || !Each.GetDynamicSpecSourceTags().HasTagExact(DashInputTag)) continue;
+			if (!bBreakDashBlock || GDashSpecHandle != Each.Handle) UE_LOG(LogMOB, Log, TEXT("MOB_DASH_SPEC ability=%s handle=%s strip=%d"), *GetNameSafe(Each.Ability), *Each.Handle.ToString(), bBreakDashBlock ? 0 : 1);
+			GDashSpecHandle = Each.Handle;
+			if (!bBreakDashBlock)
+			{
+				Each.GetDynamicSpecSourceTags().RemoveTag(DashInputTag);
+				LASC->MarkAbilitySpecDirty(Each);
+				++LyraDashStripped;
+			}
+			break;
+		}
+		Spec = GDashSpecHandle.IsValid() ? LASC->FindAbilitySpecFromHandle(GDashSpecHandle) : nullptr;
+	}
+	const bool bActive = Spec && Spec->IsActive();
+	if (bActive && !bLyraDashWasActive)
+	{
+		// 지난 프레임 끝엔 꺼져 있었는데 다리가 켜기 전에 켜졌다 = Lyra 가 혼자 켰다
+		if (LyraDashSelf < 10) UE_LOG(LogMOB, Log, TEXT("MOB_DASH_LYRA_SELF frame=%llu seq=%u"), (unsigned long long)GFrameCounter, Seq);
+		++LyraDashSelf;
+		DashLastStartFrame = GFrameCounter;
+	}
+	if (bDashPending)
+	{
+		if (!Spec || !Ch)
+		{
+			bDashPending = false;
+			++DashNoSpec;
+		}
+		else
+		{
+			bool bStarted = false;
+			bool bSwapMattered = false;
+			if (!bActive)
+			{
+				// 마지막 이동 입력만 바꾼다 — 이 프레임에 쌓인(다음 이동 계산이 가져갈) 입력은 그대로 남긴다
+				const FVector Pending = Ch->Internal_GetPendingMovementInputVector();
+				const FVector Last = Ch->Internal_GetLastMovementInputVector();
+				// 예측은 앞 입력의 요(앞 입력 뒤의 몸 앞)로 고르는데 다리가 켜는 때 Lyra 몸은 이번 입력 뒤 요다 — 그 차이만큼 넣을 이동을 돌려 Lyra 가 예측과 같은
+				// 각도 차(이동 − 몸 앞)를 보게 한다(판 dshd seq 780: 앞 입력 요 179.92 · 몸 -179.90 — 대각선 이동이 135도 경계에 걸려 예측 왼 ↔ Lyra 뒤).
+				// 0 이동은 돌려도 0 이라 못 맞추지만, 그때 예측이 켜는 것은 앞(|요| < 45) 하나라 경계 45도에 걸릴 때만 갈린다
+				const float BodyYaw = (float)Ch->GetActorRotation().Yaw;
+				const FVector Swapped = bDashPendingPrevYaw
+					? DashPendingPrevMove.RotateAngleAxis(FRotator::NormalizeAxis(BodyYaw - DashPendingPrevYaw), FVector::UpVector)
+					: DashPendingPrevMove;
+				const FVector Want = bBreakDashDir ? Last : Swapped;
+				const auto SetLastInput = [Ch, Pending](const FVector& V)
+				{
+					Ch->Internal_ConsumeMovementInputVector();
+					Ch->Internal_AddMovementInput(V, true);
+					Ch->Internal_ConsumeMovementInputVector();
+					Ch->Internal_AddMovementInput(Pending, true);
+				};
+				// 바꿔 넣기가 몽타주를 가르나 — 이번 입력 이동과 바꿔 넣을 값(돌린 앞 입력 이동)이 고르는 방향(몸 요 = 지금 몸)이 다르면
+				bSwapMattered = mo::SelectDashDir(mo::Vec3(Last.X, Last.Y, 0), BodyYaw) != mo::SelectDashDir(mo::Vec3(Swapped.X, Swapped.Y, 0), BodyYaw);
+				// 진단 — Lyra 가 고를 방향(넣을 이동 · 지금 몸 요)이 예측 방향과 다르면 예측이 쓴 값(앞 칸의 걸음 이동 · 입력 요)과 같이 남긴다
+				const uint8 LyraWill = (uint8)mo::SelectDashDir(mo::Vec3(Want.X, Want.Y, 0), BodyYaw);
+				if (LyraWill != DashPendingDir && DashMontLinesLeft > 0)
+				{
+					--DashMontLinesLeft;
+					wire::PlayerState PrevProbe = wire::PlayerState();
+					PrevProbe.lastSeq = DashPendingSeq - 1;
+					const mo::CSelfPrediction::Slot* PrevSlot = Core ? Core->Prediction.FindComparable(PrevProbe) : nullptr;
+					UE_LOG(LogMOB, Log, TEXT("MOB_DASH_DIRDIFF seq=%u want=%d lyraWill=%d put=(%.3f,%.3f) bodyYaw=%.2f last=(%.3f,%.3f) prevSlot=%d prevMove=(%.3f,%.3f) prevYaw=%.2f"),
+						DashPendingSeq, (int32)DashPendingDir, (int32)LyraWill, Want.X, Want.Y, BodyYaw, Last.X, Last.Y, PrevSlot ? 1 : 0,
+						PrevSlot ? PrevSlot->dashMove.x : 0.0, PrevSlot ? PrevSlot->dashMove.y : 0.0, PrevSlot ? PrevSlot->input.yaw : 0.f);
+				}
+				SetLastInput(Want);
+				bStarted = LASC->TryActivateAbility(GDashSpecHandle);
+				SetLastInput(Last);
+			}
+			if (bStarted)
+			{
+				bDashPending = false;
+				++DashDriven;
+				DashDirSwapMattered += bSwapMattered;
+				DashLastStartFrame = GFrameCounter;
+				DashMontCheckFrame = GFrameCounter + 1;
+				DashMontCheckDir = DashPendingDir;
+				DashMontCheckSeq = DashPendingSeq;
+			}
+			else
+			{
+				++DashWaitFrames;
+				if (GFrameCounter - DashPendingFrame > kMaxDashWaitFrames)
+				{
+					// 끝까지 켜져 있었으면 버림(Lyra 가 먼저 켬 — -MOBBreakDashBlock), 꺼져 있는데 켜기가 안 됐으면 켜기 실패(쿨다운 등)
+					bDashPending = false;
+					if (bActive) ++DashDropped;
+					else ++DashActivateFail;
+				}
+			}
+		}
+	}
+	const FGameplayAbilitySpec* After = LASC && GDashSpecHandle.IsValid() ? LASC->FindAbilitySpecFromHandle(GDashSpecHandle) : nullptr;
+	bLyraDashWasActive = After && After->IsActive();
 }
 
 // Lyra 근접 능력(GA_Melee)을 예측이 켠 근접 입력에서 켠다(사격 TickAbilityFire 와 같은 꼴, D77). 능력 칸의 입력 표식(InputTag.Ability.Melee)을 떼어
@@ -2575,6 +2836,22 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 		}
 	}
 	bAutoMelee = bMeleeNow;
+	// 대시(-MOBAutoDash) — 3.6초(한 방향 걷기 1.2초 구간 셋)마다 두 번 0.05초 누름: 걷는 방향이 바뀌는 프레임(누른 입력의 이동이 앞 입력 이동과 다르다 — 다리가 마지막 이동 입력을
+	// 바꿔 넣는 갈래) · 1.8초 뒤 걷기 구간의 한가운데. 두 누름 간격 1.8초 > 쿨다운 1.5초라 둘 다 켜진다(주기 · 자리는 제 판단, 3 과 8 이 서로소라 여덟 걷기 방향을 다 돈다).
+	// 사람 키처럼 Lyra 입력 표식에도 누름을 넣는다 — Lyra 는 다음 프레임 입력 처리에서 보므로 다리도 다음 프레임에 읽는다(bAutoDash = 한 프레임 앞 키)
+	const double DashPhase = FMath::Fmod(S, 3.0 * kAutoLeg);
+	const bool bDashKeyNow = bAutoDashOn && (DashPhase < 0.05 || (DashPhase >= 1.5 * kAutoLeg && DashPhase < 1.5 * kAutoLeg + 0.05));
+	{
+		static const FGameplayTag DashTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.Dash"), false);
+		ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch));
+		if (LASC && DashTag.IsValid())
+		{
+			if (bDashKeyNow && !bAutoDashKey) LASC->AbilityInputTagPressed(DashTag);
+			else if (!bDashKeyNow && bAutoDashKey) LASC->AbilityInputTagReleased(DashTag);
+		}
+	}
+	bAutoDash = bAutoDashKey;
+	bAutoDashKey = bDashKeyNow;
 	bAutoReload = FMath::Fmod(S, 20.0) >= 19.0 || (bAutoAim && ServerMagazine == 0);
 	if (bAutoReload != bAutoReloadPressed)
 	{
@@ -3282,12 +3559,18 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 			(unsigned long long)MC.pushesIgnored, (unsigned long long)MC.pushHitFixes, (unsigned long long)MC.pushForceFixes, (unsigned long long)MC.unconfirmed, (unsigned long long)MC.rerunsMissed);
 		UE_LOG(LogMOB, Log, TEXT("MOB_MELEE3 queued=%lld driven=%lld activateFail=%lld noSpec=%lld dropped=%lld waitFrames=%lld lyraSelf=%lld stripped=%lld"),
 			MeleeQueued, MeleeDriven, MeleeActivateFail, MeleeNoSpec, MeleeDropped, MeleeWaitFrames, LyraMeleeSelf, LyraMeleeStripped);
-		// 대시(D-3) — 받은 내 소식 · 남의 소식 · 예측 쪽 고친 수(dashDiff = startMismatches + forceFixes + unconfirmed). 다리가 대시를 보내는 것은 D-5(그 전엔 presses 0)
+		// 대시(D-3) — 받은 내 소식 · 남의 소식 · 예측 쪽 고친 수(dashDiff = startMismatches + forceFixes + unconfirmed). 다리는 D-5 부터 Shift 로 보낸다
 		const mo::CSelfPrediction::DashCounters& DC = Core->Prediction.GetDashCounters();
 		UE_LOG(LogMOB, Log, TEXT("MOB_DASH mine=%lld others=%lld presses=%llu started=%llu respawnGained=%llu respawnLost=%llu results=%llu resultsNoSlot=%llu dashDiff=%llu startMismatches=%llu forceFixes=%llu unconfirmed=%llu replays=%llu replaysMissed=%llu meleeInReplay=%llu"),
 			DashMine, DashOthers, (unsigned long long)DC.presses, (unsigned long long)DC.started, (unsigned long long)DC.respawnGained, (unsigned long long)DC.respawnLost, (unsigned long long)DC.results, (unsigned long long)DC.resultsNoSlot,
 			(unsigned long long)(DC.startMismatches + DC.forceFixes + DC.unconfirmed), (unsigned long long)DC.startMismatches, (unsigned long long)DC.forceFixes, (unsigned long long)DC.unconfirmed,
 			(unsigned long long)DC.replays, (unsigned long long)DC.replaysMissed, (unsigned long long)DC.meleeInReplay);
+		// 대시 다리(D-5) — Lyra 능력(켤 차례 · 켬 · 실패 · 칸 없음 · 버림 · 기다린 프레임 · Lyra 혼자 · 뗀 칸) · 몽타주 대조 · 방향별 켬(앞 · 뒤 · 왼 · 오른) ·
+		// 남의 효과 · 대시 중 내 자리 고침(전체 고침 수는 MOB_SUMMARY3 corrections)
+		UE_LOG(LogMOB, Log, TEXT("MOB_DASH2 inputs=%lld queued=%lld driven=%lld activateFail=%lld noSpec=%lld dropped=%lld waitFrames=%lld lyraSelf=%lld stripped=%lld montChecked=%lld montMismatch=%lld montNone=%lld dirSwapMattered=%lld prevFromSlot=%lld dirs=%lld/%lld/%lld/%lld cues=%lld cueNoPawn=%lld cueDropped=%lld cuePending=%d cueWaitAvg=%.3f cueWaitMax=%.3f dashCorr=%lld dashCorrMax=%.2f"),
+			InputsDash, DashQueued, DashDriven, DashActivateFail, DashNoSpec, DashDropped, DashWaitFrames, LyraDashSelf, LyraDashStripped, DashMontChecked, DashMontageMismatch, DashMontNone, DashDirSwapMattered, DashPrevFromSlot,
+			DashDirCount[0], DashDirCount[1], DashDirCount[2], DashDirCount[3], DashCues, DashCueNoPawn, DashCueDropped, PendingDashCues.Num(),
+			DashCues ? DashCueWaitSum / DashCues : 0.0, DashCueWaitMax, DashCorrections, DashCorrectionMax);
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY4 remotes=%d remoteFail=%d frames=%lld underrun=%lld teleports=%lld driftMax=%.3f driftOver1cm=%lld yawDiffMax=%.3f lagAvg=%.1f behindTicksAvg=%.2f"),
 		RemoteSpawned, RemoteSpawnFail, RemoteFrames, RemoteUnderrun, RemoteTeleports, RemoteDriftMax, RemoteDriftOver1cm, RemoteYawDiffMax, RemoteFrames ? RemoteLagSum / RemoteFrames : 0.0, RemoteFrames ? RemoteBehindSum / RemoteFrames : 0.0);
