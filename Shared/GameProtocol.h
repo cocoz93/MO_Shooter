@@ -11,7 +11,8 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 12;		// 12 = 대시 단추 BUTTON_DASH 를 보냄 · 대시 소식 S2C_DASH(컨텐츠 D-3)
+		constexpr uint32_t kProtocolVersion = 13;		// 13 = 수류탄 단추 BUTTON_GRENADE 를 보냄 · 입력 끝 카메라 거리 camBack · 수류탄 소식 S2C_GRENADE · 수류탄 상태 S2C_GRENADE_STATE(컨텐츠 G-3)
+														// 12 = 대시 단추 BUTTON_DASH 를 보냄 · 대시 소식 S2C_DASH(컨텐츠 D-3)
 														// 11 = 상태의 빠른 칸 quickSlots · 받침 소식의 종류 · 줍기 결과 · 무기 · 칸 · 탄 · 입력 번호 · 시험 입력의 탄 정하기 · 죽음(컨텐츠 W-2 · W-3)
 														// 10 = 근접 단추 BUTTON_MELEE · 근접 결과 S2C_MELEE · 피해 · 처치 소식의 무기 번호 근접 kWeaponMelee(컨텐츠 E-3)
 														// 9 = 체력 받침 상태 S2C_PICKUP(컨텐츠 B-3)
@@ -42,6 +43,8 @@ namespace mo
 			S2C_PICKUP = 108,		// 잃으면 안 됨 — 체력 받침 상태. 집음 · 다시 켜짐 때와, 들어올 때 · 경기 시작에 받침마다 하나(컨텐츠 B-3)
 			S2C_MELEE = 109,		// 잃으면 안 됨 — 근접 결과. 서버가 근접 능력을 켤 때마다 방 전원에게. 공격자 화면은 이것으로 제 밀기 예측을 고친다(컨텐츠 E-3)
 			S2C_DASH = 110,			// 잃으면 안 됨 — 대시 켬. 서버가 대시를 켤 때마다 방 전원에게. 켠 사람 화면은 이것으로 제 대시 예측(켬 · 방향 · 힘)을 고친다(컨텐츠 D-3)
+			S2C_GRENADE = 111,		// 잃으면 안 됨 — 수류탄 던짐 · 터짐(EGrenadeEvent). 방 전원에게. 던진 사람 화면은 던짐으로 제 쿨다운 예측을 고친다(컨텐츠 G-3)
+			S2C_GRENADE_STATE = 112,	// 잃어도 됨 — 산 수류탄마다 자리 · 회전 · 이번 틱 부딪힘. 산 수류탄이 있는 틱에만 상태 패킷 바로 뒤에(다음 틱이 덮는다)
 		};
 
 		enum EButton : uint8_t
@@ -53,7 +56,7 @@ namespace mo
 			BUTTON_CROUCH = 1 << 4,	// 누른 입력 하나에만 켠다 — 앉기 키 한 번 = ALyraCharacter::ToggleCrouch 한 번(D-5)
 			BUTTON_MELEE = 1 << 5,	// Lyra 근접 입력이 눌림을 낸 입력에 켠다 — 근접 능력이 꺼져 있으면 그 입력에 켜지고, 켜진 동안의 누름은 버린다(E-3)
 			BUTTON_DASH = 1 << 6,	// Lyra 대시 입력이 눌림을 낸 입력에 켠다 — 켜짐 · 쿨다운 중이면 버린다(서버 규칙 D-2). 보내는 쪽 = 봇 --dash(D-3) · 다리 Shift(D-5)
-			BUTTON_GRENADE = 1 << 7,	// Q 를 누른 입력 하나에만 켠다 — 쿨다운 · 대시 중이면 버린다(서버 규칙 G-2. 보내는 쪽 · 판 번호 올림 · 카메라 거리 칸은 G-3)
+			BUTTON_GRENADE = 1 << 7,	// Q 를 누른 입력 하나에만 켠다 — 쿨다운 · 대시 중이면 버린다(서버 규칙 G-2). 판 13 · 카메라 거리는 입력 camBack(G-3). 보내는 쪽 = 봇 --grenade(G-3) · 다리 Q(G-5)
 		};
 
 		// S2C_PICKUP 의 까닭 — 화면 효과를 낼지 다리가 이것으로 가른다
@@ -122,6 +125,7 @@ namespace mo
 			uint8_t weapon;			// EWeapon
 			uint32_t viewTick;		// 쏠 때 화면에 그리던 틱의 정수 부분. 0 = 시점 없음 → 서버는 현재 자리로 판정
 			float viewAlpha;		// viewTick 에서 다음 틱까지의 비율 0~1 — 틱 간격이 달리기로 약 8cm 라 정수 틱만으로는 모자란다
+			float camBack;			// 카메라에서 사격 시작점(aim)까지 시선 방향 거리(cm) — 수류탄 겨눔 선이 카메라에서 시작한다(G-3). 서버가 G-0 범위로 자른다(ClampGrenadeCamBack)
 		};
 
 		// 시험 입력 DebugPlace 의 덧붙임(flags) — 0 이면 자리 · 체력만(전부터의 뜻)
@@ -365,6 +369,53 @@ namespace mo
 			double forceX, forceY, forceZ;	// 서버가 넣은 대시 힘(cm/s). double — 서버가 넣는 값 그대로라야 같은 입력 다시 돌리기가 끝자리까지 같다(근접 밀기는 서버도 float 를 넣는다)
 			uint8_t dir;					// 고른 방향(EDashDir — 앞 · 뒤 · 왼 · 오른) = 몽타주
 		};
+
+		// S2C_GRENADE 의 종류
+		enum EGrenadeEvent : uint8_t
+		{
+			GRENADE_THROW = 0,			// 던짐 — 능력이 켜졌다(쿨다운 시작). 자리 · 속도 · 회전 = 생긴 수류탄
+			GRENADE_BOOM_TIMER = 1,		// 신관으로 터짐 — 자리 · 회전 = 터진 걸음 뒤
+			GRENADE_BOOM_HIT = 2,		// 다른 팀 사람에 맞아 터짐
+		};
+
+		// 수류탄 소식 하나(G-3) — 던짐은 그 입력 처리 안에서 보내 이 틱 상태보다 먼저 간다(던진 사람 예측의 확인 AckGrenade 가 소식을 먼저 봐야 한다)
+		struct Grenade
+		{
+			Header h;
+			uint32_t tick;
+			uint32_t id;				// 방 안 수류탄 번호(1 부터). 던짐인데 0 = 능력은 켜졌지만 목록이 차 수류탄을 못 만듦(grenadeListFull — 쿨다운 · 끊기는 그대로라 예측은 고쳐야 한다)
+			uint32_t thrower;
+			uint32_t seq;				// 던진 사람의 입력 번호(던진 입력) — 그 사람 화면은 이 입력을 던짐으로 고친다(CSelfPrediction::OnGrenadeThrown)
+			float x, y, z;				// 뿌리 자리
+			float vx, vy, vz;			// 속도(던짐만, 터짐은 0)
+			float pitch, yaw, roll;		// 회전(도)
+			uint8_t kind;				// EGrenadeEvent
+			uint8_t team;				// 던질 때 팀
+		};
+
+		// S2C_GRENADE_STATE 의 칸 깃발
+		enum EGrenadeStateFlag : uint8_t
+		{
+			GRENADE_STATE_BOUNCED = 1 << 0,	// 이번 틱에 튕겼다 — hitX/Y/Z = 첫 튕김의 맞은 자리(소리용. Lyra 소리가 어느 사건을 따르는지는 G-5 에서 견준다)
+			GRENADE_STATE_STOPPED = 1 << 1,	// 멈춤(더 안 걷는다)
+		};
+
+		struct GrenadeStateEntry
+		{
+			uint32_t id;
+			float x, y, z;				// 이번 틱 걸음 뒤 뿌리 자리
+			float pitch, yaw, roll;
+			float hitX, hitY, hitZ;		// GRENADE_STATE_BOUNCED 일 때만
+			uint8_t flags;				// EGrenadeStateFlag
+		};
+
+		// 수류탄 상태(G-3) — 머리 뒤에 칸 count 개(보낸 크기 = 머리 + 칸 × count). 그 틱에 터진 수류탄은 목록에서 빠져 안 든다(터짐은 S2C_GRENADE)
+		struct GrenadeStateHead
+		{
+			Header h;
+			uint32_t tick;
+			uint8_t count;				// kMaxPlayersInRoom 이하 — 산 수류탄은 사람당 하나(쿨다운 301 입력 > 수명 121 틱)
+		};
 #pragma pack(pop)
 
 		static_assert(sizeof(Header) == 4, "ServerCore MsgHeader 와 같아야 한다");
@@ -412,5 +463,10 @@ namespace mo
 		static_assert(sizeof(Pickup) == 56, "받침 소식 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 		static_assert(sizeof(Melee) == 38, "근접 소식 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 		static_assert(sizeof(Dash) == 41, "대시 소식 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
+		static_assert(sizeof(Grenade) == 58, "수류탄 소식 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
+		static_assert(sizeof(GrenadeStateEntry) == 41 && sizeof(GrenadeStateHead) == 9, "수류탄 상태 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
+		inline constexpr size_t kMaxGrenadeStatePacketSize = sizeof(GrenadeStateHead) + sizeof(GrenadeStateEntry) * kMaxPlayersInRoom;
+		static_assert(kMaxGrenadeStatePacketSize <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
+		static_assert(sizeof(Input) == 50, "입력 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드(판 번호를 올린다)");
 	}
 }

@@ -188,7 +188,7 @@ namespace mo
 			AckMelee(server.lastSeq);
 			AckDash(server.lastSeq);
 		}
-		AckGrenade(server.lastSeq, _waitingSpawn || (server.flags & wire::STATE_DEAD) != 0);		// 부활 대기 · 죽음 중에도 — 서버는 죽은 입력에도 수류탄 쿨다운을 센다(대시 확인 뒤 — 대시 막기가 고쳐진 칸으로 고른다)
+		AckGrenade(server.lastSeq, (server.flags & wire::STATE_DEAD) != 0);		// 부활 대기 · 죽음 중에도 — 서버는 죽은 입력에도 수류탄 쿨다운을 센다(대시 확인 뒤 — 대시 막기가 고쳐진 칸으로 고른다)
 		const Slot* found = FindComparable(server);
 		if (!found || _waitingSpawn) return result;
 		result.compared = true;
@@ -489,7 +489,7 @@ namespace mo
 	void CSelfPrediction::AckGrenade(uint32_t lastSeq, bool serverDead)
 	{
 		bool cutChanged = false;
-		const uint32_t replayFrom = MarkGrenadeAcked(lastSeq, serverDead, cutChanged);
+		const uint32_t replayFrom = MarkGrenadeAcked(lastSeq, serverDead || _waitingSpawn, cutChanged);
 		if (replayFrom != 0 && cutChanged && !_waitingSpawn) RerunMovesFrom(replayFrom);
 	}
 

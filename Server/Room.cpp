@@ -48,7 +48,7 @@ namespace mo
 		bool IsFiniteInput(const wire::Input& input)
 		{
 			return std::isfinite(input.moveX) && std::isfinite(input.moveY) && std::isfinite(input.yaw) && std::isfinite(input.pitch)
-				&& std::isfinite(input.aimX) && std::isfinite(input.aimY) && std::isfinite(input.aimZ);
+				&& std::isfinite(input.aimX) && std::isfinite(input.aimY) && std::isfinite(input.aimZ) && std::isfinite(input.camBack);
 		}
 
 		// 0~1 밖이면 보간이 몸을 아무 데나 둘 수 있다 — 시점을 안 믿는 대신 입력째 버린다. NaN 도 이 비교에서 걸린다
@@ -900,7 +900,12 @@ namespace mo
 			{
 				const EGrenadeResult grenade = player.grenade.TryActivate(false, player.dash.BlocksPresses(), _phase == wire::EMatchPhase::PostGame);
 				CountGrenade(grenade);
-				if (grenade == EGrenadeResult::Thrown) ThrowGrenade(player, input, 0.0);	// 카메라 거리 칸은 G-3 이 와이어에 더한다 — 그 전엔 0(카메라 = 입력 시작점)
+				if (grenade == EGrenadeResult::Thrown)
+				{
+					const double camBack = ClampGrenadeCamBack(input.camBack);		// G-0 에서 잰 범위로(플랜 101줄) — NaN · 무한은 입력째 버렸다(IsFiniteInput)
+					if (camBack != (double)input.camBack) ++_stats.grenadeCamBackClamped;
+					ThrowGrenade(player, input, camBack);
+				}
 			}
 		}
 
@@ -1217,20 +1222,22 @@ namespace mo
 		case EGrenadeAimBranch::LookAtEnd: ++_stats.grenadeAimLookAtEnd; break;
 		}
 
-		if (_grenades.size() >= (size_t)wire::kMaxPlayersInRoom)
-		{
-			++_stats.grenadeListFull;		// 쿨다운은 이미 걸렸다 — Lyra 는 생성이 실패해도 능력은 끝난다
-			return;
-		}
 		LiveGrenade grenade;
-		grenade.id = _nextGrenadeId++;
 		grenade.owner = player.id;
 		grenade.team = player.team;
 		grenade.seq = input.seq;
 		grenade.state.location = thrown.location;
 		grenade.state.rotation = thrown.rotation;
 		grenade.state.velocity = thrown.velocity;
+		if (_grenades.size() >= (size_t)wire::kMaxPlayersInRoom)
+		{
+			++_stats.grenadeListFull;		// 쿨다운은 이미 걸렸다 — Lyra 는 생성이 실패해도 능력은 끝난다
+			SendGrenadeEvent(wire::GRENADE_THROW, 0, grenade.owner, grenade.team, grenade.seq, grenade.state);	// 번호 0 — 던진 사람 예측은 쿨다운 · 끊기를 그대로 맞춘다
+			return;
+		}
+		grenade.id = _nextGrenadeId++;
 		_grenades.push_back(grenade);
+		SendGrenadeEvent(wire::GRENADE_THROW, grenade.id, grenade.owner, grenade.team, grenade.seq, grenade.state);	// 입력 처리 안 — 이 틱 상태보다 먼저 간다
 		if (_allowDebug)
 		{
 			std::printf("GRENADEEV tick=%u room=%u kind=throw id=%u player=%u seq=%u loc=%.4f,%.4f,%.4f rot=%.5f,%.5f vel=%.4f,%.4f,%.4f branch=%u aimHit=%d aimDist=%.4f\n",
@@ -1282,9 +1289,16 @@ namespace mo
 
 			ProjectileHit hits[kGrenadeHitSlots];
 			const size_t hitCount = TickProjectile(_map, kGrenadeParams, grenade.state, kTickSeconds, _grenadeObstacles.data(), _grenadeObstacles.size(), hits, kGrenadeHitSlots);
+			grenade.bouncedThisTick = false;
 			for (size_t i = 0; i < std::min(hitCount, kGrenadeHitSlots); ++i)
 			{
-				if (hits[i].bounced) ++_stats.grenadeBounces;
+				if (!hits[i].bounced) continue;
+				++_stats.grenadeBounces;
+				if (!grenade.bouncedThisTick)		// 상태 소식 깃발은 첫 튕김 자리 하나(G-3)
+				{
+					grenade.bouncedThisTick = true;
+					grenade.bouncePoint = hits[i].impactPoint;
+				}
 			}
 			if (grenade.state.stopped && !grenade.stopCounted)
 			{
@@ -1312,6 +1326,7 @@ namespace mo
 	{
 		if (byHit) ++_stats.grenadeDetonateHit;
 		else ++_stats.grenadeDetonateTimer;
+		SendGrenadeEvent(byHit ? wire::GRENADE_BOOM_HIT : wire::GRENADE_BOOM_TIMER, grenade.id, grenade.owner, grenade.team, grenade.seq, grenade.state);	// 피해 소식보다 먼저
 		const Vec3 at = grenade.state.location;
 		if (_allowDebug)
 		{
@@ -1372,6 +1387,72 @@ namespace mo
 				KillPlayer(target, owner, wire::kWeaponGrenade, false);
 			}
 		}
+	}
+
+	void CRoom::SendGrenadeEvent(wire::EGrenadeEvent kind, uint32_t id, uint32_t thrower, uint8_t team, uint32_t seq, const ProjectileState& state)
+	{
+		wire::Grenade msg = wire::Grenade();
+		msg.h.size = (uint16_t)sizeof(msg);
+		msg.h.type = (uint16_t)wire::Msg::S2C_GRENADE;
+		msg.tick = _tick;
+		msg.id = id;
+		msg.thrower = thrower;
+		msg.seq = seq;
+		msg.x = (float)state.location.x;
+		msg.y = (float)state.location.y;
+		msg.z = (float)state.location.z;
+		if (kind == wire::GRENADE_THROW)
+		{
+			msg.vx = (float)state.velocity.x;
+			msg.vy = (float)state.velocity.y;
+			msg.vz = (float)state.velocity.z;
+		}
+		msg.pitch = (float)state.rotation.pitch;
+		msg.yaw = (float)state.rotation.yaw;
+		msg.roll = (float)state.rotation.roll;
+		msg.kind = (uint8_t)kind;
+		msg.team = team;
+		SendToAll(&msg, (int)sizeof(msg));
+		++(kind == wire::GRENADE_THROW ? _stats.grenadeThrowMsgs : _stats.grenadeBoomMsgs);
+	}
+
+	// 산 수류탄의 이번 틱 걸음 뒤 자리 · 회전 · 첫 튕김(플랜 103줄) — 화면 몫이라 잃어도 다음 틱이 덮는다. 상태 패킷 꼴은 안 바꾼다
+	void CRoom::SendGrenadeState()
+	{
+		if (_grenades.empty()) return;
+		char bytes[wire::kMaxGrenadeStatePacketSize];
+		wire::GrenadeStateHead head = wire::GrenadeStateHead();
+		const size_t count = std::min(_grenades.size(), (size_t)wire::kMaxPlayersInRoom);		// 목록이 방 크기를 안 넘는다(ThrowGrenade) — 넘는 칸은 버린다
+		head.h.size = (uint16_t)(sizeof(head) + sizeof(wire::GrenadeStateEntry) * count);
+		head.h.type = (uint16_t)wire::Msg::S2C_GRENADE_STATE;
+		head.tick = _tick;
+		head.count = (uint8_t)count;
+		std::memcpy(bytes, &head, sizeof(head));
+		for (size_t i = 0; i < count; ++i)
+		{
+			const LiveGrenade& g = _grenades[i];
+			wire::GrenadeStateEntry e = wire::GrenadeStateEntry();
+			e.id = g.id;
+			e.x = (float)g.state.location.x;
+			e.y = (float)g.state.location.y;
+			e.z = (float)g.state.location.z;
+			e.pitch = (float)g.state.rotation.pitch;
+			e.yaw = (float)g.state.rotation.yaw;
+			e.roll = (float)g.state.rotation.roll;
+			if (g.bouncedThisTick)
+			{
+				e.flags |= wire::GRENADE_STATE_BOUNCED;
+				e.hitX = (float)g.bouncePoint.x;
+				e.hitY = (float)g.bouncePoint.y;
+				e.hitZ = (float)g.bouncePoint.z;
+				++_stats.grenadeStateBounced;
+			}
+			if (g.state.stopped) e.flags |= wire::GRENADE_STATE_STOPPED;
+			std::memcpy(bytes + sizeof(head) + sizeof(e) * i, &e, sizeof(e));
+		}
+		SendToAll(bytes, (int)head.h.size);
+		++_stats.grenadeStateMsgs;
+		_stats.grenadeStateEntries += count;
 	}
 
 	// 근접(GA_Melee, 컨텐츠 E-3) — 켜지는 입력에 판정 · 피해 · 밀기 · 몽타주를 다 한다. 걸음 앞에서 불러 밀기가 이 입력 걸음부터 먹는다(E-2-1 · D73).
@@ -2306,6 +2387,7 @@ namespace mo
 		ResolveShots();
 		const Clock::time_point shotsEnd = Clock::now();
 		SendState();
+		SendGrenadeState();		// 상태 패킷 바로 뒤(플랜 103줄) — 산 수류탄이 있는 틱만
 		const Clock::time_point stateEnd = Clock::now();
 		_stats.timeInputsNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(inputsEnd - begin).count();
 		_stats.timeShotsNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(shotsEnd - inputsEnd).count();

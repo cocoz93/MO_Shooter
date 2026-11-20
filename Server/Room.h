@@ -212,6 +212,13 @@ namespace mo
 		uint64_t grenadeDamageEvents = 0;	// 보낸 S2C_DAMAGE(무기 kWeaponGrenade)
 		uint64_t grenadeSelfDamage = 0;		// 그중 던진 사람 자신
 		uint64_t grenadeKills = 0;			// 수류탄 피해로 체력 0(자기 처치 포함)
+		// 와이어(G-3) — 세는 자리를 보내는 곳에 따로 둬 보내는 길이 빠졌는지 가린다
+		uint64_t grenadeCamBackClamped = 0;	// 던진 입력의 camBack 이 G-0 범위 밖이라 자름(봇이 칸을 안 채우면 0 → 30 으로 늘 든다)
+		uint64_t grenadeThrowMsgs = 0;		// 보낸 S2C_GRENADE 던짐 — grenadeThrown 과 같아야 한다(목록이 차 번호 0 인 것 포함)
+		uint64_t grenadeBoomMsgs = 0;		// 보낸 S2C_GRENADE 터짐 — 신관 + 맞아 터짐과 같아야 한다
+		uint64_t grenadeStateMsgs = 0;		// 보낸 S2C_GRENADE_STATE — 산 수류탄이 있는 틱 수
+		uint64_t grenadeStateEntries = 0;	// 그 칸 수의 합
+		uint64_t grenadeStateBounced = 0;	// 그중 튕김 깃발 — grenadeBounces 보다 작거나 같다(한 틱에 여러 번 튕겨도 깃발은 하나)
 
 		// 권위 확인 — 일부러 보낸 나쁜 입력을 사유별로 센다. 정직한 클라는 여기 일곱이 전부 0 이어야 한다
 		uint64_t inputsRejectedBadValue = 0;	// NaN·무한대 — 통째로 버림
@@ -410,6 +417,8 @@ namespace mo
 			uint8_t team = 0;			// 던질 때 팀 — 맞아 터짐 · 폭발 팀 규칙이 이것을 본다
 			uint32_t seq = 0;			// 던진 입력 번호
 			bool stopCounted = false;	// grenadeStops 를 셌나
+			bool bouncedThisTick = false;	// 이번 틱 걸음에서 튕겼다 — 수류탄 상태 소식 깃발(G-3)
+			Vec3 bouncePoint;				// 그 첫 튕김의 맞은 자리
 			ProjectileState state;
 		};
 
@@ -466,6 +475,9 @@ namespace mo
 		void ThrowGrenade(Player& player, const wire::Input& input, double camBack);
 		void TickGrenades();	// 입력 · 받침 뒤 — 산 수류탄마다 한 걸음 · 맞아 터짐 · 신관 터짐
 		void DetonateGrenade(const LiveGrenade& grenade, bool byHit);	// 폭발 — 산 몸마다 선 · 피해 · 처치
+		// S2C_GRENADE 하나를 방 전원에게(G-3). 던짐이면 velocity 를 싣고, 목록이 차 못 만든 던짐은 id 0
+		void SendGrenadeEvent(wire::EGrenadeEvent kind, uint32_t id, uint32_t thrower, uint8_t team, uint32_t seq, const ProjectileState& state);
+		void SendGrenadeState();		// 산 수류탄이 있으면 S2C_GRENADE_STATE 하나 — 상태 패킷 바로 뒤
 		bool MeleeHandOf(const Player& player, Vec3& out);
 		void RecordRewindSamples();
 		bool GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out, float& outAlpha) const;

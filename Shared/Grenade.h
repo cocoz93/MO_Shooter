@@ -63,6 +63,19 @@ namespace mo
 	inline constexpr double kGrenadeTraceRange = 3150.0;	// Default Targeting Range — 카메라에서 선 끝까지
 	inline constexpr double kGrenadeAimMinDistance = 45.0;	// 맞은 거리(선 시작에서) < 45 면 조종 회전 그대로 — 안 맞음도 거리 0 이라 이 갈래(G-0-a 짐작 1)
 
+	// 카메라 거리(입력 camBack, G-3) — 카메라에서 입력 시작점까지 시선 방향 거리. 보내는 쪽이 싣고 서버는 G-0 에서 잰 범위로 자른다(플랜 101줄).
+	// G-0 실측 20칸 = 서서 피치 0 283.98(앉음 · 점프 · 달리기 같음) · +45 133.5 · +60 102.8 · −20 329.6 · −35 364.8 · −60 417.3 · 등이 벽 30.0
+	// (content-impl-progress.md G-0 「camBack」 줄). 봇은 대표값으로 서서 피치 0 을 싣는다
+	inline constexpr double kGrenadeCamBackMin = 30.0;
+	inline constexpr double kGrenadeCamBackMax = 417.3;
+	inline constexpr double kGrenadeCamBackStanding = 283.98;
+	// 와이어 값을 범위로 자른다. 유한 값만 넘길 것 — 서버는 NaN · 무한 입력을 통째로 버린다(Room.cpp IsFiniteInput)
+	inline double ClampGrenadeCamBack(float camBack)
+	{
+		const double v = camBack;
+		return v < kGrenadeCamBackMin ? kGrenadeCamBackMin : (v > kGrenadeCamBackMax ? kGrenadeCamBackMax : v);
+	}
+
 	// 놓을 자리 = 몸 위치(캡슐 중심) + 몸 앞 × 5 + 몸 위 × 25. 몸 회전은 요만 있다(사람 액터는 똑바로 선다)
 	Vec3 GrenadeSpawnLocation(const Vec3& bodyCenter, double bodyYawDegrees);
 

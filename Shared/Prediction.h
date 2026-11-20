@@ -179,7 +179,8 @@ namespace mo
 		void OnGrenadeThrown(uint32_t seq);
 		// 서버가 이 번호까지 입력을 돌렸다 — 그 안에서 내가 던졌는데 소식이 없는 것(서버는 안 던짐)을 안 던진 것으로 놓고 다시 고른다.
 		// Reconcile 이 처음에 부른다 — 대시와 달리 부활 대기 · 죽음 중에도(서버는 죽은 입력에도 쿨다운을 센다).
-		// serverDead = 이 확인을 실은 서버 상태가 죽음이거나 내가 부활을 기다리는 중 — 그때 지운 던짐은 unconfirmedDead 로 따로 센다
+		// serverDead = 이 확인을 실은 서버 상태가 죽음(STATE_DEAD). 그렇거나 내가 부활을 기다리는 중이면 지운 던짐을 unconfirmedDead 로 따로 센다.
+		// 맞춰 보기만 하는 쪽(봇)도 상태마다 부른다 — 사람끼리 막기 판은 Reconcile 이 남 캡슐을 놓고 부른다(대시 확인과 같은 자리)
 		void AckGrenade(uint32_t lastSeq, bool serverDead);
 
 		struct GrenadeCounters

@@ -735,6 +735,10 @@ int main(int argc, char** argv)
 		(unsigned long long)room.grenadeMeleeCancels, (unsigned long long)room.grenadeMeleePushRemoved, (unsigned long long)room.grenadeReloadCancels, (unsigned long long)room.grenadeBounces, (unsigned long long)room.grenadeStops,
 		(unsigned long long)room.grenadeDetonateTimer, (unsigned long long)room.grenadeDetonateHit, (unsigned long long)room.grenadeOwnerLeft, (unsigned long long)room.grenadeTargets, (unsigned long long)room.grenadeWallHits,
 		(unsigned long long)room.grenadeImmune, (unsigned long long)room.grenadeSameTeam, (unsigned long long)room.grenadeZeroDamage, (unsigned long long)room.grenadeDamageEvents, (unsigned long long)room.grenadeSelfDamage, (unsigned long long)room.grenadeKills);
+	// 수류탄 와이어(G-3) — throwMsgs = thrown(목록이 차 번호 0 인 것 포함) · boomMsgs = detonate timer + hit · stateBounced ≤ bounces
+	std::printf("SERVER grenadeWire camBackClamped=%llu throwMsgs=%llu boomMsgs=%llu stateMsgs=%llu stateEntries=%llu stateBounced=%llu\n",
+		(unsigned long long)room.grenadeCamBackClamped, (unsigned long long)room.grenadeThrowMsgs, (unsigned long long)room.grenadeBoomMsgs,
+		(unsigned long long)room.grenadeStateMsgs, (unsigned long long)room.grenadeStateEntries, (unsigned long long)room.grenadeStateBounced);
 	std::printf("REJECT badValue=%llu moveOver=%llu weaponId=%llu debugPlace=%llu aimFar=%llu swap=%llu aimWall=%llu droppedFull=%llu oldSeq=%llu badPackets=%llu | aimStale=%llu fireTooSoon=%llu fireEmpty=%llu seqGapFire=%llu\n",
 		(unsigned long long)room.inputsRejectedBadValue, (unsigned long long)room.movesOverLength, (unsigned long long)room.weaponIdRejected, (unsigned long long)room.debugPlacesRejected, (unsigned long long)room.shotsAimReplaced,
 		(unsigned long long)room.firesRejectedSwap, (unsigned long long)room.shotsAimPulledBack, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq, (unsigned long long)badPackets,
