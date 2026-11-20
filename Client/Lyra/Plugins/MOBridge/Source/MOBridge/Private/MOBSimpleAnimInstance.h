@@ -67,7 +67,7 @@ struct FMOBSimpleAnimProxy : public FAnimInstanceProxy
 	static constexpr int32 kJumpStack = 4;	// 점프 전환이 겹칠 때 함께 섞이는 상태 수의 상한(Lyra 실행값에서 많아야 셋)
 	static constexpr int32 kTransitions = 12;	// 네 방향 × 출발 · 멈춤 · 돌아서기(-MOBSimpleTransitions)
 	static constexpr int32 kStackClips = kJump + kTransitions;	// 쌓기가 틀 수 있는 클립 수. 번호 = 점프 5개 뒤에 종류 × 4 + 방향
-	static constexpr int32 kMontageKindCount = 12;	// 몽타주 종류 수(Shared/AnimClips.h MONTAGE_KIND_COUNT — cpp 에서 같은지 본다)
+	static constexpr int32 kMontageKindCount = 13;	// 몽타주 종류 수(Shared/AnimClips.h MONTAGE_KIND_COUNT — cpp 에서 같은지 본다)
 	static constexpr int32 kMontageCells = 3;		// 함께 도는 몽타주 칸 수의 상한(Shared/AnimPose.h kAnimMontageMax — cpp 에서 같은지 본다)
 
 	// 몽타주 칸 하나가 앞 상태에서 이 상태까지 지나간 구간 — 알림을 틀 때 쓴다. From < 0 = 새로 생긴 칸(시각 0 부터 본다)

@@ -19,13 +19,13 @@ import struct
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
-VERSION = 6                                     # 6 = 몽타주 종류 12(대시 넷, D-4) · 몽타주마다 빼기 비중 표 칸 i16(형식이 바뀐 판). 5 = 몽타주 종류 8(근접 · 반응 둘, E-2). 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3). 3 = 묶음 클립 30개 뒤에 조준 클립 17개(C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
+VERSION = 7                                     # 7 = 몽타주 종류 13(수류탄 던짐, G-4 — 형식 칸은 그대로). 6 = 몽타주 종류 12(대시 넷, D-4) · 몽타주마다 빼기 비중 표 칸 i16(형식이 바뀐 판). 5 = 몽타주 종류 8(근접 · 반응 둘, E-2). 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3). 3 = 묶음 클립 30개 뒤에 조준 클립 17개(C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
 KINDS = {'sphere': 0, 'sphyl': 1, 'box': 2}     # Shared/Weapon.h EBodyShape 값
 SCALE_LIMIT = 1e-4
 CLIPS_PER_BUNDLE = 67                           # Shared/AnimClips.h ACLIP_COUNT — 앞 67개(조준 17개 · 앉기 20개 포함). 그 뒤는 몽타주 · 덮기 자세 클립
 ADS_IDLE_INDEX = 30                             # Shared/AnimClips.h ACLIP_ADS_IDLE
 CROUCH_IDLE_INDEX = 47                          # Shared/AnimClips.h ACLIP_CROUCH_IDLE
-MONTAGE_KINDS = ('fire', 'reload', 'equip', 'unequip', 'spawn', 'melee', 'hit_back', 'hit_front', 'dash_forward', 'dash_backward', 'dash_left', 'dash_right')    # Shared/AnimClips.h EMontageKind 차례 = 뽑는 쪽 WEAPON_MONTAGES 차례
+MONTAGE_KINDS = ('fire', 'reload', 'equip', 'unequip', 'spawn', 'melee', 'hit_back', 'hit_front', 'dash_forward', 'dash_backward', 'dash_left', 'dash_right', 'grenade')    # Shared/AnimClips.h EMontageKind 차례 = 뽑는 쪽 WEAPON_MONTAGES 차례
 SLOT_MODES = {'replace': 0, 'additive': 1, 'perbone': 2}           # Shared/AnimClips.h ESlotMode
 BLEND_OPTION_MAX = 2                            # Shared/AnimClips.h kBlendOptionMax — 몽타주 넣기 · 빼기 곡선은 선형 · Cubic · HermiteCubic 만 옮긴다
 # 끼움 자리 표. 방식은 슬롯 이름에서 읽은 것이고(이름 짐작) 아래에서 줄 클립의 덧붙임 종류와 맞는지 막는다 — 덧붙임 자리엔 덧붙임 클립만, 나머지엔 일반 클립만.

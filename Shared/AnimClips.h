@@ -35,7 +35,8 @@
 // 크기 칸은 넣지 않는다. 일반 클립은 1, 덧붙임 클립은 0 으로 항상 같고, 다르면 도구가 파일을 만들지 않는다.
 namespace mo
 {
-	inline constexpr uint32_t kClipPackVersion = 6;	// 6 = 몽타주 종류 8 → 12(대시 앞 · 뒤 · 왼 · 오른, 컨텐츠 D-4) · 몽타주마다 빼기 비중 표 칸(대시 넷 = FastFeet). 5 는 거부한다(대시 몽타주가 없다).
+	inline constexpr uint32_t kClipPackVersion = 7;	// 7 = 몽타주 종류 12 → 13(수류탄 던짐, 컨텐츠 G-4). 칸 꼴은 그대로다. 6 은 거부한다(수류탄 몽타주가 없다).
+														// 6 = 몽타주 종류 8 → 12(대시 앞 · 뒤 · 왼 · 오른, 컨텐츠 D-4) · 몽타주마다 빼기 비중 표 칸(대시 넷 = FastFeet). 5 는 거부한다(대시 몽타주가 없다).
 														// 5 = 몽타주 종류 5 → 8(근접 · 맞은 쪽 반응 뒤 · 앞, 컨텐츠 E-2). 칸 꼴은 그대로다. 4 는 거부한다(근접 몽타주가 없다).
 														// 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3) — 몽타주 클립 번호가 20 씩 더 밀린다. 3 은 거부한다(앉기 클립이 없다).
 														// 3 = 묶음 클립 30개 뒤에 조준 클립 17개(컨텐츠 C-3, D60) — 몽타주 클립 번호가 17 씩 밀린다. 2 는 거부한다(조준 클립이 없다).
@@ -82,6 +83,7 @@ namespace mo
 		MONTAGE_DASH_BACKWARD,	// 차례 = EDashDir(Shared/Dash.h) — 종류 = MONTAGE_DASH_FORWARD + 방향
 		MONTAGE_DASH_LEFT,
 		MONTAGE_DASH_RIGHT,
+		MONTAGE_GRENADE,	// 수류탄 던짐(컨텐츠 G-4) — GA_Grenade 의 AM_MM_Rifle_GrenadeToss 0.8667초, 트랙 UpperBody · UpperBodyAdditive, 세 무기 같은 자산(G-0 dump_gren.txt, 원본 기준)
 		MONTAGE_KIND_COUNT,
 	};
 
