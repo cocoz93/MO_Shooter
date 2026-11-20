@@ -3,11 +3,16 @@
 //   GrenadeCheck <map_gym.mocl> <기록 폴더> <태그>... [--verbose] [--pawn-row now|prev]
 //
 // 기록 = Tools/LyraPilot/record_content_probe.ps1 -Mode grenade(G-0). 태그마다 셋을 읽는다
-//   cprobe_<태그>.log      MOB_CPROBE_GSPAWN(생긴 자리 · 회전 · 첫 속도) · GHIT(부딪힘) · GDROP(기록 도구가 옮긴 수류탄)
+//   cprobe_<태그>.log      MOB_CPROBE_GSPAWN(생긴 자리 · 회전 · 첫 속도) · GHIT(부딪힘) · GBOUNCE(튕김) · GSTOP(멈춤) · GBOOM(터짐)
+//                          · GDROP · GWALLSET(기록 도구가 옮긴 수류탄) · FOE_ACTIVE(기록 도구가 상대를 숨기고 충돌을 끈 구간)
 //   cprobe_<태그>.csv      사람 둘(나 · 상대)의 캡슐 — 수류탄이 맞을 수 있는 사람
 //   cprobe_<태그>_gren.csv 수류탄마다 프레임 끝 자리 · 속도 · 회전(나이 0 줄 = 생긴 프레임의 걸음 뒤)
 // 날아감(G-1-b) — 수류탄마다 생긴 상태에서 1/60 초씩 걸어 첫 부딪힘 전 프레임까지 자리 · 속도 · 회전을 견주고,
 //   첫 부딪힘이 같은 프레임에 같은 것(맵 · 나 · 상대 · 수류탄)에 났는지, 맞은 거리 · 물린 시각 · 법선이 같은지 본다
+// 튕김(G-1-c) — 첫 부딪힘 뒤로도 터지거나 기록이 끝날 때까지 걸어 프레임마다 자리 · 속도 · 회전, 맞음마다 종류 · 시각 · 거리 · 법선 · 겹친 깊이,
+//   튕긴 프레임 · 멈춘 프레임 · 멈춘 자리 · 맞아서 터진 프레임을 견준다
+//   - 맞음 알림은 맞은 쪽에도 간다(멈춘 수류탄에 다른 수류탄 · 사람이 닿음) — 그 줄은 이 수류탄의 쓸기가 아니라 뺀다(뿌리 자리가 쓸기 선 위에 없음)
+//   - 같은 팀 = 생긴 단계가 foe_same(기록 대본이 상대를 내 팀에 넣은 판) — 상대에 맞아도 튕긴다. 그 밖엔 던진 사람이 아닌 사람에 맞으면 터진다
 // 끝 코드: 0 = 전부 통과, 1 = 불일치, 2 = 입력 오류
 #include "MapCollision.h"
 #include "Projectile.h"
@@ -34,6 +39,19 @@ namespace
 	constexpr double kHitDistTolerance = 0.01;
 	constexpr double kHitTimeTolerance = 1e-5;
 	constexpr double kHitNormalTolerance = 0.001;
+	constexpr double kHitDepthTolerance = 0.01;		// 시작 겹침 깊이 — 맞은 거리와 같은 자릿수(제 판단, 구현 전에 적음)
+	// 튕김 뒤 맞음의 물린 시각 — 시각 차 × 쓸기 길이(cm)로 견준다. 느려진 수류탄은 쓸기가 몇 cm 뿐이라(예: 맞은 거리 0.51 · 시각 0.2025 → 쓸기 2.5cm)
+	// 시각 1e-5 가 0.00025cm 로 거리 기준보다 마흔 배 좁다
+	constexpr double kHitTimeCmTolerance = 0.01;
+	// 튕김 뒤 프레임 — 자리 · 속도는 첫 부딪힘 전과 같은 기준(15판 최대 0.0063 · 0.0053, 플랜 163줄 「튕김마다 오차가 커지므로 첫 판 뒤 다시 정함」)
+	constexpr double kBouncePosTolerance = 0.01;
+	constexpr double kBounceVelTolerance = 0.01;
+	// 회전은 걸음 시작 속도의 방향이다 — 튕긴 뒤 느린 속도(8cm/s 안팎)에서는 속도 차 0.0004 만으로 방향이 0.002도 넘게 갈린다.
+	// 15판 최대 0.0031도 · 속도 차(이 프레임 끝 · 앞 프레임 끝 중 큰 쪽)로 설명 안 되는 몫 최대 0.000005도(bounce 줄 unexplained).
+	// 그래서 회전 차 자체는 날아감 기준(0.001)의 열 배로 두고, 설명 안 되는 몫을 날아감 기준 그대로 PASS 에 넣는다
+	constexpr double kBounceRotTolerance = 0.01;
+	constexpr double kStopPosTolerance = 1.0;		// 멈춘 자리 — 플랜 163줄 「1cm 이하」
+	constexpr double kPassiveReach = 0.5;			// 이 수류탄 뿌리 자리가 맞음의 쓸기 선에서 이보다 멀면 남이 옮겨 와 닿은 알림(기록 1,862 건은 1e-4 안 · 4 건은 7.8cm 이상)
 	constexpr float kFrameSeconds = 1.f / 60.f;	// 기록은 고정 프레임(-UseFixedTimeStep)
 	constexpr double kPawnRadius = 35.0;			// Lyra 사람 캡슐 반지름(Movement.h capsuleRadius)
 	constexpr double kOwnerReach = 40.0;			// 생긴 자리 = 던진 사람 중심 + 앞 5 + 위 25 — 이 안이면 던진 사람으로 본다
@@ -145,7 +163,7 @@ namespace
 	{
 		int frame = -1, age = -1;
 		std::string who, comp;
-		double time = 0, distance = 0;
+		double time = 0, distance = 0, penetrationDepth = 0;
 		Vec3 normal;
 		bool startPenetrating = false;
 	};
@@ -154,6 +172,7 @@ namespace
 	{
 		int frame = 0;
 		Vec3 location, velocity;
+		bool keepVelocity = false;		// GWALLSET — 멈춘 수류탄 자리만 옮김
 	};
 
 	struct Grenade
@@ -164,9 +183,25 @@ namespace
 		Rotator rotation;
 		std::map<int, GrenRow> rows;		// 나이 → 줄
 		RecordHit firstHit;
+		std::map<int, std::vector<RecordHit>> hits;	// 프레임 → 이 수류탄이 쓸다 맞은 것(맞은 쪽 알림은 뺌)
+		std::map<int, int> bounces;			// 프레임 → 튕김 수
+		int stopFrame = -1;
+		Vec3 stopLocation;
 		std::vector<Teleport> teleports;
 		uint32_t owner = 0;				// kIdMe · kIdFoe · 0(못 찾음)
+		bool foeActive = true;			// 생길 때 상대 충돌이 켜져 있었나(기록 MOB_CPROBE_FOE_ACTIVE — 꺼진 상대는 숨김 · 충돌 끔)
+		bool exploded = false;			// 로그를 읽는 동안 GBOOM 을 지났나
 	};
+
+	void AddCounters(ProjectileCounters& a, const ProjectileCounters& b)
+	{
+		a.steps += b.steps; a.blockedSteps += b.blockedSteps; a.extraIterations += b.extraIterations;
+		a.startPenetrating += b.startPenetrating; a.resolveMoved += b.resolveMoved; a.resolveCombined += b.resolveCombined;
+		a.resolveWithMove += b.resolveWithMove; a.resolveFailed += b.resolveFailed; a.ignoredOverlaps += b.ignoredOverlaps;
+		a.minMoveZeroed += b.minMoveZeroed; a.bounces += b.bounces; a.stopsOnImpact += b.stopsOnImpact; a.stopsOnSlide += b.stopsOnSlide;
+		a.multiHits += b.multiHits; a.slides += b.slides; a.corners += b.corners; a.slideMoves += b.slideMoves; a.slideHits += b.slideHits;
+		a.slideFriction += b.slideFriction; a.detonations += b.detonations;
+	}
 
 	struct Totals
 	{
@@ -177,6 +212,19 @@ namespace
 		int hitCompared = 0, hitFails = 0, meshHits = 0;
 		double maxHitDist = 0, maxHitTime = 0, maxHitNormal = 0;
 		int rowsRead = 0, spawnsRead = 0, hitsRead = 0;
+		// 튕김(G-1-c) — 첫 부딪힘 프레임부터
+		int bounceGrenades = 0, bounceFrames = 0, bounceFails = 0;
+		double maxBouncePos = 0, maxBounceVel = 0, maxBounceRot = 0;
+		int bounceFrameDiff = 0, recBounces = 0, simBounces = 0;
+		int stopFrameDiff = 0, stopsCompared = 0;
+		double maxStopPos = 0;
+		int allHitsCompared = 0, allHitFails = 0, hitFrameDiff = 0, hitCountDiff = 0, passiveHits = 0, meshFrames = 0;
+		double maxAllHitDist = 0, maxAllHitTime = 0, maxAllHitNormal = 0, maxAllHitDepth = 0;
+		int detonateSame = 0, detonateDiff = 0;
+		int foeInactiveGrenades = 0, foeToggleWhileLive = 0, wallMoves = 0;
+		double maxAllHitTimeCm = 0;
+		double maxRotUnexplained = -1e9;
+		ProjectileCounters count;
 
 		void Add(const Totals& o)
 		{
@@ -190,8 +238,30 @@ namespace
 			maxHitDist = std::max(maxHitDist, o.maxHitDist); maxHitTime = std::max(maxHitTime, o.maxHitTime);
 			maxHitNormal = std::max(maxHitNormal, o.maxHitNormal);
 			rowsRead += o.rowsRead; spawnsRead += o.spawnsRead; hitsRead += o.hitsRead;
+			bounceGrenades += o.bounceGrenades; bounceFrames += o.bounceFrames; bounceFails += o.bounceFails;
+			maxBouncePos = std::max(maxBouncePos, o.maxBouncePos); maxBounceVel = std::max(maxBounceVel, o.maxBounceVel);
+			maxBounceRot = std::max(maxBounceRot, o.maxBounceRot);
+			bounceFrameDiff += o.bounceFrameDiff; recBounces += o.recBounces; simBounces += o.simBounces;
+			stopFrameDiff += o.stopFrameDiff; stopsCompared += o.stopsCompared; maxStopPos = std::max(maxStopPos, o.maxStopPos);
+			allHitsCompared += o.allHitsCompared; allHitFails += o.allHitFails; hitFrameDiff += o.hitFrameDiff; hitCountDiff += o.hitCountDiff;
+			passiveHits += o.passiveHits; meshFrames += o.meshFrames;
+			maxAllHitDist = std::max(maxAllHitDist, o.maxAllHitDist); maxAllHitTime = std::max(maxAllHitTime, o.maxAllHitTime);
+			maxAllHitNormal = std::max(maxAllHitNormal, o.maxAllHitNormal); maxAllHitDepth = std::max(maxAllHitDepth, o.maxAllHitDepth);
+			detonateSame += o.detonateSame; detonateDiff += o.detonateDiff;
+			foeInactiveGrenades += o.foeInactiveGrenades; foeToggleWhileLive += o.foeToggleWhileLive; wallMoves += o.wallMoves;
+			maxAllHitTimeCm = std::max(maxAllHitTimeCm, o.maxAllHitTimeCm);
+			maxRotUnexplained = std::max(maxRotUnexplained, o.maxRotUnexplained);
+			AddCounters(count, o.count);
 		}
 	};
+
+	double PointSegmentDistance(const Vec3& p, const Vec3& a, const Vec3& b)
+	{
+		const Vec3 ab = b - a, ap = p - a;
+		const double len = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
+		const double t = len < 1e-12 ? 0.0 : std::clamp((ab.x * ap.x + ab.y * ap.y + ab.z * ap.z) / len, 0.0, 1.0);
+		return Dist(a + ab * t, p);
+	}
 
 	int KindIndex(const ProjectileHit& hit)
 	{
@@ -236,20 +306,77 @@ namespace
 		Totals t;
 		std::vector<Grenade> grenades;
 
-		// 로그 — 생김 · 부딪힘 · 옮김
+		// 로그 — 생김 · 부딪힘 · 튕김 · 멈춤 · 옮김
 		struct PendingHit { std::string name; RecordHit hit; };
 		std::vector<PendingHit> hits;
 		struct PendingDrop { std::string name; Teleport tp; };
 		std::vector<PendingDrop> drops;
+		struct PendingMark { std::string name; int frame; Vec3 location; };
+		std::vector<PendingMark> bounceMarks, stopMarks;
+		bool foeActive = true;	// 기록 대본이 상대를 숨기고 충돌을 끈 구간(SetFoeActive) — 줄에 프레임이 없어 로그 차례로 가린다
 		for (const std::string& line : Lines(logData))
 		{
+			const size_t foeAt = line.find("MOB_CPROBE_FOE_ACTIVE on=");
+			if (foeAt != std::string::npos)
+			{
+				foeActive = line[foeAt + 25] == '1';
+				for (const Grenade& g : grenades)
+					if (!g.exploded) ++t.foeToggleWhileLive;	// 날아가는 동안 바뀌면 생길 때 값 하나로는 못 덮는다 — 0 이어야 한다
+				continue;
+			}
 			const size_t at = line.find("MOB_CPROBE_G");
 			if (at == std::string::npos) continue;
 			const size_t space = line.find(' ', at);
 			if (space == std::string::npos) continue;
 			const std::string kind = line.substr(at + 11, space - at - 11);
-			if (kind != "GSPAWN" && kind != "GHIT" && kind != "GDROP") continue;
+			if (kind == "GBOUNCE" || kind == "GSTOP")
+			{
+				const auto kv = KeyValues(line.substr(space + 1));
+				PendingMark m;
+				m.name = kv.count("name") ? kv.at("name") : "";
+				m.frame = kv.count("frame") ? std::atoi(kv.at("frame").c_str()) : -1;
+				if (m.name.empty() || m.frame < 0 || (kind == "GSTOP" && (!kv.count("loc") || !ParseVec(kv.at("loc"), m.location))))
+				{
+					std::printf("GRENADECHECK input tag=%s %s 줄 꼴 다름\n", tag.c_str(), kind.c_str());
+					return false;
+				}
+				(kind == "GBOUNCE" ? bounceMarks : stopMarks).push_back(m);
+				continue;
+			}
+			if (kind != "GSPAWN" && kind != "GHIT" && kind != "GDROP" && kind != "GBOOM" && kind != "GWALLSET") continue;
 			const auto kv = KeyValues(line.substr(space + 1));
+			if (kind == "GBOOM")
+			{
+				const int frame = kv.count("frame") ? std::atoi(kv.at("frame").c_str()) : -1;
+				Grenade* g = kv.count("name") ? FindGrenade(grenades, kv.at("name"), frame) : nullptr;
+				if (!g)
+				{
+					std::printf("GRENADECHECK input tag=%s GBOOM 줄 꼴 다름\n", tag.c_str());
+					return false;
+				}
+				g->exploded = true;
+				continue;
+			}
+			if (kind == "GWALLSET")
+			{
+				// 벽 너머 폭발 판 — 멈춘 수류탄을 면 앞으로 옮김(속도 0 그대로). 줄에 이름이 없어 같은 단계에서 가장 늦게 생긴 것
+				PendingDrop d;
+				d.tp.frame = kv.count("frame") ? std::atoi(kv.at("frame").c_str()) : -1;
+				d.tp.keepVelocity = true;
+				const std::string step = kv.count("step") ? kv.at("step") : "";
+				const Grenade* owner = nullptr;
+				for (const Grenade& g : grenades)
+					if (g.step == step && g.spawnFrame <= d.tp.frame && (!owner || g.spawnFrame > owner->spawnFrame)) owner = &g;
+				if (!owner || !kv.count("grenade") || !ParseVec(kv.at("grenade"), d.tp.location))
+				{
+					std::printf("GRENADECHECK input tag=%s GWALLSET 줄 꼴 다름\n", tag.c_str());
+					return false;
+				}
+				d.name = owner->name;
+				drops.push_back(d);
+				++t.wallMoves;
+				continue;
+			}
 			if (kind == "GSPAWN")
 			{
 				Grenade g;
@@ -266,6 +393,8 @@ namespace
 				g.rotation.pitch = rot.x;
 				g.rotation.yaw = rot.y;
 				g.rotation.roll = rot.z;
+				g.foeActive = foeActive;
+				if (!foeActive) ++t.foeInactiveGrenades;
 				grenades.push_back(g);
 				++t.spawnsRead;
 			}
@@ -279,14 +408,23 @@ namespace
 				h.hit.comp = kv.count("comp") ? kv.at("comp") : "";
 				h.hit.time = kv.count("time") ? std::atof(kv.at("time").c_str()) : 0;
 				h.hit.distance = kv.count("dist") ? std::atof(kv.at("dist").c_str()) : 0;
+				h.hit.penetrationDepth = kv.count("penDepth") ? std::atof(kv.at("penDepth").c_str()) : 0;
 				h.hit.startPenetrating = kv.count("pen") && kv.at("pen") == "1";
-				if (h.name.empty() || h.hit.frame < 0 || !kv.count("normal") || !ParseVec(kv.at("normal"), h.hit.normal))
+				Vec3 grenLoc, traceStart, traceEnd;
+				if (h.name.empty() || h.hit.frame < 0 || !kv.count("normal") || !ParseVec(kv.at("normal"), h.hit.normal)
+					|| !kv.count("grenLoc") || !kv.count("start") || !kv.count("end")
+					|| !ParseVec(kv.at("grenLoc"), grenLoc) || !ParseVec(kv.at("start"), traceStart) || !ParseVec(kv.at("end"), traceEnd))
 				{
 					std::printf("GRENADECHECK input tag=%s GHIT 줄 꼴 다름\n", tag.c_str());
 					return false;
 				}
-				hits.push_back(h);
 				++t.hitsRead;
+				if (PointSegmentDistance(grenLoc, traceStart, traceEnd) > kPassiveReach)
+				{
+					++t.passiveHits;	// 남이 옮겨 와 닿은 알림 — 이 수류탄의 쓸기가 아니다
+					continue;
+				}
+				hits.push_back(h);
 			}
 			else
 			{
@@ -304,7 +442,23 @@ namespace
 		for (const PendingHit& h : hits)
 		{
 			Grenade* g = FindGrenade(grenades, h.name, h.hit.frame);
-			if (g && g->firstHit.frame < 0) g->firstHit = h.hit;
+			if (!g) continue;
+			if (g->firstHit.frame < 0) g->firstHit = h.hit;
+			g->hits[h.hit.frame].push_back(h.hit);
+		}
+		for (const PendingMark& m : bounceMarks)
+		{
+			Grenade* g = FindGrenade(grenades, m.name, m.frame);
+			if (g) ++g->bounces[m.frame];
+		}
+		for (const PendingMark& m : stopMarks)
+		{
+			Grenade* g = FindGrenade(grenades, m.name, m.frame);
+			if (g && g->stopFrame < 0)
+			{
+				g->stopFrame = m.frame;
+				g->stopLocation = m.location;
+			}
 		}
 		for (const PendingDrop& d : drops)
 		{
@@ -404,21 +558,24 @@ namespace
 			s.location = g.location;
 			s.rotation = g.rotation;
 			s.velocity = g.velocity;
-			bool failed = false;
-			std::string firstFail;
+			bool failed = false, bounceFailed = false, bounceCompared = false, afterFirst = false;
+			double prevDv = 0, prevSpeed = 0;	// 앞 프레임 끝 속도 차 · 기록 속도 크기(회전 차를 설명할 몫)
+			std::string firstFail, firstBounceFail;
 			bool simHit = false;
-			int simHitFrame = -1;
+			int simHitFrame = -1, simStopFrame = -1, simDetonateFrame = -1, recDetonateFrame = -1;
+			Vec3 simStopLocation;
 			ProjectileHit simFirst;
 			const int recHitFrame = g.firstHit.frame;
+			const bool sameTeam = g.step == "foe_same";
 
 			for (int age = 0; age < kMaxFrames; ++age)
 			{
 				const int frame = g.spawnFrame + age;
 				const auto rowIt = g.rows.find(age);
-				// 터짐 · 사라짐. 상대에 맞으면 그 걸음 안에서 터져 그 프레임 줄이 이미 숨김이다 — 기록의 첫 부딪힘 프레임은 걷는다
-				if (rowIt == g.rows.end() || (rowIt->second.hidden && frame != recHitFrame)) break;
+				if (rowIt == g.rows.end()) break;	// 기록 끝 · 사라짐
+				const GrenRow& r = rowIt->second;
 
-				// 막는 것 — 사람 둘 · 다른 수류탄(이 프레임 걸음 전 자리 = 앞 프레임 끝)
+				// 막는 것 — 사람 둘 · 다른 수류탄(이 프레임 걸음 전 자리 = 앞 프레임 끝). 던진 사람이 아닌 사람은 같은 팀 판이 아니면 맞자마자 터진다
 				std::vector<ProjectileObstacle> obstacles;
 				const auto pawnIt = pawns.find(pawnRowNow ? frame : frame - 1);
 				if (pawnIt != pawns.end())
@@ -429,13 +586,15 @@ namespace
 						ProjectileObstacle o;
 						o.center = p.me; o.radius = kPawnRadius; o.halfHeight = p.meHalfHeight;
 						o.id = kIdMe; o.kind = EProjectileHitKind::Pawn; o.owner = g.owner == kIdMe;
+						o.detonateOnHit = !o.owner && !sameTeam;
 						obstacles.push_back(o);
 					}
-					if (p.foeHp > 0)
+					if (p.foeHp > 0 && g.foeActive)
 					{
 						ProjectileObstacle o;
 						o.center = p.foe; o.radius = kPawnRadius; o.halfHeight = p.foeHalfHeight;
 						o.id = kIdFoe; o.kind = EProjectileHitKind::Pawn; o.owner = g.owner == kIdFoe;
+						o.detonateOnHit = !o.owner && !sameTeam;
 						obstacles.push_back(o);
 					}
 				}
@@ -457,44 +616,178 @@ namespace
 					obstacles.push_back(o);
 				}
 
-				ProjectileHit frameHits[8];
-				const size_t n = TickProjectile(map, params, s, kFrameSeconds, obstacles.data(), obstacles.size(), frameHits, 8);
-				const bool recHitHere = recHitFrame == frame;
-
-				if (n > 0 || recHitHere)
+				constexpr size_t kFrameHitSlots = 16;
+				ProjectileHit frameHits[kFrameHitSlots];
+				const size_t n = TickProjectile(map, params, s, kFrameSeconds, obstacles.data(), obstacles.size(), frameHits, kFrameHitSlots);
+				std::vector<const ProjectileHit*> simHits;	// 알림이 나간 맞음 — 기록 GHIT 와 같은 것
+				int simBounced = 0;
+				for (size_t i = 0; i < std::min(n, kFrameHitSlots); ++i)
 				{
-					if (n > 0)
+					if (frameHits[i].dispatched) simHits.push_back(&frameHits[i]);
+					if (frameHits[i].bounced) ++simBounced;
+				}
+				const auto recIt = g.hits.find(frame);
+				const std::vector<RecordHit>* recHits = recIt != g.hits.end() ? &recIt->second : nullptr;
+				const auto bounceIt = g.bounces.find(frame);
+				const int recBounced = bounceIt != g.bounces.end() ? bounceIt->second : 0;
+
+				if (!simHit && !simHits.empty())
+				{
+					simHit = true;
+					simHitFrame = frame;
+					simFirst = *simHits[0];
+				}
+				const bool hitHere = recHits != nullptr || !simHits.empty();
+				const bool flight = !afterFirst && !hitHere;
+
+				// 맞음마다 — 같은 차례끼리 종류 · 시작 겹침 · 맞은 거리 · 물린 시각 · 법선 · 겹친 깊이
+				if (hitHere)
+				{
+					const size_t recCount = recHits ? recHits->size() : 0;
+					if (recCount == 0 || simHits.empty()) ++t.hitFrameDiff;
+					else
 					{
-						simHit = true;
-						simHitFrame = frame;
-						simFirst = frameHits[0];
+						if (recCount != simHits.size()) ++t.hitCountDiff;
+						for (size_t i = 0; i < std::min(recCount, simHits.size()); ++i)
+						{
+							const RecordHit& rh = (*recHits)[i];
+							const ProjectileHit& sh = *simHits[i];
+							if (rh.comp == "CharacterMesh0")
+							{
+								++t.meshFrames;	// 사람 메시 물리 몸 — 우리는 캡슐만(미결 18)
+								continue;
+							}
+							++t.allHitsCompared;
+							const double dd = std::fabs(sh.contactDistance - rh.distance), dt = std::fabs(sh.time - rh.time), dn = Dist(sh.normal, rh.normal);
+							const double dtCm = dt * Dist(sh.traceStart, sh.traceEnd);
+							const double dpen = (rh.startPenetrating || sh.startPenetrating) ? std::fabs(sh.penetrationDepth - rh.penetrationDepth) : 0.0;
+							t.maxAllHitDist = std::max(t.maxAllHitDist, dd);
+							t.maxAllHitTime = std::max(t.maxAllHitTime, dt);
+							t.maxAllHitTimeCm = std::max(t.maxAllHitTimeCm, dtCm);
+							t.maxAllHitNormal = std::max(t.maxAllHitNormal, dn);
+							t.maxAllHitDepth = std::max(t.maxAllHitDepth, dpen);
+							if (rh.who != KindName(sh) || rh.startPenetrating != sh.startPenetrating
+								|| dd > kHitDistTolerance || dtCm > kHitTimeCmTolerance || dn > kHitNormalTolerance || dpen > kHitDepthTolerance)
+							{
+								++t.allHitFails;
+								if (verbose)
+									std::printf("  hit %s@%d age=%d #%zu %s/%s pen=%d/%d dist=%.6f/%.6f time=%.7f/%.7f normal=%.6f depth=%.6f/%.6f\n",
+										g.name.c_str(), g.spawnFrame, age, i, rh.who.c_str(), KindName(sh), rh.startPenetrating ? 1 : 0, sh.startPenetrating ? 1 : 0,
+										sh.contactDistance, rh.distance, sh.time, rh.time, dn, sh.penetrationDepth, rh.penetrationDepth);
+							}
+						}
 					}
-					break;	// 부딪힌 프레임의 줄은 튕김 뒤 — G-1-c 몫
+					if (verbose && (recCount != simHits.size()))
+						std::printf("  hitCount %s@%d age=%d rec=%zu sim=%zu\n", g.name.c_str(), g.spawnFrame, age, recCount, simHits.size());
+				}
+				// 튕긴 수 · 멈춘 프레임
+				if (recBounced != simBounced)
+				{
+					++t.bounceFrameDiff;
+					if (verbose) std::printf("  bounce %s@%d age=%d rec=%d sim=%d\n", g.name.c_str(), g.spawnFrame, age, recBounced, simBounced);
+				}
+				t.recBounces += recBounced;
+				t.simBounces += simBounced;
+				if (s.stopped && simStopFrame < 0)
+				{
+					simStopFrame = frame;
+					simStopLocation = s.location;
 				}
 
-				// 부딪힘 전 프레임 대조
-				const GrenRow& r = rowIt->second;
-				const double dp = Dist(s.location, r.location), dv = Dist(s.velocity, r.velocity), dr = RotDiff(s.rotation, r.rotation);
-				++t.frames;
-				t.maxPos = std::max(t.maxPos, dp);
-				t.maxVel = std::max(t.maxVel, dv);
-				t.maxRot = std::max(t.maxRot, dr);
-				if ((dp > kPosTolerance || dv > kVelTolerance || dr > kRotTolerance) && !failed)
+				// 터짐 · 숨김. 상대에 맞아 터지면 그 걸음 안에서 숨어 그 프레임 줄이 이미 숨김이다
+				if (r.hidden)
 				{
-					failed = true;
-					char buf[256];
-					std::snprintf(buf, sizeof(buf), "age=%d pos=%.6f vel=%.6f rot=%.6f", age, dp, dv, dr);
-					firstFail = buf;
+					if (s.detonated) simDetonateFrame = frame;
+					if (recHits && recBounced == 0)
+						for (const RecordHit& rh : *recHits)
+							if (rh.who == "foe" || rh.who == "me") recDetonateFrame = frame;
+					break;
 				}
+				if (s.detonated)
+				{
+					simDetonateFrame = frame;
+					break;
+				}
+
+				const double dp = Dist(s.location, r.location), dv = Dist(s.velocity, r.velocity), dr = RotDiff(s.rotation, r.rotation);
+				if (flight)
+				{
+					// 부딪힘 전 프레임 대조(G-1-b)
+					++t.frames;
+					t.maxPos = std::max(t.maxPos, dp);
+					t.maxVel = std::max(t.maxVel, dv);
+					t.maxRot = std::max(t.maxRot, dr);
+					if ((dp > kPosTolerance || dv > kVelTolerance || dr > kRotTolerance) && !failed)
+					{
+						failed = true;
+						char buf[256];
+						std::snprintf(buf, sizeof(buf), "age=%d pos=%.6f vel=%.6f rot=%.6f", age, dp, dv, dr);
+						firstFail = buf;
+					}
+				}
+				else
+				{
+					// 첫 부딪힘 프레임부터(G-1-c)
+					bounceCompared = true;
+					++t.bounceFrames;
+					t.maxBouncePos = std::max(t.maxBouncePos, dp);
+					t.maxBounceVel = std::max(t.maxBounceVel, dv);
+					t.maxBounceRot = std::max(t.maxBounceRot, dr);
+					// 회전 차 중 속도 차로 설명 안 되는 몫 — 속도 차 dv 가 바꿀 수 있는 방향은 dv / |v| 라디안까지.
+					// 회전은 걸음을 시작할 때 속도의 방향이라(ProjectileMovementComponent.cpp ComputeMoveDelta 옆 OldVelocity) 앞 프레임 끝 속도도 본다
+					const double speed = Dist(r.velocity, Vec3());
+					if (speed > 1.0 && prevSpeed > 1.0 && !s.stopped)
+					{
+						const double unexplained = dr - std::max(dv / speed, prevDv / prevSpeed) * 57.29577951308232;
+						t.maxRotUnexplained = std::max(t.maxRotUnexplained, unexplained);
+						if (verbose && unexplained > 0.0005)
+							std::printf("  rot %s@%d age=%d rot=%.6f vel=%.6f speed=%.3f hit=%d sim=%.6f,%.6f,%.6f rec=%.6f,%.6f,%.6f\n", g.name.c_str(), g.spawnFrame, age, dr, dv, speed,
+								hitHere ? 1 : 0, s.rotation.pitch, s.rotation.yaw, s.rotation.roll, r.rotation.pitch, r.rotation.yaw, r.rotation.roll);
+					}
+					if ((dp > kBouncePosTolerance || dv > kBounceVelTolerance || dr > kBounceRotTolerance) && !bounceFailed)
+					{
+						bounceFailed = true;
+						char buf[256];
+						std::snprintf(buf, sizeof(buf), "age=%d pos=%.6f vel=%.6f rot=%.6f", age, dp, dv, dr);
+						firstBounceFail = buf;
+					}
+				}
+				afterFirst = afterFirst || hitHere;
+				prevDv = dv;
+				prevSpeed = Dist(r.velocity, Vec3());
 
 				// 기록 도구가 옮긴 수류탄 — 그 프레임 걸음 뒤 자리 · 속도를 덮는다(회전은 그대로)
 				for (const Teleport& tp : g.teleports)
 					if (tp.frame == frame)
 					{
 						s.location = tp.location;
-						s.velocity = tp.velocity;
+						if (!tp.keepVelocity) s.velocity = tp.velocity;
 					}
 			}
+
+			// 튕김 뒤 — 멈춘 프레임 · 자리, 맞아서 터진 프레임
+			if (bounceCompared) ++t.bounceGrenades;
+			if (bounceFailed) ++t.bounceFails;
+			if (g.stopFrame >= 0 || simStopFrame >= 0)
+			{
+				if (g.stopFrame != simStopFrame) ++t.stopFrameDiff;
+				else
+				{
+					++t.stopsCompared;
+					const double d = Dist(simStopLocation, g.stopLocation);
+					t.maxStopPos = std::max(t.maxStopPos, d);
+					if (d > kStopPosTolerance) ++t.stopFrameDiff;
+				}
+			}
+			if (simDetonateFrame >= 0 || recDetonateFrame >= 0)
+			{
+				if (simDetonateFrame == recDetonateFrame) ++t.detonateSame;
+				else ++t.detonateDiff;
+			}
+			AddCounters(t.count, s.count);
+			if (verbose && (bounceFailed || g.stopFrame != simStopFrame || simDetonateFrame != recDetonateFrame))
+				std::printf("  after %s@%d step=%s stop rec=%d sim=%d detonate rec=%d sim=%d %s%s\n", g.name.c_str(), g.spawnFrame, g.step.c_str(),
+					g.stopFrame, simStopFrame, recDetonateFrame, simDetonateFrame, bounceFailed ? "fail " : "", firstBounceFail.c_str());
 
 			// 첫 부딪힘
 			const char* result;
@@ -549,6 +842,9 @@ namespace
 		std::printf("GRENADECHECK tag=%s grenades=%d frames=%d fails=%d maxPosDiff=%.6f maxVelDiff=%.6f maxRotDiff=%.6f firstHit same=%d early=%d late=%d kindDiff=%d none=%d (rows=%d spawns=%d hits=%d)\n",
 			tag.c_str(), t.grenades, t.frames, t.fails, t.maxPos, t.maxVel, t.maxRot, t.same, t.early, t.late, t.kindDiff, t.noneBoth,
 			t.rowsRead, t.spawnsRead, t.hitsRead);
+		std::printf("GRENADECHECK tag=%s bounce grenades=%d frames=%d fails=%d maxPosDiff=%.6f maxVelDiff=%.6f bounceFrameDiff=%d stopFrameDiff=%d hitFails=%d detonateDiff=%d\n",
+			tag.c_str(), t.bounceGrenades, t.bounceFrames, t.bounceFails, t.maxBouncePos, t.maxBounceVel, t.bounceFrameDiff, t.stopFrameDiff,
+			t.allHitFails + t.hitFrameDiff + t.hitCountDiff, t.detonateDiff);
 		total.Add(t);
 		return true;
 	}
@@ -589,7 +885,11 @@ int main(int argc, char** argv)
 		if (!RunTag(map, dir, tag, verbose, pawnRowNow, total)) return 2;
 
 	const bool pass = total.fails == 0 && total.early == 0 && total.late == 0 && total.kindDiff == 0 && total.hitFails == 0
-		&& total.launchFails == 0 && total.ownerUnknown == 0 && total.grenades > 0 && total.frames > 0;
+		&& total.launchFails == 0 && total.ownerUnknown == 0 && total.grenades > 0 && total.frames > 0
+		&& total.bounceFails == 0 && total.bounceFrameDiff == 0 && total.stopFrameDiff == 0 && total.detonateDiff == 0
+		&& total.allHitFails == 0 && total.hitFrameDiff == 0 && total.hitCountDiff == 0 && total.bounceFrames > 0 && total.foeToggleWhileLive == 0
+		&& total.maxRotUnexplained <= kRotTolerance;	// 속도 차로 설명 안 되는 회전 차는 날아감 기준 그대로
+	const ProjectileCounters& c = total.count;
 	std::printf("GRENADECHECK flight grenades=%d frames=%d fails=%d maxPosDiff=%.6f maxVelDiff=%.6f maxRotDiff=%.6f firstHit same=%d early=%d late=%d kindDiff=%d none=%d\n",
 		total.grenades, total.frames, total.fails, total.maxPos, total.maxVel, total.maxRot, total.same, total.early, total.late, total.kindDiff, total.noneBoth);
 	std::printf("GRENADECHECK firstHit compared=%d fails=%d maxDistDiff=%.6f maxTimeDiff=%.7f maxNormalDiff=%.6f pawnMeshNotCompared=%d\n",
@@ -597,6 +897,20 @@ int main(int argc, char** argv)
 	std::printf("GRENADECHECK firstHit kinds world=%d me=%d foe=%d gren=%d\n", total.sameKind[0], total.sameKind[1], total.sameKind[2], total.sameKind[3]);
 	std::printf("GRENADECHECK launch grenades=%d fails=%d maxVelDiff=%.6f ownerUnknown=%d (rows=%d spawns=%d hits=%d)\n",
 		total.grenades, total.launchFails, total.maxLaunch, total.ownerUnknown, total.rowsRead, total.spawnsRead, total.hitsRead);
+	std::printf("GRENADECHECK bounce grenades=%d frames=%d fails=%d maxPosDiff=%.6f maxVelDiff=%.6f maxRotDiff=%.6f (unexplained=%.6f) bounceFrameDiff=%d (rec=%d sim=%d) stopFrameDiff=%d (compared=%d) maxStopPosDiff=%.6f\n",
+		total.bounceGrenades, total.bounceFrames, total.bounceFails, total.maxBouncePos, total.maxBounceVel, total.maxBounceRot, total.maxRotUnexplained,
+		total.bounceFrameDiff, total.recBounces, total.simBounces, total.stopFrameDiff, total.stopsCompared, total.maxStopPos);
+	std::printf("GRENADECHECK hits compared=%d fails=%d frameDiff=%d countDiff=%d maxDistDiff=%.6f maxTimeDiff=%.7f maxTimeCmDiff=%.6f maxNormalDiff=%.6f maxDepthDiff=%.6f pawnMeshNotCompared=%d passive=%d\n",
+		total.allHitsCompared, total.allHitFails, total.hitFrameDiff, total.hitCountDiff, total.maxAllHitDist, total.maxAllHitTime, total.maxAllHitTimeCm,
+		total.maxAllHitNormal, total.maxAllHitDepth, total.meshFrames, total.passiveHits);
+	std::printf("GRENADECHECK detonate same=%d diff=%d\n", total.detonateSame, total.detonateDiff);
+	std::printf("GRENADECHECK script foeInactiveGrenades=%d foeToggleWhileLive=%d wallMoves=%d\n",
+		total.foeInactiveGrenades, total.foeToggleWhileLive, total.wallMoves);
+	std::printf("GRENADECHECK branches steps=%u blocked=%u extraIterations=%u startPenetrating=%u resolveMoved=%u resolveCombined=%u resolveWithMove=%u resolveFailed=%u "
+		"ignoredOverlaps=%u minMoveZeroed=%u bounces=%u stopsOnImpact=%u stopsOnSlide=%u multiHits=%u slides=%u corners=%u slideMoves=%u slideHits=%u slideFriction=%u detonations=%u\n",
+		c.steps, c.blockedSteps, c.extraIterations, c.startPenetrating, c.resolveMoved, c.resolveCombined, c.resolveWithMove, c.resolveFailed,
+		c.ignoredOverlaps, c.minMoveZeroed, c.bounces, c.stopsOnImpact, c.stopsOnSlide, c.multiHits, c.slides, c.corners, c.slideMoves, c.slideHits,
+		c.slideFriction, c.detonations);
 	std::printf("GRENADECHECK %s\n", pass ? "PASS" : "FAIL");
 	return pass ? 0 : 1;
 }

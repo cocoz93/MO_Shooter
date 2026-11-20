@@ -124,48 +124,472 @@ namespace mo
 			return { center - half, center + half };
 		}
 
-		// 기운 캡슐 쓸기 하나 — 맵(수류탄 깃발)과 막는 것들 중 가장 이른 맞음
-		bool SweepFirst(const CMapCollision& map, const ProjectileParams& p, const ProjectileState& s, const Vec3& delta,
-			const ProjectileObstacle* obstacles, size_t obstacleCount, ProjectileHit& out)
+		Vec3 Cross(const Vec3& a, const Vec3& b)
 		{
-			const Vec3 center = s.location + RotateVector(s.rotation, p.capsuleOffset);
-			const Vec3 axis = RotateVector(s.rotation, Vec3(0.0, 0.0, 1.0));
-			const double length = std::sqrt(SizeSquared(delta));
-			bool any = false;
-
-			CapsuleHit mapHit;
-			if (map.SweepCapsule(center, center + delta, axis, p.capsuleRadius, p.capsuleHalfHeight, MAP_BLOCK_GRENADE, mapHit))
-			{
-				out.kind = EProjectileHitKind::Map;
-				out.id = mapHit.object;
-				out.time = mapHit.time;
-				out.contactDistance = mapHit.distance;
-				out.normal = mapHit.normal;
-				out.impactPoint = mapHit.impactPoint;
-				out.startPenetrating = mapHit.startPenetrating;
-				any = true;
-			}
-			for (size_t i = 0; i < obstacleCount; ++i)
-			{
-				const ProjectileObstacle& o = obstacles[i];
-				if (o.owner && !s.launchCleanedUp) continue;	// 던진 사람과는 타이머 전까지 서로 무시(IgnoreActorWhenMoving)
-				double t;
-				Vec3 normal, impact;
-				bool startPen;
-				if (!SweepCapsuleCapsule(center, axis, p.capsuleRadius, p.capsuleHalfHeight, delta, o.center, o.axis, o.radius, o.halfHeight, t, normal, impact, startPen))
-					continue;
-				if (any && t >= out.time) continue;
-				out.kind = o.kind;
-				out.id = o.id;
-				out.time = t;
-				out.contactDistance = t * length;
-				out.normal = normal;
-				out.impactPoint = impact;
-				out.startPenetrating = startPen;
-				any = true;
-			}
-			return any;
+			return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
 		}
+
+		bool IsZero(const Vec3& v) { return v.x == 0 && v.y == 0 && v.z == 0; }
+
+		double NormalizeAxis(double degrees)
+		{
+			double d = std::fmod(degrees, 360.0);
+			if (d > 180.0) d -= 360.0;
+			else if (d <= -180.0) d += 360.0;
+			return d;
+		}
+
+		constexpr float kPenetrationPullback = 0.125f;		// p.PenetrationPullbackDistance(MovementComponent.cpp:593)
+		constexpr double kNormalsParallel = 0.999845;		// UE_THRESH_NORMALS_ARE_PARALLEL — FVector::Coincident(Vector.h:1429-1433)
+		constexpr float kMinMovementDistSq = (4.f * 1e-4f) * (4.f * 1e-4f);	// 쓸기의 가장 짧은 옮김(PrimitiveComponent.cpp:3283)
+		constexpr double kSameTolerance = 1e-4;				// FVector · FRotator::Equals 기본 — 이 안 차이는 안 옮긴 것(SceneComponent.cpp:3315-3317)
+		constexpr float kSlideDotTolerance = 0.01f;			// HandleDeflection DotTolerance(:344)
+
+		bool SameLocation(const Vec3& a, const Vec3& b)
+		{
+			return std::fabs(a.x - b.x) <= kSameTolerance && std::fabs(a.y - b.y) <= kSameTolerance && std::fabs(a.z - b.z) <= kSameTolerance;
+		}
+
+		bool SameRotation(const Rotator& a, const Rotator& b)
+		{
+			return std::fabs(NormalizeAxis(a.pitch - b.pitch)) <= kSameTolerance && std::fabs(NormalizeAxis(a.yaw - b.yaw)) <= kSameTolerance
+				&& std::fabs(NormalizeAxis(a.roll - b.roll)) <= kSameTolerance;
+		}
+
+		// 한 프레임 걸음의 일꾼 — 엔진 멤버 함수와 같은 이름 · 같은 차례로 둔다(ProjectileMovementComponent · MovementComponent · PrimitiveComponent)
+		class CStep
+		{
+		public:
+			CStep(const CMapCollision& map, const ProjectileParams& p, ProjectileState& s, const ProjectileObstacle* obstacles, size_t obstacleCount,
+				ProjectileHit* hits, size_t maxHits)
+				: _map(map), _p(p), _s(s), _obstacles(obstacles), _obstacleCount(obstacleCount), _hits(hits), _maxHits(maxHits)
+			{
+			}
+
+			// TickComponent 의 걸음 고리(ProjectileMovementComponent.cpp:196-330)
+			size_t Run(float deltaSeconds)
+			{
+				float remaining = deltaSeconds;
+				int numImpacts = 0, iterations = 0;
+				while (!Halted() && remaining >= kMinTickTime && iterations < _p.maxIterations)
+				{
+					++iterations;
+					++_s.count.steps;
+					const float timeTick = SimulationTimeStep(_p, remaining, iterations);
+					remaining -= timeTick;
+
+					const Vec3 oldVelocity = _s.velocity;
+					const Vec3 delta = ComputeMoveDelta(_p, oldVelocity, timeTick);
+					// 회전은 옛 속도를 따른다(:225). 쓸기는 옮기기 전 회전으로 하고 새 회전은 끝에서 붙인다
+					const Rotator newRotation = (_s.launchCleanedUp && !NearlyZero(oldVelocity, kVelocityTolerance)) ? RotatorFromDirection(oldVelocity) : _s.rotation;
+
+					Blocking hit;
+					hit.Reset(_s.location, _s.location + delta);
+					SafeMove(delta, newRotation, hit);
+					if (Halted()) break;	// 맞음 알림으로 터짐(:250-253)
+
+					if (!hit.blocking)
+					{
+						_s.previousHitTime = 1.f;
+						_s.sliding = false;
+						_s.velocity = ComputeVelocity(_p, _s.velocity, timeTick);
+						continue;
+					}
+
+					// 맞은 때까지의 속도(:277) → 막힘 처리(:285-308) → 남은 시간을 고리에 돌려줌(:315-328)
+					++_s.count.blockedSteps;
+					_s.velocity = (hit.hit.time > kKindaSmall) ? ComputeVelocity(_p, oldVelocity, timeTick * (float)hit.hit.time) : oldVelocity;
+					++numImpacts;
+					float subTickTimeRemaining = timeTick * (1.f - (float)hit.hit.time);
+					if (HandleBlockingHit(hit, timeTick, subTickTimeRemaining) == EBlockResult::Abort || Halted()) break;
+					HandleDeflection(hit, oldVelocity, subTickTimeRemaining);	// 엔진도 돌려준 값을 안 본다 — 멈췄으면 고리 조건이 끝낸다
+					_s.previousHitTime = (float)hit.hit.time;
+					_s.previousHitNormal = hit.hit.normal;
+					if (subTickTimeRemaining >= kMinTickTime)
+					{
+						remaining += subTickTimeRemaining;
+						if (numImpacts <= _p.bounceExtraIterations)
+						{
+							--iterations;
+							++_s.count.extraIterations;
+						}
+					}
+				}
+				return _hitCount;
+			}
+
+		private:
+			// 쓸어 옮기기의 막는 맞음 — 엔진 FHitResult 처럼 고리 · 미끄러짐이 같은 칸을 덮어 쓴다
+			struct Blocking
+			{
+				bool blocking = false;
+				ProjectileHit hit;
+				size_t index = SIZE_MAX;					// hits 안 자리(넘쳤으면 SIZE_MAX)
+				const ProjectileObstacle* obstacle = nullptr;
+
+				// FHitResult::Init — 시각 1 · 법선 0
+				void Reset(const Vec3& start, const Vec3& end)
+				{
+					*this = Blocking();
+					hit.time = 1.0;
+					hit.traceStart = start;
+					hit.traceEnd = end;
+				}
+			};
+
+			enum class EBlockResult
+			{
+				Abort,
+				Deflect,
+			};
+
+			bool Halted() const { return _s.stopped || _s.detonated; }
+			bool UnderStopThreshold() const { return SizeSquared(_s.velocity) < (double)(_p.stopSpeed * _p.stopSpeed); }	// IsVelocityUnderSimulationThreshold
+
+			// StopSimulating(:540-548)
+			void Stop()
+			{
+				_s.velocity = Vec3();
+				_s.stopped = true;
+			}
+
+			// 쓸기 — 맵(수류탄 깃발)과 막는 것들. 맞음 고르기는 MoveComponentImpl(PrimitiveComponent.cpp:3372-3396) — 시작 겹침이 있으면
+			// 그중 맞은 면 법선이 옮김을 가장 거스르는 것, 없으면 가장 이른 맞음. 빠져나가는 겹침은 무시(ShouldIgnoreHitResult :3135-3163 —
+			// 거리 · 내적 허용 두 값은 기본 0 이라 시작 겹침 · 내적 > 0 만 남는다 :125 · :134, Lyra 설정에 덮는 줄 없음)
+			// 맵은 가장 이른 맞음 하나만 돌려준다 — 그것이 무시되면 그 뒤 맵 맞음은 못 본다(이동 쪽 Movement.cpp 와 같은 한계)
+			bool Sweep(const Vec3& delta, bool neverIgnoreOverlaps, Blocking& out)
+			{
+				const Vec3 center = _s.location + RotateVector(_s.rotation, _p.capsuleOffset);
+				const Vec3 axis = RotateVector(_s.rotation, Vec3(0.0, 0.0, 1.0));
+				const double length = std::sqrt(SizeSquared(delta));
+				const Vec3 moveDir = SafeNormal(delta);
+				bool havePenetrating = false, haveHit = false;
+				double bestNormalDotDelta = 0;
+
+				const auto consider = [&](const ProjectileHit& h, const ProjectileObstacle* o)
+				{
+					if (h.startPenetrating && !neverIgnoreOverlaps && Dot(h.impactNormal, moveDir) > 0.0)
+					{
+						++_s.count.ignoredOverlaps;
+						return;
+					}
+					if (h.startPenetrating)
+					{
+						const double normalDotDelta = Dot(h.impactNormal, delta);
+						if (!havePenetrating || normalDotDelta < bestNormalDotDelta)
+						{
+							bestNormalDotDelta = normalDotDelta;
+							havePenetrating = true;
+							out.hit = h;
+							out.obstacle = o;
+						}
+					}
+					else if (!havePenetrating && (!haveHit || h.time < out.hit.time))
+					{
+						haveHit = true;
+						out.hit = h;
+						out.obstacle = o;
+					}
+				};
+
+				CapsuleHit mapHit;
+				if (_map.SweepCapsule(center, center + delta, axis, _p.capsuleRadius, _p.capsuleHalfHeight, MAP_BLOCK_GRENADE, mapHit))
+				{
+					ProjectileHit h;
+					h.kind = EProjectileHitKind::Map;
+					h.id = mapHit.object;
+					h.time = mapHit.time;
+					h.contactDistance = mapHit.distance;
+					h.normal = mapHit.normal;
+					h.impactNormal = mapHit.impactNormal;
+					h.impactPoint = mapHit.impactPoint;
+					h.penetrationDepth = mapHit.penetrationDepth;
+					h.startPenetrating = mapHit.startPenetrating;
+					consider(h, nullptr);
+				}
+				for (size_t i = 0; i < _obstacleCount; ++i)
+				{
+					const ProjectileObstacle& o = _obstacles[i];
+					if (o.owner && !_s.launchCleanedUp) continue;	// 던진 사람과는 타이머 전까지 서로 무시(IgnoreActorWhenMoving)
+					ProjectileHit h;
+					if (!SweepCapsuleCapsule(center, axis, _p.capsuleRadius, _p.capsuleHalfHeight, delta, o.center, o.axis, o.radius, o.halfHeight,
+						h.time, h.normal, h.impactPoint, h.startPenetrating, h.penetrationDepth))
+						continue;
+					h.kind = o.kind;
+					h.id = o.id;
+					h.contactDistance = h.time * length;
+					h.impactNormal = h.normal;	// 캡슐끼리는 면이 없다 — 받은 법선 그대로
+					consider(h, &o);
+				}
+				return havePenetrating || haveHit;
+			}
+
+			// UPrimitiveComponent::MoveComponentImpl 중 이 설정이 타는 갈래. 쓸기 모양의 회전 = 옮기기 전 회전(:3354 InitialRotationQuat)
+			// 돌려주는 값 = 자리나 회전이 바뀌었나(:3493 · SceneComponent.cpp:3315-3317 — 1e-4 안 차이는 안 바뀐 것이라 그대로 둔다)
+			// dispatchOverlaps = 시작 겹침 맞음도 알림을 내나(:3539)
+			bool MoveComponent(const Vec3& delta, const Rotator& newRotation, bool sweep, bool neverIgnoreOverlaps, bool dispatchOverlaps, Blocking* out)
+			{
+				const Vec3 traceStart = _s.location, traceEnd = traceStart + delta;
+				double deltaSizeSq = SizeSquared(delta);
+				const float minMovementDistSq = sweep ? kMinMovementDistSq : 0.f;
+				if (deltaSizeSq <= (double)minMovementDistSq)
+				{
+					if (SameRotation(newRotation, _s.rotation))
+					{
+						if (out) out->Reset(traceStart, traceEnd);
+						return true;
+					}
+					deltaSizeSq = 0;
+				}
+
+				Blocking found;
+				found.Reset(traceStart, traceEnd);
+				Vec3 newLocation = traceStart;
+				if (sweep && deltaSizeSq > 0)
+				{
+					if (Sweep(delta, neverIgnoreOverlaps, found))
+					{
+						found.blocking = true;
+						// PullBackHit — 면에 딱 붙지 않게 시간을 조금 물린다. 엔진은 float 로 잰다(:3095-3099 · :3361)
+						const float dist = (float)std::sqrt(deltaSizeSq);
+						const float timeBack = std::clamp(0.1f, 0.1f / dist, 1.f / dist) + 0.001f;
+						found.hit.time = (double)std::clamp((float)found.hit.time - timeBack, 0.f, 1.f);
+						newLocation = traceStart + delta * found.hit.time;
+						if ((float)SizeSquared(newLocation - traceStart) <= minMovementDistSq)	// 아주 짧은 옮김은 안 옮김(:3444-3456)
+						{
+							newLocation = traceStart;
+							found.hit.time = 0;
+							++_s.count.minMoveZeroed;
+						}
+					}
+					else newLocation = traceEnd;
+				}
+				else if (deltaSizeSq > 0) newLocation = traceEnd;
+
+				const bool diffLocation = !SameLocation(newLocation, _s.location);
+				const bool diffRotation = !SameRotation(newRotation, _s.rotation);
+				if (diffLocation || diffRotation)
+				{
+					_s.location = newLocation;
+					if (diffRotation) _s.rotation = newRotation;
+				}
+
+				if (found.blocking)
+				{
+					found.hit.traceStart = traceStart;
+					found.hit.traceEnd = traceEnd;
+					found.hit.dispatched = !found.hit.startPenetrating || dispatchOverlaps;
+					if (_hitCount < _maxHits)
+					{
+						found.index = _hitCount;
+						_hits[_hitCount] = found.hit;
+					}
+					++_hitCount;
+					// 맞음 알림(DispatchBlockingHit → ReceiveHit) — 다른 팀 사람이면 그 자리에서 터진다. 엔진은 미룸 없이 곧장 부른다(bSimulationUseScopedMovement 꺼짐 :29)
+					if (found.hit.dispatched && found.obstacle && found.obstacle->detonateOnHit)
+					{
+						_s.detonated = true;
+						++_s.count.detonations;
+					}
+				}
+				if (out) *out = found;
+				return diffLocation || diffRotation;
+			}
+
+			// UMovementComponent::SafeMoveUpdatedComponent(MovementComponent.cpp:558-588) — 첫 시도는 겹침을 무시하지 않고 그 알림도 안 낸다
+			// (p.MoveIgnoreFirstBlockingOverlap 0 :548). 시작 겹침이면 풀어낸 뒤 원래 옮김을 다시 한다
+			bool SafeMove(const Vec3& delta, const Rotator& newRotation, Blocking& out)
+			{
+				bool moved = MoveComponent(delta, newRotation, true, true, false, &out);
+				if (out.blocking && out.hit.startPenetrating)
+				{
+					++_s.count.startPenetrating;
+					const Vec3 adjustment = PenetrationAdjustment(out.hit);
+					if (ResolvePenetration(adjustment, out.hit, newRotation))
+						moved = MoveComponent(delta, newRotation, true, false, true, &out);
+				}
+				return moved;
+			}
+
+			// GetPenetrationAdjustment(:608-622) — 법선 × (겹친 깊이 + 0.125)
+			Vec3 PenetrationAdjustment(const ProjectileHit& hit) const
+			{
+				if (!hit.startPenetrating) return Vec3();
+				const float depth = hit.penetrationDepth > 0 ? (float)hit.penetrationDepth : 0.125f;
+				return hit.normal * (double)(depth + kPenetrationPullback);
+			}
+
+			// ResolvePenetrationImpl(:624-708). 엔진은 먼저 풀린 자리에서 경계 상자(Bounds.BoxExtent + 0.1, 뿌리 가운데)가 겹치는지 보고
+			// 안 겹치면 쓸지 않고 옮긴다. 그 상자는 메시 그림 경계라 우리 쪽에 없어 겹친 갈래(쓸어서 빠져나감)만 둔다 —
+			// 빠져나가는 길에 다른 것이 없으면 두 갈래는 같은 자리에 선다(G-1-c 기록 15판의 풀기 842번이 모두 이 갈래로 자리 · 속도가 맞음)
+			bool ResolvePenetration(const Vec3& adjustment, const ProjectileHit& hit, const Rotator& newRotation)
+			{
+				if (IsZero(adjustment)) return false;
+				Blocking sweepOut;
+				bool moved = MoveComponent(adjustment, newRotation, true, false, true, &sweepOut);
+				if (!moved && sweepOut.blocking && sweepOut.hit.startPenetrating)
+				{
+					// 두 법선을 더해 여러 면에서 한 번에 빠져나간다(:670-680)
+					const Vec3 secondMtd = PenetrationAdjustment(sweepOut.hit);
+					const Vec3 combined = adjustment + secondMtd;
+					if (!(secondMtd.x == adjustment.x && secondMtd.y == adjustment.y && secondMtd.z == adjustment.z) && !IsZero(combined))
+					{
+						++_s.count.resolveCombined;
+						moved = MoveComponent(combined, newRotation, true, false, true, nullptr);
+					}
+				}
+				if (!moved)
+				{
+					// 풀기 + 원래 옮김, 그래도 안 되면 원래 옮김만(:683-700)
+					const Vec3 moveDelta = hit.traceEnd - hit.traceStart;
+					if (!IsZero(moveDelta))
+					{
+						++_s.count.resolveWithMove;
+						moved = MoveComponent(adjustment + moveDelta, newRotation, true, false, true, nullptr);
+						if (!moved && Dot(moveDelta, adjustment) > 0.0)
+							moved = MoveComponent(moveDelta, newRotation, true, false, true, nullptr);
+					}
+				}
+				if (moved) ++_s.count.resolveMoved;
+				else ++_s.count.resolveFailed;
+				return moved;
+			}
+
+			// HandleBlockingHit(:551-574) — 세계 밖 검사(CheckStillInWorld)는 안 옮긴다(연습장 기록에 없음)
+			EBlockResult HandleBlockingHit(Blocking& b, float timeTick, float& subTickTimeRemaining)
+			{
+				HandleImpact(b);
+				if (Halted()) return EBlockResult::Abort;
+				if (b.hit.startPenetrating) return EBlockResult::Abort;
+				subTickTimeRemaining = timeTick * (1.f - (float)b.hit.time);
+				return EBlockResult::Deflect;
+			}
+
+			// HandleImpact(:605-634) — 튕김 켬이라 튕긴 속도를 셈하고, 문턱 아래면 멈춤
+			void HandleImpact(Blocking& b)
+			{
+				_s.velocity = ComputeBounceResult(b.hit);
+				++_s.count.bounces;
+				b.hit.bounced = true;
+				if (b.index != SIZE_MAX) _hits[b.index].bounced = true;
+				_s.velocity = LimitVelocity(_p, _s.velocity);
+				if (UnderStopThreshold())
+				{
+					++_s.count.stopsOnImpact;
+					Stop();
+				}
+			}
+
+			// ComputeBounceResult(:576-603) — 면으로 들어가는 속도를 되돌리고, 면을 따르는 속도에만 마찰, 되돌린 몫에 반발. 엔진처럼 내적 · 마찰은 float
+			Vec3 ComputeBounceResult(const ProjectileHit& hit) const
+			{
+				Vec3 temp = _s.velocity;
+				const Vec3& normal = hit.normal;
+				const float vDotNormal = (float)Dot(temp, normal);
+				if (vDotNormal <= 0.f)
+				{
+					const Vec3 projectedNormal = normal * (double)-vDotNormal;
+					temp = temp + projectedNormal;
+					const float scaledFriction = (_p.bounceAngleAffectsFriction || _s.sliding)
+						? (float)(std::clamp((double)-vDotNormal / std::sqrt(SizeSquared(temp)), (double)_p.minFrictionFraction, 1.0) * (double)_p.friction)
+						: _p.friction;
+					temp = temp * (double)std::clamp(1.f - scaledFriction, 0.f, 1.f);
+					temp = temp + projectedNormal * (double)std::max(_p.bounciness, 0.f);
+					temp = LimitVelocity(_p, temp);
+				}
+				return temp;
+			}
+
+			// HandleDeflection(:336-386) — 튕긴 속도가 아직 면으로 들어가면(또는 같은 면에 연달아 맞으면) 면을 따라 미끄러진다
+			bool HandleDeflection(Blocking& b, const Vec3& oldVelocity, float& subTickTimeRemaining)
+			{
+				const Vec3 normal = b.hit.normal;
+				const bool multiHit = _s.previousHitTime < 1.f && b.hit.time <= kKindaSmall;
+				if (multiHit) ++_s.count.multiHits;
+				_s.sliding = (multiHit && Dot(_s.previousHitNormal, normal) >= kNormalsParallel)
+					|| (Dot(SafeNormal(_s.velocity), normal) <= (double)kSlideDotTolerance);
+				if (_s.sliding)
+				{
+					if (multiHit && Dot(_s.previousHitNormal, normal) <= 0.0)
+					{
+						// 90도 이하 구석 — 두 법선의 외적 방향으로(:350-361)
+						++_s.count.corners;
+						const Vec3 newDir = SafeNormal(Cross(normal, _s.previousHitNormal));
+						_s.velocity = newDir * Dot(_s.velocity, newDir);
+						if (Dot(oldVelocity, _s.velocity) < 0.0) _s.velocity = _s.velocity * -1.0;
+					}
+					else
+					{
+						++_s.count.slides;
+						_s.velocity = _s.velocity - normal * Dot(_s.velocity, normal);	// ComputeSlideVector(v, 1, n) = 면에 투영
+					}
+					if (UnderStopThreshold())
+					{
+						++_s.count.stopsOnSlide;
+						Stop();
+						return false;
+					}
+					if (subTickTimeRemaining > kKindaSmall)
+					{
+						if (!HandleSliding(b, subTickTimeRemaining)) return false;
+					}
+				}
+				return true;
+			}
+
+			// HandleSliding(:389-447) — 면과 나란해진 속도로 남은 시간을 옮긴다. 다시 막히면 튕김 셈, 안 막히면 면으로 누르는 중력에 마찰
+			// b 를 그 옮김의 맞음으로 덮는다 — 엔진이 같은 FHitResult 를 받아 쓰고, 고리가 그 시각 · 법선을 앞 맞음으로 적는다
+			bool HandleSliding(Blocking& b, float& subTickTimeRemaining)
+			{
+				const Vec3 oldHitNormal = b.hit.normal;
+				++_s.count.slideMoves;
+				SafeMove(_s.velocity * (double)subTickTimeRemaining, _s.rotation, b);
+				if (Halted()) return false;
+
+				if (b.blocking)
+				{
+					++_s.count.slideHits;
+					const float timeTick = subTickTimeRemaining;
+					subTickTimeRemaining = timeTick * (1.f - (float)b.hit.time);
+					if (HandleBlockingHit(b, timeTick, subTickTimeRemaining) == EBlockResult::Abort || Halted()) return false;
+				}
+				else
+				{
+					const Vec3 postTickVelocity = ComputeVelocity(_p, _s.velocity, subTickTimeRemaining);
+					const Vec3 force = postTickVelocity - _s.velocity;
+					const float forceDotN = (float)Dot(force, oldHitNormal);
+					if (forceDotN < 0.f)
+					{
+						++_s.count.slideFriction;
+						const Vec3 projectedForce = force - oldHitNormal * Dot(force, oldHitNormal);	// VectorPlaneProject
+						const Vec3 newVelocity = _s.velocity + projectedForce;
+						const Vec3 frictionForce = SafeNormal(newVelocity) * -std::min((double)(-forceDotN * _p.friction), std::sqrt(SizeSquared(newVelocity)));
+						_s.velocity = newVelocity + frictionForce;
+					}
+					else
+					{
+						_s.velocity = postTickVelocity;
+					}
+					if (UnderStopThreshold())
+					{
+						++_s.count.stopsOnSlide;
+						Stop();
+						return false;
+					}
+					subTickTimeRemaining = 0.f;
+				}
+				return true;
+			}
+
+			const CMapCollision& _map;
+			const ProjectileParams& _p;
+			ProjectileState& _s;
+			const ProjectileObstacle* _obstacles;
+			size_t _obstacleCount;
+			ProjectileHit* _hits;
+			size_t _maxHits;
+			size_t _hitCount = 0;
+		};
 	}
 
 	Vec3 RotateVector(const Rotator& r, const Vec3& v)
@@ -197,42 +621,8 @@ namespace mo
 	size_t TickProjectile(const CMapCollision& map, const ProjectileParams& p, ProjectileState& s, float deltaSeconds,
 		const ProjectileObstacle* obstacles, size_t obstacleCount, ProjectileHit* hits, size_t maxHits)
 	{
-		size_t hitCount = 0;
-		float remaining = deltaSeconds;
-		int iterations = 0;
-		// TickComponent 의 걸음 고리(ProjectileMovementComponent.cpp:196-330)
-		while (!s.stopped && remaining >= kMinTickTime && iterations < p.maxIterations)
-		{
-			++iterations;
-			const float timeTick = SimulationTimeStep(p, remaining, iterations);
-			remaining -= timeTick;
-
-			const Vec3 oldVelocity = s.velocity;
-			const Vec3 delta = ComputeMoveDelta(p, oldVelocity, timeTick);
-			// 회전은 옛 속도를 따른다(:225). 쓸기는 옮기기 전 회전으로 하고 새 회전은 끝에서 붙인다
-			const Rotator newRotation = (s.launchCleanedUp && !NearlyZero(oldVelocity, kVelocityTolerance)) ? RotatorFromDirection(oldVelocity) : s.rotation;
-
-			ProjectileHit hit;
-			const bool blocked = SizeSquared(delta) > 0 && SweepFirst(map, p, s, delta, obstacles, obstacleCount, hit);
-			if (!blocked)
-			{
-				s.location = s.location + delta;
-				s.rotation = newRotation;
-				s.velocity = ComputeVelocity(p, s.velocity, timeTick);
-				continue;
-			}
-
-			// PullBackHit — 면에 딱 붙지 않게 시간을 조금 물린다. 엔진은 float 로 잰다(PrimitiveComponent.cpp:3095-3099)
-			const float dist = (float)std::sqrt(SizeSquared(delta));
-			const float timeBack = std::clamp(0.1f, 0.1f / dist, 1.f / dist) + 0.001f;
-			hit.time = (double)std::clamp((float)hit.time - timeBack, 0.f, 1.f);
-			s.location = s.location + delta * hit.time;
-			s.rotation = newRotation;
-			s.velocity = (hit.time > kKindaSmall) ? ComputeVelocity(p, oldVelocity, timeTick * (float)hit.time) : oldVelocity;
-			if (hitCount < maxHits) hits[hitCount] = hit;
-			++hitCount;
-			break;	// 튕김 · 미끄러짐 · 멈춤은 G-1-c — 지금은 이 프레임 나머지 걸음을 버린다
-		}
+		CStep step(map, p, s, obstacles, obstacleCount, hits, maxHits);
+		const size_t hitCount = step.Run(deltaSeconds);
 
 		// B_Grenade 의 PostLaunchCleanup 타이머(0.16초) — 나이 10 걸음 뒤에 켜진 것으로 두면 나이 11 걸음부터 속도를 따른다. 엔진 차례가 아니라 기록으로 맞춘 규칙(G-0-a · G-1-b 545발 회전 대조)
 		if (!s.launchCleanedUp && s.frames * (double)deltaSeconds >= p.launchCleanupSeconds) s.launchCleanedUp = true;
@@ -241,7 +631,8 @@ namespace mo
 	}
 
 	bool SweepCapsuleCapsule(const Vec3& centerA, const Vec3& axisA, double radiusA, double halfHeightA, const Vec3& delta,
-		const Vec3& centerB, const Vec3& axisB, double radiusB, double halfHeightB, double& outTime, Vec3& outNormal, Vec3& outImpact, bool& outStartPenetrating)
+		const Vec3& centerB, const Vec3& axisB, double radiusB, double halfHeightB, double& outTime, Vec3& outNormal, Vec3& outImpact,
+		bool& outStartPenetrating, double& outPenetrationDepth)
 	{
 		const Segment a = CapsuleSegment(centerA, axisA, radiusA, halfHeightA);
 		const Segment b = CapsuleSegment(centerB, axisB, radiusB, halfHeightB);
@@ -260,8 +651,13 @@ namespace mo
 			return true;
 		};
 
+		outPenetrationDepth = 0;
 		const double d0 = distanceAt(0.0, ca, cb);
-		if (d0 <= reach) return finish(0.0, ca, cb, true);
+		if (d0 <= reach)
+		{
+			outPenetrationDepth = reach - d0;
+			return finish(0.0, ca, cb, true);
+		}
 		const double length = std::sqrt(SizeSquared(delta));
 		if (d0 - length > reach) return false;				// 끝까지 가도 못 닿는다
 
