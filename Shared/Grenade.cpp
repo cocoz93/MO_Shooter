@@ -25,9 +25,8 @@ namespace mo
 		_justThrown = false;
 	}
 
-	EGrenadeResult CGrenadeAbility::TryActivate(bool dead, bool dashing, bool postGame)
+	EGrenadeResult CGrenadeAbility::TryActivate(bool dead, bool dashing)
 	{
-		if (postGame) return EGrenadeResult::PostGame;
 		if (dead) return EGrenadeResult::Dead;
 		if (dashing) return EGrenadeResult::WhileDash;
 		if (_cooldownLeft > 0) return EGrenadeResult::OnCooldown;

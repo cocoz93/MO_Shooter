@@ -96,7 +96,6 @@ namespace mo
 		uint64_t debugKills = 0;			// 시험 입력이 죽임(DEBUG_PLACE_KILL)
 		uint64_t statesSent = 0;
 		uint64_t shots = 0;
-		uint64_t firesBlockedPostGame = 0;	// 경기 끝 단계의 발사 입력 — GE_BlockAbilityInput
 		uint64_t adsInputs = 0;				// 조준이 켜진 채 적용한 입력(C-4)
 		uint64_t shotsAimed = 0;			// 조준 비율 1 로 쏜 발 — 퍼짐이 조준 배수를 탄 발(C-4)
 		uint64_t crouchPresses = 0;			// 앉기 키가 든 입력(D-5) — ToggleCrouch 를 부른 수
@@ -139,7 +138,6 @@ namespace mo
 		uint64_t meleePresses = 0;			// 근접 단추가 든 입력
 		uint64_t meleeStarts = 0;
 		uint64_t meleeWhileActive = 0;		// 켜져 있어 버린 누름(bRetriggerInstancedAbility = False)
-		uint64_t meleeBlockedPostGame = 0;	// 경기 끝 단계의 누름 — GE_BlockAbilityInput
 		uint64_t meleeHits = 0;
 		uint64_t meleeSameTeam = 0;
 		uint64_t meleeBlocked = 0;			// 손 → 닿은 점 선이 벽에 막힘
@@ -167,7 +165,6 @@ namespace mo
 		uint64_t dashOnCooldown = 0;
 		uint64_t dashWhileActive = 0;
 		uint64_t dashDead = 0;
-		uint64_t dashPostGame = 0;			// 경기 끝 단계 — GE_BlockAbilityInput
 		uint64_t dashFiresBlocked = 0;		// 대시가 앞 입력부터 켜져 있어 막은 쥔 사격 입력
 		uint64_t dashReloadsBlocked = 0;	// 대시가 켜져 있어(켠 입력 포함) 막은 재장전 누름
 		uint64_t dashMeleeBlocked = 0;		// 같은 까닭으로 막은 근접 누름
@@ -190,7 +187,6 @@ namespace mo
 		uint64_t grenadeOnCooldown = 0;
 		uint64_t grenadeWhileDash = 0;
 		uint64_t grenadeDead = 0;
-		uint64_t grenadePostGame = 0;		// 경기 끝 단계 — 우리는 막는다(Lyra 는 던진다, content-impl-progress.md 미결 15)
 		uint64_t grenadeAimReplaced = 0;	// 입력 시작점이 몸에서 허용 범위 밖 — 사격과 같은 눈높이로 바꿔 카메라를 셈
 		uint64_t grenadeAimNoHit = 0;		// 겨눔 선이 안 맞음 — 거리 0 이라 조종 회전 그대로(짐작 1)
 		uint64_t grenadeAimNear45 = 0;		// 맞았지만 선 시작에서 45 안 — 조종 회전 그대로

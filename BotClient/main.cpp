@@ -356,7 +356,7 @@ namespace
 		// 규칙 위반 — 전부 0 이어야 한다
 		uint64_t badShape = 0;			// 결과 칸 범위 밖 · 맞음 아닌데 피해나 힘 · 맞음인데 대상 없음 · 빗나감인데 대상 · 피해가 0 도 kMeleeDamage 도 아님
 		uint64_t badDead = 0;			// 죽은 뒤 근접
-		uint64_t badPost = 0;			// 경기 끝 단계 근접(서버가 막는다)
+		uint64_t post = 0;				// 경기 끝 단계 근접 — 서버도 켠다(L-3-b — Lyra 는 맵을 다시 열기 한 틱 전까지 능력 입력을 안 막는다). 그 갈래를 지났나
 		uint64_t badDamage = 0;			// 근접 피해 소식이 바로 앞 근접 맞음(공격자 · 대상 · 양 · 틱)과 다르거나 앞 맞음 없이 옴
 		uint64_t badZero = 0;			// 경기 중 · 무적 아닌 상대를 맞혔는데 피해 0
 		double forceDiffMax = 0;		// 화면 판정 밀기 힘 ↔ 서버 힘 차이의 최댓값(내 근접, 결과가 같은 것 · 다른 것 모두)
@@ -383,7 +383,7 @@ namespace
 		to.kills += from.kills;
 		to.badShape += from.badShape;
 		to.badDead += from.badDead;
-		to.badPost += from.badPost;
+		to.post += from.post;
 		to.badDamage += from.badDamage;
 		to.badZero += from.badZero;
 		to.forceDiffMax = std::max(to.forceDiffMax, from.forceDiffMax);
@@ -415,7 +415,7 @@ namespace
 		// 규칙 위반 — 전부 0 이어야 한다
 		uint64_t badShape = 0;			// 방향 칸 범위 밖 · 힘 크기가 kDashStrength 가 아님
 		uint64_t badDead = 0;			// 죽은 뒤 대시
-		uint64_t badPost = 0;			// 경기 끝 단계 대시(서버가 막는다)
+		uint64_t post = 0;				// 경기 끝 단계 대시 — 근접과 같다(L-3-b)
 	};
 
 	void AddDashCounts(DashBotCounts& to, const DashBotCounts& from)
@@ -430,7 +430,7 @@ namespace
 		for (int i = 0; i < 4; ++i) to.mineDir[i] += from.mineDir[i];
 		to.badShape += from.badShape;
 		to.badDead += from.badDead;
-		to.badPost += from.badPost;
+		to.post += from.post;
 	}
 
 	void AddDashFixes(CSelfPrediction::DashCounters& to, const CSelfPrediction::DashCounters& from)
@@ -468,7 +468,7 @@ namespace
 		uint64_t damageMine = 0, selfDamageMine = 0, killsMine = 0;	// 그중 공격자 = 나(자기 피해 · 자기 처치 포함)
 		// 규칙 위반 — 전부 0 이어야 한다
 		uint64_t badDead = 0;			// 죽은 뒤 던짐(서버는 죽은 입력에 안 던진다. 터짐은 죽은 뒤에도 정상)
-		uint64_t badPost = 0;			// 경기 끝 단계 던짐(서버가 막는다)
+		uint64_t post = 0;				// 경기 끝 단계 던짐 — 근접과 같다(L-3-b)
 		uint64_t badDamage = 0;			// 무기 4 피해 소식이 바로 앞 터짐(던진 사람 · 틱)과 다르거나 터짐 없이 옴
 		uint64_t badKind = 0;			// 종류 칸 범위 밖
 		uint64_t badState = 0;			// 상태 소식 크기가 머리 + 칸 × count 와 다르거나 count 가 방 크기 밖
@@ -489,7 +489,7 @@ namespace
 		to.selfDamageMine += from.selfDamageMine;
 		to.killsMine += from.killsMine;
 		to.badDead += from.badDead;
-		to.badPost += from.badPost;
+		to.post += from.post;
 		to.badDamage += from.badDamage;
 		to.msgs += from.msgs;
 		to.throws += from.throws;
@@ -967,7 +967,7 @@ namespace
 				++c.badShape;
 			const auto dead = _deadSince.find(melee.attacker);
 			if (dead != _deadSince.end() && melee.tick > dead->second) ++c.badDead;
-			if (_postTick != 0 && melee.tick > _postTick) ++c.badPost;		// 경기 끝 틱 경계는 피해 검사(damageOutsidePlaying)와 같다
+			if (_postTick != 0 && melee.tick > _postTick) ++c.post;		// 경기 끝 틱 경계는 피해 검사(damageOutsidePlaying)와 같다
 			if (hit)
 			{
 				++c.hits;
@@ -1014,7 +1014,7 @@ namespace
 			if (dash.dir > (uint8_t)EDashDir::Right || std::fabs(Length(force) - (double)kDashStrength) > 1e-6) ++c.badShape;	// 힘 = 정규화한 방향 × 세기(DashForce)
 			const auto dead = _deadSince.find(dash.player);
 			if (dead != _deadSince.end() && dash.tick > dead->second) ++c.badDead;
-			if (_postTick != 0 && dash.tick > _postTick) ++c.badPost;		// 근접 · 피해와 같은 경계
+			if (_postTick != 0 && dash.tick > _postTick) ++c.post;		// 근접 · 피해와 같은 경계
 			if (dash.player != _welcome.playerId) return;
 			++c.mine;
 			if (dash.dir <= (uint8_t)EDashDir::Right) ++c.mineDir[dash.dir];
@@ -1034,7 +1034,7 @@ namespace
 				++c.throws;
 				const auto dead = _deadSince.find(grenade.thrower);
 				if (dead != _deadSince.end() && grenade.tick > dead->second) ++c.badDead;
-				if (_postTick != 0 && grenade.tick > _postTick) ++c.badPost;		// 대시 · 근접과 같은 경계
+				if (_postTick != 0 && grenade.tick > _postTick) ++c.post;		// 대시 · 근접과 같은 경계
 				if (grenade.id == 0) ++c.throwsNoGrenade;
 				else
 				{
@@ -1318,9 +1318,9 @@ namespace
 			if (_rules.pawnBlock) _sim.SetPawns(nullptr, 0);
 		}
 
-		// 대시 확인(AckDash)으로 「소식 없이 지나감」이 는 수 중 경기 끝 단계 몫 — 서버는 단계를 틱 첫머리에 바꾸고(TickPhase → 입력) 경기 끝엔 대시를 막는데,
-		// 예측은 경기 단계를 모르고 봇은 경기 끝 소식을 받기 전에 보낸 입력에선 누를 수 있다. 정직한 클라도 못 피하는 고침이라 따로 센다(상태 틱 ≥ 경기 끝 틱).
-		// 점수로 끝난 틱은 그 틱 입력이 경기 중에 돌아(끝은 그 뒤 처치에서) 서버도 켜므로 이 갈래에 안 든다
+		// 대시 확인(AckDash)으로 「소식 없이 지나감」이 는 수 중 경기 끝 단계 몫 — 서버는 끝 단계에도 대시를 켜므로(L-3-b) 0 이어야 한다.
+		// 0 이 아니면 끝 단계에서 갈린 것인지 바로 보이게 따로 센다(상태 틱 ≥ 경기 끝 틱). 판정은 「소식 없이 지나감」 전체 0 으로 한다(이 몫을 빼지 않는다)
+		// (L-3-b 전에는 서버가 끝 단계에 막아 이 몫을 빼고 판정했다 — 빼면 서버가 다시 막아도 봇 판이 PASS 한다)
 		void NoteDashUnconfirmed(uint64_t before)
 		{
 			const uint64_t added = _self.GetDashCounters().unconfirmed - before;
@@ -1410,12 +1410,9 @@ namespace
 			bool bad = false;
 			if (dp > 0) { ++_posDiff; bad = true; }
 			if (dv > 0) { ++_velDiff; bad = true; }
-			// 경기 끝 단계는 서버가 사격 입력을 지운다 — 그 경계를 입력 번호로는 모르므로 탄은 그 전까지만 본다
-			if (_phase < (uint8_t)wire::EMatchPhase::PostGame)
-			{
-				if (p.magazine != slot.magazine || p.spare != slot.spare || p.weapon != slot.weapon) { ++_ammoDiff; bad = true; }
-				if (((p.flags & wire::STATE_RELOADING) != 0) != slot.reloading) { ++_flagDiff; bad = true; LogFlagDiff("reloading", p, slot, (p.flags & wire::STATE_RELOADING) != 0, slot.reloading); }
-			}
+			// 경기 끝 단계도 본다 — 서버가 끝 단계에도 사격 입력을 돌린다(L-3-b. 그 전엔 지워서 끝 단계 앞까지만 봤다)
+			if (p.magazine != slot.magazine || p.spare != slot.spare || p.weapon != slot.weapon) { ++_ammoDiff; bad = true; }
+			if (((p.flags & wire::STATE_RELOADING) != 0) != slot.reloading) { ++_flagDiff; bad = true; LogFlagDiff("reloading", p, slot, (p.flags & wire::STATE_RELOADING) != 0, slot.reloading); }
 			// 떨어짐은 이동의 결과 — 사람끼리 막기를 켠 판은 위치처럼 남의 캡슐(예측은 받은 최신 위치)에 따라 갈릴 수 있어 따로 센다(F-2)
 			const bool fallDiff = ((p.flags & wire::STATE_FALLING) != 0) != (slot.move.mode == EMoveMode::Falling);
 			const bool lockDiff = ((p.flags & wire::STATE_MOVE_LOCKED) != 0) != (slot.lockInputs > 0);
@@ -2013,9 +2010,9 @@ namespace
 			// --dash(D-3) — 정해 둔 간격마다 대시 단추를 한 번 누른다(누른 입력 하나에만). 간격 · 방향 · 같이 누를 단추는 따로 쓰는 난수(_dashRng)라 두뇌 난수(_rng)를 안 건드린다.
 			// 간격 12~150 입력 = --crouch 와 같다 — 켜짐 32 · 쿨다운 91 입력보다 짧은 것 · 긴 것이 섞여 켬 · 켜져 있음 · 쿨다운 갈래가 다 돈다.
 			// 방향은 능력이 앞 입력의 이동 · 몸 요로 고르므로(SelectDashDir) 누르기 한 입력 앞에서 이동을 그 입력 요 기준 0 · 180 · −90 · +90° 로 놓는다(갈래마다 한가운데).
-			// 위 · 아래 보고 앞은 누른 입력의 피치를 +40 · −30 으로(앞 대시 힘은 카메라 앞이다. D-0 기록은 피치 +20 · +45 · 아래). 부활 기다리는 중 · 경기 끝 단계엔 안 누른다 —
-			// 서버는 죽은 사람 입력을 대시 앞에서 버리고(dead 로만 센다), 경기 끝은 막는데 예측은 경기 단계를 모른다(다리는 Lyra 입력 막음을 따른다 — D-5)
-			if (_dashPress && !_self.IsWaitingSpawn() && _phase != (uint8_t)wire::EMatchPhase::PostGame)
+			// 위 · 아래 보고 앞은 누른 입력의 피치를 +40 · −30 으로(앞 대시 힘은 카메라 앞이다. D-0 기록은 피치 +20 · +45 · 아래). 부활 기다리는 중엔 안 누른다 —
+			// 서버는 죽은 사람 입력을 대시 앞에서 버린다(dead 로만 센다). 경기 끝 단계엔 누른다 — 서버 · 다리 모두 끝 단계에도 켠다(L-3-b)
+			if (_dashPress && !_self.IsWaitingSpawn())
 			{
 				--_dashWait;
 				if (_dashWait == 1)
@@ -2048,8 +2045,8 @@ namespace
 			// --grenade(G-3, 플랜 123줄) — 적이 보이고 kGrenadeBotRange 안이면 간격마다 수류탄 단추를 한 번 누른다(누른 입력 하나에만). 간격 · 피치 종류는
 			// 따로 쓰는 난수(_grenadeRng)라 두뇌 난수(_rng)를 안 건드린다. 간격 30~450 입력 = 쿨다운 301 입력보다 짧은 것 · 긴 것이 섞여 던짐 · 쿨다운 갈래가 다 돈다.
 			// 피치 = 그대로(적을 봄) · +80(하늘 — 겨눔 선이 안 맞음. Expanse 봇이 누른 자리 33곳을 MapCheck 로 재 보니 55° 는 4곳 · 80° 는 9곳만 안 맞았다 — 지붕 밑이 많다) · −60(발 앞 바닥 — 선 시작에서 45 안) · −20(먼 바닥 — 맞은 곳을 봄). 대시 누른 입력은 피치를 안 바꾼다(대시 힘이 피치를 따른다)
-			// 부활 기다리는 중 · 경기 끝 단계엔 적 없이 누른다 — 서버 죽은 갈래(쿨다운만 돎) · 경기 끝 막기를 지나가게(플랜 177줄 「통계 갈래 각각 1 이상」).
-			// 경기 끝 몫은 예측이 단계를 몰라 소식 없이 지나가므로 따로 센다(대시 unconfirmedPost 와 같은 길)
+			// 부활 기다리는 중 · 경기 끝 단계엔 적 없이 누른다 — 서버 죽은 갈래(쿨다운만 돎) · 끝 단계 던짐을 지나가게(플랜 177줄 「통계 갈래 각각 1 이상」 · L-3-b).
+			// 끝 단계 던짐은 서버도 던진다(L-3-b) — 소식 없이 지나간 끝 단계 몫(unconfirmedPost)은 0 이어야 한다
 			// 하늘 각본 — 싸움이 나는 한가운데는 높이 17m 쯤 무기 · 폭발 선만 막는 한 면 물체(이동 · 수류탄 몸은 지나감) · 지붕 밑이고 부활 자리도 지붕 밑이라, 간격 누름의 하늘 던짐은 거의 맞는다
 			// (G-3-c 파일럿 두 판 — 살아 누른 하늘 16번 전부 맞음 · MapCheck 로 잼). 그래서 서버와 같은 겨눔 선(사람 몸 뺌)을 내 맵에 대 보고 열렸고 쿨다운이 비었으면
 			// 하늘을 한 번 누른다 — 서버 「안 맞음」 갈래(플랜 177줄 「0 이면 각본을 더한다」). 누른 뒤 kGrenadeSkyGap 입력은 다시 안 본다.
@@ -2781,7 +2778,7 @@ int main(int argc, char** argv)
 		(unsigned long long)predCount.pawnHits, (unsigned long long)predCount.pawnStartPenetrating, (unsigned long long)predCount.pawnOddSimplex, (unsigned long long)predCount.pawnTouchStart, (unsigned long long)fallDiff);
 	// 수류탄 셈 둘(G-3) — 아래 출력 · 판정이 같이 쓴다. 뺄셈이 음이 되면 큰 수로 돌아 판정이 갈린다(세는 자리가 빠졌다는 뜻)
 	const uint64_t grenadeFinal = grenadeFixes.thrown + grenadeFixes.respawnThrown - grenadeFixes.respawnLost + grenadeFixes.replayGained - grenadeFixes.replayLost - grenadeUnacked;
-	const uint64_t grenadeDiff = grenadeFixes.startMismatches + grenadeFixes.unconfirmed - grenadeFixes.unconfirmedDead - grenadeUnconfirmedPost;
+	const uint64_t grenadeDiff = grenadeFixes.startMismatches + grenadeFixes.unconfirmed - grenadeFixes.unconfirmedDead;
 	// 근접(E-3) — mine 합 = 서버 SERVER melee starts(봇만 든 판). 소식 · 규칙 줄은 봇마다 같은 소식을 따로 받으므로 봇 수만큼 겹친다
 	{
 		const auto u = [](uint64_t v) { return (unsigned long long)v; };
@@ -2789,20 +2786,20 @@ int main(int argc, char** argv)
 			u(melee.presses), u(melee.judged), u(melee.screen[0]), u(melee.screen[1]), u(melee.screen[2]), u(melee.screen[3]), u(melee.mine), u(melee.mineHitForce), u(melee.mineHitNoForce), u(melee.agree), u(melee.kindDiff), u(melee.targetDiff), melee.forceDiffMax, u(melee.noGuess), u(melee.guessNoResult));
 		std::printf("BOT meleeFix started=%llu pushesGiven=%llu pushesIgnored=%llu results=%llu noSlot=%llu startMismatches=%llu hitFixes=%llu forceFixes=%llu unconfirmed=%llu rerunsMissed=%llu\n",
 			u(meleeFixes.started), u(meleeFixes.pushesGiven), u(meleeFixes.pushesIgnored), u(meleeFixes.results), u(meleeFixes.resultsNoSlot), u(meleeFixes.startMismatches), u(meleeFixes.pushHitFixes), u(meleeFixes.pushForceFixes), u(meleeFixes.unconfirmed), u(meleeFixes.rerunsMissed));
-		std::printf("BOT meleeRules msgs=%llu hits=%llu damaged=%llu zero=%llu damageMsgs=%llu kills=%llu pendingLeft=%llu | bad shape=%llu dead=%llu post=%llu damage=%llu zero=%llu\n",
-			u(melee.msgs), u(melee.hits), u(melee.hitsDamaged), u(melee.hitsZero), u(melee.damageMsgs), u(melee.kills), u(meleePendingLeft), u(melee.badShape), u(melee.badDead), u(melee.badPost), u(melee.badDamage), u(melee.badZero));
-		// 대시(D-3) — mine 합 = 서버 SERVER dash started(봇만 든 판). dashDiff = 서버 소식으로 고친 대시(켬 어긋남 + 방향 · 힘 + 소식 없이 지나감 − 그중 경기 끝 몫 unconfirmedPost), 봇 판 기대 0.
+		std::printf("BOT meleeRules msgs=%llu hits=%llu damaged=%llu zero=%llu damageMsgs=%llu kills=%llu pendingLeft=%llu post=%llu | bad shape=%llu dead=%llu damage=%llu zero=%llu\n",
+			u(melee.msgs), u(melee.hits), u(melee.hitsDamaged), u(melee.hitsZero), u(melee.damageMsgs), u(melee.kills), u(meleePendingLeft), u(melee.post), u(melee.badShape), u(melee.badDead), u(melee.badDamage), u(melee.badZero));
+		// 대시(D-3) — mine 합 = 서버 SERVER dash started(봇만 든 판). dashDiff = 서버 소식으로 고친 대시(켬 어긋남 + 방향 · 힘 + 소식 없이 지나감), 봇 판 기대 0. unconfirmedPost = 그중 경기 끝 단계 몫(기대 0 — L-3-b).
 		// pressed = 봇이 누른 입력, predPresses = 예측이 센 누름(같아야 한다). kinds = 앞 · 뒤 · 왼 · 오른 · 위 보고 앞 · 아래 보고 앞, dir = 서버가 고른 방향(앞 · 뒤 · 왼 · 오른)
 		// respawn = 부활 다시 돌리기에서 켜짐이 바뀐 칸(늘어남/줄어듦). 서버 켬 = mine = predStarted + 늘어남 − 줄어듦 + startMismatches − unconfirmed − unconfirmedDead(죽은 줄 모르고 켠 몫)
 		std::printf("BOT dash pressed=%llu predPresses=%llu predStarted=%llu respawn=+%llu/-%llu kinds=%llu/%llu/%llu/%llu/%llu/%llu extra jump=%llu reload=%llu melee=%llu | mine=%llu dir=%llu/%llu/%llu/%llu results=%llu noSlot=%llu | dashDiff=%llu startMismatches=%llu forceFixes=%llu unconfirmed=%llu unconfirmedPost=%llu unconfirmedDead=%llu replays=%llu replaysMissed=%llu meleeInReplay=%llu\n",
 			u(dash.presses), u(dashFixes.presses), u(dashFixes.started), u(dashFixes.respawnGained), u(dashFixes.respawnLost), u(dash.kinds[0]), u(dash.kinds[1]), u(dash.kinds[2]), u(dash.kinds[3]), u(dash.kinds[4]), u(dash.kinds[5]),
 			u(dash.extraJump), u(dash.extraReload), u(dash.extraMelee), u(dash.mine), u(dash.mineDir[0]), u(dash.mineDir[1]), u(dash.mineDir[2]), u(dash.mineDir[3]), u(dashFixes.results), u(dashFixes.resultsNoSlot),
-			u(dashFixes.startMismatches + dashFixes.forceFixes + dashFixes.unconfirmed - dashUnconfirmedPost), u(dashFixes.startMismatches), u(dashFixes.forceFixes), u(dashFixes.unconfirmed), u(dashUnconfirmedPost), u(dashFixes.unconfirmedDead), u(dashFixes.replays), u(dashFixes.replaysMissed), u(dashFixes.meleeInReplay));
-		std::printf("BOT dashRules msgs=%llu | bad shape=%llu dead=%llu post=%llu\n", u(dash.msgs), u(dash.badShape), u(dash.badDead), u(dash.badPost));
+			u(dashFixes.startMismatches + dashFixes.forceFixes + dashFixes.unconfirmed), u(dashFixes.startMismatches), u(dashFixes.forceFixes), u(dashFixes.unconfirmed), u(dashUnconfirmedPost), u(dashFixes.unconfirmedDead), u(dashFixes.replays), u(dashFixes.replaysMissed), u(dashFixes.meleeInReplay));
+		std::printf("BOT dashRules msgs=%llu post=%llu | bad shape=%llu dead=%llu\n", u(dash.msgs), u(dash.post), u(dash.badShape), u(dash.badDead));
 		// 수류탄(G-3) — mine 합 = 서버 SERVER grenade thrown(봇만 든 판). 소식 · 상태 · 피해 받은 수(msgs)는 봇마다 같은 소식을 따로 받으므로 봇 수 배.
 		// pressed = 봇이 누른 입력, predPresses = 예측이 센 누름(같아야 한다). kinds = 피치 그대로 · 하늘 · 발 앞 바닥 · 먼 바닥, waiting · post = 부활 대기 · 경기 끝에 누름.
 		// finalThrown = 예측 칸마다 마지막으로 정한 던짐의 합 = predThrown + 부활 다시 돌리기(+/−) + 다시 고르기(+/−) − 판 끝에 아직 확인 안 된 몫(unacked) — mine 과 같아야 한다(sameFinal).
-		// grenadeDiff = 서버 소식으로 고친 던짐(어긋남 + 소식 없이 지나감 − 죽음을 늦게 안 몫 unconfirmedDead − 경기 끝 몫 unconfirmedPost), 봇 판 기대 0
+		// grenadeDiff = 서버 소식으로 고친 던짐(어긋남 + 소식 없이 지나감 − 죽음을 늦게 안 몫 unconfirmedDead), 봇 판 기대 0. unconfirmedPost = 그중 경기 끝 단계 몫(기대 0 — L-3-b)
 		std::printf("BOT grenade pressed=%llu predPresses=%llu kinds=%llu/%llu/%llu/%llu waiting=%llu post=%llu sky=%llu near=%llu | predThrown=%llu respawn=+%llu/-%llu replay=+%llu/-%llu unacked=%llu finalThrown=%llu mine=%llu sameFinal=%d results=%llu noSlot=%llu | grenadeDiff=%llu startMismatches=%llu unconfirmed=%llu unconfirmedDead=%llu unconfirmedPost=%llu replays=%llu replaysMissed=%llu meleeInReplay=%llu\n",
 			u(grenade.presses), u(grenadeFixes.presses), u(grenade.kinds[0]), u(grenade.kinds[1]), u(grenade.kinds[2]), u(grenade.kinds[3]), u(grenade.pressWaiting), u(grenade.pressPost), u(grenade.pressSky), u(grenade.pressNear),
 			u(grenadeFixes.thrown), u(grenadeFixes.respawnThrown), u(grenadeFixes.respawnLost), u(grenadeFixes.replayGained), u(grenadeFixes.replayLost), u(grenadeUnacked), u(grenadeFinal), u(grenade.mine), grenadeFinal == grenade.mine ? 1 : 0,
@@ -2811,9 +2808,9 @@ int main(int argc, char** argv)
 		// 무기 4 — mine 합 = 서버 SERVER grenade damageEvents · selfDamage · kills(봇만 든 판). msgs 는 봇 수 배
 		std::printf("BOT grenadeHits damageMsgs=%llu killMsgs=%llu | mine damage=%llu selfDamage=%llu kills=%llu | bad damage=%llu\n",
 			u(grenade.damageMsgs), u(grenade.killMsgs), u(grenade.damageMine), u(grenade.selfDamageMine), u(grenade.killsMine), u(grenade.badDamage));
-		std::printf("BOT grenadeWire msgs=%llu throws=%llu noGrenade=%llu boom timer=%llu hit=%llu state msgs=%llu entries=%llu bounced=%llu beforeJoin=%llu | bad kind=%llu state=%llu stateId=%llu dead=%llu post=%llu\n",
+		std::printf("BOT grenadeWire msgs=%llu throws=%llu noGrenade=%llu boom timer=%llu hit=%llu state msgs=%llu entries=%llu bounced=%llu beforeJoin=%llu post=%llu | bad kind=%llu state=%llu stateId=%llu dead=%llu\n",
 			u(grenade.msgs), u(grenade.throws), u(grenade.throwsNoGrenade), u(grenade.boomTimer), u(grenade.boomHit), u(grenade.stateMsgs), u(grenade.stateEntries), u(grenade.stateBounced),
-			u(grenade.stateBeforeJoin), u(grenade.badKind), u(grenade.badState), u(grenade.badStateId), u(grenade.badDead), u(grenade.badPost));
+			u(grenade.stateBeforeJoin), u(grenade.post), u(grenade.badKind), u(grenade.badState), u(grenade.badStateId), u(grenade.badDead));
 	}
 	// 받침(컨텐츠 B-4) — healsMine 합 = 서버 SERVER pickups(봇만 든 판). healsSought = 찾아가던 중에 받은 회복(갈래가 실제로 닿았나)
 	std::printf("BOT pads count=%zu msgs=%llu bad=%llu seekStarts=%llu seekTicks=%llu healsMine=%llu healsSought=%llu\n", padCountMax, (unsigned long long)padMsgs,
@@ -2853,17 +2850,17 @@ int main(int argc, char** argv)
 	if (padBad != 0) ok = false;
 	if (invDiff != 0 || pickupFixes.noSlot != 0 || pickupFixes.resultDiffs != 0 || pickupFixes.ammoFixes != 0 || pickupFixes.received != weaponPickupsMine) ok = false;
 	// 근접 — 규칙 위반 · 피해 소식 짝 · 켠 입력 어긋남은 늘 0. --melee 판은 내 근접 결과가 하나 이상(갈래가 실제로 돌았다)
-	if (melee.badShape != 0 || melee.badDead != 0 || melee.badPost != 0 || melee.badDamage != 0 || melee.badZero != 0 || meleePendingLeft != 0) ok = false;
+	if (melee.badShape != 0 || melee.badDead != 0 || melee.badDamage != 0 || melee.badZero != 0 || meleePendingLeft != 0) ok = false;
 	if (melee.noGuess != 0 || meleeFixes.startMismatches != 0 || meleeFixes.rerunsMissed != 0 || meleeFixes.pushesIgnored != 0) ok = false;
 	if (args.meleeNear && melee.mine == 0) ok = false;
-	// 대시(D-3) — 소식 규칙 · 고친 수 0(경기 끝 몫 빼고) · 받은 내 소식 = 예측이 받은 수(칸 있음 + 없음). --dash 면 서버가 한 번 이상 켜고, 누른 수가 봇 · 예측 같고,
+	// 대시(D-3) — 소식 규칙 · 고친 수 0(경기 끝 단계 몫도 — L-3-b) · 받은 내 소식 = 예측이 받은 수(칸 있음 + 없음). --dash 면 서버가 한 번 이상 켜고, 누른 수가 봇 · 예측 같고,
 	// 서버 켬 = 예측 켬(입력 때 + 부활 다시 돌리기 늘어남 − 줄어듦 + 서버 소식으로 켬 − 소식 없이 지나감) — 세는 자리가 빠지면 갈린다
-	if (dash.badShape != 0 || dash.badDead != 0 || dash.badPost != 0) ok = false;
-	if (dashFixes.startMismatches != 0 || dashFixes.forceFixes != 0 || dashFixes.unconfirmed != dashUnconfirmedPost || dashFixes.results + dashFixes.resultsNoSlot != dash.mine) ok = false;
+	if (dash.badShape != 0 || dash.badDead != 0) ok = false;
+	if (dashFixes.startMismatches != 0 || dashFixes.forceFixes != 0 || dashFixes.unconfirmed != 0 || dashFixes.results + dashFixes.resultsNoSlot != dash.mine) ok = false;
 	if (args.dash && (dash.mine == 0 || dash.presses != dashFixes.presses || dashFixes.started + dashFixes.respawnGained + dashFixes.startMismatches != dash.mine + dashFixes.respawnLost + dashFixes.unconfirmed + dashFixes.unconfirmedDead)) ok = false;
-	// 수류탄(G-3) — 소식 · 피해 규칙 · 고친 수 0(죽음 · 경기 끝 몫 빼고) · 받은 내 소식 = 예측이 받은 수(칸 있음 + 없음) · 예측 칸에 남은 던짐 = 내 소식.
+	// 수류탄(G-3) — 소식 · 피해 규칙 · 고친 수 0(죽음 몫 빼고 — 경기 끝 단계 몫도 넣는다, L-3-b) · 받은 내 소식 = 예측이 받은 수(칸 있음 + 없음) · 예측 칸에 남은 던짐 = 내 소식.
 	// --grenade 면 서버가 한 번 이상 던지고 누른 수가 봇 · 예측 같고, 상태 소식을 받았다(플랜 177줄)
-	if (grenade.badKind != 0 || grenade.badState != 0 || grenade.badStateId != 0 || grenade.badDead != 0 || grenade.badPost != 0 || grenade.badDamage != 0) ok = false;
+	if (grenade.badKind != 0 || grenade.badState != 0 || grenade.badStateId != 0 || grenade.badDead != 0 || grenade.badDamage != 0) ok = false;
 	if (grenadeDiff != 0 || grenadeFixes.resultsNoSlot != 0 || grenadeFixes.replaysMissed != 0 || grenadeFixes.results + grenadeFixes.resultsNoSlot != grenade.mine || grenadeFinal != grenade.mine) ok = false;
 	if (args.grenade && (grenade.mine == 0 || grenade.presses != grenadeFixes.presses || grenade.stateMsgs == 0)) ok = false;
 	if (shotsWhileDead != 0 || damageOutside != 0 || damageImmune != 0) ok = false;

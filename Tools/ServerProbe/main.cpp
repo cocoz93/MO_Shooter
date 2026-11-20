@@ -523,6 +523,7 @@ namespace
 		std::vector<wire::Match> matches;
 		std::vector<wire::Melee> melees;
 		std::vector<wire::Pickup> pickups;
+		std::vector<wire::Grenade> grenades;		// S2C_GRENADE — 던짐 · 터짐(⑧ 경기 끝 수류탄)
 		std::vector<wire::PlayerState> history;
 		std::vector<uint32_t> historyTicks;		// history 와 같은 칸 — 그 상태가 어느 틱 것인가
 		wire::Result result = wire::Result();
@@ -594,6 +595,13 @@ namespace
 					wire::Pickup pickup = wire::Pickup();
 					std::memcpy(&pickup, data, std::min(size, (int)sizeof(pickup)));
 					pickups.push_back(pickup);
+					break;
+				}
+				case wire::Msg::S2C_GRENADE:
+				{
+					wire::Grenade grenade = wire::Grenade();
+					std::memcpy(&grenade, data, std::min(size, (int)sizeof(grenade)));
+					grenades.push_back(grenade);
 					break;
 				}
 				case wire::Msg::S2C_RESULT:
@@ -1195,7 +1203,8 @@ namespace
 		Expect(post.winningTeam == wire::kTeamA && post.teamScoreA == 2, fails, "목표 점수에 닿은 팀이 이김");
 		Expect(std::fabs(post.secondsLeft - rules.postGameSeconds) < 0.1, fails, "경기 뒤 10초");
 
-		// ⑧ 경기 끝 — 쏘지 못하고 움직일 수는 있다
+		// ⑧ 경기 끝 — 걷기 · 쏘기 · 수류탄 다 된다. Lyra 는 능력 입력 막음(GE_BlockAbilityInput)을 맵을 다시 열기 한 틱 전에야 건다
+		// (그래프 원본 · 기록 g0end1 · 2 — 끝 단계 Q 가 던져져 상대 몸에 맞고도 피해 0 · 점수 그대로, L-3-b). 피해는 끝 단계 무적(IsImmune)이 막는다
 		const wire::PlayerState beforeWalk = a.self;
 		const Vec3 walkDir = (bAgain - spotA2) * (1.0 / Length(bAgain - spotA2));
 		RunTicks(clients, 3, 60, [&](int) { SendAim(a, eyeA2, bAgain, (float)walkDir.x, (float)walkDir.y, wire::BUTTON_FIRE, kRifle); }, [] { return false; });
@@ -1207,8 +1216,61 @@ namespace
 		}
 		const double walked = std::sqrt((double)(a.self.x - beforeWalk.x) * (a.self.x - beforeWalk.x) + (double)(a.self.y - beforeWalk.y) * (a.self.y - beforeWalk.y));
 		std::printf("RULES 경기 끝 뒤 발사=%d 걸은 거리=%.1f\n", shotsAfter, walked);
-		Expect(shotsAfter == 0, fails, "경기 끝에는 발사 막힘");
+		Expect(shotsAfter > 0, fails, "경기 끝에도 발사는 됨");
 		Expect(walked > 100.0, fails, "경기 끝에도 이동은 됨");
+
+		// 몸에 맞혀도 피해 0 — 우승 처치로 죽은 B 를 체력 100 으로 다시 세운다(옮기기가 죽음을 푼다 · 부활 시계는 죽은 동안만 돈다 — Room.cpp TickRespawns).
+		// A 는 처음 자리로 · 소총 탄을 채워 둔다(걸으며 쏜 탄이 비면 재장전이 쏘기를 막는다)
+		const WeaponDef& rifle = GetWeaponDef(EWeapon::Rifle);
+		a.Place(spotA2, 100.f, wire::DEBUG_PLACE_SET_AMMO, kRifle, (int16_t)rifle.magazineSize, (int16_t)rifle.startSpareAmmo);
+		b.Place(bAgain, 100.f);
+		PumpFor(clients, 3, 0.2);
+		const size_t damagesBeforePost = a.damages.size(), killsBeforePost = a.kills.size(), shotsBeforePost = a.shots.size();
+		RunTicks(clients, 3, 30, [&](int) { SendAim(a, eyeA2, bAgain, 0, 0, wire::BUTTON_FIRE, kRifle); }, [] { return false; });
+		PumpFor(clients, 3, 0.1);
+		int postShots = 0, postBodyHits = 0;
+		for (size_t s = shotsBeforePost; s < a.shots.size(); ++s)
+		{
+			const wire::Shot& shot = a.shots[s];
+			if (shot.shooter != idA) continue;
+			++postShots;
+			for (int i = 0; i < shot.count && i < wire::kMaxBulletsInShot; ++i)
+			{
+				if (shot.bullets[i].hit == (uint8_t)wire::EShotHit::Body && shot.bullets[i].target == idB) ++postBodyHits;
+			}
+		}
+		const wire::Match afterFire = a.matches.back();
+		std::printf("RULES 경기 끝 뒤 몸 겨눔 발사=%d 몸 맞음=%d 피해=%zu 처치=%zu B 체력=%.1f 점수=%u:%u\n",
+			postShots, postBodyHits, a.damages.size() - damagesBeforePost, a.kills.size() - killsBeforePost, b.self.hp, afterFire.teamScoreA, afterFire.teamScoreB);
+		Expect(postShots > 0 && postBodyHits > 0 && a.damages.size() == damagesBeforePost && a.kills.size() == killsBeforePost && b.self.hp == 100.f
+			&& afterFire.teamScoreA == 2 && afterFire.teamScoreB == 0, fails, "경기 끝 — 몸에 맞아도 피해 0 · 점수 그대로");
+
+		// 수류탄 — B 에게 던진다. 던짐 소식이 오고(능력이 켜졌다) 터져도 A · B 피해 0
+		const size_t grenadesBeforePost = a.grenades.size();
+		const auto postBoomed = [&]
+		{
+			for (size_t g = grenadesBeforePost; g < a.grenades.size(); ++g)
+			{
+				if (a.grenades[g].thrower == idA && a.grenades[g].kind != wire::GRENADE_THROW) return true;
+			}
+			return false;
+		};
+		RunTicks(clients, 3, 60 * 4, [&](int i) { SendAim(a, eyeA2, bAgain, 0, 0, i == 0 ? wire::BUTTON_GRENADE : 0, kRifle); }, postBoomed);
+		PumpFor(clients, 3, 0.1);
+		int postThrows = 0, postBoomsHit = 0, postBoomsTimer = 0;
+		for (size_t g = grenadesBeforePost; g < a.grenades.size(); ++g)
+		{
+			const wire::Grenade& grenade = a.grenades[g];
+			if (grenade.thrower != idA) continue;
+			if (grenade.kind == wire::GRENADE_THROW) ++postThrows;
+			else if (grenade.kind == wire::GRENADE_BOOM_HIT) ++postBoomsHit;
+			else if (grenade.kind == wire::GRENADE_BOOM_TIMER) ++postBoomsTimer;
+		}
+		const wire::Match afterGrenade = a.matches.back();
+		std::printf("RULES 경기 끝 수류탄 던짐=%d 터짐 맞음=%d 신관=%d 피해=%zu 처치=%zu A 체력=%.1f B 체력=%.1f 점수=%u:%u\n",
+			postThrows, postBoomsHit, postBoomsTimer, a.damages.size() - damagesBeforePost, a.kills.size() - killsBeforePost, a.self.hp, b.self.hp, afterGrenade.teamScoreA, afterGrenade.teamScoreB);
+		Expect(postThrows == 1 && postBoomsHit + postBoomsTimer == 1 && a.damages.size() == damagesBeforePost && a.kills.size() == killsBeforePost
+			&& a.self.hp == 100.f && b.self.hp == 100.f && afterGrenade.teamScoreA == 2 && afterGrenade.teamScoreB == 0, fails, "경기 끝 — 수류탄 던져지고 터져도 피해 0 · 점수 그대로");
 
 		// ⑨ 결과
 		RunTicks(clients, 3, 60 * 12, [](int) {}, [&] { return a.hasResult; });

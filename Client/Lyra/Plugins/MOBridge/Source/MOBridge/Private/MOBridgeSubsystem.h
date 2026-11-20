@@ -587,7 +587,7 @@ private:
 	uint8 DashMontCheckDir = 0;
 	uint32 DashMontCheckSeq = 0;
 	int32 DashMontLinesLeft = 20;
-	// 수류탄 다리(G-5-a) — 단추를 실은 입력 · 경기 끝 단계라 안 실은 누름 · 예측이 던진 입력(낼 차례로 둠) · 다리가 몽타주 · 메시지를 냄 · 앞 던짐을 아직 못 내고 버림 ·
+	// 수류탄 다리(G-5-a) — 단추를 실은 입력 · 그중 경기 끝 단계 누름(L-3-b 부터 싣는다) · 예측이 던진 입력(낼 차례로 둠) · 다리가 몽타주 · 메시지를 냄 · 앞 던짐을 아직 못 내고 버림 ·
 	// 몽타주 틀기 실패(자산 없음 · 튼 길이 0) · 낼 곳 없음(몸 · 애님 인스턴스 · 능력 시스템이 없다) · 다리가 안 켰는데 켜짐(Lyra 혼자 — 다리는 이 능력을 켜지 않는다) · 입력 표식을 뗀 칸 ·
 	// 던짐에 끊은 Lyra 능력(그중 재장전) · 받은 서버 던짐 소식(내 것 · 남의 것) · 터짐 소식 · 상태 패킷
 	int64 InputsGrenade = 0, GrenadePressPost = 0, GrenadeQueued = 0, GrenadeDriven = 0, GrenadeDropped = 0, GrenadeMontageFail = 0, GrenadeNoSpec = 0, LyraGrenadeSelf = 0, LyraGrenadeStripped = 0;

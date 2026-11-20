@@ -846,11 +846,11 @@ namespace mo
 		if (player.dead)
 		{
 			++_stats.inputsWhileDead;
-			if (!serverMade && (input.buttons & wire::BUTTON_DASH) != 0) CountDash(player.dash.TryActivate(input.pitch, input.yaw, true, _phase == wire::EMatchPhase::PostGame).result);
+			if (!serverMade && (input.buttons & wire::BUTTON_DASH) != 0) CountDash(player.dash.TryActivate(input.pitch, input.yaw, true).result);
 			if (!serverMade)
 			{
 				player.grenade.NextInput();		// 수류탄 쿨다운은 죽은 동안에도 준다 — Lyra 쿨다운 효과는 선수 상태 능력 시스템에 있다(G-0-b2)
-				if ((input.buttons & wire::BUTTON_GRENADE) != 0) CountGrenade(player.grenade.TryActivate(true, false, _phase == wire::EMatchPhase::PostGame));
+				if ((input.buttons & wire::BUTTON_GRENADE) != 0) CountGrenade(player.grenade.TryActivate(true, false));
 			}
 			return;
 		}
@@ -890,7 +890,7 @@ namespace mo
 			player.dash.NextInput();
 			if ((input.buttons & wire::BUTTON_DASH) != 0)
 			{
-				const DashStart dash = player.dash.TryActivate(input.pitch, input.yaw, false, _phase == wire::EMatchPhase::PostGame);
+				const DashStart dash = player.dash.TryActivate(input.pitch, input.yaw, false);
 				CountDash(dash.result);
 				if (dash.result == EDashResult::Started) StartDash(player, dash, input.seq);
 			}
@@ -899,7 +899,7 @@ namespace mo
 			player.grenade.NextInput();
 			if ((input.buttons & wire::BUTTON_GRENADE) != 0)
 			{
-				const EGrenadeResult grenade = player.grenade.TryActivate(false, player.dash.BlocksPresses(), _phase == wire::EMatchPhase::PostGame);
+				const EGrenadeResult grenade = player.grenade.TryActivate(false, player.dash.BlocksPresses());
 				CountGrenade(grenade);
 				if (grenade == EGrenadeResult::Thrown)
 				{
@@ -1028,11 +1028,8 @@ namespace mo
 		weaponInput.fireHeld = (input.buttons & wire::BUTTON_FIRE) != 0;
 		weaponInput.reloadPressed = (input.buttons & wire::BUTTON_RELOAD) != 0;
 		weaponInput.meleeStarted = meleeStarted;
-		if (_phase == wire::EMatchPhase::PostGame)
-		{
-			if (weaponInput.fireHeld) ++_stats.firesBlockedPostGame;
-			weaponInput = WeaponInput();	// GE_BlockAbilityInput
-		}
+		// 경기 끝 단계에도 쏘기 · 재장전을 막지 않는다 — Lyra 는 능력 입력 막음(GE_BlockAbilityInput)을 맵을 다시 열기 한 틱 전에야 건다(L-3-b · Dash.h EDashResult).
+		// 피해는 끝 단계 무적이 막는다(IsImmune)
 		// 근접이 켜져 있으면 발사 · 재장전 입력 · 자동 재장전이 막힌다(근접의 막기 태그). 발사는 간격 검사 · 빈 탄 집계 앞에서 뺀다 — 정직한 누름이 거절로 안 세지게
 		weaponInput.meleeActive = player.melee.IsActive();
 		if (weaponInput.fireHeld && weaponInput.meleeActive)
@@ -1105,7 +1102,6 @@ namespace mo
 		case EDashResult::WhileActive: ++_stats.dashWhileActive; break;
 		case EDashResult::OnCooldown: ++_stats.dashOnCooldown; break;
 		case EDashResult::Dead: ++_stats.dashDead; break;
-		case EDashResult::PostGame: ++_stats.dashPostGame; break;
 		}
 		++_stats.dashPresses;
 	}
@@ -1164,7 +1160,6 @@ namespace mo
 		case EGrenadeResult::OnCooldown: ++_stats.grenadeOnCooldown; break;
 		case EGrenadeResult::WhileDash: ++_stats.grenadeWhileDash; break;
 		case EGrenadeResult::Dead: ++_stats.grenadeDead; break;
-		case EGrenadeResult::PostGame: ++_stats.grenadePostGame; break;
 		}
 		++_stats.grenadePresses;
 	}
@@ -1472,12 +1467,7 @@ namespace mo
 	bool CRoom::TryMelee(Player& player, const wire::Input& input)
 	{
 		if ((input.buttons & wire::BUTTON_MELEE) == 0) return false;
-		++_stats.meleePresses;
-		if (_phase == wire::EMatchPhase::PostGame)
-		{
-			++_stats.meleeBlockedPostGame;		// GE_BlockAbilityInput — 쏘기와 같다
-			return false;
-		}
+		++_stats.meleePresses;		// 경기 끝 단계에도 켠다 — 쏘기와 같다(ApplyInput 의 무기 입력 주석)
 		// 대시가 켜져 있으면(켠 입력 포함) 막힌다 — 같은 프레임에 근접과 대시를 누르면 Lyra 는 둘 다 누름 능력이라 그 프레임에 눌린 차례대로 켠다
 		// (LyraAbilitySystemComponent.cpp:250-283 InputPressedSpecHandles). 입력 하나에는 그 차례가 없어 대시 먼저로 둔다(제 판단 · 기록 없음 — 근접이 먼저면 피해가 들어간 뒤 끊긴다)
 		if (player.dash.BlocksPresses())

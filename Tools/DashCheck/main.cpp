@@ -257,7 +257,7 @@ namespace
 	struct AbilityReport
 	{
 		int inputs = 0, presses = 0, lyraStarted = 0;
-		int results[7] = {};		// EDashResult 마다(누른 입력만)
+		int results[6] = {};		// EDashResult 마다(누른 입력만)
 		int dirs[4] = {};			// 켠 방향마다
 		int startDiff = 0, dirDiff = 0, badMontage = 0, activeDiff = 0, cooldownDiff = 0;
 		int moveCopyDiff = 0, yawCopyDiff = 0;
@@ -311,7 +311,7 @@ namespace
 					if (std::fabs(Cell(prev2, c.inX) - Cell(prev, c.lastInX)) > kCopyTolerance || std::fabs(Cell(prev2, c.inY) - Cell(prev, c.lastInY)) > kCopyTolerance) { ++out.moveCopyDiff; ++diffs; }
 					if (AngleDiff(Cell(prev2, c.ctlYaw), Cell(prev, c.yaw)) > kCopyTolerance) { ++out.yawCopyDiff; ++diffs; }
 				}
-				res = ability.TryActivate(viewPitch, viewYaw, false, false);
+				res = ability.TryActivate(viewPitch, viewYaw, false);
 				++out.results[(int)res.result];
 			}
 			ability.RememberInput(move, viewYaw);
@@ -450,7 +450,7 @@ namespace
 			melee.NextInput();
 			dash.NextInput();
 			bool started = false;
-			if (HasEvent(evPrev, "dash_press")) started = dash.TryActivate(viewPitch, viewYaw, false, false).result == EDashResult::Started;
+			if (HasEvent(evPrev, "dash_press")) started = dash.TryActivate(viewPitch, viewYaw, false).result == EDashResult::Started;
 			if (started)
 			{
 				if (melee.Cut()) ++out.meleeCancels;

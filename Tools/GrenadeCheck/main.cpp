@@ -894,8 +894,9 @@ namespace
 	struct AbilityTotals
 	{
 		int inputs = 0, presses = 0, lyraThrown = 0, rowGaps = 0, gapFrames = 0, gapNotDead = 0, cdClears = 0;
-		int results[6] = {};		// EGrenadeResult 별
-		int throwDiff = 0, cooldownDiff = 0, postGameDiff = 0, gabilCompared = 0, gabilDiff = 0;
+		int results[5] = {};		// EGrenadeResult 별
+		// postPresses = 경기 끝 단계 프레임의 누름(그 갈래를 지났나) · postGameDiff = 그 프레임의 던짐 어긋남(throwDiff 의 부분 — L-3-b 에서 끝 단계에도 던지게 했다)
+		int throwDiff = 0, cooldownDiff = 0, postPresses = 0, postGameDiff = 0, gabilCompared = 0, gabilDiff = 0;
 		int throwCompared = 0, throwFails = 0, branchDiff = 0;
 		int branches[3] = {};		// EGrenadeAimBranch 별 — Lyra 선 결과로 돌린 것
 		double maxThrowPos = 0, maxThrowRot = 0, maxThrowVel = 0;
@@ -909,8 +910,8 @@ namespace
 			inputs += o.inputs; presses += o.presses; lyraThrown += o.lyraThrown; rowGaps += o.rowGaps;
 			gapFrames += o.gapFrames; gapNotDead += o.gapNotDead; cdClears += o.cdClears;
 			startInside += o.startInside; startInsideDiff += o.startInsideDiff; simpleSame += o.simpleSame;
-			for (int k = 0; k < 6; ++k) results[k] += o.results[k];
-			throwDiff += o.throwDiff; cooldownDiff += o.cooldownDiff; postGameDiff += o.postGameDiff;
+			for (int k = 0; k < 5; ++k) results[k] += o.results[k];
+			throwDiff += o.throwDiff; cooldownDiff += o.cooldownDiff; postPresses += o.postPresses; postGameDiff += o.postGameDiff;
 			gabilCompared += o.gabilCompared; gabilDiff += o.gabilDiff;
 			throwCompared += o.throwCompared; throwFails += o.throwFails; branchDiff += o.branchDiff;
 			for (int k = 0; k < 3; ++k) branches[k] += o.branches[k];
@@ -1117,7 +1118,8 @@ namespace
 			if (pressed)
 			{
 				++t.presses;
-				res = ability.TryActivate(dead, prev.dash, postGame);
+				if (postGame) ++t.postPresses;
+				res = ability.TryActivate(dead, prev.dash);
 			}
 			++t.results[(int)res];
 
@@ -1126,22 +1128,15 @@ namespace
 			if (lyraThrown) ++t.lyraThrown;
 			if (lyraThrown != (res == EGrenadeResult::Thrown))
 			{
-				if (lyraThrown && res == EGrenadeResult::PostGame)
-				{
-					++t.postGameDiff;			// 미결 15 — 우리는 끝 단계에 막는다. 뒤 쿨다운 대조가 이어지게 Lyra 쪽으로 맞춘다
-					ability.StartFromServer();
-				}
-				else
-				{
-					++t.throwDiff;
-					if (verbose) std::printf("  throwDiff r=%d pressed=%d res=%d lyra=%d cdLeft=%d prevCd=%.4f\n", r, pressed, (int)res, lyraThrown, ability.CooldownLeft(), prev.cooldown);
-				}
+				++t.throwDiff;
+				if (postGame) ++t.postGameDiff;
+				if (verbose) std::printf("  throwDiff r=%d pressed=%d res=%d lyra=%d cdLeft=%d prevCd=%.4f\n", r, pressed, (int)res, lyraThrown, ability.CooldownLeft(), prev.cooldown);
 			}
 			const auto gb = gabil.find(r);
 			if (gb != gabil.end())
 			{
 				++t.gabilCompared;
-				const bool same = (gb->second == "on" && (res == EGrenadeResult::Thrown || (res == EGrenadeResult::PostGame && lyraThrown)))
+				const bool same = (gb->second == "on" && res == EGrenadeResult::Thrown)
 					|| (gb->second == "cooldown" && res == EGrenadeResult::OnCooldown)
 					|| (gb->second == "blocked" && res == EGrenadeResult::WhileDash);
 				if (!same)
@@ -1552,7 +1547,7 @@ int main(int argc, char** argv)
 		&& total.allHitFails == 0 && total.hitFrameDiff == 0 && total.hitCountDiff == 0 && total.bounceFrames > 0 && total.foeToggleWhileLive == 0
 		&& total.fuseCompared > 0 && total.fuseDiff == 0
 		&& total.maxRotUnexplained <= kRotTolerance	// 속도 차로 설명 안 되는 회전 차는 날아감 기준 그대로
-		// 능력 · 던짐(G-2-a) — 경기 끝 갈래 다름(postGameDiff)은 미결 15 라 넣지 않는다. 사람 메시 겨눔(bodyMiss · 거리 차)은 부위 몸 몫이라 넣지 않는다
+		// 능력 · 던짐(G-2-a) — 경기 끝 갈래 다름(postGameDiff)은 throwDiff 에 든다(L-3-b). 사람 메시 겨눔(bodyMiss · 거리 차)은 부위 몸 몫이라 넣지 않는다
 		&& ab.lyraThrown > 0 && ab.throwDiff == 0 && ab.cooldownDiff == 0 && ab.gabilDiff == 0 && ab.gapNotDead == 0
 		&& ab.throwCompared == ab.lyraThrown && ab.throwFails == 0 && ab.branchDiff == 0 && ab.traceDiff == 0 && ab.endFails == 0
 		// 폭발 · 피해(G-2-b)
@@ -1586,7 +1581,7 @@ int main(int argc, char** argv)
 	if (c.mapPenetrationsDropped > 0) std::printf("GRENADECHECK branches mapPenetrationsDropped=%u\n", c.mapPenetrationsDropped);
 	std::printf("GRENADECHECK ability inputs=%d presses=%d thrown=%d lyraThrown=%d onCooldown=%d whileDash=%d dead=%d postGame=%d throwDiff=%d cooldownDiff=%d postGameDiff=%d gabil=%d gabilDiff=%d rowGaps=%d gapFrames=%d gapNotDead=%d cdClears=%d\n",
 		ab.inputs, ab.presses, ab.results[(int)EGrenadeResult::Thrown], ab.lyraThrown, ab.results[(int)EGrenadeResult::OnCooldown],
-		ab.results[(int)EGrenadeResult::WhileDash], ab.results[(int)EGrenadeResult::Dead], ab.results[(int)EGrenadeResult::PostGame],
+		ab.results[(int)EGrenadeResult::WhileDash], ab.results[(int)EGrenadeResult::Dead], ab.postPresses,
 		ab.throwDiff, ab.cooldownDiff, ab.postGameDiff, ab.gabilCompared, ab.gabilDiff, ab.rowGaps, ab.gapFrames, ab.gapNotDead, ab.cdClears);
 	std::printf("GRENADECHECK throw compared=%d fails=%d maxPosDiff=%.6f maxRotDiff=%.6f maxVelDiff=%.6f ctl=%d hit=%d end=%d branchDiff=%d\n",
 		ab.throwCompared, ab.throwFails, ab.maxThrowPos, ab.maxThrowRot, ab.maxThrowVel, ab.branches[0], ab.branches[1], ab.branches[2], ab.branchDiff);

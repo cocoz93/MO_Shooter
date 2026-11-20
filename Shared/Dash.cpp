@@ -91,11 +91,10 @@ namespace mo
 		_justStarted = false;
 	}
 
-	DashStart CDashAbility::TryActivate(float viewPitch, float viewYaw, bool dead, bool postGame)
+	DashStart CDashAbility::TryActivate(float viewPitch, float viewYaw, bool dead)
 	{
 		const Vec3& prevMove = _prevMove;
 		DashStart out;
-		if (postGame) { out.result = EDashResult::PostGame; return out; }
 		if (dead) { out.result = EDashResult::Dead; return out; }
 		if (_activeLeft > 0) { out.result = EDashResult::WhileActive; return out; }
 		if (_cooldownLeft > 0) { out.result = EDashResult::OnCooldown; return out; }

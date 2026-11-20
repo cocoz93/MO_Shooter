@@ -1045,18 +1045,14 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 		if (bServerCrouch) ++CrouchComparedOn;
 		if (bServerCrouch != S->move.crouched) ++CrouchFlagDiff;
 		// 가방 · 탄(W-4) — 봇 CompareSelf 와 같은 식. 가방은 줍기 · 부활만 바꾸고 둘 다 경기 끝 단계와 상관없어 늘 본다(무기 둘 이상 든 줄을 같이 센다).
-		// 탄 · 든 무기는 경기 끝 단계 전만 — 그 단계는 서버가 사격 입력을 지운다(그 경계를 입력 번호로는 모른다)
+		// 탄 · 든 무기도 늘 본다 — 서버가 경기 끝 단계에도 사격 입력을 돌린다(L-3-b. 그 전엔 지워서 끝 단계 앞까지만 봤다)
 		++InvCompared;
 		if (mo::CLoadout::UnpackSlot(P.quickSlots, 1) != mo::kNoWeapon) ++InvMulti;
 		const bool bInvDiff = P.quickSlots != S->quickSlots;
-		bool bAmmoDiff = false;
 		if (bInvDiff) ++InvDiff;
-		if (MatchPhase < (uint8)wire::EMatchPhase::PostGame)
-		{
-			++AmmoCompared;
-			bAmmoDiff = P.weapon != S->weapon || P.magazine != S->magazine || P.spare != S->spare;
-			if (bAmmoDiff) ++AmmoDiff;
-		}
+		++AmmoCompared;
+		const bool bAmmoDiff = P.weapon != S->weapon || P.magazine != S->magazine || P.spare != S->spare;
+		if (bAmmoDiff) ++AmmoDiff;
 		if ((bInvDiff || bAmmoDiff) && InvDiffLinesLeft > 0)
 		{
 			--InvDiffLinesLeft;
@@ -2001,26 +1997,22 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		bCrouchWasDown = bCrouchDown;
 		if (bAds) { In.buttons |= wire::BUTTON_ADS; ++InputsAds; }
 		if (bMelee) { In.buttons |= wire::BUTTON_MELEE; ++InputsMelee; }
-		// 경기 끝 단계엔 싣지 않는다 — Lyra 는 능력 입력을 막고(GE_BlockAbilityInput) 서버도 안 켜는데, 예측은 단계를 몰라 켰다가 고친다(판 dsh1 unconfirmed 6).
-		// 봇 --dash 와 같은 규칙(BotClient/main.cpp _phase != PostGame)
-		if (bDashDown && !bDashWasDown && MatchPhase != (uint8)wire::EMatchPhase::PostGame) { In.buttons |= wire::BUTTON_DASH; ++InputsDash; }
+		// 경기 끝 단계에도 싣는다 — Lyra 는 능력 입력 막음(GE_BlockAbilityInput)을 맵을 다시 열기 한 틱 전에야 걸고(그래프 원본 · 기록 g0end1 · 2) 서버도 끝 단계에 켠다(L-3-b).
+		// (그 전엔 서버가 끝 단계 내내 막아 싣지 않았다 — 판 dsh1 unconfirmed 6.) 봇 --dash 와 같은 규칙
+		if (bDashDown && !bDashWasDown) { In.buttons |= wire::BUTTON_DASH; ++InputsDash; }
 		bDashWasDown = bDashDown;
-		// 수류탄(G-5-a) — 경기 끝 단계엔 대시와 같은 까닭으로 싣지 않는다: 서버는 끝 단계 내내 막고(Room.cpp TryActivate 의 PostGame) 예측은 단계를 몰라 던졌다가 고친다.
-		// Lyra 는 끝 단계에도 던진다(G-0-b3) — 어느 쪽에 맞출지는 미결 15
+		// 수류탄(G-5-a) — 대시와 같다(끝 단계에도 싣는다 · L-3-b). GrenadePressPost = 그중 경기 끝 단계 누름
 		if (bGrenadeDown && !bGrenadeWasDown)
 		{
-			if (MatchPhase != (uint8)wire::EMatchPhase::PostGame)
-			{
-				In.buttons |= wire::BUTTON_GRENADE;
-				++InputsGrenade;
-				GrenadeCamBackMin = FMath::Min(GrenadeCamBackMin, (double)CamBack);
-				GrenadeCamBackMax = FMath::Max(GrenadeCamBackMax, (double)CamBack);
-				// 서버가 자르는 범위(G-0 20칸 30.0~417.3) 밖을 센다 — 판 grn1 최소 17.25 · 서버 camBackClamped 1. 자세는 아래 AddInput 뒤 MOB_GRENADE_PRESS 줄로 본다
-				// (판 grn2: 조준 없이 선 채 27.14 · 조준은 80 안팎이라 범위 안 — 미결 25)
-				if (CamBack < mo::kGrenadeCamBackMin) ++GrenadeCamBackBelow;
-				else if (CamBack > mo::kGrenadeCamBackMax) ++GrenadeCamBackAbove;
-			}
-			else ++GrenadePressPost;
+			In.buttons |= wire::BUTTON_GRENADE;
+			++InputsGrenade;
+			if (MatchPhase == (uint8)wire::EMatchPhase::PostGame) ++GrenadePressPost;
+			GrenadeCamBackMin = FMath::Min(GrenadeCamBackMin, (double)CamBack);
+			GrenadeCamBackMax = FMath::Max(GrenadeCamBackMax, (double)CamBack);
+			// 서버가 자르는 범위(G-0 20칸 30.0~417.3) 밖을 센다 — 판 grn1 최소 17.25 · 서버 camBackClamped 1. 자세는 아래 AddInput 뒤 MOB_GRENADE_PRESS 줄로 본다
+			// (판 grn2: 조준 없이 선 채 27.14 · 조준은 80 안팎이라 범위 안 — 미결 25)
+			if (CamBack < mo::kGrenadeCamBackMin) ++GrenadeCamBackBelow;
+			else if (CamBack > mo::kGrenadeCamBackMax) ++GrenadeCamBackAbove;
 		}
 		bGrenadeWasDown = bGrenadeDown;
 
@@ -4205,7 +4197,7 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 			(unsigned long long)GC.replayGained, (unsigned long long)GC.replayLost, (unsigned long long)GrenadeFinal, (unsigned long long)GrenadeUnacked, GrenadeFinal - GrenadeUnacked == (uint64)GrenadeMine ? 1 : 0,
 			(unsigned long long)GC.results, (unsigned long long)GC.resultsNoSlot, (unsigned long long)(GC.startMismatches + GC.unconfirmed - GC.unconfirmedDead),
 			(unsigned long long)GC.startMismatches, (unsigned long long)GC.unconfirmed, (unsigned long long)GC.unconfirmedDead, (unsigned long long)GC.replays, (unsigned long long)GC.replaysMissed, (unsigned long long)GC.meleeInReplay);
-		// 수류탄 다리(G-5-a) — 단추를 실은 입력 · 끝 단계라 안 실은 누름 · 예측이 던진 입력 · 다리가 냄 · 버림 · 몽타주 실패 · 몸 없음 · Lyra 혼자 · 뗀 칸 · 끊은 능력(그중 재장전) · 실은 camBack 범위
+		// 수류탄 다리(G-5-a) — 단추를 실은 입력 · 그중 끝 단계 누름 · 예측이 던진 입력 · 다리가 냄 · 버림 · 몽타주 실패 · 몸 없음 · Lyra 혼자 · 뗀 칸 · 끊은 능력(그중 재장전) · 실은 camBack 범위
 		UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE2 inputs=%lld pressPost=%lld queued=%lld driven=%lld dropped=%lld montageFail=%lld noSpec=%lld lyraSelf=%lld stripped=%lld cancelled=%lld cancelledReload=%lld cancelLeft=%lld camBackMin=%.2f camBackMax=%.2f camBackBelow=%lld camBackAbove=%lld pending=%d"),
 			InputsGrenade, GrenadePressPost, GrenadeQueued, GrenadeDriven, GrenadeDropped, GrenadeMontageFail, GrenadeNoSpec, LyraGrenadeSelf, LyraGrenadeStripped, GrenadeCancelled, GrenadeCancelledReload, GrenadeCancelLeft,
 			InputsGrenade ? GrenadeCamBackMin : 0.0, InputsGrenade ? GrenadeCamBackMax : 0.0, GrenadeCamBackBelow, GrenadeCamBackAbove, bGrenadePending ? 1 : 0);

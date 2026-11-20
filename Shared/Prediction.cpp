@@ -54,7 +54,7 @@ namespace mo
 		{
 			// 서버 죽은 갈래(Room.cpp ApplyInput) — 수류탄 쿨다운은 죽은 입력에도 준다(G-0-b2). 누름은 죽음으로 안 켜진다
 			_grenade.NextInput();
-			if ((input.buttons & wire::BUTTON_GRENADE) != 0) (void)_grenade.TryActivate(true, false, false);
+			if ((input.buttons & wire::BUTTON_GRENADE) != 0) (void)_grenade.TryActivate(true, false);
 			slot.grenadeAfter = _grenade;
 			return;
 		}
@@ -370,13 +370,13 @@ namespace mo
 		if ((input.buttons & wire::BUTTON_MELEE) == 0 || _waitingSpawn) return false;
 		CDashAbility dash = _dash;		// StepAbilities 의 대시 자리를 사본으로 — 켜거나 켜져 있으면 근접 누름은 막힌다
 		dash.NextInput();
-		if ((input.buttons & wire::BUTTON_DASH) != 0) (void)dash.TryActivate(input.pitch, input.yaw, false, false);
+		if ((input.buttons & wire::BUTTON_DASH) != 0) (void)dash.TryActivate(input.pitch, input.yaw, false);
 		if (dash.BlocksPresses()) return false;
 		if (_melee.WillActivateNextInput()) return true;
 		// 도는 근접 — 이 입력에 수류탄을 던지면 그 자리에서 끊겨(StepAbilities) 뒤의 근접 누름이 켜진다
 		CGrenadeAbility grenade = _grenade;
 		grenade.NextInput();
-		return (input.buttons & wire::BUTTON_GRENADE) != 0 && grenade.TryActivate(false, false, false) == EGrenadeResult::Thrown;
+		return (input.buttons & wire::BUTTON_GRENADE) != 0 && grenade.TryActivate(false, false) == EGrenadeResult::Thrown;
 	}
 
 	void CSelfPrediction::OnDashResult(uint32_t seq, uint8_t dir, const Vec3& force)
@@ -449,7 +449,7 @@ namespace mo
 			}
 			else if (!later.dashDenied && (later.input.buttons & wire::BUTTON_DASH) != 0)
 			{
-				const DashStart start = dash.TryActivate(later.input.pitch, later.input.yaw, false, false);
+				const DashStart start = dash.TryActivate(later.input.pitch, later.input.yaw, false);
 				if (start.result == EDashResult::Started)
 				{
 					started = true;
@@ -563,7 +563,7 @@ namespace mo
 				thrown = true;
 			}
 			else if (!later.grenadeDenied && (later.input.buttons & wire::BUTTON_GRENADE) != 0)
-				thrown = grenade.TryActivate(later.grenadeDead, later.dashBlocks, false) == EGrenadeResult::Thrown;
+				thrown = grenade.TryActivate(later.grenadeDead, later.dashBlocks) == EGrenadeResult::Thrown;
 			const bool cut = thrown && !later.grenadeDead && later.meleeWasActive;	// 던질 수 있는 입력은 대시를 안 켰다 — 근접은 NextInput 뒤 그대로 켜져 있다
 			if (cut != later.grenadeCutMelee)
 			{
@@ -611,7 +611,8 @@ namespace mo
 	}
 
 	// 근접 · 대시 능력 — 서버 ApplyInput 과 같은 자리(무기 교체 뒤 · 걸음 앞). 두 입력 수를 먼저 세고(NextInput 둘), 대시 누름 → 켜면 근접을 끊는다(StartDash) →
-	// 근접 누름은 대시가 켜져 있으면(켠 입력 포함) 막힌다(TryMelee). 경기 끝 단계 · 죽음은 모른다(서버만 막는다 — 소식이 안 와 AckMelee · AckDash 가 지운다)
+	// 근접 누름은 대시가 켜져 있으면(켠 입력 포함) 막힌다(TryMelee). 죽음은 모른다(서버만 막는다 — 소식이 안 와 AckMelee · AckDash 가 지운다).
+	// 경기 끝 단계는 서버도 막지 않는다(L-3-b — Dash.h EDashResult)
 	void CSelfPrediction::StepAbilities(Slot& slot, bool count)
 	{
 		const wire::Input& input = slot.input;
@@ -625,7 +626,7 @@ namespace mo
 		if ((input.buttons & wire::BUTTON_DASH) != 0)
 		{
 			if (count) ++_dashCounters.presses;
-			const DashStart dash = _dash.TryActivate(input.pitch, input.yaw, false, false);
+			const DashStart dash = _dash.TryActivate(input.pitch, input.yaw, false);
 			if (dash.result == EDashResult::Started)
 			{
 				slot.dashStarted = true;
@@ -640,7 +641,7 @@ namespace mo
 		// 수류탄(G-3) — 서버와 같은 자리(대시 뒤 · 근접 앞). 대시가 켜져 있으면(켠 입력 포함) 막힌다. 던지면 그 자리에서 근접을 끊는다(ThrowGrenade)
 		// 자리 옮기기 칸(OnSpawn 다시 돌리기에서만 여기로 온다)은 서버 ApplyPlace 처럼 안 센다
 		if (slot.grenadeTicks) _grenade.NextInput();
-		slot.grenadeThrown = slot.grenadeTicks && (input.buttons & wire::BUTTON_GRENADE) != 0 && _grenade.TryActivate(false, slot.dashBlocks, false) == EGrenadeResult::Thrown;
+		slot.grenadeThrown = slot.grenadeTicks && (input.buttons & wire::BUTTON_GRENADE) != 0 && _grenade.TryActivate(false, slot.dashBlocks) == EGrenadeResult::Thrown;
 		slot.grenadeCutMelee = slot.grenadeThrown && _melee.Cut();
 		if (slot.grenadeThrown && count) ++_grenadeCounters.thrown;
 		slot.grenadeAfter = _grenade;

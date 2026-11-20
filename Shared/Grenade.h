@@ -26,7 +26,7 @@ namespace mo
 	inline bool GrenadeFuseExpired(const ProjectileState& state) { return state.frames > kGrenadeFuseFrames; }
 
 	// 누름 하나의 결과 — 던짐 말고는 모두 「안 켬」이라 동작은 같고, 통계(SERVER 줄)를 갈래마다 따로 세려고 나눈다.
-	// 가르는 차례(경기 끝 → 죽음 → 대시 중 → 쿨다운)는 우리가 정한 것이다(대시 능력과 같은 차례)
+	// 가르는 차례(죽음 → 대시 중 → 쿨다운)는 우리가 정한 것이다(대시 능력과 같은 차례). 경기 끝 단계엔 막지 않는다(대시와 같다 — Dash.h EDashResult)
 	enum class EGrenadeResult : uint8_t
 	{
 		NotPressed,
@@ -34,7 +34,6 @@ namespace mo
 		OnCooldown,		// Ability.ActivateFail.Cooldown
 		WhileDash,		// 대시가 Ability.Type.Action 을 막음(TagRelationships_ShooterHero 4번 · Ability.ActivateFail.TagsBlocked)
 		Dead,			// 죽음 · 죽는 중
-		PostGame,		// 경기 끝 단계 — 우리 서버는 막는다. Lyra 는 끝 단계에도 던진다(content-impl-progress.md 미결 15 — 판정 전이라 다른 능력과 같게 둠)
 	};
 
 	// 수류탄 능력 — 입력 하나의 차례: NextInput → (수류탄 단추를 누른 입력이면) TryActivate
@@ -44,7 +43,7 @@ namespace mo
 	{
 	public:
 		void NextInput();
-		EGrenadeResult TryActivate(bool dead, bool dashing, bool postGame);
+		EGrenadeResult TryActivate(bool dead, bool dashing);
 		bool JustThrown() const { return _justThrown; }		// 이번 입력에 던졌나 — 재장전 · 근접 끊기는 이 입력에만
 		int CooldownLeft() const { return _cooldownLeft; }	// 0 보다 크면 이번 입력에 못 켬
 		// 서버가 이 입력에 던졌다(예측이 서버 소식으로 고칠 때) — 켜기 조건은 안 보고 쿨다운만 TryActivate 의 던짐과 같게 놓는다. NextInput 뒤에 부른다

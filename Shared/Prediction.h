@@ -174,7 +174,7 @@ namespace mo
 		const DashCounters& GetDashCounters() const { return _dashCounters; }
 		bool IsDashActive() const { return _dash.Active(); }
 
-		// 서버 수류탄 소식 중 내가 던진 것(G-3) — 서버가 입력 seq 에 던졌다. 그 칸이 안 던졌으면(앞 칸들이 서버와 갈렸다 — 죽음을 늦게 앎 · 대시 갈림 · 경기 끝.
+		// 서버 수류탄 소식 중 내가 던진 것(G-3) — 서버가 입력 seq 에 던졌다. 그 칸이 안 던졌으면(앞 칸들이 서버와 갈렸다 — 죽음을 늦게 앎 · 대시 갈림.
 		// 서버가 채운 빈 입력은 서버도 수류탄을 안 센다) 그 칸을 던짐으로 놓고 그 칸부터 수류탄을 다시 고른다(뒤 칸의 쿨다운 · 던짐). 근접 끊음이 바뀐 칸이 있으면 걸음을 다시 돌린다.
 		// 무기 쪽(재장전 끊기)은 다시 안 돈다(근접 · 대시와 같은 범위). 서버는 이 소식을 그 입력을 돈 틱의 상태보다 먼저 보낸다(대시 소식과 같은 자리 — 보내는 쪽은 G-3-b)
 		void OnGrenadeThrown(uint32_t seq);

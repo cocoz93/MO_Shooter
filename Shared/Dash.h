@@ -46,7 +46,9 @@ namespace mo
 	EDashDir SelectDashDir(const Vec3& lastInput, float bodyYaw);
 
 	// 누름 하나의 결과 — 켬 말고는 모두 「안 켬」이라 동작은 같고, 통계(SERVER 줄)를 갈래마다 따로 세려고 나눈다.
-	// 가르는 차례(경기 끝 → 죽음 → 켜져 있음 → 쿨다운 → 방향 0)는 우리가 정한 것이다 — 켜져 있는 동안은 쿨다운도 걸려 있어 둘이 겹친다
+	// 가르는 차례(죽음 → 켜져 있음 → 쿨다운 → 방향 0)는 우리가 정한 것이다 — 켜져 있는 동안은 쿨다운도 걸려 있어 둘이 겹친다.
+	// 경기 끝 단계엔 막지 않는다 — Lyra 는 능력 입력 막음(GE_BlockAbilityInput)을 맵을 다시 열기 한 틱 전에야 건다(그래프 원본 · 기록 g0end1 · 2, L-3-b).
+	// 우리 서버는 그 틱에 경기를 닫아(Finished) 입력을 안 돌린다
 	enum class EDashResult : uint8_t
 	{
 		NotPressed,
@@ -55,7 +57,6 @@ namespace mo
 		WhileActive,	// 켜진 동안 누름
 		OnCooldown,
 		Dead,
-		PostGame,		// 경기 끝 단계 — 능력 입력이 막힌다(GE_BlockAbilityInput)
 	};
 
 	struct DashStart
@@ -76,7 +77,7 @@ namespace mo
 		// 방향은 앞 입력(RememberInput 으로 기억한 이동 · 몸 요)으로, 힘의 카메라는 이번 입력(viewPitch · viewYaw)으로.
 		// 앞 입력인 까닭 = 능력은 입력 처리에서 켜지고, 이번 입력은 이동 계산이 아직 안 가져갔다
 		// (엔진 GetLastMovementInputVector · D-2 기록 turn_left · turn_back: 누른 프레임에 입력을 옆 · 뒤로 바꿔도 앞 몽타주, turn_back 은 뒤 입력인데 +X 로 521cm)
-		DashStart TryActivate(float viewPitch, float viewYaw, bool dead, bool postGame);
+		DashStart TryActivate(float viewPitch, float viewYaw, bool dead);
 		void RememberInput(const Vec3& move, float yaw) { _prevMove = move; _prevYaw = yaw; }
 		bool Active() const { return _activeLeft > 0; }			// 이번 입력에 다른 행동을 막나 — 켠 입력 포함 kDashActiveInputs 개
 		bool JustStarted() const { return _justStarted; }		// 이번 입력에 켰나 — 끊기(재장전 · 근접 · 조준 · 자동 사격 · 점프)는 이 입력에만
