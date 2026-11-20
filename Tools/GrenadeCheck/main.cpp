@@ -763,15 +763,19 @@ namespace
 					// 회전 차 중 속도 차로 설명 안 되는 몫 — 속도 차 dv 가 바꿀 수 있는 방향은 dv / |v| 라디안까지.
 					// 회전은 걸음을 시작할 때 속도의 방향이라(ProjectileMovementComponent.cpp ComputeMoveDelta 옆 OldVelocity) 앞 프레임 끝 속도도 본다
 					const double speed = Dist(r.velocity, Vec3());
+					// 회전 차 판정 몫 — 속도 차로 설명이 되면(아래 갈래 · 설명 안 되는 몫이 날아감 기준 kRotTolerance 이하) 0, 안 되면 · 셀 수 없으면(느림 · 멈춤) 회전 차 그대로.
+					// L-1-a 기록 l1a1 a_step_z300 나이 72(멈추기 세 프레임 전): 회전 차 0.0116도 · 속도 차 0.0020(기준 안) · 설명 안 되는 몫 0.000003도 — 고정 0.01도만 보면 넘김
+					double rotJudge = dr;
 					if (speed > 1.0 && prevSpeed > 1.0 && !s.stopped)
 					{
 						const double unexplained = dr - std::max(dv / speed, prevDv / prevSpeed) * 57.29577951308232;
+						rotJudge = unexplained > kRotTolerance ? dr : 0.0;
 						t.maxRotUnexplained = std::max(t.maxRotUnexplained, unexplained);
 						if (verbose && unexplained > 0.0005)
 							std::printf("  rot %s@%d age=%d rot=%.6f vel=%.6f speed=%.3f hit=%d sim=%.6f,%.6f,%.6f rec=%.6f,%.6f,%.6f\n", g.name.c_str(), g.spawnFrame, age, dr, dv, speed,
 								hitHere ? 1 : 0, s.rotation.pitch, s.rotation.yaw, s.rotation.roll, r.rotation.pitch, r.rotation.yaw, r.rotation.roll);
 					}
-					if ((dp > kBouncePosTolerance || dv > kBounceVelTolerance || dr > kBounceRotTolerance) && !bounceFailed)
+					if ((dp > kBouncePosTolerance || dv > kBounceVelTolerance || rotJudge > kBounceRotTolerance) && !bounceFailed)
 					{
 						bounceFailed = true;
 						char buf[256];
