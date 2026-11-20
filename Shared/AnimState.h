@@ -75,6 +75,7 @@ namespace mo
 		// cancelledReload = 재장전을 끊었나. 반환 = PlayMontage 결과
 		bool PlayFireMontage(float playRate, int bundle, bool& cancelledReload);
 		// 재장전 능력을 끊는 능력의 몽타주 — 쏘기와 같은 길로 재장전 칸을 먼저 끄고 kind 를 튼다. 근접(E-3)이 쓴다(근접도 재장전을 끊는다, TagRelationships_ShooterHero)
+		// 수류탄(G-4)도 쓴다 — 켤 때 재장전을 끊는다(G-0-c). 던짐 넣기 곡선(1)과 재장전 빼기 곡선(2)이 달라 이 길이라야 재장전 칸이 Lyra 와 같은 프레임에 빠진다(G-4-b AnimCheck)
 		bool PlayMontageCancellingReload(uint8_t kind, float playRate, int bundle, bool& cancelledReload);
 		// 발사 능력이 켜져 있나(Lyra 태그 IsFiring). Update 뒤에 부른다 — 다음 Update 의 「쏜 뒤 시간」이 이 값을 본다
 		void SetFiring(bool firing) { _firing = firing; }

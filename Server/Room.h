@@ -54,7 +54,8 @@ namespace mo
 	// 서버가 애니 상태에 넘기는 사건(9단계 조각 4). 틱 안에서 생긴 차례대로 쌓아 그 틱 애니 갱신 앞에 몽타주로 튼다
 	// 근접(E-3) — Melee = 공격자 근접 몽타주, HitBack · HitFront = 맞은 쪽 반응(둘 중 무작위, 서버가 정해 쌓는다)
 	// 대시(D-4) — 켠 방향의 몽타주 하나. 차례는 EDashDir(앞 · 뒤 · 왼 · 오른)와 같다(DashForward + 방향). 끝은 몽타주가 제 끝에서 스스로 뺀다(D-4-b 기록: 능력 끝 32프레임과 상관없이 길이 − 0.33초)
-	enum class EAnimEvent : uint8_t { Spawn, Swap, Fire, Reload, Melee, HitBack, HitFront, DashForward, DashBackward, DashLeft, DashRight, Count };
+	// 수류탄(G-4) — 던진 입력에 던짐 몽타주 하나. 같은 입력에 쏘기가 있으면 쏘기를 그 앞에 끼운다(Lyra 는 쥔 사격을 먼저 켜고 이어 수류탄, G-0-c 실측 — Room.cpp ApplyInput)
+	enum class EAnimEvent : uint8_t { Spawn, Swap, Fire, Reload, Melee, HitBack, HitFront, DashForward, DashBackward, DashLeft, DashRight, Grenade, Count };
 
 	// 클립을 주면 몸 판정이 서 있는 자세 대신 그 시점의 애니 자세를 쓴다(D32). 비어 있으면 지금까지와 같다
 	struct AnimOptions
@@ -199,6 +200,8 @@ namespace mo
 		uint64_t grenadeMeleeCancels = 0;	// 던진 입력에 끊은 근접(던짐 몽타주가 근접 몽타주를 바꿔 낌 — G-0-c)
 		uint64_t grenadeMeleePushRemoved = 0;	// 그중 밀기 힘 번호가 있어 지움(대시 끊기와 같은 길)
 		uint64_t grenadeReloadCancels = 0;	// 던진 입력에 끊은 재장전(탄이 안 들어감)
+		uint64_t grenadeAnimAfterFire = 0;	// 같은 입력에 쏘기가 있어 쏘기 사건을 던짐 사건 앞에 끼운 수(G-4-b)
+		uint64_t grenadeReloadMontageCancels = 0;	// 던짐 몽타주가 먼저 끈 재장전 칸(근접의 meleeReloadMontageCancels 와 같은 길, G-4-b)
 		uint64_t grenadeBounces = 0;		// 날아감이 튕김 셈을 한 맞음
 		uint64_t grenadeStops = 0;			// 멈춘 수류탄(튕긴 뒤 느려 멈춤)
 		uint64_t grenadeDetonateTimer = 0;	// 신관 kGrenadeFuseFrames 걸음 뒤 터짐
@@ -305,8 +308,8 @@ namespace mo
 		static constexpr int kInputQueueSize = 32;		// 0.53초치
 		static constexpr int kMaxInputTokens = 8;		// 입력이 밀렸을 때 한 틱에 더 꺼낼 수 있는 한도
 		static constexpr int kIdleMoveAfterTicks = 15;	// 입력이 이만큼 안 오면 빈 입력으로 움직임
-		// 부활 하나 + 입력마다 교체 · 쏘기 · 재장전 · 근접 · 대시 + 남이 때린 근접 반응(근접 간격이 34 입력 넘게라 한 틱에 한 사람이 둘 못 때린다). 넘치면 버리고 센다
-		static constexpr int kAnimEventsPerTick = 1 + 5 * kMaxInputTokens + (wire::kMaxPlayersInRoom - 1);
+		// 부활 하나 + 입력마다 교체 · 쏘기 · 재장전 · 근접 · 대시 · 수류탄 + 남이 때린 근접 반응(근접 간격이 34 입력 넘게라 한 틱에 한 사람이 둘 못 때린다). 넘치면 버리고 센다
+		static constexpr int kAnimEventsPerTick = 1 + 6 * kMaxInputTokens + (wire::kMaxPlayersInRoom - 1);
 
 		struct QueuedInput
 		{
@@ -483,6 +486,7 @@ namespace mo
 		bool GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out, float& outAlpha) const;
 		void UpdateAnimStates();
 		void PushAnimEvent(Player& player, EAnimEvent kind, uint8_t weapon);
+		bool InsertAnimEvent(Player& player, int slot, EAnimEvent kind, uint8_t weapon);
 		void DropAnimEvents(Player& player);
 		void PlayAnimEvents(Player& player);
 		void MakeMoveInput(const Player& player, AnimMoveInput& out) const;

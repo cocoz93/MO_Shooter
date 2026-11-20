@@ -772,6 +772,10 @@ int main(int argc, char** argv)
 			ev(EAnimEvent::DashForward), ev(EAnimEvent::DashBackward), ev(EAnimEvent::DashLeft), ev(EAnimEvent::DashRight),
 			dropped(EAnimEvent::DashForward), dropped(EAnimEvent::DashBackward), dropped(EAnimEvent::DashLeft), dropped(EAnimEvent::DashRight),
 			starts(mo::MONTAGE_DASH_FORWARD), starts(mo::MONTAGE_DASH_BACKWARD), starts(mo::MONTAGE_DASH_LEFT), starts(mo::MONTAGE_DASH_RIGHT));
+		// 수류탄 몽타주(G-4) — 사건 − 버림 = 튼 수. 사건 = SERVER grenade 의 thrown. afterFire = 같은 입력 쏘기를 던짐 앞에 끼운 수 · reloadCancels = 던짐이 먼저 끈 재장전 칸
+		std::printf("SERVER animGrenade events=%llu dropped=%llu starts=%llu afterFire=%llu reloadCancels=%llu\n",
+			ev(EAnimEvent::Grenade), dropped(EAnimEvent::Grenade), starts(mo::MONTAGE_GRENADE), (unsigned long long)room.grenadeAnimAfterFire,
+			(unsigned long long)room.grenadeReloadMontageCancels);
 	}
 	std::printf("SERVER pickups=%llu fromRecheck=%llu fullHealth=%llu padRespawns=%llu padRechecks=%llu\n", (unsigned long long)room.pickups, (unsigned long long)room.pickupsFromRecheck,
 		(unsigned long long)room.pickupsFullHealth, (unsigned long long)room.padRespawns, (unsigned long long)room.padRechecks);

@@ -881,6 +881,7 @@ namespace mo
 			break;
 		}
 
+		int grenadeEventSlot = -1;	// 이번 입력의 던짐 사건 자리 — 아래 무기 순환이 같은 입력의 쏘기 사건을 그 앞에 끼운다(사건을 버렸으면 -1)
 		// 대시(D-2) — 무기 바꾸기 뒤 · 점프 앞. 켜면 그 자리에서 근접(밀기 힘까지) · 점프를 끊고 일어서기 · 힘을 넣는다(StartDash).
 		// 조준 · 사격 · 재장전의 막기 · 끊기는 각자의 자리(ads.Apply · 무기 순환)가 대시 상태를 본다. 근접 입력 수도 여기서 센다 — 끊을지를 이번 입력 값으로 본다
 		if (!serverMade)	// 빈 입력은 대시 · 근접 시계를 안 센다(D87)
@@ -905,6 +906,9 @@ namespace mo
 					const double camBack = ClampGrenadeCamBack(input.camBack);		// G-0 에서 잰 범위로(플랜 101줄) — NaN · 무한은 입력째 버렸다(IsFiniteInput)
 					if (camBack != (double)input.camBack) ++_stats.grenadeCamBackClamped;
 					ThrowGrenade(player, input, camBack);
+					const int slot = player.animEventCount;
+					PushAnimEvent(player, EAnimEvent::Grenade, player.weapon);	// 던짐 몽타주(G-4) — 같은 입력의 근접 · 재장전 사건은 이 뒤에 쌓인다(서버 차례 = 수류탄 먼저, 미결 22)
+					if (player.animEventCount > slot) grenadeEventSlot = slot;
 				}
 			}
 		}
@@ -1067,7 +1071,13 @@ namespace mo
 		{
 			if (motion.aimingAlpha > 0.f) ++_stats.shotsAimed;
 			if (motion.crouching) ++_stats.shotsCrouched;
-			PushAnimEvent(player, EAnimEvent::Fire, player.weapon);
+			// 같은 입력에 던진 수류탄이 있으면 쏘기를 던짐 앞에 끼운다 — Lyra 는 누른 차례와 상관없이 쥔 사격(「누르고 있는 동안」 정책)을 먼저 켜고 이어 수류탄을 켜
+			// 던짐 몽타주가 쏘기 몽타주를 끈다(G-0-c 실측, grenade-plan.md 「막기 · 끊기」). 그대로 쌓으면 쏘기(넣기 0)가 던짐을 그 자리에서 끈다. 근접이 켜진 입력은 쏘기가 막혀 둘이 같이 안 온다
+			if (grenadeEventSlot >= 0 && grenadeEventSlot < player.animEventCount)
+			{
+				if (InsertAnimEvent(player, grenadeEventSlot, EAnimEvent::Fire, player.weapon)) ++_stats.grenadeAnimAfterFire;
+			}
+			else PushAnimEvent(player, EAnimEvent::Fire, player.weapon);
 			player.fireGate.OnFired((EWeapon)player.weapon, cycle.GetDef(), kTickSeconds);
 			PendingShot shot;
 			shot.shooter = player.id;
@@ -1903,6 +1913,22 @@ namespace mo
 		player.animEvents[(size_t)player.animEventCount++] = { kind, weapon };
 	}
 
+	// 이번 틱 사건 칸의 slot 자리에 끼운다(뒤 칸은 한 칸씩 민다). 칸이 차 있으면 PushAnimEvent 와 같이 버리고 센다 — 끼웠으면 true
+	bool CRoom::InsertAnimEvent(Player& player, int slot, EAnimEvent kind, uint8_t weapon)
+	{
+		if (!_animReady) return false;
+		++_stats.animEvents[(size_t)kind];
+		if (player.animEventCount == (int)player.animEvents.size())
+		{
+			++_stats.animEventsDropped[(size_t)kind];
+			return false;
+		}
+		for (int i = player.animEventCount; i > slot; --i) player.animEvents[(size_t)i] = player.animEvents[(size_t)(i - 1)];
+		player.animEvents[(size_t)slot] = { kind, weapon };
+		++player.animEventCount;
+		return true;
+	}
+
 	void CRoom::DropAnimEvents(Player& player)
 	{
 		for (int i = 0; i < player.animEventCount; ++i) ++_stats.animEventsDropped[(size_t)player.animEvents[(size_t)i].kind];
@@ -1971,6 +1997,18 @@ namespace mo
 				// Lyra 기록(D-4-b rl_dash): 재장전 비중이 대시 넣기의 거울(1 → 0.844 → 0.500 → 0.157 → 0)로 빠졌다. 먼저 끄면 재장전 빼기 곡선이 남는다(StopMontage 는 시간만 줄인다). 속도 1.0(같은 기록, 실측)
 				play((uint8_t)(MONTAGE_DASH_FORWARD + ((uint8_t)event.kind - (uint8_t)EAnimEvent::DashForward)), kAnimEventRate, bundle);
 				break;
+			case EAnimEvent::Grenade:
+			{
+				// 수류탄 능력은 켤 때 재장전 능력을 끊는다(grenade-plan.md 「막기 · 끊기」, G-0-c 실측) — 근접 · 쏘기와 같은 길로 재장전 칸을 자산 빼기(곡선 2 · 소총 0.3초 · 권총 · 샷건 0.35초, 기록의 자산 표)로 먼저 끄고 던짐을 튼다.
+				// 이어 같은 무리(DefaultGroup, 기록의 자산 표 animcmp_gren_rifle_montages.csv) 규칙이 빼기 시간만 던짐 넣기 0.15초로 줄이고 곡선은 그대로 둔다(StopMontage). 곡선 1 · 2 는 같은 식이라 비중은
+				// 넣기의 거울로 같고(기록 rl_gren 1 → 0.966 → 0.874 …, 섞기 칸 b0.150) 끝 반올림만 달라, 곡선 2 라야 재장전 칸이 Lyra 처럼 9번째 갱신에 빠진다(던짐 곡선 1 로 끄면 한 프레임 늦다 — G-4-b AnimCheck).
+				// 근접 · 쏘기 칸은 같은 무리 규칙만 탄다(기록에서 10번째 갱신에 빠짐). 속도 1.0(같은 기록, 실측)
+				bool cancelledReload = false;
+				if (anim.PlayMontageCancellingReload(MONTAGE_GRENADE, kAnimEventRate, bundle, cancelledReload)) ++_stats.montageStarts[MONTAGE_GRENADE];
+				else ++_stats.montageFails;
+				if (cancelledReload) ++_stats.grenadeReloadMontageCancels;
+				break;
+			}
 			case EAnimEvent::Count:
 				break;
 			}
