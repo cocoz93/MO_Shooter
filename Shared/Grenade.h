@@ -1,7 +1,7 @@
 ﻿#pragma once
 
 // 수류탄 능력 · 던짐(컨텐츠 G-2) — Lyra GA_Grenade 를 엔진 없이 옮긴 것. 정본 = MyDocs/claude-plans/mo-shooter/grenade-plan.md
-// - 날아감은 Shared/Projectile(G-1). 여기는 켜기(쿨다운) · 던짐 계산(놓을 자리 · 겨눔 선 · 방향 · 첫 속도) — 폭발은 G-2-b
+// - 날아감은 Shared/Projectile(G-1). 여기는 켜기(쿨다운) · 던짐 계산(놓을 자리 · 겨눔 선 · 방향 · 첫 속도) · 폭발(사람마다 선 · 곡선 피해)
 // - 서버 · 예측 · 대조 도구(Tools/GrenadeCheck)가 같은 함수를 쓴다
 // - 언리얼 안에서도 컴파일돼야 하므로 예외·RTTI 를 쓰지 않는다
 
@@ -98,4 +98,38 @@ namespace mo
 	// 놓을 자리 · 조종 회전 · 겨눔 선 결과 → 던짐. traceEnd = LookAtEnd 갈래가 보는 끝점
 	GrenadeThrow ComputeGrenadeThrow(const Vec3& spawnLocation, const Rotator& controlRotation, const Vec3& traceEnd,
 		const GrenadeAimHit& aim, const ProjectileParams& params);
+
+	// ── 폭발(G-2-b) — 피해 = 105 × 곡선(clamp(선 거리 ÷ 450, 0.1, 1)). 사람마다 수류탄 자리에서 캡슐 가운데로 선 하나(G-0-b 실측)
+	inline constexpr double kGrenadeBlastRadius = 450.0;	// 겹침 반지름 = 등급 분모
+	inline constexpr double kGrenadeBlastDamage = 105.0;	// 곡선 값 1 일 때 피해
+	inline constexpr double kGrenadeBlastMinGrade = 0.1;	// 등급 아래 끝 — 붙어 터져도 곡선(0.1) × 105 = 104.42
+
+	// 곡선 Curve_GrenadeDamage — 등급 0.1~1.0 을 0.001 간격 901점 표(GrenadeDamageCurve.inl)로 직선 보간. 범위 밖은 끝 값
+	double GrenadeDamageCurve(double grade);
+
+	// 폭발 선의 과녁 = 사람 캡슐(똑바로 선다)
+	struct GrenadeBlastTarget
+	{
+		Vec3 center;				// 캡슐 중심 = 액터 위치 — 선 끝
+		double radius = 35.0;
+		double halfHeight = 90.0;	// 반구 포함. 앉으면 65(MoveParams::crouchedHalfHeight)
+	};
+
+	struct GrenadeBlastHit
+	{
+		bool blocked = false;		// 맵이 몸보다 먼저 맞음 — 피해 0(D107). 몸까지 450 이상이면 맵을 안 봐서 false
+		double bodyDistance = 0;	// 선을 따라 캡슐 겉까지. 캡슐 안에서 터지면 0
+		double distance = 0;		// 첫 맞음까지 — 막혔으면 맵, 아니면 bodyDistance
+		double grade = 1.0;			// clamp(bodyDistance ÷ 450, 0.1, 1)
+		double damage = 0;			// 105 × 곡선(등급). 막혔으면 0 — 팀 · 무적 · 죽음은 GrenadeDamageApplies
+	};
+
+	// 수류탄 자리 → 캡슐 가운데 선(Lyra = Weapon_Capsule 채널 · 복잡 충돌 → 맵 MAP_BLOCK_BLAST).
+	// - 다른 사람 · 수류탄은 막지 않는다 — Lyra 무시 목록 = 겹침 안 다른 사람 + 그 수류탄이고, 몸까지 450 안의 선 위에 걸리는 사람은 반드시 겹침 안이다
+	// - 겹침(450 구)은 따로 안 본다 — 겹침 밖이면 선 거리도 450 이상이라 곡선 0, 피해가 같다(G-0-b 짐작 6). 그래서 몸까지 450 이상이면 맵 선을 안 쏜다
+	GrenadeBlastHit TraceGrenadeBlast(const CMapCollision& map, const Vec3& at, const GrenadeBlastTarget& target);
+
+	// 그 사람에게 피해가 들어가나 — Lyra 팀 규칙(던진 사람 자신은 들어감 · 같은 팀 0, LyraTeamSubsystem::CanCauseDamage) · 무적(부활 · 경기 끝) ·
+	// 죽은 몸(Lyra 는 죽기 시작하면 충돌을 꺼 겹침 · 선에 안 걸린다). 던진 사람의 생사는 안 본다(죽은 뒤에도 피해 — G-0-b2 짐작 3)
+	bool GrenadeDamageApplies(bool alive, bool self, bool sameTeam, bool immune);
 }

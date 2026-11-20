@@ -352,6 +352,10 @@ namespace mo
 	// body.pose 를 주면 고정 포즈 대신 그 자세로 판정한다
 	bool TraceBody(const BodyPlacement& body, const Vec3& start, const Vec3& end, double radius, BodyHit& out);
 
+	// 원점 기준 선분(p + t·d, t 0~1)과 축 Z 캡슐(축 반길이 h, 반지름 r)이 처음 만나는 곳. 처음부터 안이면 t = 0.
+	// 부위 몸 판정(TraceBody) · 근접 캡슐 쓸기(ResolveMelee)와 수류탄 폭발 선(Grenade.cpp)이 같이 쓴다
+	bool SegmentCapsuleZ(const Vec3& p, const Vec3& d, double h, double r, double& outT, Vec3& outNormal);
+
 	// ─── 한 발 ─────────────────────────────────────────────
 
 	enum class EBulletHit : uint8_t { None, Map, Body };

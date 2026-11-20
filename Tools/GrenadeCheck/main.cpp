@@ -19,9 +19,12 @@
 //   겨눔 선 = 맵(무기 깃발) + 상대 부위 몸(서 있는 자세 · r−1 줄 자리). Lyra 는 상대 메시 물리 몸에 맞으니 그 갈래는 따로 센다.
 //   Lyra 선이 상자 안에서 시작한 것(거리 0)도 따로 센다 — Lyra 겨눔 선은 단순 충돌, 우리 무기 깃발은 복잡 모양(미결 21)
 //   기록 도구 손질 둘을 따라 한다 — 쿨다운 지움(GCDCLEAR) · 몸 없는 프레임(죽은 뒤 새 몸까지, 표에 줄이 없음)도 시간은 간다
+// 폭발 · 피해(G-2-b) — 터짐(GBOOM)마다 나 · 상대 칸을 TraceGrenadeBlast · GrenadeDamageApplies 로 셈해 Lyra 폭발 선(GTRACE) · 체력(GBOOM 앞>뒤) ·
+//   피해 소식 크기(GMSG)와 견준다. 처치 = 체력이 0 이 됨. 팀 · 무적 · 앉음은 기록 칸 그대로 넣는다(무적 시간 · 팀 정하기는 서버 몫)
 // 끝 코드: 0 = 전부 통과, 1 = 불일치, 2 = 입력 오류
 #include "Grenade.h"
 #include "MapCollision.h"
+#include "Movement.h"
 #include "Projectile.h"
 #include "Weapon.h"
 
@@ -1206,6 +1209,279 @@ namespace
 		total.Add(t);
 		return true;
 	}
+
+	// ── 폭발 · 피해(G-2-b)
+	// 선 거리는 겨눔 선과 같은 기준(구현 전에 적음). 피해는 플랜 170줄 「피해 차 0.001 이하」 — 체력 칸은 소수 셋째 자리라 반올림이 0.0005 까지 든다
+	constexpr double kBlastDistTolerance = 0.01;
+	constexpr double kDamageTolerance = 0.001;
+
+	struct BlastTotals
+	{
+		int booms = 0, targets = 0, alive = 0, traced = 0, lineCompared = 0, lineFails = 0, bodyLines = 0, mapLines = 0, farMap = 0;
+		int deadAfter = 0, deadAfterNotKilled = 0, notTraced = 0, notTracedNear = 0, notTracedHurt = 0, tracedNotAlive = 0;
+		int hhDiff = 0, rowMissing = 0, foeHidden = 0, sameFrameBooms = 0;
+		double maxLineDist = 0;
+		int damageCompared = 0, damageFails = 0, msgCompared = 0, msgFails = 0, msgMissing = 0, msgExtra = 0, msgOtherInst = 0;
+		int hurt = 0, kills = 0, killDiff = 0, sameTeam = 0, immune = 0, dead = 0, crouched = 0;
+		double maxDamage = 0, maxMsg = 0;
+
+		void Add(const BlastTotals& o)
+		{
+			booms += o.booms; targets += o.targets; alive += o.alive; traced += o.traced; lineCompared += o.lineCompared;
+			lineFails += o.lineFails; bodyLines += o.bodyLines; mapLines += o.mapLines; farMap += o.farMap;
+			deadAfter += o.deadAfter; deadAfterNotKilled += o.deadAfterNotKilled; notTraced += o.notTraced; notTracedNear += o.notTracedNear;
+			notTracedHurt += o.notTracedHurt; tracedNotAlive += o.tracedNotAlive;
+			hhDiff += o.hhDiff; rowMissing += o.rowMissing; foeHidden += o.foeHidden; sameFrameBooms += o.sameFrameBooms;
+			maxLineDist = std::max(maxLineDist, o.maxLineDist);
+			damageCompared += o.damageCompared; damageFails += o.damageFails; msgCompared += o.msgCompared; msgFails += o.msgFails;
+			msgMissing += o.msgMissing; msgExtra += o.msgExtra; msgOtherInst += o.msgOtherInst;
+			hurt += o.hurt; kills += o.kills; killDiff += o.killDiff; sameTeam += o.sameTeam; immune += o.immune; dead += o.dead; crouched += o.crouched;
+			maxDamage = std::max(maxDamage, o.maxDamage); maxMsg = std::max(maxMsg, o.maxMsg);
+		}
+	};
+
+	struct BoomRecord
+	{
+		int frame = 0;
+		std::string name, step;
+		Vec3 location;
+		double hpBefore[2] = {}, hpAfter[2] = {};	// [0] 나 · [1] 상대
+		bool sameTeamFoe = false, foeCrouched = false, foeActive = true;
+		bool immune[2] = {};
+	};
+
+	struct BlastTraceRecord
+	{
+		bool hit = false, body = false;
+		double distance = 0;
+	};
+
+	struct BlastRow
+	{
+		Vec3 body, foe;
+		bool crouched = false;
+		double halfHeight = 0, foeHalfHeight = 0;
+	};
+
+	bool ParseHpPair(const std::string& text, double& before, double& after)
+	{
+		return std::sscanf(text.c_str(), "%lf>%lf", &before, &after) == 2;
+	}
+
+	// 터짐마다 두 사람(나 · 상대) 칸 — 기록의 터진 자리 · 그 프레임 표 자리(G-0 기록은 터짐 앞뒤 세 줄 자리가 같다 · 313/313)에서 폭발 선 · 피해를 셈해
+	//   Lyra 선(GTRACE — 기록 도구가 피해 뒤에 다시 쏜 선, 그래서 그 폭발에 죽은 몸엔 안 맞는다) · 체력(GBOOM 앞>뒤) · 피해 소식(GMSG 크기 = 자르지 않은 피해)과 견준다.
+	//   던진 사람은 늘 나(기록 대본). 같은 팀 = foeCmp 0 · 무적 = 기록 칸(부활 · 경기 끝 — 무적 시간은 서버 몫, 미결 14) · 상대 숨김(FOE_ACTIVE 0) = 충돌 꺼짐이라 죽은 몸과 같게
+	bool RunBlastTag(const CMapCollision& map, const std::string& dir, const std::string& tag, bool verbose, BlastTotals& total)
+	{
+		std::vector<char> logData, csvData;
+		const std::string base = dir + "/cprobe_" + tag;
+		if (!ReadFile(base + ".log", logData) || !ReadFile(base + ".csv", csvData))
+		{
+			std::printf("GRENADECHECK input tag=%s 읽기 실패\n", tag.c_str());
+			return false;
+		}
+		BlastTotals t;
+		const MoveParams move = MakeLyraMoveParams();
+
+		std::vector<BoomRecord> booms;
+		std::map<std::string, BlastTraceRecord> traces[2];				// 수류탄 이름 → 사람별 선
+		std::map<std::pair<int, int>, std::vector<double>> msgs;		// (프레임, 사람) → 피해 소식 크기
+		bool hasMsgLines = false, foeActive = true;
+		for (const std::string& line : Lines(logData))
+		{
+			const size_t at = line.find("MOB_CPROBE_");
+			if (at == std::string::npos) continue;
+			const size_t space = line.find(' ', at);
+			if (space == std::string::npos) continue;
+			const std::string kind = line.substr(at + 11, space - at - 11);
+			const std::map<std::string, std::string> kv = KeyValues(line.substr(space + 1));
+			const auto get = [&](const char* k) { const auto it = kv.find(k); return it == kv.end() ? std::string() : it->second; };
+			if (kind == "FOE_ACTIVE") foeActive = get("on") == "1";
+			else if (kind == "GBOOM")
+			{
+				BoomRecord b;
+				b.frame = std::atoi(get("frame").c_str());
+				b.name = get("name");
+				b.step = get("step");
+				if (!ParseVec(get("loc"), b.location) || !ParseHpPair(get("myHp"), b.hpBefore[0], b.hpAfter[0])
+					|| !ParseHpPair(get("foeHp"), b.hpBefore[1], b.hpAfter[1]))
+				{
+					std::printf("GRENADECHECK input tag=%s 터짐 줄 읽기 실패 frame=%d\n", tag.c_str(), b.frame);
+					return false;
+				}
+				b.sameTeamFoe = get("foeCmp") == "0";
+				b.foeCrouched = get("foeCrouched") == "1";
+				b.immune[0] = get("myImmune") == "1";
+				b.immune[1] = get("foeImmune") == "1";
+				b.foeActive = foeActive;
+				booms.push_back(b);
+			}
+			else if (kind == "GTRACE")
+			{
+				BlastTraceRecord r;
+				r.hit = get("hit") == "1";
+				r.body = get("hitComp") == "CollisionCylinder";
+				r.distance = std::atof(get("dist").c_str());
+				traces[get("who") == "me" ? 0 : 1][get("name")] = r;
+			}
+			else if (kind == "GMSG")
+			{
+				hasMsgLines = true;
+				if (get("verb") != "Lyra.Damage.Message" || line.find("DamageType.Grenade") == std::string::npos) continue;
+				if (get("instWho") != "me") ++t.msgOtherInst;
+				msgs[{ std::atoi(get("frame").c_str()), get("targetWho") == "me" ? 0 : 1 }].push_back(std::atof(get("mag").c_str()));
+			}
+		}
+
+		std::map<int, BlastRow> rows;
+		{
+			const std::vector<std::string> lines = Lines(csvData);
+			if (lines.empty()) return false;
+			const std::vector<std::string> head = SplitComma(lines[0]);
+			std::map<std::string, size_t> col;
+			for (size_t i = 0; i < head.size(); ++i) if (!col.count(head[i])) col[head[i]] = i;
+			const char* need[] = { "frame", "px", "py", "pz", "crouched", "capHH", "foeX", "foeY", "foeZ", "foeHH" };
+			for (const char* n : need)
+				if (!col.count(n))
+				{
+					std::printf("GRENADECHECK input tag=%s 사람 표에 %s 칸 없음\n", tag.c_str(), n);
+					return false;
+				}
+			for (size_t i = 1; i < lines.size(); ++i)
+			{
+				const std::vector<std::string> c = SplitComma(lines[i]);
+				if (c.size() < head.size()) continue;
+				const auto num = [&](const char* n) { return std::atof(c[col[n]].c_str()); };
+				BlastRow& r = rows[std::atoi(c[col["frame"]].c_str())];
+				r.body = Vec3(num("px"), num("py"), num("pz"));
+				r.crouched = std::atoi(c[col["crouched"]].c_str()) != 0;
+				r.halfHeight = num("capHH");
+				r.foe = Vec3(num("foeX"), num("foeY"), num("foeZ"));
+				r.foeHalfHeight = num("foeHH");
+			}
+		}
+
+		std::map<int, int> boomsPerFrame;
+		for (const BoomRecord& b : booms) ++boomsPerFrame[b.frame];
+		for (const BoomRecord& b : booms)
+		{
+			++t.booms;
+			if (boomsPerFrame[b.frame] > 1) ++t.sameFrameBooms;		// 피해 소식은 프레임으로만 묶여 갈리지 않는다
+			const auto rowIt = rows.find(b.frame);
+			for (int who = 0; who < 2; ++who)
+			{
+				++t.targets;
+				const double before = b.hpBefore[who], after = b.hpAfter[who];
+				const bool hidden = who == 1 && !b.foeActive;
+				if (hidden) ++t.foeHidden;
+				const bool alive = before > 0.0 && !hidden;
+				const bool self = who == 0;
+				const bool sameTeam = self || b.sameTeamFoe;
+				const bool immune = b.immune[who];
+				const auto traceIt = traces[who].find(b.name);
+				const bool traced = traceIt != traces[who].end();
+
+				GrenadeBlastHit blast;
+				bool lineKnown = false;
+				if (alive)
+				{
+					++t.alive;
+					if (immune) ++t.immune;
+					if (!self && b.sameTeamFoe) ++t.sameTeam;
+					if (rowIt == rows.end()) ++t.rowMissing;
+					else
+					{
+						const BlastRow& row = rowIt->second;
+						const bool crouched = self ? row.crouched : b.foeCrouched;
+						if (crouched) ++t.crouched;
+						GrenadeBlastTarget target;
+						target.center = self ? row.body : row.foe;
+						target.radius = move.capsuleRadius;
+						target.halfHeight = crouched ? move.crouchedHalfHeight : move.capsuleHalfHeight;
+						if (std::fabs(target.halfHeight - (self ? row.halfHeight : row.foeHalfHeight)) > kBlastDistTolerance) ++t.hhDiff;
+						blast = TraceGrenadeBlast(map, b.location, target);
+						lineKnown = true;
+					}
+				}
+				else ++t.dead;
+
+				// 선 — Lyra 가 쏜 사람만(겹침 안). 안 쏜 사람은 우리 피해가 0 이어야 한다
+				const char* lineResult = "-";
+				if (traced && !alive) { ++t.tracedNotAlive; lineResult = "tracedNotAlive"; }
+				else if (traced && lineKnown)
+				{
+					++t.traced;
+					const BlastTraceRecord& lr = traceIt->second;
+					if (!lr.hit)
+					{
+						++t.deadAfter;		// 피해 뒤에 쏜 선이라 그 폭발에 죽은 몸엔 안 맞는다 — 피해는 소식 크기로 본다
+						if (after > 0.0) { ++t.deadAfterNotKilled; lineResult = "deadAfterNotKilled"; }
+						else lineResult = "deadAfter";
+					}
+					else
+					{
+						if (lr.body) ++t.bodyLines; else ++t.mapLines;
+						if (!lr.body && blast.bodyDistance >= kGrenadeBlastRadius) { ++t.farMap; lineResult = "farMap"; }	// 우리는 맵을 안 쏜 칸 — 피해 0 은 같다
+						else
+						{
+							++t.lineCompared;
+							const double d = std::fabs(blast.distance - lr.distance);
+							t.maxLineDist = std::max(t.maxLineDist, d);
+							const bool fail = blast.blocked == lr.body || d > kBlastDistTolerance;
+							if (fail) ++t.lineFails;
+							lineResult = fail ? "lineFail" : "same";
+						}
+					}
+				}
+				else if (alive && lineKnown)
+				{
+					++t.notTraced;
+					if (blast.bodyDistance < kGrenadeBlastRadius) ++t.notTracedNear;
+				}
+
+				// 피해 · 체력 · 처치 · 소식
+				const bool applies = lineKnown && GrenadeDamageApplies(alive, self, sameTeam, immune);
+				const double damage = applies ? blast.damage : 0.0;
+				if (alive && lineKnown && !traced && damage > 0.0) { ++t.notTracedHurt; lineResult = "notTracedHurt"; }
+				const double oursAfter = std::max(0.0, before - damage);
+				++t.damageCompared;
+				const double hpDiff = std::fabs(oursAfter - after);
+				double msgDiff = 0.0;
+				const auto msgIt = msgs.find({ b.frame, who });
+				const bool hasMsg = msgIt != msgs.end() && !msgIt->second.empty();
+				if (hasMsgLines)
+				{
+					if (damage > 0.0 && !hasMsg) ++t.msgMissing;
+					if (damage <= 0.0 && hasMsg) ++t.msgExtra;
+					if (damage > 0.0 && hasMsg)
+					{
+						++t.msgCompared;
+						msgDiff = std::fabs(msgIt->second.front() - damage);
+						t.maxMsg = std::max(t.maxMsg, msgDiff);
+						if (msgDiff > kDamageTolerance) ++t.msgFails;
+					}
+				}
+				t.maxDamage = std::max(t.maxDamage, hpDiff);
+				const bool damageFail = hpDiff > kDamageTolerance;
+				if (damageFail) ++t.damageFails;
+				if (damage > 0.0) ++t.hurt;
+				const bool oursKill = before > 0.0 && oursAfter <= 0.0, lyraKill = before > 0.0 && after <= 0.0;
+				if (oursKill) ++t.kills;
+				if (oursKill != lyraKill) ++t.killDiff;
+
+				if (verbose && (damageFail || msgDiff > kDamageTolerance || oursKill != lyraKill
+					|| (std::strcmp(lineResult, "same") != 0 && std::strcmp(lineResult, "-") != 0)))
+					std::printf("  blast frame=%d step=%s who=%s alive=%d line=%s ours blocked=%d body=%.4f dist=%.4f grade=%.6f damage=%.4f applies=%d hp %.3f>%.3f ours>%.3f msg=%.4f\n",
+						b.frame, b.step.c_str(), self ? "me" : "foe", alive, lineResult, blast.blocked, blast.bodyDistance, blast.distance, blast.grade,
+						blast.damage, applies, before, after, oursAfter, hasMsg ? msgIt->second.front() : -1.0);
+			}
+		}
+
+		std::printf("GRENADECHECK tag=%s blast booms=%d lineCompared=%d lineFails=%d notTracedHurt=%d damage compared=%d fails=%d msgFails=%d kills=%d killDiff=%d\n",
+			tag.c_str(), t.booms, t.lineCompared, t.lineFails, t.notTracedHurt, t.damageCompared, t.damageFails, t.msgFails, t.kills, t.killDiff);
+		total.Add(t);
+		return true;
+	}
 }
 
 int main(int argc, char** argv)
@@ -1240,10 +1516,12 @@ int main(int argc, char** argv)
 
 	Totals total;
 	AbilityTotals ab;
+	BlastTotals bl;
 	for (const std::string& tag : tags)
 	{
 		if (!RunTag(map, dir, tag, verbose, pawnRowNow, total)) return 2;
 		if (!RunAbilityTag(map, dir, tag, verbose, ab)) return 2;
+		if (!RunBlastTag(map, dir, tag, verbose, bl)) return 2;
 	}
 
 	const bool pass = total.fails == 0 && total.early == 0 && total.late == 0 && total.kindDiff == 0 && total.hitFails == 0
@@ -1253,7 +1531,11 @@ int main(int argc, char** argv)
 		&& total.maxRotUnexplained <= kRotTolerance	// 속도 차로 설명 안 되는 회전 차는 날아감 기준 그대로
 		// 능력 · 던짐(G-2-a) — 경기 끝 갈래 다름(postGameDiff)은 미결 15 라 넣지 않는다. 사람 메시 겨눔(bodyMiss · 거리 차)은 부위 몸 몫이라 넣지 않는다
 		&& ab.lyraThrown > 0 && ab.throwDiff == 0 && ab.cooldownDiff == 0 && ab.gabilDiff == 0 && ab.gapNotDead == 0
-		&& ab.throwCompared == ab.lyraThrown && ab.throwFails == 0 && ab.branchDiff == 0 && ab.traceDiff == 0 && ab.endFails == 0;
+		&& ab.throwCompared == ab.lyraThrown && ab.throwFails == 0 && ab.branchDiff == 0 && ab.traceDiff == 0 && ab.endFails == 0
+		// 폭발 · 피해(G-2-b)
+		&& bl.damageCompared > 0 && bl.lineCompared > 0 && bl.lineFails == 0 && bl.notTracedHurt == 0 && bl.tracedNotAlive == 0
+		&& bl.deadAfterNotKilled == 0 && bl.hhDiff == 0 && bl.rowMissing == 0 && bl.sameFrameBooms == 0 && bl.msgOtherInst == 0
+		&& bl.damageFails == 0 && bl.msgFails == 0 && bl.msgMissing == 0 && bl.msgExtra == 0 && bl.killDiff == 0;
 	const ProjectileCounters& c = total.count;
 	std::printf("GRENADECHECK flight grenades=%d frames=%d fails=%d maxPosDiff=%.6f maxVelDiff=%.6f maxRotDiff=%.6f firstHit same=%d early=%d late=%d kindDiff=%d none=%d\n",
 		total.grenades, total.frames, total.fails, total.maxPos, total.maxVel, total.maxRot, total.same, total.early, total.late, total.kindDiff, total.noneBoth);
@@ -1285,6 +1567,12 @@ int main(int argc, char** argv)
 	std::printf("GRENADECHECK aim compared=%d none=%d mapHits=%d traceDiff=%d maxMapDistDiff=%.6f endFails=%d maxEndRotDiff=%.6f maxEndVelDiff=%.6f startInside=%d startInsideDiff=%d simpleSame=%d bodyCompared=%d bodyHits=%d bodyMiss=%d maxBodyDistDiff=%.4f maxBodyRotDiff=%.4f crouchedFoe=%d\n",
 		ab.aimCompared, ab.aimNone, ab.aimMap, ab.traceDiff, ab.maxAimMapDist, ab.endFails, ab.maxEndRot, ab.maxEndVel, ab.startInside, ab.startInsideDiff, ab.simpleSame, ab.bodyCompared, ab.aimBody,
 		ab.bodyMiss, ab.maxBodyDist, ab.maxBodyRot, ab.crouchedFoe);
+	std::printf("GRENADECHECK blast booms=%d targets=%d alive=%d dead=%d foeHidden=%d traced=%d lineCompared=%d lineFails=%d body=%d map=%d maxLineDistDiff=%.6f farMap=%d deadAfter=%d deadAfterNotKilled=%d notTraced=%d notTracedNear=%d notTracedHurt=%d tracedNotAlive=%d crouched=%d hhDiff=%d rowMissing=%d sameFrameBooms=%d\n",
+		bl.booms, bl.targets, bl.alive, bl.dead, bl.foeHidden, bl.traced, bl.lineCompared, bl.lineFails, bl.bodyLines, bl.mapLines, bl.maxLineDist, bl.farMap,
+		bl.deadAfter, bl.deadAfterNotKilled, bl.notTraced, bl.notTracedNear, bl.notTracedHurt, bl.tracedNotAlive, bl.crouched, bl.hhDiff, bl.rowMissing, bl.sameFrameBooms);
+	std::printf("GRENADECHECK damage compared=%d fails=%d maxDamageDiff=%.6f msgCompared=%d msgFails=%d maxMsgDiff=%.6f msgMissing=%d msgExtra=%d msgOtherInst=%d hurt=%d kills=%d killDiff=%d sameTeam=%d immune=%d\n",
+		bl.damageCompared, bl.damageFails, bl.maxDamage, bl.msgCompared, bl.msgFails, bl.maxMsg, bl.msgMissing, bl.msgExtra, bl.msgOtherInst,
+		bl.hurt, bl.kills, bl.killDiff, bl.sameTeam, bl.immune);
 	std::printf("GRENADECHECK %s\n", pass ? "PASS" : "FAIL");
 	return pass ? 0 : 1;
 }

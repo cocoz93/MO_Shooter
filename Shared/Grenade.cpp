@@ -1,5 +1,6 @@
 ﻿#include "Grenade.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace mo
@@ -7,6 +8,15 @@ namespace mo
 	namespace
 	{
 		constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+
+		// Curve_GrenadeDamage 에디터 평가 값 — 등급 0.100, 0.101, …, 1.000
+		constexpr float kGrenadeCurveTable[] =
+		{
+#include "GrenadeDamageCurve.inl"
+		};
+		constexpr size_t kGrenadeCurveCount = sizeof(kGrenadeCurveTable) / sizeof(kGrenadeCurveTable[0]);
+		constexpr double kGrenadeCurveStep = 0.001;
+		static_assert(kGrenadeCurveCount == 901, "Curve table must hold 0.1..1.0 at 0.001 spacing");
 	}
 
 	void CGrenadeAbility::NextInput()
@@ -110,5 +120,47 @@ namespace mo
 		}
 		out.velocity = LaunchVelocity(out.rotation, params);
 		return out;
+	}
+
+	double GrenadeDamageCurve(double grade)
+	{
+		const double x = std::min(std::max(grade, kGrenadeBlastMinGrade), 1.0);
+		const double pos = (x - kGrenadeBlastMinGrade) / kGrenadeCurveStep;	// 표 칸 번호(소수)
+		const size_t i = static_cast<size_t>(pos);
+		if (i + 1 >= kGrenadeCurveCount) return kGrenadeCurveTable[kGrenadeCurveCount - 1];
+		const double a = pos - static_cast<double>(i);
+		const double v0 = kGrenadeCurveTable[i];
+		const double v1 = kGrenadeCurveTable[i + 1];
+		return v0 + a * (v1 - v0);
+	}
+
+	GrenadeBlastHit TraceGrenadeBlast(const CMapCollision& map, const Vec3& at, const GrenadeBlastTarget& target)
+	{
+		GrenadeBlastHit out;
+		const Vec3 seg = target.center - at;
+		const double len = std::sqrt(seg.x * seg.x + seg.y * seg.y + seg.z * seg.z);
+		// 선 끝이 캡슐 가운데라 늘 맞는다(t ≤ 1). 안에서 터지면 t = 0 — Lyra 도 거리 0 에 캡슐(G-0-a foe_close 의 나)
+		double t = 1.0;
+		Vec3 normal;
+		const double axisHalf = std::max(0.0, target.halfHeight - target.radius);
+		if (!SegmentCapsuleZ(at - target.center, seg, axisHalf, target.radius, t, normal)) t = 1.0;
+		out.bodyDistance = t * len;
+		out.distance = out.bodyDistance;
+		out.grade = std::min(std::max(out.bodyDistance / kGrenadeBlastRadius, kGrenadeBlastMinGrade), 1.0);
+		if (out.bodyDistance >= kGrenadeBlastRadius) return out;	// 곡선(1) = 0 — 막혔든 아니든 피해 0
+		RayHit rh;
+		if (map.Raycast(at, target.center, MAP_BLOCK_BLAST, rh) && rh.distance < out.bodyDistance)
+		{
+			out.blocked = true;
+			out.distance = rh.distance;
+			return out;
+		}
+		out.damage = kGrenadeBlastDamage * GrenadeDamageCurve(out.grade);
+		return out;
+	}
+
+	bool GrenadeDamageApplies(bool alive, bool self, bool sameTeam, bool immune)
+	{
+		return alive && !immune && (self || !sameTeam);
 	}
 }
