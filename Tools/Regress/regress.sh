@@ -3,7 +3,7 @@
 # - 왜: 빌드 대상을 골라 돌리다 대조 도구가 옛 빌드로 남은 적이 있어, 전부 한 명령으로 묶는다.
 #
 #   Tools/Regress/regress.sh [--bin <빌드 폴더>] [--out <출력 폴더>] [--only checks|play|multi] [--break]
-#     --break  일부러 틀림 — 대조 도구 입력을 잘라 기준선과 어긋나게 하고 봇에 --breakMirror 를 준다(대시 판 봇엔 --breakDash=predict).
+#     --break  일부러 틀림 — 대조 도구 입력을 잘라 기준선과 어긋나게 하고 봇에 --breakMirror 를 준다(대시 판 봇엔 --breakDash=predict, 수류탄 판 봇엔 --breakGrenade=predict).
 #              이때 FAIL 이 나와야 맞다(시험의 시험).
 # 판정은 개수·바이트만 본다. 시간 값은 안 쓰므로 PC 가 바빠도 돌릴 수 있다.
 # 기준선 = golden_checks.txt. 이동·충돌·무기 코드를 일부러 고쳤을 때만 갱신한다.
@@ -70,6 +70,12 @@ run_checks() {
 	# 능력(CDashAbility — 켠 입력 · 방향 · 막힘 · 쿨다운)을 입력마다 대조, 막기 · 끊기(사격 · 재장전 · 근접 · 점프 · 조준 켜짐 · 탄창)를 줄마다 대조(D-2-b). 힘 없는 대조군 줄도 기준선에 든다
 	"$tools/DashCheck/Release/DashCheck.exe" "$DATA/cprobe_dash6.log" "$DATA/cprobe_dash6.csv" "$DATA/map_gym.mocl" > "$OUT/dash.log" 2>&1
 	sed 's/^/dash /' "$OUT/dash.log" >> "$g"
+	# 수류탄(G-1 · G-2) — Lyra 연습장 수류탄 기록 15벌(G-0, 태그마다 cprobe_<태그>.log · .csv · _gren.csv)과 Shared 탄체 걸음(날아감 · 튕김 · 멈춤) · 능력 · 던짐 계산 · 겨눔 선 · 폭발 선 · 피해 · 처치 · 신관을
+	# 프레임 · 수류탄 · 사람마다 대조. 태그별 줄 · 합계 줄 · GRENADECHECK PASS 까지 기준선에 든다. --break 이면 기록 한 벌(g0t2)을 빼 합계 줄이 어긋나야 한다
+	local gtags="g0a1 g0a2 g0a3 g0a4 g0b1 g0b2 g0c1 g0c2 g0c3 g0end1 g0end2 g0life1 g0life2 g0t1 g0t2"
+	[ "$BREAK" = 1 ] && gtags="${gtags% g0t2}"
+	"$tools/GrenadeCheck/Release/GrenadeCheck.exe" "$DATA/map_gym.mocl" "$DATA" $gtags > "$OUT/grenade.log" 2>&1
+	sed 's/^/grenade /' "$OUT/grenade.log" >> "$g"
 	for t in expanse gym; do
 		local m="map_$t.mocl"
 		"$tools/MapCheck/Release/MapCheck.exe" "$DATA/$m" "$DATA/trace_$t.csv" > "$OUT/map_$t.log" 2>&1
@@ -227,6 +233,60 @@ run_dash() {
 		ok=0
 	fi
 	verdict 봇대시 $ok "봇 rc=$brc 서버 rc=$src 켬=$started 소식=$msgs 봇받음=$mine 방향=$f/$b/$l/$r 사건=${ev[*]} 버림=${dr[*]} 튼수=${st[*]}$(echo "$bd" | grep -oE ' (dashDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n')"
+}
+
+# 수류탄(컨텐츠 G-3 · G-4) — 봇이 수류탄을 던지며(--grenade, 대시 · 조준 · 근접 · 앉기와 섞어 대시 중 · 근접 끊기 · 재장전 끊기 갈래까지) 싸운다. 서버엔 클립을 줘 수류탄 몽타주를 튼다.
+# 봇 RESULT PASS = 위치 · 속도 · 탄 · 깃발 차이 0 · 던짐 소식이 예측과 같음(grenadeDiff 0) · 소식 · 피해 규칙 어긋남 0.
+# 여기서 더 보는 것 = 서버 던짐 = 던짐 소식 = 터짐 소식(신관 + 맞음) = 봇이 받은 내 소식(mine) · 봇이 센 내 피해 · 자기 피해 · 처치 = 서버 ·
+# 봇이 받은 던짐 · 신관 터짐 · 맞음 터짐 · 상태 소식 · 상태 칸 · 튕김 = 서버 × 봇 수(봇마다 같은 소식을 받는다) · 몽타주 사건 = 던짐 · 튼 수 = 사건 − 버림.
+# 한 번 이상이어야 하는 것 = 던짐 · 신관 터짐 · 하늘 던짐(noHit — 각본 갈래) · 피해(같음 비교가 0 = 0 이 아니게).
+# 맞아 터짐 · 근접 끊기는 판마다 0 이 나온다(G-3-c · G-4-b 판 0~3 · 0~4). 대시 중 · 벽 · 재장전 끊기도 판마다 흔들린다 — 다섯 다 값만 적는다.
+# 막기는 끈다(--testNoPawnBlock, run_bots 와 같은 까닭). --break 이면 예측에 수류탄을 안 넣어(--breakGrenade=predict) 어긋나야 한다
+run_grenade() {
+	local break_arg=""
+	[ "$BREAK" = 1 ] && break_arg="--breakGrenade=predict"
+	"$SRV" "--map=$MAP" --port=7967 --exitWhenEmpty "--record=$OUT_W/grenade_srv.csv" --warmup=2 --matchSeconds=40 --seed=21 "--pads=$PADS" "--clips=$DATA/clips.bin" --testNoPawnBlock > "$OUT/grenade_srv.log" 2>&1 &
+	local spid=$!
+	"$BOT" "--map=$MAP" --port=7967 "--record=$OUT_W/grenade_bot.csv" --seed=21 --testNoPawnBlock --grenade --dash --ads --melee --crouch $break_arg > "$OUT/grenade_bot.log" 2>&1
+	local brc=$?
+	wait $spid
+	local src=$? ok=1
+	[ $brc = 0 ] && [ $src = 0 ] || ok=0
+	cmp -s "$OUT/grenade_srv.csv" "$OUT/grenade_bot.csv" || ok=0
+	grep -q '^RESULT PASS' "$OUT/grenade_bot.log" || ok=0
+	local sg sw sa bg bw nb thrown timer hit smsgs sents sbnc hurt bhit bwire ev dr st
+	sg="$(grep -a '^SERVER grenade ' "$OUT/grenade_srv.log")"
+	sw="$(grep -a '^SERVER grenadeWire ' "$OUT/grenade_srv.log")"
+	sa="$(grep -a '^SERVER animGrenade ' "$OUT/grenade_srv.log")"
+	bg="$(grep -a '^BOT grenade ' "$OUT/grenade_bot.log")"
+	bw="$(grep -a '^BOT grenadeWire ' "$OUT/grenade_bot.log")"
+	nb="$(grep -a '^BOT 방 ' "$OUT/grenade_bot.log" | head -1 | sed -nE 's/.*: 봇 ([0-9]+) .*/\1/p')"
+	thrown="$(num "$sg" thrown)"; timer="$(num "$sg" timer)"; hit="$(num "$sg" hit)"
+	smsgs="$(num "$sw" stateMsgs)"; sents="$(num "$sw" stateEntries)"; sbnc="$(num "$sw" stateBounced)"
+	# 빈 값으로 $(( )) 를 셈하면 bash 가 스크립트를 끝낸다 — 아래 if 가 먼저 다 있는지 본다
+	# grenadeHits 줄엔 「 damage=」가 둘(mine · bad)이라 num 대신 자리로 읽는다
+	hurt=($(echo "$sg" | sed -nE 's/.* damage=([0-9]+) self=([0-9]+) kills=([0-9]+).*/\1 \2 \3/p'))
+	bhit=($(grep -a '^BOT grenadeHits ' "$OUT/grenade_bot.log" | sed -nE 's/.* mine damage=([0-9]+) selfDamage=([0-9]+) kills=([0-9]+) .*/\1 \2 \3/p'))
+	# grenadeWire 줄엔 「 msgs=」가 둘(전체 · 상태)이라 상태 몫도 자리로 읽는다 — throws · timer · hit · 상태 소식 · 칸 · 튕김
+	bwire=($(echo "$bw" | sed -nE 's/.* throws=([0-9]+) .* boom timer=([0-9]+) hit=([0-9]+) state msgs=([0-9]+) entries=([0-9]+) bounced=([0-9]+) .*/\1 \2 \3 \4 \5 \6/p'))
+	if [ -n "$thrown" ] && [ -n "$timer" ] && [ -n "$hit" ] && [ -n "$nb" ] && [ -n "$smsgs" ] && [ -n "$sents" ] && [ -n "$sbnc" ] && [ ${#hurt[@]} = 3 ] && [ ${#bhit[@]} = 3 ] && [ ${#bwire[@]} = 6 ]; then
+		[ "$thrown" -gt 0 ] && [ "$timer" -gt 0 ] && [ "$(num "$sg" noHit)" -gt 0 ] 2>/dev/null && [ "${hurt[0]}" -gt 0 ] || ok=0
+		[ "$(num "$sw" throwMsgs)" = "$thrown" ] && [ "$(num "$sw" boomMsgs)" = "$thrown" ] && [ $((timer + hit)) = "$thrown" ] || ok=0
+		[ "$(num "$bg" mine)" = "$thrown" ] && [ "$(num "$bg" grenadeDiff)" = 0 ] || ok=0
+		[ "${bhit[*]}" = "${hurt[*]}" ] || ok=0
+		[ "${bwire[0]}" = $((thrown * nb)) ] && [ "${bwire[1]}" = $((timer * nb)) ] && [ "${bwire[2]}" = $((hit * nb)) ] || ok=0
+		[ "${bwire[3]}" = $((smsgs * nb)) ] && [ "${bwire[4]}" = $((sents * nb)) ] && [ "${bwire[5]}" = $((sbnc * nb)) ] || ok=0
+	else
+		ok=0
+	fi
+	# animGrenade 줄 = events · dropped · starts · afterFire · reloadCancels(Server/main.cpp 가 찍음) — 사건 = 던짐, 튼 수 = 사건 − 버림
+	ev="$(num "$sa" events)"; dr="$(num "$sa" dropped)"; st="$(num "$sa" starts)"
+	if [ -n "$ev" ] && [ -n "$dr" ] && [ -n "$st" ]; then
+		[ "$ev" = "$thrown" ] && [ "$st" = $((ev - dr)) ] || ok=0
+	else
+		ok=0
+	fi
+	verdict 봇수류탄 $ok "봇 rc=$brc 서버 rc=$src 봇 $nb 던짐=$thrown 신관=$timer 맞음=$hit 피해·자기·처치=${hurt[*]} 봇=${bhit[*]} 사건=$ev 버림=$dr 튼수=$st$(echo "$sg" | grep -oE ' (noHit|whileDash|melee|reload|wall)=[0-9]+' | tr -d '\n')$(echo "$bg" | grep -oE ' (grenadeDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n')"
 }
 
 # 사람끼리 막기 대조(컨텐츠 F-1) — Lyra 연습장에서 두 사람이 부딪힌 기록을 Shared 이동으로 다시 돌려 위치 · 속도가 0.01 안이어야 한다.
@@ -392,6 +452,7 @@ else
 		run_block
 		run_pause
 		run_dash
+		run_grenade
 		run_rules
 		run_replay
 		run_authority
