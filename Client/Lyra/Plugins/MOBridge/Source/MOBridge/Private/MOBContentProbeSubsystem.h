@@ -12,6 +12,10 @@ struct FLyraAbilitySimpleFailureMessage;
 struct FLyraVerbMessage;
 struct FAbilityEndedData;
 class UGameplayAbility;
+class UAbilitySystemComponent;
+struct FGameplayEffectSpec;
+struct FActiveGameplayEffect;
+struct FActiveGameplayEffectHandle;
 class AController;
 class APawn;
 
@@ -50,7 +54,9 @@ public:
 		// G-0-b3 경기 끝 — 목표 점수를 지금 두 팀 점수 중 큰 쪽 + 1 로 낮춘다(다음 처치가 경기를 끝낸다)
 		LowerTarget,
 		// L-1-c 같은 프레임 누름(대시 판, -MOBCPDashSet=l1c) — Arg = DASH_ACTIONS 차례. ActDashSame = 그 능력 → 대시, DashActSame = 대시 → 그 능력을 한 프레임 안에 그 차례로 누른다
-		ActDashSame, DashActSame };
+		ActDashSame, DashActSame,
+		// L-1-d ① 상대가 던진다(수류탄 판, -MOBCPGrenSet=l1d) — Arg 안 씀(상대 자리 FT_FOE_BACK · FT_FOE_SIDE · 내 자리 FT_ME_FROM_HOME). FoeThrowLeave 는 수류탄이 생기고 FT_LEAVE_AFTER 프레임 뒤 상대가 나간다
+		FoeThrow, FoeThrowLeave };
 
 private:
 	bool WaitReady(float DeltaTime);
@@ -69,7 +75,7 @@ private:
 	void GoHome() const;
 	void PlaceFoe(double Distance, bool bFacingMe, double Side = 0.0) const;
 	void LogScores(const TCHAR* When) const;
-	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? (bDashL1C ? 9 : 5) : (bGrenade ? (bGrenL1C ? 10 : (bGrenL1B ? 8 : (bGrenL1A ? 7 : 6))) : 0))))); }
+	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? (bDashL1C ? 9 : 5) : (bGrenade ? (bGrenL1D ? 11 : (bGrenL1C ? 10 : (bGrenL1B ? 8 : (bGrenL1A ? 7 : 6)))) : 0))))); }
 	// 수류탄 판(G-0, grenade-plan.md) — 생김 · 부딪힘 · 튕김 · 멈춤은 엔진 알림을 받은 그 자리에서 적고(MOB_CPROBE_GSPAWN · _GHIT · _GBOUNCE · _GSTOP),
 	// 터짐(메시 숨김)은 틱에서 보고 폭발 판정을 같은 식으로 다시 해 본다(MOB_CPROBE_GBOOM — 겹친 성분은 comps 칸 · _GTRACE). 칸 끝 요약 = MOB_CPROBE_GREN
 	void OnActorSpawned(AActor* A);
@@ -139,6 +145,7 @@ private:
 	bool bGrenade = false;	// G-0 수류탄 각본(연습장, -MOBCPMode=grenade)
 	bool bGrenL1A = false;	// L-1-a 수류탄 장면 각본(-MOBCPMode=grenade -MOBCPGrenSet=l1a — 구석 · 높은 데서 아래로 · 벽 스침 · 턱 틈 + 옮겨 놓기 10칸. G-0 각본은 그대로)
 	bool bGrenL1B = false;	// L-1-b 수류탄 expanse 장면 각본(-MOBCPGrenSet=l1b, 맵 L_Expanse — 이동은 지나고 수류탄은 막는 창틀 띠 셋 + 무기 광선은 지나고 폭발 선은 막는 문틀 뒤 · 막힘 없는 대조 = 다섯 칸)
+	bool bGrenL1D = false;	// L-1-d 상대가 던진 뒤 나감 각본(-MOBCPGrenSet=l1d — 나가지 않는 대조 칸 · 나가는 칸)
 	bool bGrenL1C = false;	// L-1-c 수류탄 같은 프레임 누름 각본(-MOBCPGrenSet=l1c — 근접 → Q · Q → 근접 · 재장전 → Q · Q → 재장전, 한 프레임 안)
 	bool bDashL1C = false;	// L-1-c 대시 같은 프레임 누름 각본(-MOBCPMode=dash -MOBCPDashSet=l1c — 근접 → 대시 · 대시 → 근접, 한 프레임 안)
 	bool bReady = false;
@@ -286,6 +293,22 @@ private:
 	void FlushShots(const TCHAR* StepName, double Now);
 	class UAbilitySystemComponent* MyPSASC() const;	// 내 선수 상태의 ASC — 몸이 없을 때(죽음 ~ 부활)도 쿨다운을 읽는다
 	void FoeKillMe(const TCHAR* StepName);
+
+	// L-1-d ① 상대가 던진 뒤 나감 — 칸마다 누른 · 생긴 · 나간 · 상대 선수 상태가 사라진 · 내가 죽은 프레임(-1 = 아직) · 능력이 켜졌나. 대조 칸(FoeThrow)은 나감만 없다
+	int32 FTPressFrame = -1, FTSpawnFrame = -1, FTLeaveFrame = -1, FTPsGoneFrame = -1, FTMyDeathFrame = -1, FTAbilOk = -1;
+	float FTMyHpBegin = 0.f;
+	FString FTGrenName;
+	TWeakObjectPtr<AActor> FTFoePS;
+	void BeginFoeThrow();
+	void DuringFoeThrow();
+	void EndFoeThrow();
+	// L-1-d ② 효과 알림 — 나(0) · 상대(1) 선수 상태 ASC 의 지속 효과 걸림 · 풀림 · 무적 표식 수 바뀜(MOB_CPROBE_GEFX). 다시 생겨도 ASC 는 선수 상태에 있어 그대로다
+	TWeakObjectPtr<UAbilitySystemComponent> GEAsc[2];
+	FDelegateHandle GEAddH[2], GERemH[2], GETagH[2];
+	void WatchEffects(UAbilitySystemComponent* A, int32 Who);
+	void OnGEAdded(UAbilitySystemComponent* Target, const FGameplayEffectSpec& Spec, FActiveGameplayEffectHandle Handle, int32 Who);
+	void OnGERemoved(const FActiveGameplayEffect& E, int32 Who);
+	void OnImmuneTag(const FGameplayTag ChangedTag, int32 Count, int32 Who);
 
 	// G-0-b3 경기 끝(묶음 20) — 단계 줄(바뀐 때만) · 끝 단계가 처음 보인 프레임 · 내 능력 입력이 막혔나(막힌 프레임에 판을 끝낸다 — 다음 틱에 Lyra 가 맵을 다시 연다)
 	FString LastPhaseSig;
