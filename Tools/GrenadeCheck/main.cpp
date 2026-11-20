@@ -13,9 +13,17 @@
 //   튕긴 프레임 · 멈춘 프레임 · 멈춘 자리 · 맞아서 터진 프레임을 견준다
 //   - 맞음 알림은 맞은 쪽에도 간다(멈춘 수류탄에 다른 수류탄 · 사람이 닿음) — 그 줄은 이 수류탄의 쓸기가 아니라 뺀다(뿌리 자리가 쓸기 선 위에 없음)
 //   - 같은 팀 = 생긴 단계가 foe_same(기록 대본이 상대를 내 팀에 넣은 판) — 상대에 맞아도 튕긴다. 그 밖엔 던진 사람이 아닌 사람에 맞으면 터진다
+// 능력 · 던짐(G-2-a) — 기록 전체를 한 줄기로(쿨다운이 칸을 넘는다) 입력마다 CGrenadeAbility 를 서버 차례(NextInput → TryActivate)로 돌려 Lyra 와 견준다
+//   입력 r = 표 r 줄 프레임. 누름 = r−1 줄 g_press(누른 프레임의 다음 프레임 입력 처리에서 켜진다) · 막힘 · 쿨다운 = r−1 줄. 던짐 = GSPAWN frame=r
+//   던짐 계산은 표에서 — 몸 · 몸 요 = r−1 줄(이번 입력 이동 전, G-0-a 짐작 4) · 카메라 · 조종 회전 = r 줄(표 카메라 칸은 한 프레임 늦은 값, G-0-a)
+//   겨눔 선 = 맵(무기 깃발) + 상대 부위 몸(서 있는 자세 · r−1 줄 자리). Lyra 는 상대 메시 물리 몸에 맞으니 그 갈래는 따로 센다.
+//   Lyra 선이 상자 안에서 시작한 것(거리 0)도 따로 센다 — Lyra 겨눔 선은 단순 충돌, 우리 무기 깃발은 복잡 모양(미결 21)
+//   기록 도구 손질 둘을 따라 한다 — 쿨다운 지움(GCDCLEAR) · 몸 없는 프레임(죽은 뒤 새 몸까지, 표에 줄이 없음)도 시간은 간다
 // 끝 코드: 0 = 전부 통과, 1 = 불일치, 2 = 입력 오류
+#include "Grenade.h"
 #include "MapCollision.h"
 #include "Projectile.h"
+#include "Weapon.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -56,6 +65,13 @@ namespace
 	constexpr double kPawnRadius = 35.0;			// Lyra 사람 캡슐 반지름(Movement.h capsuleRadius)
 	constexpr double kOwnerReach = 40.0;			// 생긴 자리 = 던진 사람 중심 + 앞 5 + 위 25 — 이 안이면 던진 사람으로 본다
 	constexpr int kMaxFrames = 400;
+	// 던짐(G-2-a) — 생김 줄은 소수 열째 자리, 표 입력은 다섯째(자리) · 여섯째(각) 자리. 놓을 자리는 더하기뿐이라 표 자릿수 안,
+	// 회전 · 첫 속도는 날아감 기준(0.001° · 0.01cm/s)과 같게(제 판단, 구현 전에 적음)
+	constexpr double kThrowPosTolerance = 0.001;
+	constexpr double kThrowRotTolerance = 0.001;
+	constexpr double kThrowVelTolerance = 0.01;
+	constexpr double kAimDistTolerance = 0.01;		// 겨눔 선 맵 맞은 거리 — G-1 맞음 거리와 같은 기준
+	constexpr double kStandingHalfHeight = 89.0;	// 상대 캡슐 반높이가 이보다 작으면 앉음 — 서 있는 자세로 쏜 부위 몸이 안 맞는다(따로 셈)
 
 	enum : uint32_t
 	{
@@ -848,6 +864,348 @@ namespace
 		total.Add(t);
 		return true;
 	}
+
+	// ── 능력 · 던짐(G-2-a)
+	struct AbilityTotals
+	{
+		int inputs = 0, presses = 0, lyraThrown = 0, rowGaps = 0, gapFrames = 0, gapNotDead = 0, cdClears = 0;
+		int results[6] = {};		// EGrenadeResult 별
+		int throwDiff = 0, cooldownDiff = 0, postGameDiff = 0, gabilCompared = 0, gabilDiff = 0;
+		int throwCompared = 0, throwFails = 0, branchDiff = 0;
+		int branches[3] = {};		// EGrenadeAimBranch 별 — Lyra 선 결과로 돌린 것
+		double maxThrowPos = 0, maxThrowRot = 0, maxThrowVel = 0;
+		int aimCompared = 0, aimNone = 0, aimMap = 0, aimBody = 0, traceDiff = 0, endFails = 0, startInside = 0, startInsideDiff = 0, simpleSame = 0;
+		double maxAimMapDist = 0, maxEndRot = 0, maxEndVel = 0;
+		int bodyCompared = 0, bodyMiss = 0, crouchedFoe = 0;
+		double maxBodyDist = 0, maxBodyRot = 0;
+
+		void Add(const AbilityTotals& o)
+		{
+			inputs += o.inputs; presses += o.presses; lyraThrown += o.lyraThrown; rowGaps += o.rowGaps;
+			gapFrames += o.gapFrames; gapNotDead += o.gapNotDead; cdClears += o.cdClears;
+			startInside += o.startInside; startInsideDiff += o.startInsideDiff; simpleSame += o.simpleSame;
+			for (int k = 0; k < 6; ++k) results[k] += o.results[k];
+			throwDiff += o.throwDiff; cooldownDiff += o.cooldownDiff; postGameDiff += o.postGameDiff;
+			gabilCompared += o.gabilCompared; gabilDiff += o.gabilDiff;
+			throwCompared += o.throwCompared; throwFails += o.throwFails; branchDiff += o.branchDiff;
+			for (int k = 0; k < 3; ++k) branches[k] += o.branches[k];
+			maxThrowPos = std::max(maxThrowPos, o.maxThrowPos); maxThrowRot = std::max(maxThrowRot, o.maxThrowRot);
+			maxThrowVel = std::max(maxThrowVel, o.maxThrowVel);
+			aimCompared += o.aimCompared; aimNone += o.aimNone; aimMap += o.aimMap; aimBody += o.aimBody;
+			traceDiff += o.traceDiff; endFails += o.endFails;
+			maxAimMapDist = std::max(maxAimMapDist, o.maxAimMapDist); maxEndRot = std::max(maxEndRot, o.maxEndRot);
+			maxEndVel = std::max(maxEndVel, o.maxEndVel);
+			bodyCompared += o.bodyCompared; bodyMiss += o.bodyMiss; crouchedFoe += o.crouchedFoe;
+			maxBodyDist = std::max(maxBodyDist, o.maxBodyDist); maxBodyRot = std::max(maxBodyRot, o.maxBodyRot);
+		}
+	};
+
+	struct AbilityRow
+	{
+		double t = 0;
+		std::string ev;				// 그 프레임 줄들의 사건을 이어 붙임
+		Vec3 body, camera, foe;
+		double yaw = 0, hp = 0, cooldown = 0, camPitch = 0, camYaw = 0, ctlPitch = 0, ctlYaw = 0, foeYaw = 0, foeHalfHeight = 0, foeHp = 0;
+		bool dash = false;
+	};
+
+	struct SpawnRecord
+	{
+		std::string step;
+		Vec3 location, velocity;
+		Rotator rotation;
+		bool foeActive = true;
+	};
+
+	struct AimRecord
+	{
+		bool hit = false, body = false;
+		double distance = 0;
+		Vec3 location;
+		std::string branch;
+	};
+
+	int BranchIndex(const std::string& name)
+	{
+		if (name == "ctl") return (int)EGrenadeAimBranch::Control;
+		if (name == "hit") return (int)EGrenadeAimBranch::LookAtHit;
+		return (int)EGrenadeAimBranch::LookAtEnd;
+	}
+
+	bool RunAbilityTag(const CMapCollision& map, const std::string& dir, const std::string& tag, bool verbose, AbilityTotals& total)
+	{
+		std::vector<char> logData, csvData;
+		const std::string base = dir + "/cprobe_" + tag;
+		if (!ReadFile(base + ".log", logData) || !ReadFile(base + ".csv", csvData))
+		{
+			std::printf("GRENADECHECK input tag=%s 읽기 실패\n", tag.c_str());
+			return false;
+		}
+		AbilityTotals t;
+
+		// 로그 — 생김 · 겨눔 선 · 능력 알림 · 단계 · 죽은 몸(기록 도구가 체력만 1000 으로 되돌린 몸)
+		std::map<int, SpawnRecord> spawns;
+		std::map<int, AimRecord> aims;
+		std::map<int, std::string> gabil;		// 프레임 → on · cooldown · blocked(수류탄 능력만, 그 프레임 첫 줄)
+		std::set<int> cdClears;					// 기록 도구가 쿨다운 효과를 지운 프레임(t_cdclear) — 그 프레임 표 값이 이미 0 이라 다음 입력부터 0
+		int postFrame = -1;
+		bool startDead = false;
+		double revivedAt = -1;					// 시작 때 죽은 몸이면 새 몸이 생긴 때(초)
+		bool foeActive = true;
+		for (const std::string& line : Lines(logData))
+		{
+			const size_t at = line.find("MOB_CPROBE_");
+			if (at == std::string::npos) continue;
+			const size_t space = line.find(' ', at);
+			if (space == std::string::npos) continue;
+			const std::string kind = line.substr(at + 11, space - at - 11);
+			const std::map<std::string, std::string> kv = KeyValues(line.substr(space + 1));
+			const auto get = [&](const char* k) { const auto it = kv.find(k); return it == kv.end() ? std::string() : it->second; };
+			if (kind == "FOE_ACTIVE") foeActive = get("on") == "1";
+			else if (kind == "GCDCLEAR") cdClears.insert(std::atoi(get("frame").c_str()));
+			else if (kind == "PARAMS") startDead = std::atof(get("hp").c_str()) <= 0.0;
+			else if (kind == "PAWN_CHANGED")
+			{
+				if (startDead && revivedAt < 0 && get("to") != "None") revivedAt = std::atof(get("t").c_str());
+			}
+			else if (kind == "PHASE")
+			{
+				if (get("post") == "1" && postFrame < 0) postFrame = std::atoi(get("frame").c_str());
+			}
+			else if (kind == "GSPAWN")
+			{
+				SpawnRecord s;
+				s.step = get("step");
+				Vec3 rot;
+				if (!ParseVec(get("loc"), s.location) || !ParseVec(get("vel"), s.velocity) || !ParseVec(get("rot"), rot)) continue;
+				s.rotation.pitch = rot.x; s.rotation.yaw = rot.y; s.rotation.roll = rot.z;
+				s.foeActive = foeActive;
+				spawns[std::atoi(get("frame").c_str())] = s;
+			}
+			else if (kind == "GAIM")
+			{
+				if (get("which") != "now") continue;
+				AimRecord a;
+				a.hit = get("hit") == "1";
+				a.distance = std::atof(get("dist").c_str());
+				ParseVec(get("hitLoc"), a.location);
+				a.body = get("comp") == "CharacterMesh0";
+				a.branch = get("branch");
+				aims[std::atoi(get("frame").c_str())] = a;
+			}
+			else if (kind == "GABIL")
+			{
+				if (line.find("GA_Grenade") == std::string::npos) continue;
+				const int frame = std::atoi(get("frame").c_str());
+				const std::string ev = get("ev");
+				std::string what;
+				if (ev == "on") what = "on";
+				else if (ev == "fail" && line.find("ActivateFail.Cooldown") != std::string::npos) what = "cooldown";
+				else if (ev == "fail" && line.find("ActivateFail.TagsBlocked") != std::string::npos) what = "blocked";
+				else if (ev == "fail") what = "otherFail";
+				if (!what.empty() && !gabil.count(frame)) gabil[frame] = what;
+			}
+		}
+
+		// 표 — 프레임마다(같은 프레임 줄이 여럿이면 값은 마지막 줄, 사건은 이어 붙임)
+		std::map<int, AbilityRow> rows;
+		{
+			const std::vector<std::string> lines = Lines(csvData);
+			if (lines.empty()) return false;
+			const std::vector<std::string> head = SplitComma(lines[0]);
+			std::map<std::string, size_t> col;
+			for (size_t i = 0; i < head.size(); ++i) if (!col.count(head[i])) col[head[i]] = i;
+			const char* need[] = { "frame", "t", "ev", "px", "py", "pz", "yaw", "hp", "gCooldown", "dashActive", "camX", "camPitch", "camYaw",
+				"ctlPitch", "ctlYaw", "foeX", "foeY", "foeZ", "foeYaw", "foeHH", "foeHp" };
+			for (const char* n : need)
+				if (!col.count(n))
+				{
+					std::printf("GRENADECHECK input tag=%s 사람 표에 %s 칸 없음\n", tag.c_str(), n);
+					return false;
+				}
+			// 카메라 z 는 이름이 둘이다(앞쪽 camZ 는 다른 값) — camX 바로 뒤 둘을 쓴다
+			const size_t camX = col["camX"];
+			if (camX + 2 >= head.size() || head[camX + 1] != "camY" || head[camX + 2] != "camZ")
+			{
+				std::printf("GRENADECHECK input tag=%s 카메라 칸 차례가 다름\n", tag.c_str());
+				return false;
+			}
+			for (size_t i = 1; i < lines.size(); ++i)
+			{
+				const std::vector<std::string> c = SplitComma(lines[i]);
+				if (c.size() < head.size()) continue;
+				const auto num = [&](const char* n) { return std::atof(c[col[n]].c_str()); };
+				AbilityRow& r = rows[std::atoi(c[col["frame"]].c_str())];
+				r.t = num("t");
+				r.ev += c[col["ev"]];
+				r.body = Vec3(num("px"), num("py"), num("pz"));
+				r.yaw = num("yaw");
+				r.hp = num("hp");
+				r.cooldown = num("gCooldown");
+				r.dash = std::atoi(c[col["dashActive"]].c_str()) != 0;
+				r.camera = Vec3(std::atof(c[camX].c_str()), std::atof(c[camX + 1].c_str()), std::atof(c[camX + 2].c_str()));
+				r.camPitch = num("camPitch"); r.camYaw = num("camYaw");
+				r.ctlPitch = num("ctlPitch"); r.ctlYaw = num("ctlYaw");
+				r.foe = Vec3(num("foeX"), num("foeY"), num("foeZ"));
+				r.foeYaw = num("foeYaw"); r.foeHalfHeight = num("foeHH"); r.foeHp = num("foeHp");
+			}
+		}
+		if (rows.size() < 2) return false;
+
+		const ProjectileParams params;
+		CGrenadeAbility ability;
+		// 죽음 = 체력 0, 또는 시작 몸이 죽은 몸(PARAMS hp=0 — 표 체력은 기록 도구가 1000 으로 되돌려 보임)인 동안 새 몸이 생기기 전까지
+		const auto isDead = [&](const AbilityRow& row) { return row.hp <= 0.0 || (startDead && (revivedAt < 0 || row.t < revivedAt)); };
+		int prevFrame = rows.begin()->first;
+		for (auto it = std::next(rows.begin()); it != rows.end(); ++it)
+		{
+			const int r = it->first;
+			const AbilityRow& prev = rows[prevFrame];
+			const AbilityRow& cur = it->second;
+			// 표에 없는 프레임 = 몸이 없던 프레임(죽은 뒤 새 몸까지 — 앞 줄 체력 0). Lyra 쿨다운은 시간으로 가니 빈 프레임도 입력 하나씩 센다
+			if (r != prevFrame + 1)
+			{
+				++t.rowGaps;
+				if (!isDead(prev)) ++t.gapNotDead;
+			}
+			for (int f = prevFrame + 1; f <= r; ++f)
+			{
+				if (cdClears.count(f - 1))
+				{
+					++t.cdClears;
+					ability.Reset();			// 기록 도구가 쿨다운 효과를 지움 — 서버에는 없는 손질
+				}
+				if (f == r) break;
+				ability.NextInput();
+				++t.gapFrames;
+			}
+			prevFrame = r;
+			++t.inputs;
+
+			ability.NextInput();
+			if ((ability.CooldownLeft() > 0) != (prev.cooldown > 0.0)) ++t.cooldownDiff;
+
+			const bool pressed = prev.ev.find("g_press") != std::string::npos;
+			const bool dead = isDead(prev);
+			const bool postGame = postFrame >= 0 && r > postFrame;
+			EGrenadeResult res = EGrenadeResult::NotPressed;
+			if (pressed)
+			{
+				++t.presses;
+				res = ability.TryActivate(dead, prev.dash, postGame);
+			}
+			++t.results[(int)res];
+
+			const auto sp = spawns.find(r);
+			const bool lyraThrown = sp != spawns.end();
+			if (lyraThrown) ++t.lyraThrown;
+			if (lyraThrown != (res == EGrenadeResult::Thrown))
+			{
+				if (lyraThrown && res == EGrenadeResult::PostGame)
+				{
+					++t.postGameDiff;			// 미결 15 — 우리는 끝 단계에 막는다. 뒤 쿨다운 대조가 이어지게 Lyra 쪽으로 맞춘다
+					ability.StartFromServer();
+				}
+				else
+				{
+					++t.throwDiff;
+					if (verbose) std::printf("  throwDiff r=%d pressed=%d res=%d lyra=%d cdLeft=%d prevCd=%.4f\n", r, pressed, (int)res, lyraThrown, ability.CooldownLeft(), prev.cooldown);
+				}
+			}
+			const auto gb = gabil.find(r);
+			if (gb != gabil.end())
+			{
+				++t.gabilCompared;
+				const bool same = (gb->second == "on" && (res == EGrenadeResult::Thrown || (res == EGrenadeResult::PostGame && lyraThrown)))
+					|| (gb->second == "cooldown" && res == EGrenadeResult::OnCooldown)
+					|| (gb->second == "blocked" && res == EGrenadeResult::WhileDash);
+				if (!same)
+				{
+					++t.gabilDiff;
+					if (verbose) std::printf("  gabilDiff r=%d lyra=%s res=%d\n", r, gb->second.c_str(), (int)res);
+				}
+			}
+			if (!lyraThrown) continue;
+
+			// 던짐 — Lyra 선 결과로 한 번(계산 대조) · 우리 선으로 한 번(겨눔 선 대조)
+			const SpawnRecord& s = sp->second;
+			const auto am = aims.find(r);
+			if (am == aims.end()) { ++t.throwFails; continue; }
+			const AimRecord& la = am->second;
+			++t.throwCompared;
+			const Vec3 spawn = GrenadeSpawnLocation(prev.body, prev.yaw);
+			Rotator camRot; camRot.pitch = cur.camPitch; camRot.yaw = cur.camYaw;
+			Rotator ctlRot; ctlRot.pitch = cur.ctlPitch; ctlRot.yaw = cur.ctlYaw;
+			Vec3 traceStart, traceEnd;
+			GrenadeTraceSegment(cur.camera, camRot, traceStart, traceEnd);
+
+			GrenadeAimHit lyraAim;
+			lyraAim.hit = la.hit; lyraAim.distance = la.distance; lyraAim.location = la.location; lyraAim.body = la.body;
+			const GrenadeThrow fromLyra = ComputeGrenadeThrow(spawn, ctlRot, traceEnd, lyraAim, params);
+			++t.branches[(int)fromLyra.branch];
+			if ((int)fromLyra.branch != BranchIndex(la.branch)) ++t.branchDiff;
+			const double dPos = Dist(spawn, s.location), dRot = RotDiff(fromLyra.rotation, s.rotation), dVel = Dist(fromLyra.velocity, s.velocity);
+			t.maxThrowPos = std::max(t.maxThrowPos, dPos); t.maxThrowRot = std::max(t.maxThrowRot, dRot); t.maxThrowVel = std::max(t.maxThrowVel, dVel);
+			const bool throwFail = dPos > kThrowPosTolerance || dRot > kThrowRotTolerance || dVel > kThrowVelTolerance;
+			if (throwFail) ++t.throwFails;
+
+			BodyPlacement bodies[2];
+			bodies[0].center = prev.body; bodies[0].yawDegrees = prev.yaw; bodies[0].id = kIdMe;
+			bodies[1].center = prev.foe; bodies[1].yawDegrees = prev.foeYaw; bodies[1].id = kIdFoe;
+			bodies[1].skip = !s.foeActive || prev.foeHp <= 0.0;
+			const bool foeCrouched = !bodies[1].skip && prev.foeHalfHeight < kStandingHalfHeight;
+			if (foeCrouched) ++t.crouchedFoe;
+			const GrenadeAimHit ours = TraceGrenadeAim(map, traceStart, traceEnd, bodies, 2, kIdMe);
+			const GrenadeThrow end = ComputeGrenadeThrow(spawn, ctlRot, traceEnd, ours, params);
+			++t.aimCompared;
+			const char* aimResult = "same";
+			if (la.body || ours.body)
+			{
+				++t.bodyCompared;
+				const double dEndRot = RotDiff(end.rotation, s.rotation);
+				t.maxBodyRot = std::max(t.maxBodyRot, dEndRot);
+				if (la.body && ours.body && la.hit == ours.hit)
+				{
+					++t.aimBody;
+					t.maxBodyDist = std::max(t.maxBodyDist, std::fabs(ours.distance - la.distance));
+				}
+				else { ++t.bodyMiss; aimResult = "bodyMiss"; }
+			}
+			else
+			{
+				if (!la.hit) ++t.aimNone; else ++t.aimMap;
+				// 진단 — 같은 선을 단순 나무(수류탄 깃발 · 속 찬 상자는 안에서 거리 0)로 쏘면 Lyra 와 같나. 겨눔 선은 단순 충돌이다(GA_Grenade 의 LineTraceSingle 에
+				// bTraceComplex 핀이 없음 = 기본 false, 폭발 선은 true 가 찍힘 — gren0/ga_flow.txt:107-116 · b_flow.txt:53-60). 맵 파일엔 「단순 모양 + 무기 채널」 깃발이 없다(미결 21)
+				RayHit simpleHit;
+				const bool simpleHitAny = map.Raycast(traceStart, traceEnd, MAP_BLOCK_GRENADE, simpleHit);
+				if (simpleHitAny == la.hit && (!la.hit || std::fabs(simpleHit.distance - la.distance) <= kAimDistTolerance)) ++t.simpleSame;
+				// Lyra 가 상자 안에서 시작(거리 0 · 맞은 점 = 선 시작) — 우리 무기 깃발은 복잡 모양(면)이라 안에서 시작해도 거리 0 이 안 된다. 따로 센다
+				const bool lyraInside = la.hit && la.distance == 0.0 && Dist(la.location, traceStart) <= kAimDistTolerance;
+				if (lyraInside) ++t.startInside;
+				const double dDist = std::fabs(ours.distance - la.distance);
+				const double dEndRot = RotDiff(end.rotation, s.rotation), dEndVel = Dist(end.velocity, s.velocity);
+				if (lyraInside && (!ours.hit || dDist > kAimDistTolerance)) { ++t.startInsideDiff; aimResult = "startInside"; }
+				else
+				{
+					if (la.hit && ours.hit) t.maxAimMapDist = std::max(t.maxAimMapDist, dDist);
+					t.maxEndRot = std::max(t.maxEndRot, dEndRot); t.maxEndVel = std::max(t.maxEndVel, dEndVel);
+					if (la.hit != ours.hit || dDist > kAimDistTolerance) { ++t.traceDiff; aimResult = "traceDiff"; }
+					else if (dEndRot > kThrowRotTolerance || dEndVel > kThrowVelTolerance) { ++t.endFails; aimResult = "endFail"; }
+				}
+			}
+			if (verbose && (throwFail || std::strcmp(aimResult, "same") != 0 || (int)fromLyra.branch != BranchIndex(la.branch)))
+				std::printf("  throw r=%d step=%s branch lyra=%s ours=%d pos=%.6f rot=%.6f vel=%.6f aim %s lyra hit=%d body=%d dist=%.4f at=%.4f,%.4f,%.4f ours hit=%d body=%d dist=%.4f at=%.4f,%.4f,%.4f start=%.4f,%.4f,%.4f%s\n",
+					r, s.step.c_str(), la.branch.c_str(), (int)fromLyra.branch, dPos, dRot, dVel, aimResult, la.hit, la.body, la.distance,
+					la.location.x, la.location.y, la.location.z, ours.hit, ours.body, ours.distance, ours.location.x, ours.location.y, ours.location.z,
+					traceStart.x, traceStart.y, traceStart.z, foeCrouched ? " foeCrouched" : "");
+		}
+
+		std::printf("GRENADECHECK tag=%s ability presses=%d thrown=%d lyraThrown=%d throwDiff=%d cooldownDiff=%d postGameDiff=%d gabilDiff=%d throw fails=%d branchDiff=%d aim traceDiff=%d endFails=%d startInsideDiff=%d bodyMiss=%d cdClears=%d gapFrames=%d\n",
+			tag.c_str(), t.presses, t.results[(int)EGrenadeResult::Thrown], t.lyraThrown, t.throwDiff, t.cooldownDiff, t.postGameDiff, t.gabilDiff,
+			t.throwFails, t.branchDiff, t.traceDiff, t.endFails, t.startInsideDiff, t.bodyMiss, t.cdClears, t.gapFrames);
+		total.Add(t);
+		return true;
+	}
 }
 
 int main(int argc, char** argv)
@@ -881,14 +1239,21 @@ int main(int argc, char** argv)
 	}
 
 	Totals total;
+	AbilityTotals ab;
 	for (const std::string& tag : tags)
+	{
 		if (!RunTag(map, dir, tag, verbose, pawnRowNow, total)) return 2;
+		if (!RunAbilityTag(map, dir, tag, verbose, ab)) return 2;
+	}
 
 	const bool pass = total.fails == 0 && total.early == 0 && total.late == 0 && total.kindDiff == 0 && total.hitFails == 0
 		&& total.launchFails == 0 && total.ownerUnknown == 0 && total.grenades > 0 && total.frames > 0
 		&& total.bounceFails == 0 && total.bounceFrameDiff == 0 && total.stopFrameDiff == 0 && total.detonateDiff == 0
 		&& total.allHitFails == 0 && total.hitFrameDiff == 0 && total.hitCountDiff == 0 && total.bounceFrames > 0 && total.foeToggleWhileLive == 0
-		&& total.maxRotUnexplained <= kRotTolerance;	// 속도 차로 설명 안 되는 회전 차는 날아감 기준 그대로
+		&& total.maxRotUnexplained <= kRotTolerance	// 속도 차로 설명 안 되는 회전 차는 날아감 기준 그대로
+		// 능력 · 던짐(G-2-a) — 경기 끝 갈래 다름(postGameDiff)은 미결 15 라 넣지 않는다. 사람 메시 겨눔(bodyMiss · 거리 차)은 부위 몸 몫이라 넣지 않는다
+		&& ab.lyraThrown > 0 && ab.throwDiff == 0 && ab.cooldownDiff == 0 && ab.gabilDiff == 0 && ab.gapNotDead == 0
+		&& ab.throwCompared == ab.lyraThrown && ab.throwFails == 0 && ab.branchDiff == 0 && ab.traceDiff == 0 && ab.endFails == 0;
 	const ProjectileCounters& c = total.count;
 	std::printf("GRENADECHECK flight grenades=%d frames=%d fails=%d maxPosDiff=%.6f maxVelDiff=%.6f maxRotDiff=%.6f firstHit same=%d early=%d late=%d kindDiff=%d none=%d\n",
 		total.grenades, total.frames, total.fails, total.maxPos, total.maxVel, total.maxRot, total.same, total.early, total.late, total.kindDiff, total.noneBoth);
@@ -911,6 +1276,15 @@ int main(int argc, char** argv)
 		c.steps, c.blockedSteps, c.extraIterations, c.startPenetrating, c.resolveMoved, c.resolveCombined, c.resolveWithMove, c.resolveFailed,
 		c.ignoredOverlaps, c.minMoveZeroed, c.bounces, c.stopsOnImpact, c.stopsOnSlide, c.multiHits, c.slides, c.corners, c.slideMoves, c.slideHits,
 		c.slideFriction, c.detonations);
+	std::printf("GRENADECHECK ability inputs=%d presses=%d thrown=%d lyraThrown=%d onCooldown=%d whileDash=%d dead=%d postGame=%d throwDiff=%d cooldownDiff=%d postGameDiff=%d gabil=%d gabilDiff=%d rowGaps=%d gapFrames=%d gapNotDead=%d cdClears=%d\n",
+		ab.inputs, ab.presses, ab.results[(int)EGrenadeResult::Thrown], ab.lyraThrown, ab.results[(int)EGrenadeResult::OnCooldown],
+		ab.results[(int)EGrenadeResult::WhileDash], ab.results[(int)EGrenadeResult::Dead], ab.results[(int)EGrenadeResult::PostGame],
+		ab.throwDiff, ab.cooldownDiff, ab.postGameDiff, ab.gabilCompared, ab.gabilDiff, ab.rowGaps, ab.gapFrames, ab.gapNotDead, ab.cdClears);
+	std::printf("GRENADECHECK throw compared=%d fails=%d maxPosDiff=%.6f maxRotDiff=%.6f maxVelDiff=%.6f ctl=%d hit=%d end=%d branchDiff=%d\n",
+		ab.throwCompared, ab.throwFails, ab.maxThrowPos, ab.maxThrowRot, ab.maxThrowVel, ab.branches[0], ab.branches[1], ab.branches[2], ab.branchDiff);
+	std::printf("GRENADECHECK aim compared=%d none=%d mapHits=%d traceDiff=%d maxMapDistDiff=%.6f endFails=%d maxEndRotDiff=%.6f maxEndVelDiff=%.6f startInside=%d startInsideDiff=%d simpleSame=%d bodyCompared=%d bodyHits=%d bodyMiss=%d maxBodyDistDiff=%.4f maxBodyRotDiff=%.4f crouchedFoe=%d\n",
+		ab.aimCompared, ab.aimNone, ab.aimMap, ab.traceDiff, ab.maxAimMapDist, ab.endFails, ab.maxEndRot, ab.maxEndVel, ab.startInside, ab.startInsideDiff, ab.simpleSame, ab.bodyCompared, ab.aimBody,
+		ab.bodyMiss, ab.maxBodyDist, ab.maxBodyRot, ab.crouchedFoe);
 	std::printf("GRENADECHECK %s\n", pass ? "PASS" : "FAIL");
 	return pass ? 0 : 1;
 }

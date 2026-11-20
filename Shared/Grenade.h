@@ -1,0 +1,101 @@
+﻿#pragma once
+
+// 수류탄 능력 · 던짐(컨텐츠 G-2) — Lyra GA_Grenade 를 엔진 없이 옮긴 것. 정본 = MyDocs/claude-plans/mo-shooter/grenade-plan.md
+// - 날아감은 Shared/Projectile(G-1). 여기는 켜기(쿨다운) · 던짐 계산(놓을 자리 · 겨눔 선 · 방향 · 첫 속도) — 폭발은 G-2-b
+// - 서버 · 예측 · 대조 도구(Tools/GrenadeCheck)가 같은 함수를 쓴다
+// - 언리얼 안에서도 컴파일돼야 하므로 예외·RTTI 를 쓰지 않는다
+
+#include "Projectile.h"
+#include "Weapon.h"
+
+#include <cstddef>
+#include <cstdint>
+
+namespace mo
+{
+	// ── 능력 — 쿨다운은 입력 수로 센다(입력 하나 = Lyra 기록 한 프레임, 60/초 · 대시와 같은 꼴)
+	inline constexpr int kGrenadeCooldownInputs = 301;	// 다시 켜는 첫 입력 = 켠 입력 + 301 — G-0-c 실측(매 프레임 누름 간격 301 · 301 · 301, g0c2 · g0c3 같음).
+														// 원본 GE_Grenade_Cooldown 5초 × 60 = 300 — 대시(1.5초 → 91)와 같이 하나 더 걸린다
+
+	// 누름 하나의 결과 — 던짐 말고는 모두 「안 켬」이라 동작은 같고, 통계(SERVER 줄)를 갈래마다 따로 세려고 나눈다.
+	// 가르는 차례(경기 끝 → 죽음 → 대시 중 → 쿨다운)는 우리가 정한 것이다(대시 능력과 같은 차례)
+	enum class EGrenadeResult : uint8_t
+	{
+		NotPressed,
+		Thrown,
+		OnCooldown,		// Ability.ActivateFail.Cooldown
+		WhileDash,		// 대시가 Ability.Type.Action 을 막음(TagRelationships_ShooterHero 4번 · Ability.ActivateFail.TagsBlocked)
+		Dead,			// 죽음 · 죽는 중
+		PostGame,		// 경기 끝 단계 — 우리 서버는 막는다. Lyra 는 끝 단계에도 던진다(content-impl-progress.md 미결 15 — 판정 전이라 다른 능력과 같게 둠)
+	};
+
+	// 수류탄 능력 — 입력 하나의 차례: NextInput → (수류탄 단추를 누른 입력이면) TryActivate
+	// 서버가 만든 빈 입력(serverMade)에는 둘 다 안 부른다 — 시계가 안 간다(D87, 근접 · 대시와 같다).
+	// 쿨다운은 죽어도 안 풀린다(Lyra 는 쿨다운 효과가 선수 상태 ASC 에 있다 — G-0-b2 실측) → 부활에 Reset 을 부르지 않는다
+	class CGrenadeAbility
+	{
+	public:
+		void NextInput();
+		EGrenadeResult TryActivate(bool dead, bool dashing, bool postGame);
+		bool JustThrown() const { return _justThrown; }		// 이번 입력에 던졌나 — 재장전 · 근접 끊기는 이 입력에만
+		int CooldownLeft() const { return _cooldownLeft; }	// 0 보다 크면 이번 입력에 못 켬
+		// 서버가 이 입력에 던졌다(예측이 서버 소식으로 고칠 때) — 켜기 조건은 안 보고 쿨다운만 TryActivate 의 던짐과 같게 놓는다. NextInput 뒤에 부른다
+		void StartFromServer();
+		void Reset();		// 판 시작
+
+	private:
+		int _cooldownLeft = 0;
+		bool _justThrown = false;
+	};
+
+	// ── 던짐 — GA_Grenade 그래프 「Get Spawn Location」 · 「Get Spawn Rotation」(원본 기준 ga_flow.txt:65-158)
+	inline constexpr double kGrenadeSpawnForward = 5.0;		// 몸 앞 × 5
+	inline constexpr double kGrenadeSpawnUp = 25.0;			// 몸 위 × 25 — 던진 사람 캡슐 안이다
+	inline constexpr double kGrenadeTraceStart = 450.0;		// Start Trace Offset — 카메라에서 선 시작까지
+	inline constexpr double kGrenadeTraceRange = 3150.0;	// Default Targeting Range — 카메라에서 선 끝까지
+	inline constexpr double kGrenadeAimMinDistance = 45.0;	// 맞은 거리(선 시작에서) < 45 면 조종 회전 그대로 — 안 맞음도 거리 0 이라 이 갈래(G-0-a 짐작 1)
+
+	// 놓을 자리 = 몸 위치(캡슐 중심) + 몸 앞 × 5 + 몸 위 × 25. 몸 회전은 요만 있다(사람 액터는 똑바로 선다)
+	Vec3 GrenadeSpawnLocation(const Vec3& bodyCenter, double bodyYawDegrees);
+
+	// 겨눔 선 구간 = 카메라 + 방향 × 450 ~ 카메라 + 방향 × 3150. 방향 = 카메라 회전(Conv_RotatorToVector)
+	void GrenadeTraceSegment(const Vec3& camera, const Rotator& cameraRotation, Vec3& outStart, Vec3& outEnd);
+
+	// 겨눔 선 결과(LineTraceSingle · 무기 채널 · 던진 사람 뺌) — 안 맞으면 hit = false · distance = 0(BreakHitResult 기본값)
+	struct GrenadeAimHit
+	{
+		bool hit = false;
+		double distance = 0;	// 선 시작에서 맞은 곳까지
+		Vec3 location;			// 맞은 곳(선이라 ImpactPoint 와 같다)
+		bool body = false;		// 사람 부위 몸에 맞음(아니면 맵)
+		uint32_t bodyId = 0;	// 맞은 몸의 BodyPlacement::id
+		uint32_t shape = 0;		// 맞은 부위(BodyHit::shape)
+	};
+
+	// 맵(무기 깃발) + 사람 부위 몸 중 가장 가까운 것. bodies 중 id == ignoreId 는 뺀다(던진 사람, bIgnoreSelf).
+	// Lyra 는 사람 메시 물리 몸에 맞는다(G-0 기록 comp=CharacterMesh0) — 우리 쪽은 총알과 같은 부위 몸(TraceBody)
+	// 맵 몫은 Lyra 와 모양이 다르다 — Lyra 겨눔 선은 단순 충돌(bTraceComplex 기본 false)인데 맵 파일엔 「단순 모양 + 무기 채널」 깃발이 없어
+	// 무기 깃발(복잡 모양)로 쏜다. 선 시작(카메라 앞 450)이 상자 안이면 Lyra 는 거리 0(→ 조종 회전), 우리는 반대쪽 면에 맞는다
+	// (gym 기록 겨눔 490 중 28) — content-impl-progress.md 미결 21
+	GrenadeAimHit TraceGrenadeAim(const CMapCollision& map, const Vec3& start, const Vec3& end,
+		const BodyPlacement* bodies, size_t bodyCount, uint32_t ignoreId);
+
+	enum class EGrenadeAimBranch : uint8_t
+	{
+		Control,	// 맞은 거리 < 45(안 맞음 포함) — 조종 회전 그대로
+		LookAtHit,	// 놓을 자리에서 맞은 곳을 보는 회전
+		LookAtEnd,	// 거리 ≥ 45 인데 안 맞음 — 그래프에 있는 갈래(Select 의 거짓 쪽). 안 맞으면 거리가 0 이라 실제로는 안 온다
+	};
+
+	struct GrenadeThrow
+	{
+		Vec3 location;			// 놓을 자리 = 수류탄 뿌리(메시)
+		Rotator rotation;		// 생길 때 회전 — 날아감의 몸 축(기운 캡슐)
+		Vec3 velocity;			// 첫 속도 = 회전 × 정규화(1, 0, 0.15) × 2500(LaunchVelocity)
+		EGrenadeAimBranch branch = EGrenadeAimBranch::Control;
+	};
+
+	// 놓을 자리 · 조종 회전 · 겨눔 선 결과 → 던짐. traceEnd = LookAtEnd 갈래가 보는 끝점
+	GrenadeThrow ComputeGrenadeThrow(const Vec3& spawnLocation, const Rotator& controlRotation, const Vec3& traceEnd,
+		const GrenadeAimHit& aim, const ProjectileParams& params);
+}
