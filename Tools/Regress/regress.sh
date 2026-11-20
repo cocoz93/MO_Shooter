@@ -89,6 +89,12 @@ run_checks() {
 	[ "$BREAK" = 1 ] && btags="l1b1"
 	"$tools/GrenadeCheck/Release/GrenadeCheck.exe" "$MAP" "$DATA" $btags > "$OUT/grenade_l1b.log" 2>&1
 	sed 's/^/grenade_l1b /' "$OUT/grenade_l1b.log" >> "$g"
+	# 같은 입력 두 누름(L-5-b) — L-1-c 기록 넷(수류탄 l1c1 · l1c2 · 대시 l1cd1 · l1cd2)의 누름 차례를 예측(CSelfPrediction)에 넣어 Lyra 근접 켬 · 끊김 · 막힘 · 대시 · 던짐 ·
+	# 재장전 · 칸 끝 탄창과 대조. 차례 없이 넣은 대조군이 Lyra 와 다른 칸 수(fixedOrderDiff)까지 기준선에 든다. --break 이면 l1cd2 를 빼 합계 줄이 어긋나야 한다
+	local ptags="l1c1 l1c2 l1cd1 l1cd2"
+	[ "$BREAK" = 1 ] && ptags="l1c1 l1c2 l1cd1"
+	"$tools/PressCheck/Release/PressCheck.exe" "$DATA/map_gym.mocl" "$DATA" $ptags > "$OUT/press.log" 2>&1
+	sed 's/^/press /' "$OUT/press.log" >> "$g"
 	for t in expanse gym; do
 		local m="map_$t.mocl"
 		"$tools/MapCheck/Release/MapCheck.exe" "$DATA/$m" "$DATA/trace_$t.csv" > "$OUT/map_$t.log" 2>&1

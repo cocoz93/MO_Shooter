@@ -444,6 +444,8 @@ namespace
 			if (reloadPressed || meleePressed || actPress || HasEvent(evPrev, "jump_press")) ++step.presses;
 
 			// 서버 차례(Room::ApplyInput) — 대시 켜기 · 끊기 → 점프 → 근접 → 조준 → 무기 순환 → 앞 입력 기억
+			// (서버는 근접을 점프 앞 능력 자리에서 켠다(L-5-a) — 근접 · 점프가 서로를 안 읽어 결과가 같다. 같은 입력 두 누름은 고정 차례(대시 먼저)로만 본다 —
+			//  이 도구 기록 dash6 에는 그런 줄이 없고, 누른 차례 대조는 PressCheck(L-5-b)가 L-1-c 기록으로 한다)
 			const Vec3 move(Cell(prev, c.inX), Cell(prev, c.inY), 0.0);
 			const float viewPitch = (float)Cell(prev, c.ctlPitch);
 			const float viewYaw = (float)Cell(prev, c.ctlYaw);
