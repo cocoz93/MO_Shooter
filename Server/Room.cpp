@@ -1745,12 +1745,13 @@ namespace mo
 		target.respawnTick = _tick + SecondsToTicks(_rules.respawnSeconds);
 		target.move.velocity = Vec3();
 		std::fill(target.padOverlap.begin(), target.padOverlap.end(), (uint8_t)0);	// 죽으면 충돌이 꺼져 겹침이 끝난다
-		++target.deaths;
 
-		// B_ShooterGameScoring_Base — 죽은 쪽은 늘 +1, 다른 팀이 죽였을 때만 처치와 팀 점수 +1
+		// B_ShooterGameScoring_Base — 다른 팀이 죽였을 때만 죽은 쪽 죽음 · 처치 · 팀 점수 +1. 처치자 없는 자기 파괴(떨어짐 · 디버그 처치) · 자기 수류탄 · 같은 팀 처치는 셋 다 안 센다
+		// (그래프 원본. Lyra 기록 G-0-b2 — 스스로 죽음 둘 · 자기 수류탄 처치 하나 모두 죽음 0). 봇 집계(BotClient OnKill)도 같은 규칙을 따로 적는다
 		const bool scored = attacker && attacker->team != target.team;
 		if (scored)
 		{
+			++target.deaths;
 			++attacker->kills;
 			uint16_t& score = attacker->team == wire::kTeamA ? _teamScoreA : _teamScoreB;
 			++score;

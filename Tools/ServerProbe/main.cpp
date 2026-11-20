@@ -23,6 +23,7 @@
 // 일부러 틀리기: --breakMirror 는 여기 쪽 가속을, --breakSpread 는 여기 쪽 퍼짐을 「이번 발의 열이 더해진 뒤」 값으로 바꿔 1번이,
 // --breakDamage 는 여기 쪽 기대 피해를 바꿔 2번이 실패해야 한다.
 #include "GameProtocol.h"
+#include "Grenade.h"
 #include "MapCollision.h"
 #include "MatchRules.h"
 #include "Movement.h"
@@ -1102,7 +1103,7 @@ namespace
 		Expect(respawnB.tick - kill1.tick == kRespawnTicks, fails, "부활까지 300틱");
 		Expect(b.self.hp == 100.f && b.self.weapon == 0 && b.self.magazine == GetWeaponDef(EWeapon::Pistol).magazineSize && b.self.spare == GetWeaponDef(EWeapon::Pistol).startSpareAmmo, fails, "부활하면 체력·탄 처음대로, 권총");
 
-		// ⑥ 떨어져 죽음 — 사망 +1, 점수 그대로
+		// ⑥ 떨어져 죽음 — 사망 · 점수 그대로(처치자 없는 자기 파괴 — B_ShooterGameScoring_Base 는 다른 팀 처치만 센다, L-3-a)
 		wire::DebugPlace fall = wire::DebugPlace();
 		fall.seq = ++c.seq;
 		fall.x = 50000; fall.y = 50000; fall.z = rules.fallKillZ + 5.0;
@@ -1117,11 +1118,56 @@ namespace
 		{
 			const wire::Kill& k = a.kills[killsBeforeFall];
 			std::printf("RULES 낙사 가한=%u 맞은=%u 점수=%u:%u 사망수=%u\n", k.attacker, k.target, k.teamScoreA, k.teamScoreB, k.targetDeaths);
-			Expect(k.attacker == 0 && k.target == idC && k.teamScoreA == 1 && k.teamScoreB == 0 && k.targetDeaths == 1, fails, "낙사 — 사망만 +1, 점수 그대로");
+			Expect(k.attacker == 0 && k.target == idC && k.teamScoreA == 1 && k.teamScoreB == 0 && k.targetDeaths == 0, fails, "낙사 — 사망 · 점수 그대로");
 		}
 		else
 		{
 			Expect(false, fails, "낙사가 안 일어남");
+		}
+
+		// ⑥-2 자기 수류탄 처치 — C 를 체력 1 로 옮겨(옮기기가 죽음 · 무적을 푼다) 발밑에 던진다. 처치자 = 자기(같은 팀)라 사망 · 처치 · 점수 다 그대로(L-3-a).
+		// 자리는 A · B 가 폭발 반지름 밖인 곳 — 두 사람 체력 · 도움 기록을 건드리면 ⑦ 이 달라진다
+		{
+			const Vec3 posA(a.self.x, a.self.y, a.self.z), posB(b.self.x, b.self.y, b.self.z);
+			const double keepAway = kGrenadeBlastRadius + 150.0;
+			size_t startCount = 0;
+			const SpawnPoint* starts = GetExpanseStarts(startCount);
+			Vec3 spotC;
+			bool found = false;
+			for (size_t s = 0; s < startCount && !found; ++s)
+			{
+				Vec3 at;
+				if (!FindSpotNear(map, starts[s].location, at)) continue;
+				if (Length(at - posA) < keepAway || Length(at - posB) < keepAway) continue;
+				spotC = at;
+				found = true;
+			}
+			if (!found)
+			{
+				Expect(false, fails, "자기 수류탄 처치 — A · B 에서 먼 자리를 못 찾음");
+			}
+			else
+			{
+				c.Place(spotC, 1.f);
+				PumpFor(clients, 3, 0.1);
+				const Vec3 eyeC = spotC + Vec3(0, 0, 60);
+				const size_t killsBeforeSelf = a.kills.size();
+				RunTicks(clients, 3, 60 * 4, [&](int i) { SendAim(c, eyeC, eyeC + Vec3(30, 0, -100), 0, 0, i == 0 ? wire::BUTTON_GRENADE : 0, 0); },
+					[&] { return a.kills.size() > killsBeforeSelf; });
+				PumpFor(clients, 3, 0.05);
+				if (a.kills.size() > killsBeforeSelf)
+				{
+					const wire::Kill& k = a.kills[killsBeforeSelf];
+					std::printf("RULES 자기 수류탄 처치 가한=%u 맞은=%u 무기=%u 점수=%u:%u 처치수=%u 사망수=%u A 거리=%.0f B 거리=%.0f\n",
+						k.attacker, k.target, k.weapon, k.teamScoreA, k.teamScoreB, k.attackerKills, k.targetDeaths, Length(spotC - posA), Length(spotC - posB));
+					Expect(k.attacker == idC && k.target == idC && k.weapon == wire::kWeaponGrenade && k.teamScoreA == 1 && k.teamScoreB == 0 && k.attackerKills == 0 && k.targetDeaths == 0,
+						fails, "자기 수류탄 처치 — 사망 · 처치 · 점수 그대로");
+				}
+				else
+				{
+					Expect(false, fails, "자기 수류탄 처치가 안 일어남");
+				}
+			}
 		}
 
 		// ⑦ 승리 — 목표 2. 무적이 끝날 때쯤 쏘기 시작한다
@@ -1183,7 +1229,7 @@ namespace
 		}
 		std::printf("RULES 결과 틱=경기 끝+%d(기대 %u) 이긴 팀=%u A 처치=%d B 사망=%d C 사망=%d 결과 인원=%u\n", (int)(a.result.tick - post.tick), kPostGameTicks, a.result.winningTeam, killsA, deathsB, deathsC, a.result.count);
 		Expect(a.result.tick - post.tick == kPostGameTicks, fails, "경기 끝 600틱 뒤 결과");
-		Expect(a.result.winningTeam == wire::kTeamA && killsA == 2 && deathsB == 2 && deathsC == 1 && a.result.count == 3, fails, "결과 = 처치·사망 집계");
+		Expect(a.result.winningTeam == wire::kTeamA && killsA == 2 && deathsB == 2 && deathsC == 0 && a.result.count == 3, fails, "결과 = 처치·사망 집계");
 
 		timeEndPeriod(1);
 		std::printf("RULES 실패 %d건\n", fails);

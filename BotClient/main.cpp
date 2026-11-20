@@ -877,14 +877,17 @@ namespace
 				++_grenadeCounts.killMsgs;
 				if (kill.attacker == _welcome.playerId) ++_grenadeCounts.killsMine;		// 자기 처치도 공격자 = 던진 사람(DetonateGrenade → KillPlayer)
 			}
-			// 처치 집계 — B_ShooterGameScoring_Base 규칙(서버 KillPlayer 와 따로 적음): 죽은 쪽은 늘 +1, 다른 팀이 죽였을 때만 처치 +1.
+			// 처치 집계 — B_ShooterGameScoring_Base 규칙(서버 KillPlayer 와 따로 적음): 다른 팀이 죽였을 때만 처치 · 죽은 쪽 죽음 +1(떨어짐 · 자기 수류탄은 둘 다 0).
 			// 총알 · 근접은 같은 팀에 피해가 없어(ComputeDamage · 근접 같은 팀 칸) 「처치자 있음」과 같았다. 자기 수류탄 처치(G-3)가 처음으로 처치자 = 같은 팀(자기)이다
 			const auto attackerState = _players.find(kill.attacker);
 			const auto targetState = _players.find(kill.target);
 			const bool sameTeam = kill.attacker == kill.target
 				|| (attackerState != _players.end() && targetState != _players.end() && attackerState->second.team == targetState->second.team);
-			if (kill.attacker != 0 && !sameTeam) ++_killTally[kill.attacker];
-			++_deathTally[kill.target];
+			if (kill.attacker != 0 && !sameTeam)
+			{
+				++_killTally[kill.attacker];
+				++_deathTally[kill.target];
+			}
 			_deadSince[kill.target] = kill.tick;
 			// 도움 — ShooterCore AssistProcessor 규칙을 서버와 따로 적는다. 때린 사람 중 처치자를 뺀 전원 +1, 그 사람 기록은 지운다.
 			// 처치자가 없으면(떨어짐) 죽은 사람 자신을 뺀다 — 자기 파괴의 처치 소식 시킨 쪽 = 자기 선수 상태(원본 기준, D112)
