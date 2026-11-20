@@ -137,6 +137,7 @@ namespace mo
 			summary->id = _id;
 			summary->thread = thread;
 			summary->stats = _room.GetStats();
+			summary->stats.grenadeAliveAtClose = _room.GetLiveGrenadeCount();	// 닫을 때 남은 수 — 던진 사람이 나간 수류탄도 남으므로(L-3-d) 나갈 때 센 수로는 셈이 안 맞는다
 			summary->badPackets = _badPackets;
 			summary->playersPeak = _playersPeak;
 			summary->finished = _room.GetPhase() == wire::EMatchPhase::Finished;

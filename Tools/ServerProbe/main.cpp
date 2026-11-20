@@ -1467,6 +1467,135 @@ namespace
 		}
 	}
 
+	// ─── 던진 사람 나감(L-3-d) ─────────────────────────────
+	// Lyra 기록대로 — 던진 사람이 나가도 수류탄은 남아 제때 터지고(L-1-d ① l1df), 나간 뒤엔 상대 몸에 닿아도 안 터지고 튕기며(L-3-d l3dh), 반지름 안 몸도 피해 0 · 소식 0.
+	// 칸 셋 — ① 대조(안 나감): V 의 등 뒤 400 에서 V 눈높이를 보고 던짐 → 몸에 닿아 터짐 · 피해 소식(Lyra l3dh 나이 8)
+	// ② 같은 자리 · 같은 입력으로 던지고 던짐 소식을 받자마자 나감 → 닿아도 신관 터짐 · 피해 0
+	// ③ V 곁 150 에서 발 앞 바닥에 던지고 나감 → 터진 자리에서 V 가 반지름 안(같은 코드로 잰 곡선 피해 > 0)인데 피해 0.
+	// 던지는 사람은 칸마다 새로 들어온다(나가면 번호가 없어진다 — V 가 팀 A, 던지는 사람은 늘 팀 B)
+	bool RunGrenadeLeave(int port, const CMapCollision& map, const std::vector<Row>& rows)
+	{
+		int fails = 0;
+		const auto check = [&fails](bool ok, const char* text)
+		{
+			std::printf("GLEAVE %s %s\n", ok ? "통과" : "실패", text);
+			if (!ok) ++fails;
+		};
+		Vec3 farA, spotV, sideV;
+		if (!FindArena(map, rows, farA, spotV, sideV))
+		{
+			std::printf("GLEAVE 설 자리를 못 찾음\n");
+			return false;
+		}
+		Vec3 dir = farA - spotV;
+		dir.z = 0.0;
+		dir = dir * (1.0 / Length(dir));
+		const Vec3 spotT = spotV + dir * 400.0;							// ① · ② 던지는 자리 — Lyra 기록 l3dh 와 같은 거리
+		const Vec3 spotN = spotV + Vec3(-dir.y, dir.x, 0.0) * 150.0;		// ③ 던지는 자리 — V 곁
+		for (const Vec3& at : { spotT, spotN })
+		{
+			RayHit floor;
+			if (!map.Raycast(at + Vec3(0, 0, 10), at + Vec3(0, 0, -150), MAP_BLOCK_MOVE, floor) || floor.distance < 95 || floor.distance > 105 || map.OverlapCapsule(at, 35, 90, MAP_BLOCK_MOVE))
+			{
+				std::printf("GLEAVE 던질 자리에 바닥이 없거나 막힘 (%.0f, %.0f, %.0f)\n", at.x, at.y, at.z);
+				return false;
+			}
+		}
+
+		ShotClient clients[4];		// V · 던지는 사람 셋(칸마다 하나 — 닫힌 쪽 Pump 는 recv 실패로 바로 돈다)
+		ShotClient& v = clients[0];
+		if (!ConnectAndHello(v.net, port, v.welcome))
+		{
+			std::printf("GLEAVE 접속 실패\n");
+			return false;
+		}
+		timeBeginPeriod(1);
+		const Vec3 eyeV = spotV + Vec3(0, 0, 60);
+		// ① · ② 는 camBack 100 — 겨눔 선 시작(눈 + 시선 × 350)이 V 몸 겉(눈높이에서 약 365)에서 45 안이라 조종 회전 (요, 0) 그대로 던진다(Grenade.cpp ComputeGrenadeThrow).
+		// Lyra 기록의 봇도 조종 회전 (0, 0) 그대로였다(FTPRESS ctlRot · 속도 2472, 0, 370) — 0 을 실으면 선 시작이 V 를 지나 먼 벽을 바라봐 피치가 달라진다(첫 판 1.46)
+		struct Cell { const char* name; Vec3 at; Vec3 lookAt; float camBack; bool leave; };
+		const Cell cells[] = {
+			{ "대조(안 나감)", spotT, eyeV, 100.f, false },
+			{ "나감 · 몸에 닿음", spotT, eyeV, 100.f, true },
+			{ "나감 · 곁에서 터짐", spotN, spotN + dir * 40.0 + Vec3(0, 0, -90), 0.f, true },
+		};
+		for (int ci = 0; ci < 3; ++ci)
+		{
+			const Cell& cell = cells[ci];
+			ShotClient& t = clients[1 + ci];
+			if (!ConnectAndHello(t.net, port, t.welcome))
+			{
+				check(false, "던지는 사람 접속 실패");
+				continue;
+			}
+			const uint32_t idT = t.welcome.playerId;
+			v.Place(spotV, 1000.f);		// 체력 1000 — 대조 칸 피해로 안 죽는다(옮기기가 부활 무적도 푼다)
+			t.Place(cell.at, 100.f);
+			PumpFor(clients, 4, 0.15);
+			const size_t gFrom = v.grenades.size(), dFrom = v.damages.size(), kFrom = v.kills.size();
+			wire::Grenade thrown = wire::Grenade(), boom = wire::Grenade();
+			bool hasThrow = false, hasBoom = false;
+			const auto scan = [&]
+			{
+				for (size_t g = gFrom; g < v.grenades.size(); ++g)
+				{
+					const wire::Grenade& m = v.grenades[g];
+					if (m.thrower != idT) continue;
+					if (!hasThrow && m.kind == wire::GRENADE_THROW && m.id != 0) { thrown = m; hasThrow = true; }
+					else if (hasThrow && !hasBoom && m.id == thrown.id && (m.kind == wire::GRENADE_BOOM_HIT || m.kind == wire::GRENADE_BOOM_TIMER)) { boom = m; hasBoom = true; }
+				}
+			};
+			const Vec3 eyeT = cell.at + Vec3(0, 0, 60);
+			const auto send = [&](uint8_t buttons)
+			{
+				wire::Input input = wire::Input();
+				input.seq = ++t.seq;
+				AimAt(eyeT, cell.lookAt, input.yaw, input.pitch);
+				input.aimX = (float)eyeT.x; input.aimY = (float)eyeT.y; input.aimZ = (float)eyeT.z;
+				input.camBack = cell.camBack;
+				input.buttons = buttons;
+				t.net.SendPacket(input, wire::Msg::C2S_INPUT);
+			};
+			// 손 자리(몸 앞 5 · 위 25)는 앞 입력까지의 몸 요로 잡힌다 — 옮긴 뒤 첫 입력에 누르면 몸이 아직 V 반대쪽을 봐 손이 뒤쪽 5 에 생긴다
+			// (첫 판 생긴 자리가 V 에서 405 · Lyra l3dh 395 — leave_srv_new3 · new4 의 throw 줄).
+			// Lyra 기록의 봇은 V 쪽을 본 채 섰다가 던졌다 → 몇 입력 먼저 돌려 둔다
+			constexpr int kTurnInputs = 5;
+			RunTicks(clients, 4, 60, [&](int i) { send(i == kTurnInputs ? wire::BUTTON_GRENADE : 0); }, [&] { scan(); return hasThrow; });
+			struct { bool has; float z; } throwerZ = { t.hasSelf, t.self.z };		// 나가기 전 마지막 내 상태 — 두 자리 바닥 높이가 다르면 Lyra(같은 바닥)와 맞은 점이 달라진다
+			if (cell.leave && hasThrow) t.net.Close();		// 던짐 소식을 받자마자 — 서버는 다음 받기에서 끊김을 안다(GameThread OnLeave → RemovePlayer)
+			RunTicks(clients, 4, 60 * 4, [&](int) { if (!cell.leave) send(0); }, [&] { scan(); return hasBoom; });
+			PumpFor(clients, 4, 0.1);
+			int damages = 0;
+			float selfDamage = 0.f;		// 던진 사람 자기 피해(대조 칸 — Lyra l3dh 54.8652)
+			for (size_t d = dFrom; d < v.damages.size(); ++d)
+			{
+				if (v.damages[d].weapon != wire::kWeaponGrenade) continue;
+				++damages;
+				if (v.damages[d].target == idT) selfDamage += v.damages[d].amount;
+			}
+			const size_t kills = v.kills.size() - kFrom;
+			GrenadeBlastTarget body;
+			body.center = Vec3(v.self.x, v.self.y, v.self.z);
+			const GrenadeBlastHit would = TraceGrenadeBlast(map, Vec3(boom.x, boom.y, boom.z), body);
+			const bool byHit = hasBoom && boom.kind == wire::GRENADE_BOOM_HIT;
+			// 던진 자리 기준 — 앞 = V 쪽(Lyra l3dh 는 던진 방향 +X 로 같은 값을 읽는다) · 위 = 던진 사람 몸 가운데에서
+			const Vec3 fromT = Vec3(boom.x, boom.y, boom.z) - cell.at;
+			std::printf("GLEAVE %s 팀=%u(V %u) 몸 높이 차(V − 던진 사람)=%.2f 던짐=%d 번호=%u 던짐 속도=%.2f,%.2f,%.2f 터짐=%s 나이=%d 던진 자리 기준 앞=%.1f 위=%.1f V 까지 몸 거리=%.1f 막힘=%d 같은 코드 피해=%.2f 피해 소식=%d(자기 %.4f) 처치=%zu V 체력=%.2f\n",
+				cell.name, t.welcome.team, v.welcome.team, throwerZ.has ? v.self.z - throwerZ.z : 0.f, hasThrow ? 1 : 0, thrown.id, thrown.vx, thrown.vy, thrown.vz, !hasBoom ? "없음" : (byHit ? "맞음" : "신관"), hasBoom ? (int)(boom.tick - thrown.tick) : -1,
+				-(fromT.x * dir.x + fromT.y * dir.y), fromT.z, would.bodyDistance, would.blocked ? 1 : 0, would.damage, damages, selfDamage, kills, v.self.hp);
+			const bool teamsOk = t.welcome.team != v.welcome.team;
+			if (ci == 0) check(teamsOk && hasBoom && byHit && damages > 0 && v.self.hp < 1000.f, "대조 — 안 나가면 상대 몸에 닿아 터지고 피해가 든다");
+			else if (ci == 1) check(teamsOk && hasBoom && !byHit && damages == 0 && kills == 0 && v.self.hp == 1000.f, "나감 — 남아 제때 터지고 상대 몸에 닿아도 안 터짐 · 피해 0");
+			else check(teamsOk && hasBoom && !byHit && would.damage > 0.0 && !would.blocked && damages == 0 && kills == 0 && v.self.hp == 1000.f, "나감 — 반지름 안 몸도 피해 0 · 소식 0");
+			if (!cell.leave) t.net.Close();
+			PumpFor(clients, 4, 0.2);
+		}
+		v.net.Close();
+		timeEndPeriod(1);
+		std::printf("GLEAVE 실패 %d건\n", fails);
+		return fails == 0;
+	}
+
 	bool RunAuthority(int port, const CMapCollision& map, const std::string& serverLog)
 	{
 		int fails = 0;
@@ -2880,7 +3009,7 @@ int main(int argc, char** argv)
 	int port = 7791;
 	size_t rowLimit = (size_t)-1;
 	bool breakMirror = false, breakSpread = false, breakDamage = false, rulesOnly = false;
-	bool authorityOnly = false, rewindOnly = false, padsOnly = false, weaponsOnly = false;
+	bool authorityOnly = false, rewindOnly = false, padsOnly = false, weaponsOnly = false, grenadeLeaveOnly = false;
 	std::string meleeLog;
 	std::string serverLog;
 	std::string startsDump;
@@ -2897,6 +3026,7 @@ int main(int argc, char** argv)
 		else if (s == "--rewind") rewindOnly = true;
 		else if (s == "--pads") padsOnly = true;
 		else if (s == "--weapons") weaponsOnly = true;
+		else if (s == "--grenadeLeave") grenadeLeaveOnly = true;
 		else if (s.rfind("--melee=", 0) == 0) meleeLog = s.substr(8);
 		else if (s.rfind("--serverLog=", 0) == 0) serverLog = s.substr(12);
 		else if (s.rfind("--checkStarts=", 0) == 0) startsDump = s.substr(14);
@@ -2957,6 +3087,12 @@ int main(int argc, char** argv)
 		const bool weaponsOk = RunWeapons(port, serverLog);
 		std::printf("RESULT %s (무기 받침 구동 — 대조는 check_weapon_pads.py)\n", weaponsOk ? "PASS" : "FAIL");
 		return weaponsOk ? 0 : 1;
+	}
+	if (grenadeLeaveOnly)
+	{
+		const bool leaveOk = RunGrenadeLeave(port, map, rows);
+		std::printf("RESULT %s (던진 사람 나감)\n", leaveOk ? "PASS" : "FAIL");
+		return leaveOk ? 0 : 1;
 	}
 	if (rulesOnly)
 	{

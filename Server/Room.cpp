@@ -269,12 +269,16 @@ namespace mo
 		{
 			if (slot.claimedBy == player->id) slot.claimedBy = 0;
 		}
-		// 산 수류탄을 지운다 — 피해는 던진 사람 능력 시스템으로 들어가는데 나가면 그 선수 상태가 없다(제 판단 · Lyra 로 안 돌려 봄).
-		// 남겨 두면 없는 번호가 공격자 · 도움 기록에 다시 들어간다
-		const uint32_t leaverId = player->id;
-		const size_t grenadesBefore = _grenades.size();
-		_grenades.erase(std::remove_if(_grenades.begin(), _grenades.end(), [leaverId](const LiveGrenade& g) { return g.owner == leaverId; }), _grenades.end());
-		_stats.grenadeOwnerLeft += grenadesBefore - _grenades.size();
+		// 산 수류탄은 남긴다(L-3-d) — Lyra 는 던진 사람이 나가도 수류탄을 지우지 않고 제때 같은 자리에서 터뜨린다(L-1-d ① 기록 l1df1 · l1df2).
+		// 피해는 던진 사람 몸의 능력 시스템으로 거는데 몸이 지워져 걸 쪽이 없다 → 피해 · 처치 소식 0(같은 기록). 몸에 닿아 터짐은 팀 비교(맞은 쪽 ↔ 던진 몸)가
+		// 「다른 팀」일 때만인데 던진 몸이 팀 없음이 돼 안 터지고 튕긴다(L-3-d 기록 l3dh1 · l3dh2). 없는 번호는 공격자 · 도움 기록에 안 들어간다(DetonateGrenade 가 먼저 뺀다)
+		for (LiveGrenade& g : _grenades)
+		{
+			if (g.owner != player->id || g.ownerGone) continue;
+			g.ownerGone = true;
+			++_stats.grenadeOwnerLeft;
+			if (_allowDebug) std::printf("GRENADEOWNERLEFT tick=%u room=%u id=%u player=%u age=%d\n", _tick, _roomId, g.id, g.owner, g.state.frames - 1);
+		}
 		_players.erase(std::remove_if(_players.begin(), _players.end(), [session](const std::unique_ptr<Player>& p) { return p->session == session; }), _players.end());
 	}
 
@@ -1284,7 +1288,7 @@ namespace mo
 				o.id = p->id;
 				o.kind = EProjectileHitKind::Pawn;
 				o.owner = p->id == grenade.owner;		// 생긴 뒤 0.16초 서로 무시 — 날아감이 launchCleanedUp 으로 가른다
-				o.detonateOnHit = !o.owner && p->team != grenade.team;	// 같은 팀 · 자기 몸은 튕긴다
+				o.detonateOnHit = !o.owner && !grenade.ownerGone && p->team != grenade.team;	// 같은 팀 · 자기 몸 · 던진 사람이 나간 수류탄(L-3-d)은 튕긴다
 				_grenadeObstacles.push_back(o);
 			}
 			for (const ProjectileObstacle& other : _grenadeCapsules)
@@ -1297,6 +1301,7 @@ namespace mo
 			grenade.bouncedThisTick = false;
 			for (size_t i = 0; i < std::min(hitCount, kGrenadeHitSlots); ++i)
 			{
+				if (grenade.ownerGone && hits[i].kind == EProjectileHitKind::Pawn && hits[i].dispatched) ++_stats.grenadeOwnerGoneBodyHits;		// 맞음 알림이 나간 몸 맞음 — 팀 비교가 안 돼 안 터짐
 				if (!hits[i].bounced) continue;
 				++_stats.grenadeBounces;
 				if (!grenade.bouncedThisTick)		// 상태 소식 깃발은 첫 튕김 자리 하나(G-3)
@@ -1353,6 +1358,11 @@ namespace mo
 			if (hit.blocked)
 			{
 				++_stats.grenadeWallHits;		// 벽이 먼저 — 피해 0(D107)
+				continue;
+			}
+			if (grenade.ownerGone)
+			{
+				++_stats.grenadeOwnerGoneTargets;	// 던진 사람이 나감 — 피해 효과를 걸 능력 시스템이 없다(L-1-d ① 기록 · 반지름 안 몸도 피해 0 · 소식 0)
 				continue;
 			}
 			const bool self = target.id == grenade.owner;

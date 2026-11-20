@@ -202,9 +202,12 @@ namespace mo
 		uint64_t grenadeStops = 0;			// 멈춘 수류탄(튕긴 뒤 느려 멈춤)
 		uint64_t grenadeDetonateTimer = 0;	// 신관 kGrenadeFuseFrames 걸음 뒤 터짐
 		uint64_t grenadeDetonateHit = 0;	// 다른 팀 사람에 맞아 그 자리에서 터짐
-		uint64_t grenadeOwnerLeft = 0;		// 던진 사람이 나가 지운 산 수류탄
+		uint64_t grenadeOwnerLeft = 0;		// 던진 사람이 나갈 때 살아 있던 수류탄 — 지우지 않고 남겨 제때 터뜨린다(L-3-d)
+		uint64_t grenadeOwnerGoneBodyHits = 0;	// 던진 사람이 나간 뒤 몸에 닿음 — 팀을 못 견줘 안 터지고 튕긴다(L-3-d)
+		uint64_t grenadeAliveAtClose = 0;	// 방을 닫을 때 안 터진 채 남은 수류탄(GameThread MakeSummary 가 채움) — 터짐 timer + hit + 이것 = 생긴 수
 		uint64_t grenadeTargets = 0;		// 폭발 선을 쏜 산 몸(몸까지 450 안)
 		uint64_t grenadeWallHits = 0;		// 그중 맵이 먼저 맞아 피해 0
+		uint64_t grenadeOwnerGoneTargets = 0;	// 그중 던진 사람이 나가 피해를 걸 쪽이 없어 피해 0 · 소식 없음(L-3-d)
 		uint64_t grenadeImmune = 0;			// 그중 무적이라 피해 0(부활 · 경기 중 아님)
 		uint64_t grenadeZeroDamage = 0;		// 그중 곡선 피해가 0 — 450 안이면 등급 < 1 이라 0 보다 커서 0 이어야 한다(세는 자리를 따로 둬 합이 맞는지 본다)
 		uint64_t grenadeSameTeam = 0;		// 그중 같은 팀(던진 사람 빼고)이라 피해 0 — 소식 없음(총알 같은 팀 길과 같다)
@@ -306,6 +309,7 @@ namespace mo
 		wire::EMatchPhase GetPhase() const { return _phase; }
 		const RoomResult& GetResult() const { return _result; }		// Finished 부터 뜻이 있다
 		const RoomStats& GetStats() const { return _stats; }
+		size_t GetLiveGrenadeCount() const { return _grenades.size(); }		// 방 닫을 때 남은 수(grenadeAliveAtClose)
 
 	private:
 		static constexpr int kInputQueueSize = 32;		// 0.53초치
@@ -422,6 +426,7 @@ namespace mo
 			uint32_t owner = 0;			// 던진 사람 번호
 			uint8_t team = 0;			// 던질 때 팀 — 맞아 터짐 · 폭발 팀 규칙이 이것을 본다
 			uint32_t seq = 0;			// 던진 입력 번호
+			bool ownerGone = false;		// 던진 사람이 나갔다(L-3-d) — 남아 제때 터지되 몸에 닿아도 안 터지고 피해 · 소식이 없다
 			bool stopCounted = false;	// grenadeStops 를 셌나
 			bool bouncedThisTick = false;	// 이번 틱 걸음에서 튕겼다 — 수류탄 상태 소식 깃발(G-3)
 			Vec3 bouncePoint;				// 그 첫 튕김의 맞은 자리

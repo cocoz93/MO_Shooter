@@ -261,8 +261,9 @@ run_dash() {
 
 # 수류탄(컨텐츠 G-3 · G-4) — 봇이 수류탄을 던지며(--grenade, 대시 · 조준 · 근접 · 앉기와 섞어 대시 중 · 근접 끊기 · 재장전 끊기 갈래까지) 싸운다. 서버엔 클립을 줘 수류탄 몽타주를 튼다.
 # 봇 RESULT PASS = 위치 · 속도 · 탄 · 깃발 차이 0 · 던짐 소식이 예측과 같음(grenadeDiff 0) · 소식 · 피해 규칙 어긋남 0.
-# 여기서 더 보는 것 = 서버 던짐 = 던짐 소식 = 봇이 받은 내 소식(mine) = 터짐(신관 + 맞음, = 터짐 소식) + 던진 사람이 나가 지운 몫(ownerLeft) · 봇이 센 내 피해 · 자기 피해 · 처치 = 서버 ·
-# (ownerLeft — 서버는 끝 단계에도 던지고(L-3-b) 경기를 닫으면 틱을 안 돌려, 신관 2초(kGrenadeFuseFrames) 안의 막판 던짐이 안 터진 채 남다가 봇이 나갈 때 지워진다. L-3-b 전엔 0) ·
+# 여기서 더 보는 것 = 서버 던짐 = 던짐 소식 = 봇이 받은 내 소식(mine) = 터짐(신관 + 맞음, = 터짐 소식) + 방을 닫을 때 남은 수(alive) · 봇이 센 내 피해 · 자기 피해 · 처치 = 서버 ·
+# (alive — 서버는 끝 단계에도 던지고(L-3-b) 경기를 닫으면 틱을 안 돌려, 신관 2초(kGrenadeFuseFrames) 안의 막판 던짐이 안 터진 채 남는다. L-3-b 전엔 0.
+#  던진 사람이 나가도 지우지 않으므로(L-3-d) 나갈 때 센 ownerLeft 로는 셈이 안 맞는다 — 나간 뒤 남은 틱에 터지면 두 번 센다) ·
 # 봇이 받은 던짐 · 신관 터짐 · 맞음 터짐 · 상태 소식 · 상태 칸 · 튕김 = 서버 × 봇 수(봇마다 같은 소식을 받는다) · 몽타주 사건 = 던짐 · 튼 수 = 사건 − 버림.
 # 한 번 이상이어야 하는 것 = 던짐 · 신관 터짐 · 하늘 던짐(noHit — 각본 갈래) · 피해(같음 비교가 0 = 0 이 아니게).
 # 맞아 터짐 · 근접 끊기는 판마다 0 이 나온다(G-3-c · G-4-b 판 0~3 · 0~4). 대시 중 · 벽 · 재장전 끊기도 판마다 흔들린다 — 다섯 다 값만 적는다.
@@ -279,14 +280,14 @@ run_grenade() {
 	[ $brc = 0 ] && [ $src = 0 ] || ok=0
 	cmp -s "$OUT/grenade_srv.csv" "$OUT/grenade_bot.csv" || ok=0
 	grep -q '^RESULT PASS' "$OUT/grenade_bot.log" || ok=0
-	local sg sw sa bg bw nb thrown timer hit left smsgs sents sbnc hurt bhit bwire ev dr st
+	local sg sw sa bg bw nb thrown timer hit alive smsgs sents sbnc hurt bhit bwire ev dr st
 	sg="$(grep -a '^SERVER grenade ' "$OUT/grenade_srv.log")"
 	sw="$(grep -a '^SERVER grenadeWire ' "$OUT/grenade_srv.log")"
 	sa="$(grep -a '^SERVER animGrenade ' "$OUT/grenade_srv.log")"
 	bg="$(grep -a '^BOT grenade ' "$OUT/grenade_bot.log")"
 	bw="$(grep -a '^BOT grenadeWire ' "$OUT/grenade_bot.log")"
 	nb="$(grep -a '^BOT 방 ' "$OUT/grenade_bot.log" | head -1 | sed -nE 's/.*: 봇 ([0-9]+) .*/\1/p')"
-	thrown="$(num "$sg" thrown)"; timer="$(num "$sg" timer)"; hit="$(num "$sg" hit)"; left="$(num "$sg" ownerLeft)"
+	thrown="$(num "$sg" thrown)"; timer="$(num "$sg" timer)"; hit="$(num "$sg" hit)"; alive="$(num "$sg" alive)"
 	smsgs="$(num "$sw" stateMsgs)"; sents="$(num "$sw" stateEntries)"; sbnc="$(num "$sw" stateBounced)"
 	# 빈 값으로 $(( )) 를 셈하면 bash 가 스크립트를 끝낸다 — 아래 if 가 먼저 다 있는지 본다
 	# grenadeHits 줄엔 「 damage=」가 둘(mine · bad)이라 num 대신 자리로 읽는다
@@ -294,9 +295,9 @@ run_grenade() {
 	bhit=($(grep -a '^BOT grenadeHits ' "$OUT/grenade_bot.log" | sed -nE 's/.* mine damage=([0-9]+) selfDamage=([0-9]+) kills=([0-9]+) .*/\1 \2 \3/p'))
 	# grenadeWire 줄엔 「 msgs=」가 둘(전체 · 상태)이라 상태 몫도 자리로 읽는다 — throws · timer · hit · 상태 소식 · 칸 · 튕김
 	bwire=($(echo "$bw" | sed -nE 's/.* throws=([0-9]+) .* boom timer=([0-9]+) hit=([0-9]+) state msgs=([0-9]+) entries=([0-9]+) bounced=([0-9]+) .*/\1 \2 \3 \4 \5 \6/p'))
-	if [ -n "$thrown" ] && [ -n "$timer" ] && [ -n "$hit" ] && [ -n "$left" ] && [ -n "$nb" ] && [ -n "$smsgs" ] && [ -n "$sents" ] && [ -n "$sbnc" ] && [ ${#hurt[@]} = 3 ] && [ ${#bhit[@]} = 3 ] && [ ${#bwire[@]} = 6 ]; then
+	if [ -n "$thrown" ] && [ -n "$timer" ] && [ -n "$hit" ] && [ -n "$alive" ] && [ -n "$nb" ] && [ -n "$smsgs" ] && [ -n "$sents" ] && [ -n "$sbnc" ] && [ ${#hurt[@]} = 3 ] && [ ${#bhit[@]} = 3 ] && [ ${#bwire[@]} = 6 ]; then
 		[ "$thrown" -gt 0 ] && [ "$timer" -gt 0 ] && [ "$(num "$sg" noHit)" -gt 0 ] 2>/dev/null && [ "${hurt[0]}" -gt 0 ] || ok=0
-		[ "$(num "$sw" throwMsgs)" = "$thrown" ] && [ "$(num "$sw" boomMsgs)" = $((timer + hit)) ] && [ $((timer + hit + left)) = "$thrown" ] || ok=0
+		[ "$(num "$sw" throwMsgs)" = "$thrown" ] && [ "$(num "$sw" boomMsgs)" = $((timer + hit)) ] && [ $((timer + hit + alive)) = "$thrown" ] || ok=0
 		[ "$(num "$bg" mine)" = "$thrown" ] && [ "$(num "$bg" grenadeDiff)" = 0 ] || ok=0
 		[ "${bhit[*]}" = "${hurt[*]}" ] || ok=0
 		[ "${bwire[0]}" = $((thrown * nb)) ] && [ "${bwire[1]}" = $((timer * nb)) ] && [ "${bwire[2]}" = $((hit * nb)) ] || ok=0
@@ -311,7 +312,7 @@ run_grenade() {
 	else
 		ok=0
 	fi
-	verdict 봇수류탄 $ok "봇 rc=$brc 서버 rc=$src 봇 $nb 던짐=$thrown 신관=$timer 맞음=$hit 피해·자기·처치=${hurt[*]} 봇=${bhit[*]} 사건=$ev 버림=$dr 튼수=$st$(echo "$sg" | grep -oE ' (noHit|whileDash|melee|reload|wall|ownerLeft)=[0-9]+' | tr -d '\n')$(echo "$bg" | grep -oE ' (grenadeDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n')"
+	verdict 봇수류탄 $ok "봇 rc=$brc 서버 rc=$src 봇 $nb 던짐=$thrown 신관=$timer 맞음=$hit 피해·자기·처치=${hurt[*]} 봇=${bhit[*]} 사건=$ev 버림=$dr 튼수=$st$(echo "$sg" | grep -oE ' (noHit|whileDash|melee|reload|wall|alive|ownerLeft)=[0-9]+' | tr -d '\n')$(echo "$bg" | grep -oE ' (grenadeDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n')"
 }
 
 # 사람끼리 막기 대조(컨텐츠 F-1) — Lyra 연습장에서 두 사람이 부딪힌 기록을 Shared 이동으로 다시 돌려 위치 · 속도가 0.01 안이어야 한다.
@@ -379,6 +380,23 @@ run_rules() {
 	[ $prc = 0 ] && [ $src = 0 ] || ok=0
 	grep -q '^RESULT PASS' "$OUT/rules_probe.log" || ok=0
 	verdict 경기규칙 $ok "프로브 rc=$prc 서버 rc=$src"
+}
+
+# 던진 사람 나감(L-3-d) — 프로브 --grenadeLeave 가 칸 셋(① 안 나감 대조 ② 던지고 나감 · 상대 몸에 닿음 ③ 던지고 나감 · 곁에서 터짐)을 돈다.
+# 프로브 RESULT PASS = ① 맞아 터지고 피해 · ② 신관 터짐 · 피해 0 · ③ 같은 코드 곡선 피해 > 0 인데 피해 0. 여기서 더 보는 것 = 서버가 센 나간 사람 몫
+# ownerLeft 2(② · ③) · 나간 뒤 몸 맞음 ownerGoneBody ≥ 1(② 가 몸에 닿았다 — 안 닿았으면 ② 가 아무것도 안 본다) · 반지름 안 피해 0 ownerGone ≥ 1(③) · 남은 수 alive 0
+run_grenade_leave() {
+	"$SRV" "--map=$MAP" --port=7968 --debug --exitWhenEmpty --warmup=0 --matchSeconds=100000 --targetScore=1000 > "$OUT/gleave_srv.log" 2>&1 &
+	local spid=$!
+	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --port=7968 --grenadeLeave > "$OUT/gleave_probe.log" 2>&1
+	local prc=$?
+	wait $spid
+	local src=$? ok=1 sg
+	[ $prc = 0 ] && [ $src = 0 ] || ok=0
+	grep -q '^RESULT PASS' "$OUT/gleave_probe.log" || ok=0
+	sg="$(grep -a '^SERVER grenade ' "$OUT/gleave_srv.log")"
+	[ "$(num "$sg" ownerLeft)" = 2 ] && [ "$(num "$sg" ownerGoneBody)" -ge 1 ] 2>/dev/null && [ "$(num "$sg" ownerGone)" -ge 1 ] 2>/dev/null && [ "$(num "$sg" alive)" = 0 ] || ok=0
+	verdict 던진사람나감 $ok "프로브 rc=$prc 서버 rc=$src$(echo "$sg" | grep -oE ' (timer|hit|alive|ownerLeft|ownerGoneBody|ownerGone|damage)=[0-9]+' | tr -d '\n')"
 }
 
 run_replay() {
@@ -479,6 +497,7 @@ else
 		run_dash
 		run_grenade
 		run_rules
+		run_grenade_leave
 		run_replay
 		run_authority
 		run_rewind

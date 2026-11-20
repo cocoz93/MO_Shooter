@@ -746,6 +746,20 @@ namespace
 		{ TEXT("me_settle"),  3.0f,  EAct::Home,           0.f,   false },
 		{ TEXT("ft_leave"),   5.1f,  EAct::FoeThrowLeave,  0.f,   false },
 	};
+	// L-3-d 상대가 던진 뒤 나가고 수류탄이 내 몸에 닿음 각본(-MOBCPGrenSet=l3d) — Arg 1 = 몸 맞음 자리: 상대를 집에 선 내 등 뒤 FT_HIT_FOE_BACK 에 +X 를 보게, 나는 집 그대로.
+	// L-1-d 둘째 판 자리(내 몸에 바로 맞아 나이 8 에 터짐 — 나감 10 보다 앞)라 나감 칸은 수류탄이 생기고 FT_HIT_LEAVE_AFTER 프레임 뒤 나가 닿기 전에 나간다.
+	// 맞은 쪽 팀 비교(B_Grenade ReceiveHit → CompareTeams(맞은 쪽, Instigator) → 다른 팀이면 터짐)가 던진 사람이 없을 때 어떻게 가르는지 본다. 대조 칸 = 안 나감(닿아 터져 내가 죽음)
+	constexpr double FT_HIT_FOE_BACK = -400.0;
+	constexpr int32 FT_HIT_LEAVE_AFTER = 3;
+	const FStep GRENADE_L3D_SCRIPT[] = {
+		{ TEXT("settle"),       1.0f,  EAct::Home,           0.f,   false },
+		{ TEXT("foe_show"),     0.3f,  EAct::FoeShow,        0.f,   false },
+		{ TEXT("foe_setup"),    0.5f,  EAct::FoeSetup,       0.f,   false },	// 다른 팀 · 체력 1000
+		{ TEXT("fth_stay"),     5.1f,  EAct::FoeThrow,       1.f,   false },
+		{ TEXT("me_respawn"),   12.0f, EAct::MeRespawnWait,  0.f,   false },
+		{ TEXT("me_settle"),    3.0f,  EAct::Home,           0.f,   false },
+		{ TEXT("fth_leave"),    5.1f,  EAct::FoeThrowLeave,  1.f,   false },
+	};
 	// L-2-c 가까운 상대 메시 몸 각본(-MOBCPGrenSet=l2c) — G-0 각본 foe_close(자리 18)만 여섯 번. 칸마다 BeginGrenade 가 두 체력을 1000 으로 되돌린다.
 	// 상대 서기 자세는 칸마다 애니 시각이 달라 맞은 점이 판마다 다르다(옛 기록 16판 최대 약 8cm) — 여섯 번이 서로 다른 자세 여섯
 	const FStep GRENADE_L2C_SCRIPT[] = {
@@ -920,6 +934,7 @@ namespace
 		case 10: return GRENADE_L1C_SCRIPT[I];
 		case 11: return GRENADE_L1D_SCRIPT[I];
 		case 12: return GRENADE_L2C_SCRIPT[I];
+		case 13: return GRENADE_L3D_SCRIPT[I];
 		default: return GYM_SCRIPT[I];
 		}
 	}
@@ -939,6 +954,7 @@ namespace
 		case 10: return UE_ARRAY_COUNT(GRENADE_L1C_SCRIPT);
 		case 11: return UE_ARRAY_COUNT(GRENADE_L1D_SCRIPT);
 		case 12: return UE_ARRAY_COUNT(GRENADE_L2C_SCRIPT);
+		case 13: return UE_ARRAY_COUNT(GRENADE_L3D_SCRIPT);
 		default: return UE_ARRAY_COUNT(GYM_SCRIPT);
 		}
 	}
@@ -1053,6 +1069,8 @@ void UMOBContentProbeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	if (bGrenL1D) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l1d steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L1D_SCRIPT));
 	bGrenL2C = bGrenade && GrenSet == TEXT("l2c");
 	if (bGrenL2C) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l2c steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L2C_SCRIPT));
+	bGrenL3D = bGrenade && GrenSet == TEXT("l3d");
+	if (bGrenL3D) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l3d steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L3D_SCRIPT));
 	FString DashSet;
 	FParse::Value(Cmd, TEXT("MOBCPDashSet="), DashSet);
 	bDashL1C = bDash && DashSet == TEXT("l1c");
@@ -1787,8 +1805,9 @@ void UMOBContentProbeSubsystem::BeginFoeThrow()
 	const FStep& S = StepAt(ScriptIdx(), Step);
 	ACharacter* Ch = Me();
 	GoHome();
-	PlaceFoe(FT_FOE_BACK, false, FT_FOE_SIDE);	// 집에 선 나를 기준으로 — 나를 옮기기 전에
-	if (Ch)
+	const bool bBodyHit = S.Arg > 0.f;	// L-3-d 몸 맞음 자리 — 상대는 내 등 뒤 FT_HIT_FOE_BACK, 나는 집 그대로
+	PlaceFoe(bBodyHit ? FT_HIT_FOE_BACK : FT_FOE_BACK, false, bBodyHit ? 0.0 : FT_FOE_SIDE);	// 집에 선 나를 기준으로 — 나를 옮기기 전에
+	if (Ch && !bBodyHit)
 	{
 		Ch->SetActorLocationAndRotation(Home + FT_ME_FROM_HOME, FRotator::ZeroRotator, false, nullptr, ETeleportType::TeleportPhysics);
 		if (UCharacterMovementComponent* M = Ch->GetCharacterMovement()) M->StopMovementImmediately();
@@ -1838,7 +1857,7 @@ void UMOBContentProbeSubsystem::DuringFoeThrow()
 		}
 	}
 	// 나감 — 엔진 사람 나감 차례 그대로: 몸 지움(PawnLeavingGame) → 컨트롤러 지움(Controller::Destroyed → CleanupPlayerState 가 선수 상태 · ASC 를 지움)
-	if (S.Act == EAct::FoeThrowLeave && FTSpawnFrame >= 0 && FTLeaveFrame < 0 && Frame >= FTSpawnFrame + FT_LEAVE_AFTER)
+	if (S.Act == EAct::FoeThrowLeave && FTSpawnFrame >= 0 && FTLeaveFrame < 0 && Frame >= FTSpawnFrame + (S.Arg > 0.f ? FT_HIT_LEAVE_AFTER : FT_LEAVE_AFTER))
 	{
 		FTLeaveFrame = Frame;
 		APawn* FP = Foe.Get();
