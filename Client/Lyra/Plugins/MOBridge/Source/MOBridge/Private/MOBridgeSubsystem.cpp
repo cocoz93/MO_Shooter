@@ -79,6 +79,14 @@
 #include "Equipment/LyraPickupDefinition.h"
 #include "UObject/UnrealType.h"
 #include "GameplayCueFunctionLibrary.h"
+#include "AbilitySystemBlueprintLibrary.h"
+#include "GameplayCueManager.h"
+#include "GameplayCueSet.h"
+#include "GameFramework/ProjectileMovementComponent.h"
+#include "Kismet/GameplayStatics.h"
+#include "Sound/SoundAttenuation.h"
+#include "Sound/SoundBase.h"
+#include "TimerManager.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/AudioComponent.h"
 #include "Components/LightComponent.h"
@@ -215,6 +223,11 @@ namespace
 	constexpr float kLyraGrenadeCooldownSeconds = 5.0f;
 	// 몽타주 칸을 능력 클래스에서 못 읽을 때 쓰는 자산(GA_Grenade CDO 의 GrenadeThrowMontage 값, 원본 기준 GA_Grenade_cdo.t3d)
 	const TCHAR* const kGrenadeThrowMontagePath = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Rifle_GrenadeToss.AM_MM_Rifle_GrenadeToss");
+	// 겉모습 수류탄(G-5-b) — 능력이 만드는 클래스 · 부딪힘 소리 · 소리 감쇠(원본 기준 C:\tmp\mob\gren0\ga_flow.txt:2-10 · b_flow.txt:131-139)
+	const TCHAR* const kGrenadeActorClassPath = TEXT("/ShooterCore/Weapon/Grenade/B_Grenade.B_Grenade_C");
+	const TCHAR* const kGrenadeImpactSoundPath = TEXT("/Game/Audio/MetaSounds/sfx_Weapon_GrenadeImpact_nl_meta.sfx_Weapon_GrenadeImpact_nl_meta");
+	const TCHAR* const kGrenadeImpactAttenuationPath = TEXT("/Game/Audio/AttenuationPresets/ATT_Projectile.ATT_Projectile");
+	const TCHAR* const kGrenadeDetonateCueTag = TEXT("GameplayCue.Weapon.Grenade.Detonate");	// B_Grenade 변수 Gameplay Tag(원본 기준 B_Grenade_cdo.t3d)
 	void KeepBridgeCrouch(ULyraCharacterMovementComponent* Self, FVector&, float)
 	{
 		const ACharacter* C = Self->GetCharacterOwner();
@@ -435,6 +448,11 @@ void UMOBridgeSubsystem::Deinitialize()
 		delete Core;
 		Core = nullptr;
 	}
+	if (GrenadeCueRouteHandle.IsValid())
+	{
+		if (UGameplayCueManager* GCM = UAbilitySystemGlobals::Get().GetGameplayCueManager()) GCM->OnGameplayCueRouted().Remove(GrenadeCueRouteHandle);
+		GrenadeCueRouteHandle.Reset();
+	}
 	Super::Deinitialize();
 }
 
@@ -498,6 +516,7 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bAutoDashOn = FParse::Param(Cmd, TEXT("MOBAutoDash"));
 	bBreakGrenadeBlock = FParse::Param(Cmd, TEXT("MOBBreakGrenadeBlock"));
 	bAutoGrenadeOn = FParse::Param(Cmd, TEXT("MOBAutoGrenade"));
+	bBreakGrenadeVisual = FParse::Param(Cmd, TEXT("MOBBreakGrenadeVisual"));
 	FParse::Value(Cmd, TEXT("MOBRayBreak="), RayBreak);
 	bViewClamp = !FParse::Param(Cmd, TEXT("MOBNoViewClamp"));
 	FParse::Value(Cmd, TEXT("MOBBreakAt="), BreakAt);
@@ -613,6 +632,7 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 	TickSelfVisual(Now, DeltaTime);
 	TickRemotes(Now);
 	TickRemoteDashCues();
+	TickGrenadeVisuals();
 	TickPickups(Now);
 	TickDevices(Now);
 	FlushSend();
@@ -947,7 +967,8 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 		break;
 	}
 	case wire::Msg::S2C_GRENADE_STATE:
-		++GrenadeStatePackets;	// 겉모습 수류탄의 자리 · 부딪힘(G-5-b 가 읽는다). 지금은 세기만
+		++GrenadeStatePackets;	// 겉모습 수류탄의 자리 · 부딪힘(G-5-b)
+		HandleGrenadeState(Data, Size);
 		break;
 	case wire::Msg::S2C_RESULT:
 	{
@@ -2017,6 +2038,13 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		}
 		Seq = In.seq;
 		MeleeYaw = In.yaw;
+		if ((In.buttons & wire::BUTTON_GRENADE) != 0)
+		{
+			// 겉모습 수류탄이 보이기까지(G-5-b SpawnGrenadeVisual)를 재려고 단추를 실은 입력 번호 · 프레임을 둔다
+			GrenadePressSeqs[GrenadePressRing % 8] = In.seq;
+			GrenadePressFrames[GrenadePressRing % 8] = GFrameCounter;
+			++GrenadePressRing;
+		}
 		if ((In.buttons & wire::BUTTON_GRENADE) != 0 && GrenadePressLinesLeft > 0)
 		{
 			--GrenadePressLinesLeft;
@@ -2355,7 +2383,7 @@ void UMOBridgeSubsystem::HandleDash(const wire::Dash& M)
 }
 
 // 서버 수류탄 소식(G-5-a) — 내 던짐이면 예측을 서버 값으로 고친다(그 입력이 안 던졌으면 던짐으로 놓고 뒤 칸의 쿨다운 · 던짐을 다시 고른다 — 봇 OnGrenade 와 같은 길).
-// 남의 던짐 · 터짐은 세기만 — 겉모습 수류탄 · 터짐 신호는 G-5-b
+// 던짐 · 터짐은 겉모습 수류탄 칸에 틱 하나로 적는다(G-5-b — 만들기 · 터짐 신호는 TickGrenadeVisuals 가 화면 시점에)
 void UMOBridgeSubsystem::HandleGrenade(const wire::Grenade& M)
 {
 	switch (M.kind)
@@ -2364,11 +2392,50 @@ void UMOBridgeSubsystem::HandleGrenade(const wire::Grenade& M)
 		break;
 	case wire::GRENADE_BOOM_TIMER:
 	case wire::GRENADE_BOOM_HIT:
+	{
 		++GrenadeBooms;
+		FMOBGrenadeVisual* G = GrenadeVisuals.Find(M.id);
+		if (!G || G->bBoomKnown)
+		{
+			++GrenadeBoomUnknown;
+			return;
+		}
+		G->bBoomKnown = true;
+		G->BoomTick = M.tick;
+		G->BoomKind = M.kind;
+		// 터진 틱 걸음 뒤 자리 — 그 틱 상태 칸에는 안 든다(서버가 목록에서 뺐다, GameProtocol.h GrenadeStateHead)
+		if (G->Snaps.Num() == 0 || G->Snaps.Last().Tick < M.tick)
+		{
+			FMOBGrenadeSnap& S = G->Snaps.AddDefaulted_GetRef();
+			S.Tick = M.tick;
+			S.Pos = FVector(M.x, M.y, M.z);
+			S.Rot = FRotator(M.pitch, M.yaw, M.roll);
+		}
+		else ++GrenadeStateOld;
 		return;
+	}
 	default:
 		++GrenadeBadKind;
 		return;
+	}
+	// 겉모습 수류탄 칸 — 번호 0 은 목록이 차 서버도 수류탄을 못 만든 던짐(만들 것 없음)
+	if (M.id == 0) ++GrenadeThrowsNoId;
+	else if (GrenadeVisuals.Contains(M.id)) ++GrenadeDupId;
+	else
+	{
+		++GrenadeThrowsWithId;
+		FMOBGrenadeVisual& G = GrenadeVisuals.Add(M.id);
+		G.Id = M.id;
+		G.Thrower = M.thrower;
+		G.ThrowTick = M.tick;
+		G.Seq = M.seq;
+		G.Snaps.Reserve(128);
+		// 생긴 자리는 던진 틱 걸음 앞(서버는 입력 처리 안에서 만들고 같은 틱 TickGrenades 에서 한 걸음 — Room.cpp ThrowGrenade · TickGrenades) = 던진 틱 − 1 칸.
+		// 던진 사람 몸도 그 입력 걸음 앞 자리에서 던지므로 남 몸 보간의 같은 칸과 맞는다
+		FMOBGrenadeSnap& S = G.Snaps.AddDefaulted_GetRef();
+		S.Tick = M.tick > 0 ? M.tick - 1 : 0;
+		S.Pos = FVector(M.x, M.y, M.z);
+		S.Rot = FRotator(M.pitch, M.yaw, M.roll);
 	}
 	if (M.thrower != PlayerId)
 	{
@@ -2380,6 +2447,304 @@ void UMOBridgeSubsystem::HandleGrenade(const wire::Grenade& M)
 	{
 		const FMOBCore::FPawnScope PawnScope(*Core);	// 근접 끊음이 바뀌어 다시 돌리는 걸음도 남 캡슐을 본다(봇과 같다)
 		Core->Prediction.OnGrenadeThrown(M.seq);
+	}
+}
+
+// 서버 수류탄 상태(G-5-b) — 머리 뒤 칸 count 개. 칸마다 그 번호 겉모습 수류탄의 틱 하나(걸음 뒤 자리 · 회전 · 튕김)로 쌓는다
+void UMOBridgeSubsystem::HandleGrenadeState(const uint8* Data, int32 Size)
+{
+	wire::GrenadeStateHead H = wire::GrenadeStateHead();
+	if (Size < (int32)sizeof(H))
+	{
+		++GrenadeStateBadSize;
+		return;
+	}
+	FMemory::Memcpy(&H, Data, sizeof(H));
+	if (Size < (int32)(sizeof(H) + sizeof(wire::GrenadeStateEntry) * H.count))
+	{
+		++GrenadeStateBadSize;
+		return;
+	}
+	for (int32 i = 0; i < (int32)H.count; ++i)
+	{
+		wire::GrenadeStateEntry E = wire::GrenadeStateEntry();
+		FMemory::Memcpy(&E, Data + sizeof(H) + sizeof(E) * i, sizeof(E));
+		FMOBGrenadeVisual* G = GrenadeVisuals.Find(E.id);
+		if (!G)
+		{
+			++GrenadeStateUnknown;
+			continue;
+		}
+		if (G->Snaps.Num() > 0 && G->Snaps.Last().Tick >= H.tick)
+		{
+			++GrenadeStateOld;
+			continue;
+		}
+		++GrenadeStateEntries;
+		FMOBGrenadeSnap& S = G->Snaps.AddDefaulted_GetRef();
+		S.Tick = H.tick;
+		S.Pos = FVector(E.x, E.y, E.z);
+		S.Rot = FRotator(E.pitch, E.yaw, E.roll);
+		if ((E.flags & wire::GRENADE_STATE_BOUNCED) != 0)
+		{
+			++GrenadeStateBounced;
+			S.bBounced = true;
+			S.Hit = FVector(E.hitX, E.hitY, E.hitZ);
+		}
+	}
+}
+
+// 겉모습 수류탄 만들기(G-5-b) — 능력과 같은 클래스 · 생성 값(AlwaysSpawn · 루트 크기 1 · 던진 몸 = Instigator, 원본 기준 ga_flow.txt:2-10)으로 만든다.
+// 만들면 BeginPlay 가 꼬리(던진 몸의 팀 색)를 붙이고 타이머 둘(터짐 TimeBeforeExplode 2.0 · 0.16초 뒤 PostLaunchCleanup = 던진 몸과 서로 무시를 풂)을 건다(b_flow.txt:69-114 · 259-302) —
+// 타이머를 다 지우고 날아감을 끄고 충돌을 끈다. 충돌을 끄는 까닭: 메시는 사람 캡슐을 막고(G-0-c2 GCOLL) 다른 팀 몸이 닿으면 ReceiveHit 가 Detonate 를 부른다(b_flow.txt:115-132) —
+// 독립 실행이라 그 Detonate 가 Lyra 쪽 피해를 넣는다. 수류탄 충돌 · 터짐은 서버 몫이다
+void UMOBridgeSubsystem::SpawnGrenadeVisual(FMOBGrenadeVisual& G)
+{
+	G.bSpawned = true;
+	UWorld* World = GetWorld();
+	// 첫 겉모습 앞에 신호 길 알림을 건다(그 뒤 터짐 신호를 센다 — 블루프린트 터짐 타이머 2.0초보다 앞이다)
+	if (!GrenadeCueRouteHandle.IsValid())
+	{
+		if (UGameplayCueManager* GCM = UAbilitySystemGlobals::Get().GetGameplayCueManager())
+		{
+			const FGameplayTag CueTag = FGameplayTag::RequestGameplayTag(kGrenadeDetonateCueTag, false);
+			GrenadeCueRouteHandle = GCM->OnGameplayCueRouted().AddWeakLambda(this, [this, CueTag](AActor*, FGameplayTag Routed, EGameplayCueEvent::Type Event, const FGameplayCueParameters&, EGameplayCueExecutionOptions)
+			{
+				if (Event != EGameplayCueEvent::Executed || !CueTag.IsValid() || Routed != CueTag) return;
+				if (bGrenadeCueCalling) ++GrenadeCueRoutedMine;
+				else ++GrenadeCueRoutedOther;
+			});
+		}
+	}
+	UClass* GrenadeClass = LoadClass<AActor>(nullptr, kGrenadeActorClassPath);
+	const FMOBGrenadeSnap& S0 = G.Snaps[0];
+	APawn* InstigatorPawn = FindPlayerPawn(G.Thrower);
+	if (!InstigatorPawn) ++GrenadeVisNoInstigator;	// 꼬리 팀 색은 블루프린트가 Instigator 팀으로 고른다 — 없으면 팀 1 이 아닌 쪽 색
+	FActorSpawnParameters P;
+	P.Instigator = InstigatorPawn;
+	P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	P.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
+	AActor* A = (World && GrenadeClass) ? World->SpawnActor<AActor>(GrenadeClass, FTransform(S0.Rot, S0.Pos, FVector::OneVector), P) : nullptr;
+	if (!A)
+	{
+		++GrenadeVisSpawnFail;
+		UE_LOG(LogMOB, Warning, TEXT("MOB_GRENADE_VIS spawnFail id=%u class=%s"), G.Id, *GetNameSafe(GrenadeClass));
+		return;
+	}
+	G.Actor = A;
+	G.SpawnFrame = GFrameCounter;
+	G.SpawnTime = World->GetTimeSeconds();
+	++GrenadeVisSpawned;
+
+	// 터짐 타이머 손잡이(블루프린트 변수 Timer) — 지우기 전에 켜져 있었나 · 지운 뒤 꺼졌나를 본다. 칸 형이 FTimerHandle 일 때만 그 꼴로 읽는다
+	FTimerManager& TM = World->GetTimerManager();
+	FTimerHandle DetonateTimer;
+	if (const FStructProperty* TP = CastField<FStructProperty>(A->GetClass()->FindPropertyByName(TEXT("Timer"))))
+	{
+		if (TP->Struct && TP->Struct->GetFName() == FName(TEXT("TimerHandle")) && TP->Struct->GetStructureSize() == (int32)sizeof(FTimerHandle))
+		{
+			DetonateTimer = *TP->ContainerPtrToValuePtr<FTimerHandle>(A);
+		}
+	}
+	if (DetonateTimer.IsValid() && TM.IsTimerActive(DetonateTimer)) ++GrenadeVisTimersActive;
+	if (!bBreakGrenadeVisual) TM.ClearAllTimersForObject(A);
+	if (DetonateTimer.IsValid() && TM.IsTimerActive(DetonateTimer)) ++GrenadeVisTimersLeft;
+	if (UProjectileMovementComponent* PMC = A->FindComponentByClass<UProjectileMovementComponent>())
+	{
+		PMC->StopMovementImmediately();
+		PMC->Deactivate();
+	}
+	else ++GrenadeVisNoMovement;
+	A->SetActorEnableCollision(false);
+
+	if (const FObjectProperty* MP = CastField<FObjectProperty>(A->GetClass()->FindPropertyByName(TEXT("Mesh"))))
+	{
+		G.Mesh = Cast<UPrimitiveComponent>(MP->GetObjectPropertyValue_InContainer(A));
+	}
+	if (!G.Mesh.IsValid()) G.Mesh = Cast<UPrimitiveComponent>(A->GetRootComponent());
+	if (const FObjectProperty* NP = CastField<FObjectProperty>(A->GetClass()->FindPropertyByName(TEXT("NS_Trail"))))
+	{
+		G.Trail = Cast<UActorComponent>(NP->GetObjectPropertyValue_InContainer(A));
+	}
+
+	// 내 수류탄 — Q 를 누른 프레임에서 보이기까지(서버 왕복 + 남 몸과 같은 화면 늦춤)
+	int64 ShowDelay = -1;
+	if (G.Thrower == PlayerId)
+	{
+		for (int32 k = 0; k < 8; ++k)
+		{
+			if (GrenadePressFrames[k] != 0 && GrenadePressSeqs[k] == G.Seq) ShowDelay = (int64)(GFrameCounter - GrenadePressFrames[k]);
+		}
+		if (ShowDelay < 0) ++GrenadeShowNoPress;
+		else
+		{
+			++GrenadeShowDelayN;
+			GrenadeShowDelaySum += ShowDelay;
+			GrenadeShowDelayMin = FMath::Min(GrenadeShowDelayMin, ShowDelay);
+			GrenadeShowDelayMax = FMath::Max(GrenadeShowDelayMax, ShowDelay);
+		}
+	}
+	if (GrenadeVisLinesLeft > 0)
+	{
+		--GrenadeVisLinesLeft;
+		UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE_VIS spawn id=%u thrower=%u mine=%d throwTick=%u render=%.3f frame=%llu instigator=%s trail=%d mesh=%d showDelay=%lld"),
+			G.Id, G.Thrower, G.Thrower == PlayerId ? 1 : 0, G.ThrowTick, ShownRenderTick, (unsigned long long)GFrameCounter, *GetNameSafe(InstigatorPawn), G.Trail.IsValid() ? 1 : 0, G.Mesh.IsValid() ? 1 : 0, ShowDelay);
+	}
+}
+
+// 겉모습 수류탄(G-5-b) — 사건 틱 X 는 화면 시점이 X − 1 을 넘은 첫 프레임에 낸다(남의 대시 효과 TickRemoteDashCues 와 같은 규칙 — 서버가 틱 X 처리 안에서 일으켰다).
+// 만들기(던진 틱) → 자리 · 회전 보간(남 몸과 같은 ShownRenderTick) → 튕김 소리(상태 칸의 틱) → 터짐(터진 틱 — 그 자리로 옮기고 블루프린트 Detonate 의 화면 몫:
+// 신호 · 메시 숨김, b_flow.txt:31-50 · 151-154 · 186-189) → 꼬리가 끝나면 지움(블루프린트는 꼬리 OnSystemFinished 에 지운다, b_flow.txt:16-17 · 146-150)
+void UMOBridgeSubsystem::TickGrenadeVisuals()
+{
+	if (GrenadeVisuals.Num() == 0 || ShownRenderTick < 1.0) return;
+	static const FGameplayTag DetonateTag = FGameplayTag::RequestGameplayTag(kGrenadeDetonateCueTag, false);
+	const double R = ShownRenderTick;
+	UWorld* World = GetWorld();
+	USoundBase* ImpactSound = nullptr;
+	USoundAttenuation* ImpactAttenuation = nullptr;
+	bool bSoundLoaded = false;
+	// 블루프린트 ReceiveHit 의 소리와 같은 값(b_flow.txt:131-139 — 맞은 자리 · 크기 1 · 높이 1 · 시작 0 · 감쇠 ATT_Projectile · 끝나면 지움)
+	const auto PlayImpact = [&](const FVector& At)
+	{
+		if (!bSoundLoaded)
+		{
+			bSoundLoaded = true;
+			ImpactSound = LoadObject<USoundBase>(nullptr, kGrenadeImpactSoundPath);
+			ImpactAttenuation = LoadObject<USoundAttenuation>(nullptr, kGrenadeImpactAttenuationPath);
+		}
+		if (ImpactSound) UGameplayStatics::SpawnSoundAtLocation(this, ImpactSound, At, FRotator::ZeroRotator, 1.f, 1.f, 0.f, ImpactAttenuation, nullptr, true);
+	};
+
+	for (auto It = GrenadeVisuals.CreateIterator(); It; ++It)
+	{
+		FMOBGrenadeVisual& G = It.Value();
+		if (!G.bSpawned && R > (double)G.ThrowTick - 1.0) SpawnGrenadeVisual(G);
+		if (!G.bSpawned) continue;
+		if (G.SpawnFrame == 0)
+		{
+			if (G.bBoomKnown) It.RemoveCurrent();	// 만들기 실패 — 터짐 소식까지 받고 뺀다(뒤 소식이 「칸 없음」으로 안 세이게)
+			continue;
+		}
+		AActor* A = G.Actor.Get();
+		if (!A)
+		{
+			if (!G.bDestroyedByUs)
+			{
+				++GrenadeVisLost;
+				// 일부러 틀림(-MOBBreakGrenadeVisual)에선 블루프린트가 스스로 터지고 꼬리가 끝나면 스스로 지운다 — 그 지움까지 초를 다리 지움과 같은 꼴로 남겨
+				// 같은 판 조건(느린 프레임)에서 Lyra 원본 길과 견준다. 알아챈 프레임은 지워진 다음 프레임이다
+				if (GrenadeGoneLinesLeft > 0)
+				{
+					--GrenadeGoneLinesLeft;
+					UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE_VIS lostGone id=%u frame=%llu fromSpawn=%lld sec=%.3f maxDt=%.3f overDt=%.3f spawnDt=%.3f selfHidden=%d"), G.Id, (unsigned long long)GFrameCounter,
+						(int64)(GFrameCounter - G.SpawnFrame), World->GetTimeSeconds() - G.SpawnTime, G.MaxDt, G.OverDt, G.SpawnDt, G.bSelfHidden ? 1 : 0);
+				}
+			}
+			It.RemoveCurrent();
+			continue;
+		}
+		if (GFrameCounter == G.SpawnFrame) G.SpawnDt = World->GetDeltaSeconds();
+		else
+		{
+			G.MaxDt = FMath::Max(G.MaxDt, World->GetDeltaSeconds());
+			G.OverDt += FMath::Max(World->GetDeltaSeconds() - 0.125f, 0.f);
+		}
+		UPrimitiveComponent* Mesh = G.Mesh.Get();
+		if (!G.bBoomed && !G.bSelfHidden && Mesh && Mesh->bHiddenInGame)
+		{
+			// 다리가 숨기기 전에 메시가 숨었다 = 블루프린트 Detonate 가 돌았다(그 첫 화면 일이 메시 숨김이다)
+			G.bSelfHidden = true;
+			++LocalGrenadeDetonate;
+			UE_LOG(LogMOB, Warning, TEXT("MOB_GRENADE_VIS localDetonate id=%u frame=%llu age=%.3f"), G.Id, (unsigned long long)GFrameCounter, World->GetTimeSeconds() - G.SpawnTime);
+		}
+
+		for (const FMOBGrenadeSnap& S : G.Snaps)
+		{
+			if (!S.bBounced || S.Tick <= G.LastSoundTick || R <= (double)S.Tick - 1.0) continue;
+			G.LastSoundTick = S.Tick;
+			PlayImpact(S.Hit);
+			++GrenadeVisBounceSounds;
+		}
+
+		if (!G.bBoomed)
+		{
+			// 보간 — 화면 시점 R 이하의 마지막 틱과 그다음 틱을 섞는다(틱 사이가 비면 그 폭으로). 다음 틱이 아직 없으면 마지막 틱에 둔다
+			const TArray<FMOBGrenadeSnap>& Snaps = G.Snaps;
+			int32 i = Snaps.Num() - 1;
+			while (i > 0 && (double)Snaps[i].Tick > R) --i;
+			FVector Pos = Snaps[i].Pos;
+			FRotator Rot = Snaps[i].Rot;
+			if (i + 1 < Snaps.Num())
+			{
+				const FMOBGrenadeSnap& From = Snaps[i];
+				const FMOBGrenadeSnap& To = Snaps[i + 1];
+				const double Span = FMath::Max<double>((double)To.Tick - (double)From.Tick, 1.0);
+				const float Alpha = (float)FMath::Clamp((R - (double)From.Tick) / Span, 0.0, 1.0);
+				Pos = FMath::Lerp(From.Pos, To.Pos, Alpha);
+				Rot = FQuat::Slerp(From.Rot.Quaternion(), To.Rot.Quaternion(), Alpha).Rotator();
+			}
+			else if ((double)Snaps[i].Tick < R) ++GrenadeVisUnderrun;
+			A->SetActorLocationAndRotation(Pos, Rot, false, nullptr, ETeleportType::None);
+		}
+
+		if (G.bBoomKnown && !G.bBoomed && !bBreakGrenadeVisual && R > (double)G.BoomTick - 1.0)
+		{
+			G.bBoomed = true;
+			const FMOBGrenadeSnap& Boom = G.Snaps.Last();
+			A->SetActorLocationAndRotation(Boom.Pos, Boom.Rot, false, nullptr, ETeleportType::None);
+			// 블루프린트와 같은 신호 값(b_flow.txt:32-37 — 자리 = 수류탄 자리 · 법선 0 · 효과 · 능력 단계 1, 나머지 핀은 기본값)
+			const FGameplayCueParameters Params = UAbilitySystemBlueprintLibrary::MakeGameplayCueParameters(0.f, 0.f, FGameplayEffectContextHandle(), FGameplayTag(), FGameplayTag(),
+				FGameplayTagContainer(), FGameplayTagContainer(), A->GetActorLocation(), FVector::ZeroVector, nullptr, nullptr, nullptr, nullptr, 1, 1, nullptr, false);
+			if (DetonateTag.IsValid())
+			{
+				bGrenadeCueCalling = true;	// 신호 길 알림은 이 부름 안에서 바로 온다(능력 시스템 없는 대상 → ExecuteGameplayCue_NonReplicated → RouteGameplayCue)
+				UGameplayCueFunctionLibrary::ExecuteGameplayCueOnActor(A, DetonateTag, Params);
+				bGrenadeCueCalling = false;
+			}
+			else ++GrenadeVisCueNoTag;
+			if (Mesh) Mesh->SetHiddenInGame(true);
+			++GrenadeVisBooms;
+			// 다른 팀 몸에 맞아 터지면 블루프린트는 Detonate 뒤 맞은 자리에 부딪힘 소리를 낸다(b_flow.txt:131-132) — 맞은 자리는 와이어에 없어 터진 자리로
+			if (G.BoomKind == wire::GRENADE_BOOM_HIT)
+			{
+				PlayImpact(Boom.Pos);
+				++GrenadeVisHitSounds;
+			}
+			G.BoomFrame = GFrameCounter;
+			G.BoomTime = World->GetTimeSeconds();
+			if (GrenadeVisLinesLeft > 0)
+			{
+				--GrenadeVisLinesLeft;
+				UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE_VIS boom id=%u kind=%u boomTick=%u render=%.3f frame=%llu ageFrames=%llu age=%.3f"), G.Id, (unsigned)G.BoomKind, G.BoomTick, R,
+					(unsigned long long)GFrameCounter, (unsigned long long)(GFrameCounter - G.SpawnFrame), G.BoomTime - G.SpawnTime);
+			}
+		}
+
+		if (G.bBoomed)
+		{
+			UActorComponent* Trail = G.Trail.Get();
+			if (!Trail || !Trail->IsActive())	// Niagara 는 끝나면 켜짐을 끈다(NiagaraComponent.cpp OnSystemComplete 의 SetActiveFlag(false))
+			{
+				const int64 GoneFrames = (int64)(GFrameCounter - G.SpawnFrame);
+				const double GoneSec = World->GetTimeSeconds() - G.SpawnTime;
+				GrenadeGoneFramesMin = FMath::Min(GrenadeGoneFramesMin, GoneFrames);
+				GrenadeGoneFramesMax = FMath::Max(GrenadeGoneFramesMax, GoneFrames);
+				GrenadeGoneSecMin = FMath::Min(GrenadeGoneSecMin, GoneSec);
+				GrenadeGoneSecMax = FMath::Max(GrenadeGoneSecMax, GoneSec);
+				if (GrenadeGoneLinesLeft > 0)
+				{
+					--GrenadeGoneLinesLeft;
+					UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE_VIS gone id=%u frame=%llu fromSpawn=%lld fromBoom=%llu sec=%.3f boomSec=%.3f maxDt=%.3f overDt=%.3f spawnDt=%.3f trail=%d"), G.Id, (unsigned long long)GFrameCounter, GoneFrames,
+						(unsigned long long)(GFrameCounter - G.BoomFrame), GoneSec, G.BoomTime - G.SpawnTime, G.MaxDt, G.OverDt, G.SpawnDt, Trail ? 1 : 0);
+				}
+				G.bDestroyedByUs = true;
+				++GrenadeVisGone;
+				A->Destroy();
+				It.RemoveCurrent();
+				continue;
+			}
+		}
 	}
 }
 
@@ -3844,6 +4209,38 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 		UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE2 inputs=%lld pressPost=%lld queued=%lld driven=%lld dropped=%lld montageFail=%lld noSpec=%lld lyraSelf=%lld stripped=%lld cancelled=%lld cancelledReload=%lld cancelLeft=%lld camBackMin=%.2f camBackMax=%.2f camBackBelow=%lld camBackAbove=%lld pending=%d"),
 			InputsGrenade, GrenadePressPost, GrenadeQueued, GrenadeDriven, GrenadeDropped, GrenadeMontageFail, GrenadeNoSpec, LyraGrenadeSelf, LyraGrenadeStripped, GrenadeCancelled, GrenadeCancelledReload, GrenadeCancelLeft,
 			InputsGrenade ? GrenadeCamBackMin : 0.0, InputsGrenade ? GrenadeCamBackMax : 0.0, GrenadeCamBackBelow, GrenadeCamBackAbove, bGrenadePending ? 1 : 0);
+		// 겉모습 수류탄(G-5-b) — 끝날 때 남은 칸: 아직 안 만듦(화면 시점이 던진 틱에 못 닿음) · 날아가는 중 · 터짐 소식은 왔고 아직 안 냄 · 꼬리 기다림.
+		// 판정 = 만듦 + 안 만듦 + 만들기 실패 = 번호 있는 던짐 · 낸 터짐 + 터짐 대기 = 터짐 소식(칸 있는 것) · 혼자 터짐 0 · 사라짐 0 · 지운 뒤 켜진 타이머 0
+		int64 VisNotSpawned = 0, VisFlying = 0, VisBoomPending = 0, VisTrailWait = 0;
+		for (const TPair<uint32, FMOBGrenadeVisual>& Pair : GrenadeVisuals)
+		{
+			const FMOBGrenadeVisual& G = Pair.Value;
+			if (!G.bSpawned) ++VisNotSpawned;
+			else if (G.SpawnFrame == 0) continue;
+			else if (G.bBoomed) ++VisTrailWait;
+			else if (G.bBoomKnown) ++VisBoomPending;
+			else ++VisFlying;
+		}
+		UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE3 throwsWithId=%lld throwsNoId=%lld dupId=%lld spawned=%lld spawnFail=%lld notSpawned=%lld noInstigator=%lld timersActive=%lld timersLeft=%lld noMovement=%lld booms=%lld boomUnknown=%lld visBooms=%lld boomPending=%lld flying=%lld trailWait=%lld stateEntries=%lld stateUnknown=%lld stateOld=%lld stateBounced=%lld stateBadSize=%lld bounceSounds=%lld hitSounds=%lld localDetonate=%lld gone=%lld lost=%lld underrun=%lld goneFrames=%lld~%lld goneSec=%.3f~%.3f showDelayN=%lld showDelay=%lld~%lld showDelayAvg=%.2f showNoPress=%lld"),
+			GrenadeThrowsWithId, GrenadeThrowsNoId, GrenadeDupId, GrenadeVisSpawned, GrenadeVisSpawnFail, VisNotSpawned, GrenadeVisNoInstigator, GrenadeVisTimersActive, GrenadeVisTimersLeft, GrenadeVisNoMovement,
+			GrenadeBooms, GrenadeBoomUnknown, GrenadeVisBooms, VisBoomPending, VisFlying, VisTrailWait, GrenadeStateEntries, GrenadeStateUnknown, GrenadeStateOld, GrenadeStateBounced, GrenadeStateBadSize,
+			GrenadeVisBounceSounds, GrenadeVisHitSounds, LocalGrenadeDetonate, GrenadeVisGone, GrenadeVisLost, GrenadeVisUnderrun,
+			GrenadeVisGone ? GrenadeGoneFramesMin : 0, GrenadeGoneFramesMax, GrenadeVisGone ? GrenadeGoneSecMin : 0.0, GrenadeGoneSecMax,
+			GrenadeShowDelayN, GrenadeShowDelayN ? GrenadeShowDelayMin : 0, GrenadeShowDelayMax, GrenadeShowDelayN ? (double)GrenadeShowDelaySum / (double)GrenadeShowDelayN : 0.0, GrenadeShowNoPress);
+		// 터짐 신호 — 길에 들어간 수(다리 · 그 밖) · 표식 없음 · 신호 묶음에 그 표식 칸이 있나 · 그 칸의 신호 클래스가 올라와 있나(-1 = 신호 관리자 · 묶음을 못 찾음).
+		// 판정 = 다리 길 = 낸 터짐(visBooms) · 그 밖 0 · 칸 1 · 올라옴 1. 클래스가 덜 올라온 채 온 신호는 엔진이 올린 뒤 다시 낸다(GameplayCueManager.cpp HandleMissingGameplayCue)
+		int32 CueInSet = -1, CueLoaded = -1;
+		if (UGameplayCueManager* GCM = UAbilitySystemGlobals::Get().GetGameplayCueManager())
+		{
+			if (UGameplayCueSet* Set = GCM->GetRuntimeCueSet())
+			{
+				const int32* Idx = Set->GameplayCueDataMap.Find(FGameplayTag::RequestGameplayTag(kGrenadeDetonateCueTag, false));
+				CueInSet = Idx ? 1 : 0;
+				if (Idx) CueLoaded = (Set->GameplayCueData.IsValidIndex(*Idx) && Set->GameplayCueData[*Idx].LoadedGameplayCueClass) ? 1 : 0;
+			}
+		}
+		UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE4 cueRoutedMine=%lld cueRoutedOther=%lld cueNoTag=%lld cueInSet=%d cueLoaded=%d routeHooked=%d"),
+			GrenadeCueRoutedMine, GrenadeCueRoutedOther, GrenadeVisCueNoTag, CueInSet, CueLoaded, GrenadeCueRouteHandle.IsValid() ? 1 : 0);
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY4 remotes=%d remoteFail=%d frames=%lld underrun=%lld teleports=%lld driftMax=%.3f driftOver1cm=%lld yawDiffMax=%.3f lagAvg=%.1f behindTicksAvg=%.2f"),
 		RemoteSpawned, RemoteSpawnFail, RemoteFrames, RemoteUnderrun, RemoteTeleports, RemoteDriftMax, RemoteDriftOver1cm, RemoteYawDiffMax, RemoteFrames ? RemoteLagSum / RemoteFrames : 0.0, RemoteFrames ? RemoteBehindSum / RemoteFrames : 0.0);

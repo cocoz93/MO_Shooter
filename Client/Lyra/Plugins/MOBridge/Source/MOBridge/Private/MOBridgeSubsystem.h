@@ -12,6 +12,9 @@ class APawn;
 class APlayerState;
 class ULyraEquipmentInstance;
 class ALyraWeaponSpawner;
+class AActor;
+class UActorComponent;
+class UPrimitiveComponent;
 struct FMOBCore;
 struct FGameplayAbilityActorInfo;
 
@@ -77,6 +80,45 @@ struct FMOBPendingDashCue
 	double ReceivedAt = 0;		// 받은 때(FPlatformTime) — 효과까지 기다린 시간을 잰다
 };
 
+// 겉모습 수류탄의 한 틱(G-5-b) — 던짐 소식(던진 틱 − 1 칸 = 생긴 자리) · 상태 소식(그 틱 걸음 뒤) · 터짐 소식(터진 틱 걸음 뒤)
+struct FMOBGrenadeSnap
+{
+	uint32 Tick = 0;
+	FVector Pos = FVector::ZeroVector;
+	FRotator Rot = FRotator::ZeroRotator;
+	bool bBounced = false;		// 이 틱 걸음에 튕겼다 — Hit = 첫 튕김의 맞은 자리(소리)
+	FVector Hit = FVector::ZeroVector;
+};
+
+// 겉모습 수류탄 하나(G-5-b) — 서버 던짐 소식으로 Lyra B_Grenade 를 만들어 제 타이머 · 날아감 · 충돌을 끄고, 자리 · 회전은 서버 틱을 남 몸과 같은 화면 시점(ShownRenderTick)으로 보간한다.
+// 터짐 소식에 터짐 신호 · 메시 숨김을 내고 꼬리가 끝나면 지운다(블루프린트 Detonate 의 화면 몫 — 피해는 서버 몫이라 Detonate 는 안 부른다)
+struct FMOBGrenadeVisual
+{
+	uint32 Id = 0;
+	uint32 Thrower = 0;
+	uint32 ThrowTick = 0;
+	uint32 Seq = 0;				// 던진 사람의 입력 번호 — 내 것이면 누른 프레임을 찾아 보이기까지를 잰다
+	TArray<FMOBGrenadeSnap> Snaps;	// 틱 차례(던진 틱 − 1 부터 터진 틱까지 — 신관이면 던진 틱 + 120, Shared/Grenade.h kGrenadeFuseFrames)
+	bool bSpawned = false;		// 만들기를 해 봤다(실패도 — 다시 안 만든다)
+	TWeakObjectPtr<AActor> Actor;
+	TWeakObjectPtr<UPrimitiveComponent> Mesh;
+	TWeakObjectPtr<UActorComponent> Trail;
+	bool bBoomKnown = false;	// 터짐 소식을 받았다
+	uint32 BoomTick = 0;
+	uint8 BoomKind = 0;
+	bool bBoomed = false;		// 다리가 터짐 신호를 냈다
+	bool bSelfHidden = false;	// 다리가 안 숨겼는데 메시가 숨었다 — 블루프린트가 스스로 터짐(LocalGrenadeDetonate 로 셌다)
+	bool bDestroyedByUs = false;
+	uint32 LastSoundTick = 0;	// 부딪힘 소리를 낸 마지막 틱
+	uint64 SpawnFrame = 0, BoomFrame = 0;
+	double SpawnTime = 0, BoomTime = 0;	// 월드 시각(초) — 만든 뒤 지우기까지를 Lyra 기록(1/60초 고정 걸음)과 초로 견준다
+	// 지우기가 늦은 칸이 느린 프레임 탓인지 보려고 — 만든 프레임 뒤 가장 긴 프레임(초) · 그 프레임들의 0.125초 넘는 몫 합(Niagara 기본 한 걸음 상한
+	// MaxDeltaTimePerTick 0.125, NiagaraSettings.h:181 · 걸음을 자르는 자리 NiagaraSystemSimulation.cpp:1182-1184) · 만든 프레임의 길이(꼬리가 그 프레임에 걸음을 받는지 몰라 따로)
+	float MaxDt = 0;
+	float OverDt = 0;
+	float SpawnDt = 0;
+};
+
 /**
  * Lyra 와 매치 서버를 잇는다 — 입력을 서버로 보내고 서버 결과를 받는다. 판정은 전부 서버 몫.
  * 와이어 형식 = MO_Shooter/Shared/GameProtocol.h(봇과 같은 한 벌).
@@ -111,6 +153,8 @@ struct FMOBPendingDashCue
  *   -MOBAutoGrenade             자동 입력에 수류탄을 더한다 — 2.6초마다 Q 를 0.05초(쿨다운 5초라 둘에 하나는 쿨다운에 걸린다) · 20초마다 재장전을 누른 0.4초 뒤 한 번(재장전 끊기 길).
  *                               대시와 같이 Lyra 입력 표식에도 누름을 넣고, 다리는 그다음 프레임에 읽는다
  *   -MOBBreakGrenadeBlock       일부러 틀리기 — Lyra 수류탄 능력의 입력 표식을 안 떼어 Lyra 가 키로 혼자 수류탄을 켠다(MOB_GRENADE2 lyraSelf 가 늘어야 한다)
+ *   -MOBBreakGrenadeVisual      일부러 틀리기 — 겉모습 수류탄의 블루프린트 타이머를 안 지우고 서버 터짐도 안 따른다(블루프린트가 2초에 스스로 터진다 —
+ *                               MOB_GRENADE3 localDetonate 가 만든 수만큼 늘어야 한다. 독립 실행이라 그 블루프린트가 Lyra 쪽 피해도 넣는다 — 이 판은 셈만 본다)
  *   -MOBBreakPadsAt=N           일부러 틀리기 — 준비된 뒤 N초에 묶인 받침 하나의 Lyra 켜짐을 뒤집고 · 다음 회복 효과를 건너뛰고 · 다음 받침 소식 하나를 버린다(check_pads_bridge.py 가 잡는지 보려고)
  *   -MOBBreakDevices            일부러 틀리기 — 점프대 · 순간이동의 겹침을 안 끈다(MOB_DEVICES overlap 이 늘어야 한다 — 끈 판의 0 이 「못 셌다」가 아님을 보려고)
  *   -MOBHumanCheck              사람 확인 자동화(MyDocs human-check-auto-plan.md) — 자동 입력 앞에 각본(샷건 조준 · 허리 사격, 앉기 · 앉은 채 점프, 무기별 근접 누른 채)을 돌리고
@@ -185,7 +229,10 @@ private:
 	void HandlePickup(const mo::wire::Pickup& M);
 	void HandleMelee(const mo::wire::Melee& M);
 	void HandleDash(const mo::wire::Dash& M);
-	void HandleGrenade(const mo::wire::Grenade& M);		// 서버 수류탄 소식(G-5-a) — 내 던짐이면 예측을 서버 값으로 고친다. 남의 던짐 · 터짐은 세기만(겉모습은 G-5-b)
+	void HandleGrenade(const mo::wire::Grenade& M);		// 서버 수류탄 소식(G-5-a) — 내 던짐이면 예측을 서버 값으로 고친다. 던짐 · 터짐은 겉모습 수류탄 칸에도 적는다(G-5-b)
+	void HandleGrenadeState(const uint8* Data, int32 Size);	// 서버 수류탄 상태(G-5-b) — 칸마다 겉모습 수류탄의 틱 하나로 쌓는다
+	void TickGrenadeVisuals();		// 매 프레임(TickRemoteDashCues 뒤) — 화면 시점으로 겉모습 수류탄을 만들고 · 옮기고 · 소리 · 터짐 신호 · 지우기(G-5-b)
+	void SpawnGrenadeVisual(FMOBGrenadeVisual& G);
 	void TickRemoteDashCues();		// 매 프레임(TickRemotes 뒤) — 받아 둔 남의 대시 효과 중 화면 시점이 닿은 것을 낸다
 	ALyraWeaponSpawner* BindPad(int32 Index);
 	void ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects);
@@ -249,6 +296,7 @@ private:
 	bool bBreakDashDir = false;		// -MOBBreakDashDir — 일부러 틀림: 켤 때 마지막 이동 입력을 앞 입력 것으로 안 바꾼다(montMismatch 가 는다)
 	bool bAutoDashOn = false;		// -MOBAutoDash — 자동 입력에 대시를 더한다
 	bool bBreakGrenadeBlock = false;	// -MOBBreakGrenadeBlock — 일부러 틀림: Lyra 수류탄 능력의 입력 표식을 안 뗀다(Lyra 가 혼자 켜 lyraSelf 가 는다)
+	bool bBreakGrenadeVisual = false;	// -MOBBreakGrenadeVisual — 일부러 틀림: 겉모습 수류탄 블루프린트를 그대로 둔다(스스로 터져 localDetonate 가 는다)
 	bool bAutoGrenadeOn = false;	// -MOBAutoGrenade — 자동 입력에 수류탄을 더한다
 	bool bBreakCrouchBlock = false;	// -MOBBreakCrouchBlock — 일부러 틀림: 앉기 막기 갈고리가 어긋남을 세기만 하고 안 되돌린다. Lyra 가 혼자 앉으며 캡슐을 옮겨 내 캐릭터 밀림(selfDriftOver1cm)이 늘어야 한다(D-5-c)
 	bool bAbilityOwnTimer = false;	// -MOBAbilityOwnTimer — 내 사격 능력을 Lyra 자기 타이머 · 원본 난수로 둔다(고치기 전 동작과 견줄 때만, D53)
@@ -558,6 +606,30 @@ private:
 	uint32 GrenadePendingSeq = 0;
 	uint64 GrenadePendingFrame = 0;
 	int32 GrenadeLinesLeft = 40;	// 던짐 하나씩 줄(MOB_GRENADE_ONE) 남은 수
+	// 겉모습 수류탄(G-5-b) — 수류탄 번호 → 칸. 지운 칸은 뺀다
+	TMap<uint32, FMOBGrenadeVisual> GrenadeVisuals;
+	// 받은 던짐 소식(번호 있음 · 번호 0 = 목록이 차 못 만듦) · 같은 번호 다시 · 칸 없는(또는 두 번째) 터짐 · 상태 칸(받음 · 칸 없음 · 옛 틱 — 터짐 소식의 옛 틱도 · 튕김) · 크기가 모자란 상태 패킷
+	int64 GrenadeThrowsWithId = 0, GrenadeThrowsNoId = 0, GrenadeDupId = 0, GrenadeBoomUnknown = 0;
+	int64 GrenadeStateEntries = 0, GrenadeStateUnknown = 0, GrenadeStateOld = 0, GrenadeStateBounced = 0, GrenadeStateBadSize = 0;
+	// 만듦 · 만들기 실패(클래스 · 생성) · 던진 몸 없음 · 만들 때 켜져 있던 블루프린트 터짐 타이머 · 지운 뒤에도 켜진 타이머 · 날아감 성분 없음
+	int64 GrenadeVisSpawned = 0, GrenadeVisSpawnFail = 0, GrenadeVisNoInstigator = 0, GrenadeVisTimersActive = 0, GrenadeVisTimersLeft = 0, GrenadeVisNoMovement = 0;
+	// 낸 터짐 신호 · 부딪힘 소리(상태 튕김 · 직접 맞음 터짐) · 블루프린트 혼자 터짐 · 꼬리가 끝나 지움 · 다리가 안 지웠는데 사라짐 · 화면 시점이 쌓인 틱보다 앞선 프레임
+	int64 GrenadeVisBooms = 0, GrenadeVisBounceSounds = 0, GrenadeVisHitSounds = 0, LocalGrenadeDetonate = 0, GrenadeVisGone = 0, GrenadeVisLost = 0, GrenadeVisUnderrun = 0;
+	// 만든 뒤 지우기까지(프레임 · 초 — Lyra 기록은 1/60초 고정 걸음으로 만든 뒤 180프레임 = 3.0초, cprobe_g0a1.log MOB_CPROBE_GGONE) · 내 Q 에서 겉모습이 보이기까지 프레임(GrenadeShowDelay — 값만 기록, 플랜 「위험」)
+	int64 GrenadeGoneFramesMin = TNumericLimits<int64>::Max(), GrenadeGoneFramesMax = -1;
+	double GrenadeGoneSecMin = 1e9, GrenadeGoneSecMax = -1;
+	int64 GrenadeShowDelayN = 0, GrenadeShowDelayMin = TNumericLimits<int64>::Max(), GrenadeShowDelayMax = -1, GrenadeShowDelaySum = 0, GrenadeShowNoPress = 0;
+	// 단추를 실은 최근 입력 번호 · 프레임(보이기까지를 재려고 — 쿨다운 5초에 하나라 8칸이면 넉넉하다)
+	uint32 GrenadePressSeqs[8] = {};
+	uint64 GrenadePressFrames[8] = {};
+	uint32 GrenadePressRing = 0;
+	int32 GrenadeVisLinesLeft = 40;	// 겉모습 하나씩 줄(MOB_GRENADE_VIS 만듦 · 터짐) 남은 수
+	int32 GrenadeGoneLinesLeft = 60;	// 지움 줄(MOB_GRENADE_VIS gone · lostGone) 남은 수 — 한 판 던짐(40 안팎)을 다 남기려고 따로 센다
+	// 터짐 신호가 실제로 능력 시스템 신호 길에 들어갔나 — 신호 관리자의 길 알림(OnGameplayCueRouted, 출시 빌드가 아닐 때만 알린다)을 듣고
+	// 터짐 신호 표식이면 센다: 다리가 부르는 중(Mine) · 그 밖(Other = 블루프린트 Detonate 등). 표식을 못 찾아 신호를 못 냄
+	FDelegateHandle GrenadeCueRouteHandle;
+	bool bGrenadeCueCalling = false;
+	int64 GrenadeCueRoutedMine = 0, GrenadeCueRoutedOther = 0, GrenadeVisCueNoTag = 0;
 	uint32 MeleePendingSeq = 0;
 	uint64 MeleePendingFrame = 0;
 	bool bLyraMeleeWasActive = false;
