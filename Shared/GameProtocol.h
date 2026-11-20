@@ -125,7 +125,7 @@ namespace mo
 			uint8_t weapon;			// EWeapon
 			uint32_t viewTick;		// 쏠 때 화면에 그리던 틱의 정수 부분. 0 = 시점 없음 → 서버는 현재 자리로 판정
 			float viewAlpha;		// viewTick 에서 다음 틱까지의 비율 0~1 — 틱 간격이 달리기로 약 8cm 라 정수 틱만으로는 모자란다
-			float camBack;			// 카메라에서 사격 시작점(aim)까지 시선 방향 거리(cm) — 수류탄 겨눔 선이 카메라에서 시작한다(G-3). 서버가 G-0 범위로 자른다(ClampGrenadeCamBack)
+			float camBack;			// 카메라에서 사격 시작점(aim)까지 시선 방향 거리(cm) — 수류탄 겨눔 선이 카메라에서 시작한다(G-3). 서버가 정직한 Lyra 값이 드는 범위로 자른다(ClampGrenadeCamBack · L-3-c)
 		};
 
 		// 시험 입력 DebugPlace 의 덧붙임(flags) — 0 이면 자리 · 체력만(전부터의 뜻)

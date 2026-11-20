@@ -212,7 +212,7 @@ namespace mo
 		uint64_t grenadeSelfDamage = 0;		// 그중 던진 사람 자신
 		uint64_t grenadeKills = 0;			// 수류탄 피해로 체력 0(자기 처치 포함)
 		// 와이어(G-3) — 세는 자리를 보내는 곳에 따로 둬 보내는 길이 빠졌는지 가린다
-		uint64_t grenadeCamBackClamped = 0;	// 던진 입력의 camBack 이 G-0 범위 밖이라 자름(봇이 칸을 안 채우면 0 → 30 으로 늘 든다)
+		uint64_t grenadeCamBackClamped = 0;	// 던진 입력의 camBack 이 범위(kGrenadeCamBackMin ~ Max) 밖이라 자름 — 칸을 안 채운 0 은 범위 안이다(L-3-c)
 		uint64_t grenadeThrowMsgs = 0;		// 보낸 S2C_GRENADE 던짐 — grenadeThrown 과 같아야 한다(목록이 차 번호 0 인 것 포함)
 		uint64_t grenadeBoomMsgs = 0;		// 보낸 S2C_GRENADE 터짐 — 신관 + 맞아 터짐과 같아야 한다
 		uint64_t grenadeStateMsgs = 0;		// 보낸 S2C_GRENADE_STATE — 산 수류탄이 있는 틱 수

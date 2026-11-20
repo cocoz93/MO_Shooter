@@ -1829,7 +1829,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	const FVector Location = Ch->GetActorLocation();
 	const FVector Aim = TargetingStart(PC, Location);
 	// 수류탄 카메라 거리(입력 camBack, G-3) — 카메라에서 사격 시작점까지 시선 방향 거리 = (몸 − 카메라) · 시선(G-0 「camBack」 줄의 식 — 시작점은 시선 위 몸에 가장 가까운 점이라 같은 값).
-	// 서버가 G-0 범위로 자르고 던진 입력에만 쓴다(ClampGrenadeCamBack)
+	// 서버가 범위(kGrenadeCamBackMin ~ Max)로 자르고 던진 입력에만 쓴다(ClampGrenadeCamBack)
 	float CamBack = 0.f;
 	{
 		FVector CamLoc;
@@ -2009,8 +2009,8 @@ void UMOBridgeSubsystem::TickInput(double Now)
 			if (MatchPhase == (uint8)wire::EMatchPhase::PostGame) ++GrenadePressPost;
 			GrenadeCamBackMin = FMath::Min(GrenadeCamBackMin, (double)CamBack);
 			GrenadeCamBackMax = FMath::Max(GrenadeCamBackMax, (double)CamBack);
-			// 서버가 자르는 범위(G-0 20칸 30.0~417.3) 밖을 센다 — 판 grn1 최소 17.25 · 서버 camBackClamped 1. 자세는 아래 AddInput 뒤 MOB_GRENADE_PRESS 줄로 본다
-			// (판 grn2: 조준 없이 선 채 27.14 · 조준은 80 안팎이라 범위 안 — 미결 25)
+			// 서버가 자르는 범위(−90 ~ 417.3, L-3-c) 밖을 센다 — 옛 아래 끝 30 일 때 판 grn1 최소 17.25 · 서버 camBackClamped 1. 자세는 아래 AddInput 뒤 MOB_GRENADE_PRESS 줄로 본다
+			// (판 grn2: 조준 없이 선 채 27.14 · 조준은 80 안팎 — 미결 25 → L-3-c 에서 아래 끝을 −90 으로)
 			if (CamBack < mo::kGrenadeCamBackMin) ++GrenadeCamBackBelow;
 			else if (CamBack > mo::kGrenadeCamBackMax) ++GrenadeCamBackAbove;
 		}

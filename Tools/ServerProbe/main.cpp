@@ -1133,23 +1133,109 @@ namespace
 			Expect(false, fails, "낙사가 안 일어남");
 		}
 
-		// ⑥-2 자기 수류탄 처치 — C 를 체력 1 로 옮겨(옮기기가 죽음 · 무적을 푼다) 발밑에 던진다. 처치자 = 자기(같은 팀)라 사망 · 처치 · 점수 다 그대로(L-3-a).
-		// 자리는 A · B 가 폭발 반지름 밖인 곳 — 두 사람 체력 · 도움 기록을 건드리면 ⑦ 이 달라진다
+		// ⑥-1 · ⑥-2 의 C 자리 — A · B 가 폭발 반지름 밖인 곳(두 사람 체력 · 도움 기록을 건드리면 ⑦ 이 달라진다).
+		// ⑥-1 은 던진 뒤 C 를 옮겨 둘 먼 자리(spotFar — C 자리에서도 폭발 반지름 밖)도 쓴다
+		const Vec3 posA(a.self.x, a.self.y, a.self.z), posB(b.self.x, b.self.y, b.self.z);
+		const double keepAway = kGrenadeBlastRadius + 150.0;
+		Vec3 spotC, spotFar;
+		bool found = false, foundFar = false;
 		{
-			const Vec3 posA(a.self.x, a.self.y, a.self.z), posB(b.self.x, b.self.y, b.self.z);
-			const double keepAway = kGrenadeBlastRadius + 150.0;
 			size_t startCount = 0;
 			const SpawnPoint* starts = GetExpanseStarts(startCount);
-			Vec3 spotC;
-			bool found = false;
-			for (size_t s = 0; s < startCount && !found; ++s)
+			for (size_t s = 0; s < startCount && !foundFar; ++s)
 			{
 				Vec3 at;
 				if (!FindSpotNear(map, starts[s].location, at)) continue;
 				if (Length(at - posA) < keepAway || Length(at - posB) < keepAway) continue;
-				spotC = at;
-				found = true;
+				if (!found) { spotC = at; found = true; }
+				else if (Length(at - spotC) >= keepAway) { spotFar = at; foundFar = true; }
 			}
+		}
+
+		// ⑥-1 수류탄 카메라 거리(L-3-c) — 선 시작 = 입력 시작점 + 시선 × (450 − camBack), 선 시작에서 45 안에 맞으면 조종 회전 그대로(Grenade.cpp ComputeGrenadeThrow).
+		// 바닥까지 471 이면 17.25 → 38.25(조종) · 30 → 51(맞은 곳 바라봄 — 대조군), 515 면 −40 → 25(조종) · 0 으로 잘리면 65. 아래 끝이 30 이면 첫째 · 셋째가, 0 이면 셋째만 갈린다.
+		// 조종 회전이면 던짐 소식 회전 = 입력 회전(Room.cpp ThrowGrenade → SendGrenadeEvent). 던짐 소식을 받으면 C 를 먼 자리로 옮겨 폭발을 피하고,
+		// 다음 던짐까지 쿨다운(301 입력)을 C 입력으로 채운다 — 경기 끝 단계(10초)엔 세 번을 못 기다려 경기 중에 던진다
+		if (!found || !foundFar)
+		{
+			Expect(false, fails, "수류탄 카메라 거리 — A · B 에서 먼 자리 둘을 못 찾음");
+		}
+		else
+		{
+			struct CamCase { float camBack; double floorAt; bool control; };
+			const CamCase cases[] = { { 17.25f, 471.0, true }, { 30.f, 471.0, false }, { -40.f, 515.0, true } };
+			const auto angleDiff = [](double x, double y) { return std::fmod(x - y + 540.0, 360.0) - 180.0; };
+			const Vec3 eyeC = spotC + Vec3(0, 0, 60);
+			const Vec3 eyeFar = spotFar + Vec3(0, 0, 60);
+			RayHit down;
+			const bool floorFound = map.Raycast(eyeC, eyeC + Vec3(0, 0, -400), MAP_BLOCK_WEAPON, down);
+			for (const CamCase& cc : cases)
+			{
+				// 피치는 눈높이로 정하고, 요는 16 방향 중 눈에서 그 시선으로 무기 채널 맞은 거리가 floorAt ± 4 인 첫 방향(45 까지 여유 2.75 이상)
+				const float pitch = floorFound ? (float)(-std::asin(down.distance / cc.floorAt) * 180.0 / kPi) : 0.f;
+				float yaw = 0.f;
+				double seen = 0.0;
+				bool aimed = false;
+				for (int d = 0; d < 16 && floorFound && !aimed; ++d)
+				{
+					const float tryYaw = (float)(d * 22.5);
+					RayHit ray;
+					if (!map.Raycast(eyeC, eyeC + AimDirection(tryYaw, pitch) * kGrenadeTraceRange, MAP_BLOCK_WEAPON, ray)) continue;
+					if (std::fabs(ray.distance - cc.floorAt) > 4.0) continue;
+					yaw = tryYaw;
+					seen = ray.distance;
+					aimed = true;
+				}
+				if (!aimed)
+				{
+					Expect(false, fails, "수류탄 카메라 거리 — 바닥까지 거리가 맞는 방향이 없음");
+					continue;
+				}
+				c.Place(spotC, 100.f);
+				PumpFor(clients, 3, 0.1);
+				const size_t grenadesBefore = a.grenades.size();
+				const auto findThrow = [&]() -> const wire::Grenade*
+				{
+					for (size_t g = grenadesBefore; g < a.grenades.size(); ++g)
+					{
+						if (a.grenades[g].thrower == idC && a.grenades[g].kind == wire::GRENADE_THROW) return &a.grenades[g];
+					}
+					return nullptr;
+				};
+				uint32_t throwSeq = 0;
+				RunTicks(clients, 3, 60, [&](int i)
+				{
+					wire::Input input = wire::Input();
+					input.seq = ++c.seq;
+					input.yaw = yaw;
+					input.pitch = pitch;
+					input.aimX = (float)eyeC.x; input.aimY = (float)eyeC.y; input.aimZ = (float)eyeC.z;
+					input.camBack = cc.camBack;
+					if (i == 0)
+					{
+						input.buttons = wire::BUTTON_GRENADE;
+						throwSeq = input.seq;
+					}
+					c.net.SendPacket(input, wire::Msg::C2S_INPUT);
+				}, [&] { return findThrow() != nullptr; });
+				PumpFor(clients, 3, 0.05);
+				c.Place(spotFar, 100.f);		// 폭발을 피한다
+				const wire::Grenade* thrown = findThrow();
+				const double pitchDiff = thrown ? angleDiff(thrown->pitch, pitch) : 0.0;
+				const double yawDiff = thrown ? angleDiff(thrown->yaw, yaw) : 0.0;
+				std::printf("RULES 수류탄 카메라 거리 camBack=%.2f 바닥까지=%.2f(목표 %.0f) 요=%.1f 피치=%.3f 던짐=%d 소식 seq=%u(누름 %u) 피치 차=%.4f 요 차=%.4f\n",
+					cc.camBack, seen, cc.floorAt, yaw, pitch, thrown ? 1 : 0, thrown ? thrown->seq : 0, throwSeq, pitchDiff, yawDiff);
+				const bool control = thrown && std::fabs(pitchDiff) < 0.01 && std::fabs(yawDiff) < 0.01;
+				const bool lookAt = thrown && std::fabs(pitchDiff) > 0.5;
+				Expect(thrown && thrown->seq == throwSeq && (cc.control ? control : lookAt), fails,
+					cc.control ? "수류탄 카메라 거리 — 선 시작에서 45 안 → 조종 회전(자르지 않음)" : "수류탄 카메라 거리 — 45 밖 → 맞은 곳 바라봄(대조군)");
+				RunTicks(clients, 3, 310, [&](int) { SendAim(c, eyeFar, eyeFar + Vec3(100, 0, 0), 0, 0, 0, 0); }, [] { return false; });	// 쿨다운 301 입력 + 여유
+			}
+		}
+
+		// ⑥-2 자기 수류탄 처치 — C 를 체력 1 로 옮겨(옮기기가 죽음 · 무적을 푼다) 발밑에 던진다. 처치자 = 자기(같은 팀)라 사망 · 처치 · 점수 다 그대로(L-3-a).
+		// 자리는 위 C 자리
+		{
 			if (!found)
 			{
 				Expect(false, fails, "자기 수류탄 처치 — A · B 에서 먼 자리를 못 찾음");

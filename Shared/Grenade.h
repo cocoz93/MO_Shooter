@@ -62,10 +62,13 @@ namespace mo
 	inline constexpr double kGrenadeTraceRange = 3150.0;	// Default Targeting Range — 카메라에서 선 끝까지
 	inline constexpr double kGrenadeAimMinDistance = 45.0;	// 맞은 거리(선 시작에서) < 45 면 조종 회전 그대로 — 안 맞음도 거리 0 이라 이 갈래(G-0-a 짐작 1)
 
-	// 카메라 거리(입력 camBack, G-3) — 카메라에서 입력 시작점까지 시선 방향 거리. 보내는 쪽이 싣고 서버는 G-0 에서 잰 범위로 자른다(플랜 101줄).
+	// 카메라 거리(입력 camBack, G-3) — 카메라에서 입력 시작점까지 시선 방향 거리. 보내는 쪽이 싣고 서버는 정직한 Lyra 값이 드는 범위로 자른다(플랜 101줄).
 	// G-0 실측 20칸 = 서서 피치 0 283.98(앉음 · 점프 · 달리기 같음) · +45 133.5 · +60 102.8 · −20 329.6 · −35 364.8 · −60 417.3 · 등이 벽 30.0
 	// (content-impl-progress.md G-0 「camBack」 줄). 봇은 대표값으로 서서 피치 0 을 싣는다
-	inline constexpr double kGrenadeCamBackMin = 30.0;
+	// 아래 끝(L-3-c) — Lyra 카메라는 벽에 다 밀리면 몸 캡슐 안 점까지 온다(LyraCameraMode_ThirdPerson.cpp:137-150 · 348). 값 = (몸 − 카메라)·시선이라
+	// 그때 −캡슐 반높이(서 있는 90, Movement.h capsuleHalfHeight)보다 작을 수 없다(원본 기준 — 음수는 관측 안 함. 다리 실측 최소 17.25 · 27.14 가 옛 끝 30 아래였다).
+	// 위 끝은 G-0 실측 그대로(피치 −60 보다 아래를 본 기록은 없다)
+	inline constexpr double kGrenadeCamBackMin = -90.0;
 	inline constexpr double kGrenadeCamBackMax = 417.3;
 	inline constexpr double kGrenadeCamBackStanding = 283.98;
 	// 와이어 값을 범위로 자른다. 유한 값만 넘길 것 — 서버는 NaN · 무한 입력을 통째로 버린다(Room.cpp IsFiniteInput)

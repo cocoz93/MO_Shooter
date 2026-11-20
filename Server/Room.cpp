@@ -903,7 +903,7 @@ namespace mo
 				CountGrenade(grenade);
 				if (grenade == EGrenadeResult::Thrown)
 				{
-					const double camBack = ClampGrenadeCamBack(input.camBack);		// G-0 에서 잰 범위로(플랜 101줄) — NaN · 무한은 입력째 버렸다(IsFiniteInput)
+					const double camBack = ClampGrenadeCamBack(input.camBack);		// 정직한 Lyra 값이 드는 범위로(플랜 101줄 · Grenade.h kGrenadeCamBackMin) — NaN · 무한은 입력째 버렸다(IsFiniteInput)
 					if (camBack != (double)input.camBack) ++_stats.grenadeCamBackClamped;
 					ThrowGrenade(player, input, camBack);
 					const int slot = player.animEventCount;
