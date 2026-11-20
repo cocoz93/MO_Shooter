@@ -25,6 +25,7 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/SkeletalBodySetup.h"
+#include "Engine/OverlapResult.h"
 #include "UnrealClient.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
@@ -745,6 +746,19 @@ namespace
 		{ TEXT("me_settle"),  3.0f,  EAct::Home,           0.f,   false },
 		{ TEXT("ft_leave"),   5.1f,  EAct::FoeThrowLeave,  0.f,   false },
 	};
+	// L-2-c 가까운 상대 메시 몸 각본(-MOBCPGrenSet=l2c) — G-0 각본 foe_close(자리 18)만 여섯 번. 칸마다 BeginGrenade 가 두 체력을 1000 으로 되돌린다.
+	// 상대 서기 자세는 칸마다 애니 시각이 달라 맞은 점이 판마다 다르다(옛 기록 16판 최대 약 8cm) — 여섯 번이 서로 다른 자세 여섯
+	const FStep GRENADE_L2C_SCRIPT[] = {
+		{ TEXT("settle"),     1.0f, EAct::Home,      0.f,  false },
+		{ TEXT("foe_show"),   0.3f, EAct::FoeShow,   0.f,  false },
+		{ TEXT("foe_setup"),  0.5f, EAct::FoeSetup,  0.f,  false },	// 다른 팀(맞으면 터짐 — B_Grenade ReceiveHit)
+		{ TEXT("foe_close1"), 5.1f, EAct::GrenThrow, 18.f, false },
+		{ TEXT("foe_close2"), 5.1f, EAct::GrenThrow, 18.f, false },
+		{ TEXT("foe_close3"), 5.1f, EAct::GrenThrow, 18.f, false },
+		{ TEXT("foe_close4"), 5.1f, EAct::GrenThrow, 18.f, false },
+		{ TEXT("foe_close5"), 5.1f, EAct::GrenThrow, 18.f, false },
+		{ TEXT("foe_close6"), 5.1f, EAct::GrenThrow, 18.f, false },
+	};
 	// L-1-c 대시 같은 프레임 누름 각본(-MOBCPMode=dash -MOBCPDashSet=l1c) — 칸 길이 · 누름 시각은 D-0 대시 중 누름 칸과 같다(2초 · 대시는 칸 시작 DASH_PRESS_AT). Arg 3 = 근접(DASH_ACTIONS)
 	const FStep DASH_L1C_SCRIPT[] = {
 		{ TEXT("settle"),       1.0f, EAct::Home,        0.f, false },
@@ -889,7 +903,7 @@ namespace
 	constexpr float MELEE_SIDE_FORWARD = 250.f;	// 옆 거리 칸에서 상대를 세우는 앞 거리 — 맞는 앞 범위(150~520, gym1) 한가운데쯤
 	constexpr float WATCH_LOG_EVERY = 5.f;		// 다리 판 마지막 칸에서 점수를 적는 간격(초)
 
-	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장) · 6 = 수류탄(연습장) · 7 = 수류탄 L-1-a 장면(연습장) · 8 = 수류탄 L-1-b 장면(L_Expanse) · 9 = 대시 L-1-c 같은 프레임 누름(연습장) · 10 = 수류탄 L-1-c 같은 프레임 누름(연습장) · 11 = 수류탄 L-1-d 상대가 던진 뒤 나감(연습장)
+	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장) · 6 = 수류탄(연습장) · 7 = 수류탄 L-1-a 장면(연습장) · 8 = 수류탄 L-1-b 장면(L_Expanse) · 9 = 대시 L-1-c 같은 프레임 누름(연습장) · 10 = 수류탄 L-1-c 같은 프레임 누름(연습장) · 11 = 수류탄 L-1-d 상대가 던진 뒤 나감(연습장) · 12 = 수류탄 L-2-c 가까운 상대 메시 몸(연습장)
 	const FStep& StepAt(int32 Script, int32 I)
 	{
 		switch (Script)
@@ -905,6 +919,7 @@ namespace
 		case 9: return DASH_L1C_SCRIPT[I];
 		case 10: return GRENADE_L1C_SCRIPT[I];
 		case 11: return GRENADE_L1D_SCRIPT[I];
+		case 12: return GRENADE_L2C_SCRIPT[I];
 		default: return GYM_SCRIPT[I];
 		}
 	}
@@ -923,6 +938,7 @@ namespace
 		case 9: return UE_ARRAY_COUNT(DASH_L1C_SCRIPT);
 		case 10: return UE_ARRAY_COUNT(GRENADE_L1C_SCRIPT);
 		case 11: return UE_ARRAY_COUNT(GRENADE_L1D_SCRIPT);
+		case 12: return UE_ARRAY_COUNT(GRENADE_L2C_SCRIPT);
 		default: return UE_ARRAY_COUNT(GYM_SCRIPT);
 		}
 	}
@@ -1035,6 +1051,8 @@ void UMOBContentProbeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	if (bGrenL1C) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l1c steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L1C_SCRIPT));
 	bGrenL1D = bGrenade && GrenSet == TEXT("l1d");
 	if (bGrenL1D) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l1d steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L1D_SCRIPT));
+	bGrenL2C = bGrenade && GrenSet == TEXT("l2c");
+	if (bGrenL2C) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l2c steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L2C_SCRIPT));
 	FString DashSet;
 	FParse::Value(Cmd, TEXT("MOBCPDashSet="), DashSet);
 	bDashL1C = bDash && DashSet == TEXT("l1c");
@@ -3026,6 +3044,69 @@ void UMOBContentProbeSubsystem::OnGrenadeHit(AActor* SelfActor, AActor* OtherAct
 		Hit.Normal.X, Hit.Normal.Y, Hit.Normal.Z, Hit.ImpactNormal.X, Hit.ImpactNormal.Y, Hit.ImpactNormal.Z, Hit.Location.X, Hit.Location.Y, Hit.Location.Z,
 		Hit.ImpactPoint.X, Hit.ImpactPoint.Y, Hit.ImpactPoint.Z, Hit.TraceStart.X, Hit.TraceStart.Y, Hit.TraceStart.Z, Hit.TraceEnd.X, Hit.TraceEnd.Y, Hit.TraceEnd.Z,
 		V.X, V.Y, V.Z, GL.X, GL.Y, GL.Z, GR.Pitch, GR.Yaw, GR.Roll);
+
+	// L-2-c — 사람 메시에 맞으면 그 메시 물리 몸마다 한 줄: 세계 모양(WriteShapes 와 같은 칸) · 수류탄 쓸기를 막나 · 무기 채널을 막나.
+	// 막나는 엔진 겹침 질의로 묻는다 — 몸마다 거름(물리 자산 CollisionReponse 와 메시 반응의 작은 쪽, BodyInstance.cpp BuildBodyFilterData)을 엔진이 그대로 쓴다.
+	// 겹침 결과의 몸 번호는 메시 bMultiBodyOverlap 이 켜져야 채워진다(CollisionConversions.cpp — 꺼져 있으면 INDEX_NONE) → 질의 동안만 켜고 되돌린다.
+	// 대조군 blockCtl = 같은 질의인데 질의 쪽이 메시 물체 종류를 무시(0 이어야 한다 — 질의가 거름을 타는지)
+	// 수류탄 쪽 = 쓸린 성분(뿌리)의 물체 종류 · 반응(ProjectileMovement 의 SafeMoveUpdatedComponent 와 같은 거름). 무기 = Lyra_TraceChannel_Weapon(ECC_GameTraceChannel2) · 기본 반응
+	USkeletalMeshComponent* Sk = Cast<USkeletalMeshComponent>(Hit.GetComponent());
+	const UPrimitiveComponent* GC = SelfActor ? Cast<UPrimitiveComponent>(SelfActor->GetRootComponent()) : nullptr;
+	if (Sk && GC)
+	{
+		const FCollisionResponseParams GrenResp(GC->GetCollisionResponseToChannels());
+		FCollisionResponseParams CtlResp(GC->GetCollisionResponseToChannels());
+		CtlResp.CollisionResponse.SetResponse(Sk->GetCollisionObjectType(), ECR_Ignore);
+		FCollisionQueryParams QP(SCENE_QUERY_STAT(MOBMeshBody), false);
+		const bool bMultiWas = Sk->bMultiBodyOverlap;
+		Sk->bMultiBodyOverlap = true;
+		const int32 CompGren = (int32)Sk->GetCollisionResponseToChannel(GC->GetCollisionObjectType());
+		const int32 CompWeapon = (int32)Sk->GetCollisionResponseToChannel(ECC_GameTraceChannel2);
+		const int32 GrenToMesh = (int32)GC->GetCollisionResponseToChannel(Sk->GetCollisionObjectType());
+		for (int32 BI = 0; BI < Sk->Bodies.Num(); ++BI)
+		{
+			const FBodyInstance* Inst = Sk->Bodies[BI];
+			const UBodySetup* BS = Inst ? Inst->GetBodySetup() : nullptr;
+			if (!BS) continue;
+			const FTransform BodyW = Inst->GetUnrealWorldTransform();
+			int32 OvN = 0, OvSk = 0;	// 지나간 양 — 가장 최근 질의의 결과 수 · 그중 이 메시 몫
+			const auto Blocks = [&](const FVector& At, ECollisionChannel Ch, const FCollisionResponseParams& Resp)
+			{
+				TArray<FOverlapResult> Out;
+				GetWorld()->OverlapMultiByChannel(Out, At, FQuat::Identity, Ch, FCollisionShape::MakeSphere(0.1f), QP, Resp);
+				int32 R = 0;	// 0 = 안 걸림 · 1 = 겹침만 · 2 = 막음
+				OvN = Out.Num(); OvSk = 0;
+				for (const FOverlapResult& O : Out)
+				{
+					if (O.GetComponent() != Sk) continue;
+					++OvSk;
+					if (O.GetItemIndex() == BI) R = FMath::Max(R, O.bBlockingHit ? 2 : 1);
+				}
+				return R;
+			};
+			const auto Emit = [&](const TCHAR* Kind, const FTransform& ElemLocal, double A, double B, double C)
+			{
+				const FTransform W = ElemLocal * BodyW;
+				const FVector P = W.GetLocation(), X = W.GetUnitAxis(EAxis::X), Y = W.GetUnitAxis(EAxis::Y), Z = W.GetUnitAxis(EAxis::Z);
+				const int32 BG = Blocks(P, GC->GetCollisionObjectType(), GrenResp);
+				const int32 NG = OvN, SG = OvSk;
+				const int32 BW = Blocks(P, ECC_GameTraceChannel2, FCollisionResponseParams::DefaultResponseParam);
+				const int32 NW = OvN, SW = OvSk;
+				const int32 BC = Blocks(P, GC->GetCollisionObjectType(), CtlResp);
+				const int32 NC = OvN;
+				UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_MESHBODY frame=%d name=%s hitBone=%s body=%d bone=%s setupResp=%d enabled=%d blockGren=%d blockWeapon=%d blockCtl=%d ")
+					TEXT("ovGren=%d/%d ovWeapon=%d/%d ovCtl=%d compGren=%d compWeapon=%d grenToMesh=%d instGren=%d multiWas=%d kind=%s ")
+					TEXT("p=%.6f,%.6f,%.6f x=%.7f,%.7f,%.7f y=%.7f,%.7f,%.7f z=%.7f,%.7f,%.7f a=%.6f b=%.6f c=%.6f scale=%.6f"),
+					Frame, *GetNameSafe(SelfActor), *Hit.BoneName.ToString(), BI, *BS->BoneName.ToString(), (int32)BS->CollisionReponse, (int32)Inst->GetCollisionEnabled(), BG, BW, BC,
+					SG, NG, SW, NW, NC, CompGren, CompWeapon, GrenToMesh, (int32)Inst->GetResponseToChannel(GC->GetCollisionObjectType()), bMultiWas ? 1 : 0, Kind,
+					P.X, P.Y, P.Z, X.X, X.Y, X.Z, Y.X, Y.Y, Y.Z, Z.X, Z.Y, Z.Z, A, B, C, BodyW.GetScale3D().X);
+			};
+			for (const FKSphereElem& E : BS->AggGeom.SphereElems) Emit(TEXT("sphere"), FTransform(E.Center), E.Radius, 0, 0);
+			for (const FKSphylElem& E : BS->AggGeom.SphylElems) Emit(TEXT("sphyl"), FTransform(E.Rotation, E.Center), E.Radius, E.Length, 0);
+			for (const FKBoxElem& E : BS->AggGeom.BoxElems) Emit(TEXT("box"), FTransform(E.Rotation, E.Center), E.X, E.Y, E.Z);
+		}
+		Sk->bMultiBodyOverlap = bMultiWas;
+	}
 }
 
 const AActor* UMOBContentProbeSubsystem::NearestGrenade(const FVector& Where, double& OutDist) const
