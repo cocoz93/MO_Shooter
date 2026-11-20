@@ -67,7 +67,7 @@ private:
 	void GoHome() const;
 	void PlaceFoe(double Distance, bool bFacingMe, double Side = 0.0) const;
 	void LogScores(const TCHAR* When) const;
-	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? 5 : (bGrenade ? 6 : 0))))); }
+	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? 5 : (bGrenade ? (bGrenL1A ? 7 : 6) : 0))))); }
 	// 수류탄 판(G-0, grenade-plan.md) — 생김 · 부딪힘 · 튕김 · 멈춤은 엔진 알림을 받은 그 자리에서 적고(MOB_CPROBE_GSPAWN · _GHIT · _GBOUNCE · _GSTOP),
 	// 터짐(메시 숨김)은 틱에서 보고 폭발 판정을 같은 식으로 다시 해 본다(MOB_CPROBE_GBOOM — 겹친 성분은 comps 칸 · _GTRACE). 칸 끝 요약 = MOB_CPROBE_GREN
 	void OnActorSpawned(AActor* A);
@@ -89,6 +89,7 @@ private:
 	float GrenadeCooldownLeft() const;		// GE_Grenade_Cooldown 효과의 남은 초, 없으면 0
 	int32 NearestWallDir() const;			// 집에서 가장 가까운 서 있는 벽의 축 방향(ClearAround, 0 · 2 · 4 · 6) · 없으면 -1
 	bool FindSurface(bool bCorner, FVector& OutPoint, FVector& OutStand, FString& OutWhat) const;	// 집 둘레 비스듬한 면 · 두 벽이 만나는 구석(과 그 구석을 대각으로 볼 던질 자리)을 찾는다
+	bool StandAt(double X, double Y, FVector& OutStand, FString& OutWhat) const;	// L-1-a 정한 자리 — 그 XY 바닥(위에서 내려 쏨) 위에 캡슐이 안 겹치게 설 자리
 	void AimAt(const FVector& Point) const;	// 카메라에서 그 점을 보게 조종 회전 · 몸 요를 돌린다(카메라 선이 그 점을 지나게)
 	// 피해 칸(G-0-b) — 멈춘 수류탄 둘레에 상대를 세운다(Pass 0 = 세움 · 1 = 재서 고침 · 2 = 재기만). 벽 칸은 수류탄도 정한 자리로 옮긴다. 줄 = MOB_CPROBE_GBLAST
 	void BlastPass(AActor* G, int32 Pass);
@@ -133,6 +134,7 @@ private:
 	bool bWeapons = false;	// W-0 무기 받침 각본(L_Expanse, -MOBCPMode=weapons)
 	bool bDash = false;		// D-0 대시 각본(연습장, -MOBCPMode=dash)
 	bool bGrenade = false;	// G-0 수류탄 각본(연습장, -MOBCPMode=grenade)
+	bool bGrenL1A = false;	// L-1-a 수류탄 장면 각본(-MOBCPMode=grenade -MOBCPGrenSet=l1a — 구석 · 높은 데서 아래로 · 벽 스침 · 턱 틈 + 옮겨 놓기 10칸. G-0 각본은 그대로)
 	bool bReady = false;
 	bool bDone = false;
 	TWeakObjectPtr<APawn> ClearPawn;
@@ -239,6 +241,7 @@ private:
 	// 칸마다 다시 채운다(BeginGrenade)
 	int32 GrenPressFrame = -1;
 	int32 GrenSpawnFrame = -1;		// 이 칸에서 처음 생긴 수류탄 · 그 수류탄의 첫 부딪힘 · 터짐 프레임
+	int32 GrenPlacedFrame = -1;		// L-1-a 옮겨 놓기 칸 — 옮긴 프레임(−1 = 아직)
 	int32 GrenFirstHitFrame = -1;
 	int32 GrenBoomFrame = -1;
 	int32 GrenHits = 0;

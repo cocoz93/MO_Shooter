@@ -76,6 +76,12 @@ run_checks() {
 	[ "$BREAK" = 1 ] && gtags="${gtags% g0t2}"
 	"$tools/GrenadeCheck/Release/GrenadeCheck.exe" "$DATA/map_gym.mocl" "$DATA" $gtags > "$OUT/grenade.log" 2>&1
 	sed 's/^/grenade /' "$OUT/grenade.log" >> "$g"
+	# 수류탄 정한 장면(L-1-a) — 같은 각본 두 판(cprobe_l1a1 · l1a2, 26칸 = 정한 자리 16 · 옮겨 놓기 10). 옛 15벌에 없던 갈래(2550 자름 · 구석 · 바닥+벽 멈춤 ·
+	# 미끄러짐 마찰 · 겹침 둘)를 Lyra 와 대조한다. 옛 줄을 안 건드리려 따로 부른다. --break 이면 l1a2 를 빼 합계 줄이 어긋나야 한다
+	local ltags="l1a1 l1a2"
+	[ "$BREAK" = 1 ] && ltags="l1a1"
+	"$tools/GrenadeCheck/Release/GrenadeCheck.exe" "$DATA/map_gym.mocl" "$DATA" $ltags > "$OUT/grenade_l1a.log" 2>&1
+	sed 's/^/grenade_l1a /' "$OUT/grenade_l1a.log" >> "$g"
 	for t in expanse gym; do
 		local m="map_$t.mocl"
 		"$tools/MapCheck/Release/MapCheck.exe" "$DATA/$m" "$DATA/trace_$t.csv" > "$OUT/map_$t.log" 2>&1
