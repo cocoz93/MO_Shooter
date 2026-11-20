@@ -183,7 +183,7 @@ void UMOBWeaponDumpSubsystem::DumpObject(UObject* O, const FString& Indent, TSet
 	}
 }
 
-void UMOBWeaponDumpSubsystem::DumpBlueprintGraphs(const FString& Path)
+void UMOBWeaponDumpSubsystem::DumpBlueprintGraphs(const FString& Path, bool bDeep)
 {
 	Out += FString::Printf(TEXT("\n=== GRAPH %s\n"), *Path);
 #if WITH_EDITORONLY_DATA
@@ -199,8 +199,10 @@ void UMOBWeaponDumpSubsystem::DumpBlueprintGraphs(const FString& Path)
 	Graphs.Append(BP->UbergraphPages);
 	Graphs.Append(BP->FunctionGraphs);
 	Graphs.Append(BP->MacroGraphs);
-	for (UEdGraph* G : Graphs)
+	// bDeep 이면 노드 안 그래프(상태 기계 · 상태 · 전이 · 층)를 뒤에 붙여 차례로 걷는다 — 그래서 첨자로 돈다
+	for (int32 GI = 0; GI < Graphs.Num(); ++GI)
 	{
+		UEdGraph* G = Graphs[GI];
 		if (!G) continue;
 		Out += FString::Printf(TEXT("--- %s (노드 %d)\n"), *G->GetName(), G->Nodes.Num());
 		for (UEdGraphNode* N : G->Nodes)
@@ -220,6 +222,21 @@ void UMOBWeaponDumpSubsystem::DumpBlueprintGraphs(const FString& Path)
 				const bool bUseful = !Pin->DefaultValue.IsEmpty() || Pin->DefaultObject || Pin->LinkedTo.Num() > 0;
 				if (bUseful) Out += Line + TEXT("\n");
 			}
+#if WITH_EDITOR
+			if (bDeep)
+			{
+				// 애님 노드는 알파 · 입력 연결 · 속성 묶음이 핀이 아니라 노드 속성에 있다
+				if (N->GetClass()->GetName().StartsWith(TEXT("AnimGraphNode_")))
+				{
+					TSet<UObject*> Seen;
+					DumpObject(N, TEXT("      "), Seen);
+				}
+				for (UEdGraph* Sub : N->GetSubGraphs())
+				{
+					if (Sub && !Graphs.Contains(Sub)) Graphs.Add(Sub);
+				}
+			}
+#endif
 		}
 	}
 #else
@@ -249,6 +266,14 @@ void UMOBWeaponDumpSubsystem::DumpAssets()
 		DumpObject(Target, TEXT("  "), Seen);
 	}
 	for (const TCHAR* Path : GRAPHS) DumpBlueprintGraphs(Path);
+	// L-2-a — 명령줄로 받은 그래프(쌍반점으로 여럿)는 깊게. 옛 GRAPHS 출력은 그대로
+	FString Extra;
+	if (FParse::Value(FCommandLine::Get(), TEXT("MOBWDGraph="), Extra))
+	{
+		TArray<FString> Paths;
+		Extra.ParseIntoArray(Paths, TEXT(";"));
+		for (const FString& P : Paths) DumpBlueprintGraphs(P, true);
+	}
 	UE_LOG(LogMOBWeaponDump, Log, TEXT("MOB_WDUMP assets loaded=%d missing=%d"), Loaded, Missing);
 }
 
