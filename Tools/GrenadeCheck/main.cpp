@@ -13,6 +13,8 @@
 //   튕긴 프레임 · 멈춘 프레임 · 멈춘 자리 · 맞아서 터진 프레임을 견준다
 //   - 맞음 알림은 맞은 쪽에도 간다(멈춘 수류탄에 다른 수류탄 · 사람이 닿음) — 그 줄은 이 수류탄의 쓸기가 아니라 뺀다(뿌리 자리가 쓸기 선 위에 없음)
 //   - 같은 팀 = 생긴 단계가 foe_same(기록 대본이 상대를 내 팀에 넣은 판) — 상대에 맞아도 튕긴다. 그 밖엔 던진 사람이 아닌 사람에 맞으면 터진다
+// 신관(G-2-d) — 사람 맞음 없이 터진 것(GBOOM)은 그 프레임이 GrenadeFuseExpired 가 처음 참이 된 걸음과 같은지,
+//   맞아 터진 것은 그 앞에 신관이 안 다 됐는지 본다(서버 TickGrenades 와 같은 함수)
 // 능력 · 던짐(G-2-a) — 기록 전체를 한 줄기로(쿨다운이 칸을 넘는다) 입력마다 CGrenadeAbility 를 서버 차례(NextInput → TryActivate)로 돌려 Lyra 와 견준다
 //   입력 r = 표 r 줄 프레임. 누름 = r−1 줄 g_press(누른 프레임의 다음 프레임 입력 처리에서 켜진다) · 막힘 · 쿨다운 = r−1 줄. 던짐 = GSPAWN frame=r
 //   던짐 계산은 표에서 — 몸 · 몸 요 = r−1 줄(이번 입력 이동 전, G-0-a 짐작 4) · 카메라 · 조종 회전 = r 줄(표 카메라 칸은 한 프레임 늦은 값, G-0-a)
@@ -210,6 +212,7 @@ namespace
 		uint32_t owner = 0;				// kIdMe · kIdFoe · 0(못 찾음)
 		bool foeActive = true;			// 생길 때 상대 충돌이 켜져 있었나(기록 MOB_CPROBE_FOE_ACTIVE — 꺼진 상대는 숨김 · 충돌 끔)
 		bool exploded = false;			// 로그를 읽는 동안 GBOOM 을 지났나
+		int boomFrame = -1;				// GBOOM 프레임(-1 = 터지기 전에 기록이 끝남)
 	};
 
 	void AddCounters(ProjectileCounters& a, const ProjectileCounters& b)
@@ -240,6 +243,7 @@ namespace
 		int allHitsCompared = 0, allHitFails = 0, hitFrameDiff = 0, hitCountDiff = 0, passiveHits = 0, meshFrames = 0;
 		double maxAllHitDist = 0, maxAllHitTime = 0, maxAllHitNormal = 0, maxAllHitDepth = 0;
 		int detonateSame = 0, detonateDiff = 0;
+		int fuseCompared = 0, fuseDiff = 0;
 		int foeInactiveGrenades = 0, foeToggleWhileLive = 0, wallMoves = 0;
 		double maxAllHitTimeCm = 0;
 		double maxRotUnexplained = -1e9;
@@ -267,6 +271,7 @@ namespace
 			maxAllHitDist = std::max(maxAllHitDist, o.maxAllHitDist); maxAllHitTime = std::max(maxAllHitTime, o.maxAllHitTime);
 			maxAllHitNormal = std::max(maxAllHitNormal, o.maxAllHitNormal); maxAllHitDepth = std::max(maxAllHitDepth, o.maxAllHitDepth);
 			detonateSame += o.detonateSame; detonateDiff += o.detonateDiff;
+			fuseCompared += o.fuseCompared; fuseDiff += o.fuseDiff;
 			foeInactiveGrenades += o.foeInactiveGrenades; foeToggleWhileLive += o.foeToggleWhileLive; wallMoves += o.wallMoves;
 			maxAllHitTimeCm = std::max(maxAllHitTimeCm, o.maxAllHitTimeCm);
 			maxRotUnexplained = std::max(maxRotUnexplained, o.maxRotUnexplained);
@@ -374,6 +379,7 @@ namespace
 					return false;
 				}
 				g->exploded = true;
+				g->boomFrame = frame;
 				continue;
 			}
 			if (kind == "GWALLSET")
@@ -582,6 +588,7 @@ namespace
 			std::string firstFail, firstBounceFail;
 			bool simHit = false;
 			int simHitFrame = -1, simStopFrame = -1, simDetonateFrame = -1, recDetonateFrame = -1;
+			int simFuseFrame = -1;		// 서버 신관 판정(GrenadeFuseExpired)이 처음 참이 된 걸음의 프레임
 			Vec3 simStopLocation;
 			ProjectileHit simFirst;
 			const int recHitFrame = g.firstHit.frame;
@@ -638,6 +645,7 @@ namespace
 				constexpr size_t kFrameHitSlots = 16;
 				ProjectileHit frameHits[kFrameHitSlots];
 				const size_t n = TickProjectile(map, params, s, kFrameSeconds, obstacles.data(), obstacles.size(), frameHits, kFrameHitSlots);
+				if (simFuseFrame < 0 && GrenadeFuseExpired(s)) simFuseFrame = frame;	// 아래 갈래가 끊기 전에 — 숨김 · 맞아 터짐 줄에서도 센다
 				std::vector<const ProjectileHit*> simHits;	// 알림이 나간 맞음 — 기록 GHIT 와 같은 것
 				int simBounced = 0;
 				for (size_t i = 0; i < std::min(n, kFrameHitSlots); ++i)
@@ -802,6 +810,16 @@ namespace
 			{
 				if (simDetonateFrame == recDetonateFrame) ++t.detonateSame;
 				else ++t.detonateDiff;
+			}
+			// 신관(G-2-d) — 기록에 사람 맞아 터짐이 없는데 터졌으면(GBOOM) 신관 터짐: 그 프레임 = 신관 판정이 처음 참이 된 걸음.
+			// 맞아 터진 칸은 그 프레임 앞에서 신관이 다 되면 안 된다(같은 걸음이면 서버는 맞아 터짐을 먼저 본다 — Room TickGrenades)
+			if (g.boomFrame >= 0)
+			{
+				++t.fuseCompared;
+				const bool fuseFail = recDetonateFrame < 0 ? simFuseFrame != g.boomFrame : (simFuseFrame >= 0 && simFuseFrame < recDetonateFrame);
+				if (fuseFail) ++t.fuseDiff;
+				if (verbose && fuseFail)
+					std::printf("  fuse %s@%d step=%s boom=%d hitBoom=%d simFuse=%d\n", g.name.c_str(), g.spawnFrame, g.step.c_str(), g.boomFrame, recDetonateFrame, simFuseFrame);
 			}
 			AddCounters(t.count, s.count);
 			if (verbose && (bounceFailed || g.stopFrame != simStopFrame || simDetonateFrame != recDetonateFrame))
@@ -1528,6 +1546,7 @@ int main(int argc, char** argv)
 		&& total.launchFails == 0 && total.ownerUnknown == 0 && total.grenades > 0 && total.frames > 0
 		&& total.bounceFails == 0 && total.bounceFrameDiff == 0 && total.stopFrameDiff == 0 && total.detonateDiff == 0
 		&& total.allHitFails == 0 && total.hitFrameDiff == 0 && total.hitCountDiff == 0 && total.bounceFrames > 0 && total.foeToggleWhileLive == 0
+		&& total.fuseCompared > 0 && total.fuseDiff == 0
 		&& total.maxRotUnexplained <= kRotTolerance	// 속도 차로 설명 안 되는 회전 차는 날아감 기준 그대로
 		// 능력 · 던짐(G-2-a) — 경기 끝 갈래 다름(postGameDiff)은 미결 15 라 넣지 않는다. 사람 메시 겨눔(bodyMiss · 거리 차)은 부위 몸 몫이라 넣지 않는다
 		&& ab.lyraThrown > 0 && ab.throwDiff == 0 && ab.cooldownDiff == 0 && ab.gabilDiff == 0 && ab.gapNotDead == 0
@@ -1551,6 +1570,7 @@ int main(int argc, char** argv)
 		total.allHitsCompared, total.allHitFails, total.hitFrameDiff, total.hitCountDiff, total.maxAllHitDist, total.maxAllHitTime, total.maxAllHitTimeCm,
 		total.maxAllHitNormal, total.maxAllHitDepth, total.meshFrames, total.passiveHits);
 	std::printf("GRENADECHECK detonate same=%d diff=%d\n", total.detonateSame, total.detonateDiff);
+	std::printf("GRENADECHECK fuse compared=%d diff=%d (frames=%d)\n", total.fuseCompared, total.fuseDiff, kGrenadeFuseFrames);
 	std::printf("GRENADECHECK script foeInactiveGrenades=%d foeToggleWhileLive=%d wallMoves=%d\n",
 		total.foeInactiveGrenades, total.foeToggleWhileLive, total.wallMoves);
 	std::printf("GRENADECHECK branches steps=%u blocked=%u extraIterations=%u startPenetrating=%u resolveMoved=%u resolveCombined=%u resolveWithMove=%u resolveFailed=%u "

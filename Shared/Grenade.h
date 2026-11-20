@@ -21,6 +21,10 @@ namespace mo
 	// G-0-a 실측 = 타이머 터짐 18/18 이 120(121 은 0) · g0a1 B_Grenade_C_0 나이 120 줄 자리 = 터짐 자리(앞 줄 + 그 프레임 걸음)
 	inline constexpr int kGrenadeFuseFrames = 120;
 
+	// 신관이 다 됐나 — 이번 걸음까지 걸은 수(state.frames, 생긴 프레임 걸음 = 1)가 kGrenadeFuseFrames 를 넘었나. 참이 되는 첫 걸음 = 나이 120.
+	// 서버 TickGrenades 와 GrenadeCheck 신관 대조가 같이 쓴다 — 한쪽만 바뀌면 대조가 못 잡으니 판정은 여기 하나에 둔다
+	inline bool GrenadeFuseExpired(const ProjectileState& state) { return state.frames > kGrenadeFuseFrames; }
+
 	// 누름 하나의 결과 — 던짐 말고는 모두 「안 켬」이라 동작은 같고, 통계(SERVER 줄)를 갈래마다 따로 세려고 나눈다.
 	// 가르는 차례(경기 끝 → 죽음 → 대시 중 → 쿨다운)는 우리가 정한 것이다(대시 능력과 같은 차례)
 	enum class EGrenadeResult : uint8_t

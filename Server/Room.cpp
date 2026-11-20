@@ -1294,7 +1294,7 @@ namespace mo
 
 			// 나이 = 걸은 수 − 1(생긴 틱 걸음이 나이 0). 맞아 터짐이 먼저 — 그 걸음에서 이미 멈췄다
 			const bool byHit = grenade.state.detonated;
-			if (byHit || grenade.state.frames > kGrenadeFuseFrames)
+			if (byHit || GrenadeFuseExpired(grenade.state))
 			{
 				const LiveGrenade done = grenade;
 				_grenades.erase(_grenades.begin() + (std::ptrdiff_t)index);		// 폭발이 처치 · 경기 끝을 불러도 목록은 안 만진다 — 먼저 뺀다
