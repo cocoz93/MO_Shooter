@@ -256,7 +256,8 @@ namespace mo
 			// 쓸기 — 맵(수류탄 깃발)과 막는 것들. 맞음 고르기는 MoveComponentImpl(PrimitiveComponent.cpp:3372-3396) — 시작 겹침이 있으면
 			// 그중 맞은 면 법선이 옮김을 가장 거스르는 것, 없으면 가장 이른 맞음. 빠져나가는 겹침은 무시(ShouldIgnoreHitResult :3135-3163 —
 			// 거리 · 내적 허용 두 값은 기본 0 이라 시작 겹침 · 내적 > 0 만 남는다 :125 · :134, Lyra 설정에 덮는 줄 없음)
-			// 맵은 가장 이른 맞음 하나만 돌려준다 — 그것이 무시되면 그 뒤 맵 맞음은 못 본다(이동 쪽 Movement.cpp 와 같은 한계)
+			// 맵 시작 겹침은 물체마다 받아 하나씩 고른다(L-1-a — 가장 깊은 것 하나만 받으면 그것이 빠지는 겹침일 때 다른 물체 겹침을 놓쳤다).
+			// 남은 한계: 시작 겹침이 하나라도 있으면 맵은 쓸기 맞음을 안 센다 — 겹침이 모두 빠지는 쪽이면 그 뒤 맵 맞음은 못 본다(이동 쪽 Movement.cpp 와 같은 한계)
 			bool Sweep(const Vec3& delta, bool neverIgnoreOverlaps, Blocking& out)
 			{
 				const Vec3 center = _s.location + RotateVector(_s.rotation, _p.capsuleOffset);
@@ -292,8 +293,7 @@ namespace mo
 					}
 				};
 
-				CapsuleHit mapHit;
-				if (_map.SweepCapsule(center, center + delta, axis, _p.capsuleRadius, _p.capsuleHalfHeight, MAP_BLOCK_GRENADE, mapHit))
+				const auto considerMap = [&](const CapsuleHit& mapHit)
 				{
 					ProjectileHit h;
 					h.kind = EProjectileHitKind::Map;
@@ -306,6 +306,17 @@ namespace mo
 					h.penetrationDepth = mapHit.penetrationDepth;
 					h.startPenetrating = mapHit.startPenetrating;
 					consider(h, nullptr);
+				};
+				CapsuleHit mapHit;
+				CMapCollision::Penetrations mapPens;
+				if (_map.SweepCapsule(center, center + delta, axis, _p.capsuleRadius, _p.capsuleHalfHeight, MAP_BLOCK_GRENADE, mapHit, &mapPens))
+				{
+					if (mapHit.startPenetrating && mapPens.count > 0)
+					{
+						for (size_t i = 0; i < mapPens.count; ++i) considerMap(mapPens.hits[i]);
+						_s.count.mapPenetrationsDropped += (uint32_t)mapPens.dropped;
+					}
+					else considerMap(mapHit);
 				}
 				for (size_t i = 0; i < _obstacleCount; ++i)
 				{

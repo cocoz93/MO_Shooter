@@ -222,7 +222,7 @@ namespace
 		a.resolveWithMove += b.resolveWithMove; a.resolveFailed += b.resolveFailed; a.ignoredOverlaps += b.ignoredOverlaps;
 		a.minMoveZeroed += b.minMoveZeroed; a.bounces += b.bounces; a.stopsOnImpact += b.stopsOnImpact; a.stopsOnSlide += b.stopsOnSlide;
 		a.multiHits += b.multiHits; a.slides += b.slides; a.corners += b.corners; a.slideMoves += b.slideMoves; a.slideHits += b.slideHits;
-		a.slideFriction += b.slideFriction; a.detonations += b.detonations;
+		a.slideFriction += b.slideFriction; a.detonations += b.detonations; a.mapPenetrationsDropped += b.mapPenetrationsDropped;
 	}
 
 	struct Totals
@@ -1558,7 +1558,8 @@ int main(int argc, char** argv)
 		// 폭발 · 피해(G-2-b)
 		&& bl.damageCompared > 0 && bl.lineCompared > 0 && bl.lineFails == 0 && bl.notTracedHurt == 0 && bl.tracedNotAlive == 0
 		&& bl.deadAfterNotKilled == 0 && bl.hhDiff == 0 && bl.rowMissing == 0 && bl.sameFrameBooms == 0 && bl.msgOtherInst == 0
-		&& bl.damageFails == 0 && bl.msgFails == 0 && bl.msgMissing == 0 && bl.msgExtra == 0 && bl.killDiff == 0;
+		&& bl.damageFails == 0 && bl.msgFails == 0 && bl.msgMissing == 0 && bl.msgExtra == 0 && bl.killDiff == 0
+		&& total.count.mapPenetrationsDropped == 0;	// 맵 시작 겹침을 물체 칸이 모자라 못 본 것(L-1-a) — 나면 아래 줄이 뜬다
 	const ProjectileCounters& c = total.count;
 	std::printf("GRENADECHECK flight grenades=%d frames=%d fails=%d maxPosDiff=%.6f maxVelDiff=%.6f maxRotDiff=%.6f firstHit same=%d early=%d late=%d kindDiff=%d none=%d\n",
 		total.grenades, total.frames, total.fails, total.maxPos, total.maxVel, total.maxRot, total.same, total.early, total.late, total.kindDiff, total.noneBoth);
@@ -1582,6 +1583,7 @@ int main(int argc, char** argv)
 		c.steps, c.blockedSteps, c.extraIterations, c.startPenetrating, c.resolveMoved, c.resolveCombined, c.resolveWithMove, c.resolveFailed,
 		c.ignoredOverlaps, c.minMoveZeroed, c.bounces, c.stopsOnImpact, c.stopsOnSlide, c.multiHits, c.slides, c.corners, c.slideMoves, c.slideHits,
 		c.slideFriction, c.detonations);
+	if (c.mapPenetrationsDropped > 0) std::printf("GRENADECHECK branches mapPenetrationsDropped=%u\n", c.mapPenetrationsDropped);
 	std::printf("GRENADECHECK ability inputs=%d presses=%d thrown=%d lyraThrown=%d onCooldown=%d whileDash=%d dead=%d postGame=%d throwDiff=%d cooldownDiff=%d postGameDiff=%d gabil=%d gabilDiff=%d rowGaps=%d gapFrames=%d gapNotDead=%d cdClears=%d\n",
 		ab.inputs, ab.presses, ab.results[(int)EGrenadeResult::Thrown], ab.lyraThrown, ab.results[(int)EGrenadeResult::OnCooldown],
 		ab.results[(int)EGrenadeResult::WhileDash], ab.results[(int)EGrenadeResult::Dead], ab.results[(int)EGrenadeResult::PostGame],

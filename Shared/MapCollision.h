@@ -82,6 +82,18 @@ namespace mo
 		// 위 함수는 axis = (0, 0, 1) 인 이 함수다
 		bool SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out) const;
 
+		// 시작 겹침을 물체마다 하나씩(그 물체에서 가장 깊은 것). out 은 위와 같다(물체를 가리지 않고 가장 깊은 것)
+		// 언리얼은 물체(컴포넌트)마다 맞음을 따로 받아 MoveComponentImpl 이 빠져나가는 겹침을 뺀 나머지에서 고른다 — 가장 깊은 것 하나만 받으면
+		// 그것이 빠지는 겹침일 때 다른 물체 겹침을 놓친다(L-1-a 기록 l1a1 p_crease_* — 바닥 · 지붕 상자에 함께 겹쳐 바닥 아래로 내려감)
+		struct Penetrations
+		{
+			static constexpr size_t kMax = 8;
+			CapsuleHit hits[kMax];
+			size_t count = 0;
+			size_t dropped = 0;		// kMax 를 넘어 못 담은 물체 수
+		};
+		bool SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out, Penetrations* perObject) const;
+
 		// 이 자리에 똑바로 선 캡슐을 두면 무언가와 겹치나. 뒷면 규칙을 쓰지 않는다(언리얼 겹침 검사와 같음)
 		bool OverlapCapsule(const Vec3& center, double radius, double halfHeight, uint32_t blockFlag) const;
 

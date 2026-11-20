@@ -1000,6 +1000,16 @@ namespace mo
 
 	bool CMapCollision::SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out) const
 	{
+		return SweepCapsule(start, end, axis, radius, halfHeight, blockFlag, out, nullptr);
+	}
+
+	bool CMapCollision::SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out, Penetrations* perObject) const
+	{
+		if (perObject)
+		{
+			perObject->count = 0;
+			perObject->dropped = 0;
+		}
 		const double axisHalf = std::max(0.0, halfHeight - radius);
 		const Vec3 up = axis * axisHalf;
 		const Vec3 s0 = start - up;
@@ -1029,6 +1039,31 @@ namespace mo
 			}
 			best = 0;
 			penetrating = true;
+			if (!perObject) return;
+			// 물체마다 가장 깊은 것 — 칸은 out 을 채우는 아래 규칙과 같다(시각 · 거리 0, 면 법선 = 빠져나갈 방향)
+			CapsuleHit* slot = nullptr;
+			for (size_t i = 0; i < perObject->count; ++i)
+				if (perObject->hits[i].object == object) slot = &perObject->hits[i];
+			if (!slot)
+			{
+				if (perObject->count >= Penetrations::kMax)
+				{
+					++perObject->dropped;
+					return;
+				}
+				slot = &perObject->hits[perObject->count++];
+				slot->penetrationDepth = -kInf;
+			}
+			else if (depth <= slot->penetrationDepth) return;
+			slot->time = 0;
+			slot->distance = 0;
+			slot->normal = normal;
+			slot->impactNormal = normal;
+			slot->impactPoint = point;
+			slot->penetrationDepth = depth;
+			slot->object = object;
+			slot->flags = flags;
+			slot->startPenetrating = true;
 		};
 
 		// 볼록 물체는 Chaos 가 물체 전체로 푼다 — 평면 중 가장 조금 밀어도 되는 쪽으로 나간다
@@ -1185,6 +1220,9 @@ namespace mo
 			out.object = depthObject;
 			out.flags = depthFlags;
 			out.startPenetrating = true;
+			if (perObject)
+				for (size_t i = 0; i < perObject->count; ++i)
+					if (!(perObject->hits[i].penetrationDepth > 0)) perObject->hits[i].penetrationDepth = 0;
 			return true;
 		}
 

@@ -106,6 +106,7 @@ namespace mo
 		uint32_t slideHits = 0;							// 그 옮김이 다시 막힘
 		uint32_t slideFriction = 0;						// 면으로 누르는 힘에 마찰
 		uint32_t detonations = 0;
+		uint32_t mapPenetrationsDropped = 0;			// 맵 시작 겹침이 물체 칸(CMapCollision::Penetrations::kMax)을 넘어 못 본 물체 수 — 0 이어야 한다
 	};
 
 	struct ProjectileState
