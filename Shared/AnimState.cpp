@@ -528,6 +528,8 @@ namespace mo
 			slot.kind = instance.montage->kind;
 			slot.position = instance.position;
 			slot.weight = instance.blend.blended;
+			// 빼기 진행(L-4) — 엔진은 빼기 비중 표가 걸린 몽타주(대시 넷 = FastFeet)만 빼는 동안 선형 진행으로 뼈마다 뺀다(D103). 빼기 = 바라는 비중 0(StopMontage)
+			slot.blendOut = instance.montage->blendOutProfile >= 0 && instance.blend.desired == 0.f ? instance.blend.alpha : -1.f;
 		}
 		_disableLeftHand = LeftHandCurve();
 	}
@@ -1455,6 +1457,8 @@ namespace mo
 			cell.montage = (uint8_t)(((uint8_t)slot.bundle << wire::kAnimMontageKindBits) | slot.kind);
 			cell.time = ToWireTime(slot.position);
 			cell.weight = weight;
+			// 빼기 진행 — 0 = 없음, 1~255 = 0~1(시작 진행 0 도 0 과 갈리게 1 부터)
+			cell.blendOut = slot.blendOut < 0.f ? (uint8_t)0 : (uint8_t)(1 + std::lround(Clamp(slot.blendOut, 0.f, 1.f) * 254.f));
 		}
 	}
 
@@ -1517,6 +1521,7 @@ namespace mo
 			out.montages[i].kind = (uint8_t)(cell.montage & kWireMontageKindMask);
 			out.montages[i].position = FromWireTime(cell.time);
 			out.montages[i].weight = (float)cell.weight / 255.f;
+			out.montages[i].blendOut = cell.blendOut == 0 ? -1.f : (float)(cell.blendOut - 1) / 254.f;
 		}
 		for (int i = out.montageCount; i < kAnimMontageMax; ++i) out.montages[i] = AnimMontageSlot{};
 		out.overrideWeight = (float)in.overrideWeight / 255.f;

@@ -147,7 +147,8 @@ run_bots() {
 	verdict 받침갈래 $ok "서버 회복=$pk 봇 자기 회복 합=$mine 찾아가 닿음=$sought"
 
 	# 무기 받침 갈래(컨텐츠 W-5) — 권총 하나로 부활한 봇이 안 가진 무기의 받침을 찾아가 집는다.
-	# 서버가 보낸 내 줍기 소식 합(new · noSwitch · ammo — full · 칸 없음 · 판 끝은 소식이 없다) = 봇이 센 내 집음 = 예측이 받은 소식 = 그 입력부터 다시 돌린 수,
+	# 서버가 보낸 내 줍기 소식 합(new · noSwitch · ammo — 칸 없음 · 판 끝은 소식이 없고 full 은 집으려던 사람에게 실패 소식, 판 14 · L-4) = 봇이 센 내 집음 = 예측이 받은 소식 = 그 입력부터 다시 돌린 수,
+	# 서버 full = 보낸 실패 소식(failMsgs) = 봇이 받은 내 실패 소식(failMine), 모양 틀린 실패 소식(failBad) 0,
 	# 칸 없음 · 결과 어긋남 · 탄 고침 · 가방 어긋남 0, 무기 둘 이상 든 비교 줄이 있고(가방 비교가 돌았다) · 서버 new 1 이상 · 찾아가던 중 집음 1 이상(갈래가 받침에 닿았다).
 	# ammo · full 은 값만 본다 — 이 판은 ammo 0 · full 1 이라 사건 하나에 판정이 걸린다. 서버 ammo 갈래는 무기받침 프로브가 Lyra 기록과 견준다
 	local wp wb snew snosw sammo bmine brecv brerun sent k
@@ -162,9 +163,10 @@ run_bots() {
 	else
 		ok=0
 	fi
-	for k in noSlot resultDiffs ammoFixes invDiff; do [ "$(num "$wb" $k)" = 0 ] || ok=0; done
+	for k in noSlot resultDiffs ammoFixes invDiff failBad; do [ "$(num "$wb" $k)" = 0 ] || ok=0; done
 	[ "$(num "$wb" invMulti)" -gt 0 ] 2>/dev/null && [ "$(num "$wb" sought)" -gt 0 ] 2>/dev/null && [ "$snew" -gt 0 ] 2>/dev/null || ok=0
-	verdict 무기갈래 $ok "서버 new=$snew noSwitch=$snosw ammo=$sammo full=$(num "$wp" full) 봇 집음=$bmine 받음=$brecv 다시돌림=$brerun$(echo "$wb" | grep -oE ' (noSlot|resultDiffs|ammoFixes|invDiff|invMulti|sought)=[0-9]+' | tr -d '\n')"
+	[ -n "$(num "$wp" full)" ] && [ "$(num "$wp" failMsgs)" = "$(num "$wp" full)" ] && [ "$(num "$wb" failMine)" = "$(num "$wp" full)" ] || ok=0
+	verdict 무기갈래 $ok "서버 new=$snew noSwitch=$snosw ammo=$sammo full=$(num "$wp" full) failMsgs=$(num "$wp" failMsgs) 봇 집음=$bmine 받음=$brecv 다시돌림=$brerun$(echo "$wb" | grep -oE ' (noSlot|resultDiffs|ammoFixes|invDiff|invMulti|sought|failMine|failBad)=[0-9]+' | tr -d '\n')"
 }
 
 # 사람끼리 막기(컨텐츠 F, D83 늘 켬) — 봇이 안 쏘고 가장 가까운 사람 쪽으로 걸어(--push) 계속 부딪힌다. 예측도 남 캡슐을 보고 서버와 다르면 고친다.
@@ -256,7 +258,13 @@ run_dash() {
 	else
 		ok=0
 	fi
-	verdict 봇대시 $ok "봇 rc=$brc 서버 rc=$src 켬=$started 소식=$msgs 봇받음=$mine 방향=$f/$b/$l/$r 사건=${ev[*]} 버림=${dr[*]} 튼수=${st[*]}$(echo "$bd" | grep -oE ' (dashDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n')"
+	# 몽타주 칸 빼기 진행(판 14 · L-4) — 서버가 쓴 칸(blendOutCells, 사람 × 틱) · 봇이 받은 칸 둘 다 있고, 빼기 비중 표가 없는 몽타주(대시 넷 밖)에 실린 칸 0.
+	# 봇 칸은 봇마다 모든 사람 꼬리를 받아 서버 칸의 봇 수 배쯤(11-21 판 2842 · 28420 — 같은 수는 접속 · 나감 틱에 기대므로 값만 본다)
+	local aw sbo
+	aw="$(grep -a '^BOT animWire ' "$OUT/dash_bot.log")"
+	sbo="$(num "$ad" blendOutCells)"
+	[ -n "$sbo" ] && [ "$sbo" -gt 0 ] && [ "$(num "$aw" blendOut)" -gt 0 ] 2>/dev/null && [ "$(num "$aw" blendOutBad)" = 0 ] || ok=0
+	verdict 봇대시 $ok "봇 rc=$brc 서버 rc=$src 켬=$started 소식=$msgs 봇받음=$mine 방향=$f/$b/$l/$r 사건=${ev[*]} 버림=${dr[*]} 튼수=${st[*]}$(echo "$bd" | grep -oE ' (dashDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n') 빼기칸 서버=$sbo 봇=$(num "$aw" blendOut) 대시밖=$(num "$aw" blendOutBad)"
 }
 
 # 수류탄(컨텐츠 G-3 · G-4) — 봇이 수류탄을 던지며(--grenade, 대시 · 조준 · 근접 · 앉기와 섞어 대시 중 · 근접 끊기 · 재장전 끊기 갈래까지) 싸운다. 서버엔 클립을 줘 수류탄 몽타주를 튼다.
@@ -399,6 +407,38 @@ run_grenade_leave() {
 	verdict 던진사람나감 $ok "프로브 rc=$prc 서버 rc=$src$(echo "$sg" | grep -oE ' (timer|hit|alive|ownerLeft|ownerGoneBody|ownerGone|damage)=[0-9]+' | tr -d '\n')"
 }
 
+# 한 입력 안 누름 차례(판 14 · L-4) — 서버 시험이 쓰고 읽기 왕복(모음 11 · 차례 60)을 보고, 차례 실은 둘 · 0 을 실은 둘 켬 하나 · 하나만 켠 하나를 보내
+# 서버가 multi 3 · ordered 2 · unordered 1 로 세나 본다(서버는 L-5 전까지 세기만). 서버 줄은 프로브가 서버 출력에서 읽는다
+run_press_order() {
+	"$SRV" "--map=$MAP" --port=7969 --debug --exitWhenEmpty --warmup=0 > "$OUT/press_srv.log" 2>&1 &
+	local spid=$!
+	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --port=7969 --pressOrder "--serverLog=$OUT_W/press_srv.log" > "$OUT/press_probe.log" 2>&1
+	local prc=$?
+	wait $spid
+	local src=$? ok=1 sp
+	[ $prc = 0 ] && [ $src = 0 ] || ok=0
+	grep -q '^RESULT PASS' "$OUT/press_probe.log" || ok=0
+	sp="$(grep -a '^SERVER pressOrder ' "$OUT/press_srv.log")"
+	[ "$(num "$sp" multi)" = 3 ] && [ "$(num "$sp" ordered)" = 2 ] && [ "$(num "$sp" unordered)" = 1 ] || ok=0
+	verdict 누름차례 $ok "프로브 rc=$prc 서버 rc=$src$(echo "$sp" | grep -oE ' (multi|ordered|unordered)=[0-9]+' | tr -d '\n') $(grep -a '^PRESSORDER 왕복' "$OUT/press_probe.log" | sed -E 's/^PRESSORDER //')"
+}
+
+# 예비 가득 실패 소식(판 14 · L-4) — 둘이 들어와 A 만 권총 받침에 선다. 예비 가득이면 A 에게만 실패 소식 하나(B 0), 예비를 줄이면 실패 없이 탄 채움.
+# 무기받침 판은 한 사람이라 「방 전원에게」를 못 가르고, 봇 판들은 예비 가득이 드물어(11-21 판 0) 이 판이 실패 소식의 받는 사람을 본다
+run_fail_full() {
+	"$SRV" "--map=$MAP" --port=7974 --debug --exitWhenEmpty --warmup=0 "--pads=$PADS" > "$OUT/failfull_srv.log" 2>&1 &
+	local spid=$!
+	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --port=7974 --failFull > "$OUT/failfull_probe.log" 2>&1
+	local prc=$?
+	wait $spid
+	local src=$? ok=1 wp
+	[ $prc = 0 ] && [ $src = 0 ] || ok=0
+	grep -q '^RESULT PASS' "$OUT/failfull_probe.log" || ok=0
+	wp="$(grep -a '^SERVER weaponPickups' "$OUT/failfull_srv.log")"
+	[ "$(num "$wp" full)" = 1 ] && [ "$(num "$wp" failMsgs)" = 1 ] && [ "$(num "$wp" ammo)" = 1 ] || ok=0
+	verdict 가득실패 $ok "프로브 rc=$prc 서버 rc=$src$(echo "$wp" | grep -oE ' (ammo|full|failMsgs)=[0-9]+' | tr -d '\n') $(grep -a '^FAILFULL ② ' "$OUT/failfull_probe.log" | sed -E 's/^FAILFULL //')"
+}
+
 run_replay() {
 	"$SRV" "--map=$MAP" --port=7955 --debug --exitWhenEmpty --warmup=0 --matchSeconds=100000 --fallKillZ=-1000000 --testStartAllWeapons > "$OUT/replay_srv.log" 2>&1 &
 	local spid=$!
@@ -498,6 +538,8 @@ else
 		run_grenade
 		run_rules
 		run_grenade_leave
+		run_press_order
+		run_fail_full
 		run_replay
 		run_authority
 		run_rewind

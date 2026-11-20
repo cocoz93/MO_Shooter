@@ -24,6 +24,7 @@
 // --breakDamage 는 여기 쪽 기대 피해를 바꿔 2번이 실패해야 한다.
 #include "GameProtocol.h"
 #include "Grenade.h"
+#include "Loadout.h"
 #include "MapCollision.h"
 #include "MatchRules.h"
 #include "Movement.h"
@@ -1473,6 +1474,186 @@ namespace
 	// ② 같은 자리 · 같은 입력으로 던지고 던짐 소식을 받자마자 나감 → 닿아도 신관 터짐 · 피해 0
 	// ③ V 곁 150 에서 발 앞 바닥에 던지고 나감 → 터진 자리에서 V 가 반지름 안(같은 코드로 잰 곡선 피해 > 0)인데 피해 0.
 	// 던지는 사람은 칸마다 새로 들어온다(나가면 번호가 없어진다 — V 가 팀 A, 던지는 사람은 늘 팀 B)
+	// ─── 한 입력 안 누름 차례(--pressOrder, 판 14 · L-4) ─────────────
+	// ① 쓰고 읽기 왕복 — 넷 중 둘 이상 고른 모음(11)의 모든 차례(60)를 MakePressOrder → ReadPressOrder 로 되읽어 같은 차례가 나오고,
+	//    모음마다 256 값 중 믿는 값 수 = 차례 수(n!)인지(남는 칸 · 겹침을 다 거른다). 하나 이하 켠 입력은 pressOrder 를 안 본다
+	// ② 서버 세기 — 보낸 입력 넷(차례 실은 둘 · 0 을 실은 둘 켬 하나 · 하나만 켠 하나)을 서버가 multi 3 · ordered 2 · unordered 1 로 세나(SERVER pressOrder)
+	bool RunPressOrder(int port, const std::string& serverLog)
+	{
+		int fails = 0;
+		const auto check = [&fails](bool ok, const char* text)
+		{
+			std::printf("PRESSORDER %s %s\n", ok ? "통과" : "실패", text);
+			if (!ok) ++fails;
+		};
+		int subsets = 0, orders = 0, roundTripBad = 0, countBad = 0;
+		for (int mask = 0; mask < 16; ++mask)
+		{
+			uint8_t keys[wire::kPressKeyCount];
+			int n = 0;
+			uint8_t buttons = 0;
+			for (uint8_t key = 0; key < wire::kPressKeyCount; ++key)
+			{
+				if ((mask & (1 << key)) == 0) continue;
+				keys[n++] = key;
+				buttons = (uint8_t)(buttons | wire::kPressKeyButtons[key]);
+			}
+			uint8_t out[wire::kPressKeyCount];
+			if (n <= 1)
+			{
+				// 하나 이하 — 어떤 pressOrder 든 n 을 돌려준다
+				for (int value = 0; value < 256; ++value)
+				{
+					if (wire::ReadPressOrder(buttons, (uint8_t)value, out) != n || (n == 1 && out[0] != keys[0])) ++roundTripBad;
+				}
+				continue;
+			}
+			++subsets;
+			std::sort(keys, keys + n);
+			int perms = 0;
+			do
+			{
+				++perms;
+				++orders;
+				const uint8_t value = wire::MakePressOrder(keys, n);
+				if (wire::ReadPressOrder(buttons, value, out) != n || !std::equal(keys, keys + n, out)) ++roundTripBad;
+			} while (std::next_permutation(keys, keys + n));
+			int valid = 0;
+			for (int value = 0; value < 256; ++value) valid += wire::ReadPressOrder(buttons, (uint8_t)value, out) == n ? 1 : 0;
+			if (valid != perms) ++countBad;
+			// 다른 단추(쏘기 · 점프 · 앉기 · 겨눔)를 같이 켜도 같은 값이어야 한다 — 넷 밖 단추는 안 본다
+			const uint8_t others = (uint8_t)(wire::BUTTON_FIRE | wire::BUTTON_JUMP | wire::BUTTON_CROUCH | wire::BUTTON_ADS);
+			int validOthers = 0;
+			for (int value = 0; value < 256; ++value) validOthers += wire::ReadPressOrder((uint8_t)(buttons | others), (uint8_t)value, out) == n ? 1 : 0;
+			if (validOthers != valid) ++countBad;
+		}
+		std::printf("PRESSORDER 왕복 모음=%d 차례=%d 왕복틀림=%d 믿는값수틀림=%d\n", subsets, orders, roundTripBad, countBad);
+		check(subsets == 11 && orders == 60 && roundTripBad == 0 && countBad == 0, "쓰고 읽기 왕복(모음 11 · 차례 60)");
+
+		ShotClient client;
+		if (!ConnectAndHello(client.net, port, client.welcome))
+		{
+			std::printf("PRESSORDER 접속 실패\n");
+			return false;
+		}
+		timeBeginPeriod(1);
+		const Vec3 eye(0, 0, 0);
+		const Vec3 ahead(100, 0, 0);
+		const uint8_t dashMelee[] = { wire::PRESS_DASH, wire::PRESS_MELEE };
+		const uint8_t meleeReloadGrenade[] = { wire::PRESS_MELEE, wire::PRESS_RELOAD, wire::PRESS_GRENADE };
+		struct Sent { uint8_t buttons; uint8_t order; };
+		const Sent sent[] = {
+			{ (uint8_t)(wire::BUTTON_MELEE | wire::BUTTON_DASH), wire::MakePressOrder(dashMelee, 2) },								// 믿음
+			{ (uint8_t)(wire::BUTTON_MELEE | wire::BUTTON_RELOAD | wire::BUTTON_GRENADE), wire::MakePressOrder(meleeReloadGrenade, 3) },	// 믿음
+			{ (uint8_t)(wire::BUTTON_MELEE | wire::BUTTON_DASH), 0 },															// 못 믿음(판 13 꼴 0)
+			{ (uint8_t)wire::BUTTON_DASH, 0xFF },																				// 하나만 — 안 셈
+		};
+		const int sentCount = (int)(sizeof(sent) / sizeof(sent[0]));
+		// 입력 사이에 빈 입력 하나씩 — 같은 틱에 몰려도 서버는 입력마다 센다. 빈 입력은 단추가 없어 안 센다
+		RunTicks(&client, 1, sentCount * 2, [&](int i)
+		{
+			if (i % 2 == 1) { SendAim(client, eye, ahead, 0, 0, 0, 0); return; }
+			const Sent& s = sent[i / 2];
+			wire::Input input = wire::Input();
+			input.seq = ++client.seq;
+			AimAt(eye, ahead, input.yaw, input.pitch);
+			input.buttons = s.buttons;
+			input.pressOrder = s.order;
+			client.net.SendPacket(input, wire::Msg::C2S_INPUT);
+		}, [] { return false; });
+		PumpFor(&client, 1, 0.3);
+		timeEndPeriod(1);
+		client.net.Close();
+
+		std::string log;
+		for (int i = 0; i < 100 && log.empty() && !serverLog.empty(); ++i)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			std::ifstream file(serverLog, std::ios::binary);
+			log.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+			if (log.find("SERVER pressOrder ") == std::string::npos) log.clear();
+		}
+		unsigned long long multi = 0, ordered = 0, unordered = 0;
+		const size_t at = log.find("SERVER pressOrder ");
+		const bool read = at != std::string::npos && std::sscanf(log.c_str() + at, "SERVER pressOrder multi=%llu ordered=%llu unordered=%llu", &multi, &ordered, &unordered) == 3;
+		std::printf("PRESSORDER 서버 %s multi=%llu ordered=%llu unordered=%llu (보낸 입력 %d — 기대 3 · 2 · 1)\n", read ? "읽음" : "못 읽음", multi, ordered, unordered, sentCount);
+		check(read && multi == 3 && ordered == 2 && unordered == 1, "서버 세기(3 · 2 · 1)");
+		return fails == 0;
+	}
+
+	// ─── 예비 가득 실패 소식(--failFull, 판 14 · L-4) ─────────────
+	// 둘이 들어와 A 만 권총 받침(P7, 무기받침 판과 같은 자리)에 선다. ① 시작 권총 예비 48 = 기본값이라 가득 → A 에게만 PICKUP_FAIL_FULL 하나
+	// (give = Full · 권총 · 12/48 · 받침 켜짐), B 는 0. ② A 예비를 10 으로 줄이고 다시 서면 탄 채움 집음(take · give = Ammo) · 실패 소식은 그대로 하나.
+	// 무기받침 판은 한 사람이라 「방 전원에게」 틀림을 못 가른다 — 이 판이 가른다
+	bool RunFailFull(int port)
+	{
+		int fails = 0;
+		const auto check = [&fails](bool ok, const char* text)
+		{
+			std::printf("FAILFULL %s %s\n", ok ? "통과" : "실패", text);
+			if (!ok) ++fails;
+		};
+		ShotClient clients[2];
+		ShotClient& a = clients[0];
+		ShotClient& b = clients[1];
+		if (!ConnectAndHello(a.net, port, a.welcome) || !ConnectAndHello(b.net, port, b.welcome))
+		{
+			std::printf("FAILFULL 접속 실패\n");
+			return false;
+		}
+		timeBeginPeriod(1);
+		const Vec3 home(4700.0, -250.0, -368.100);			// 무기받침 판 집(RunWeapons)
+		const Vec3 homeB(4700.0, 250.0, -368.100);
+		const Vec3 pistolPad(-4586.5, 1008.4, -368.031);	// P7 권총(B_WeaponSpawner7) 위 — RunWeapons spots[2]
+		const auto idle = [&](int) { SendAim(a, home, home + Vec3(100, 0, 0), 0, 0, 0, 0); SendAim(b, homeB, homeB + Vec3(100, 0, 0), 0, 0, 0, 0); };
+		const auto failsOf = [](const ShotClient& c, uint8_t reason)
+		{
+			int n = 0;
+			for (const wire::Pickup& m : c.pickups) n += m.reason == reason ? 1 : 0;
+			return n;
+		};
+		RunTicks(clients, 2, 60, idle, [&] { return a.hasSelf && b.hasSelf; });
+		const float hp = a.hasSelf ? a.self.hp : 100.f;
+		a.Place(home, hp);
+		b.Place(homeB, hp);
+		RunTicks(clients, 2, 30, idle, [] { return false; });
+		// ① 예비 가득으로 선다
+		a.Place(pistolPad, hp);
+		RunTicks(clients, 2, 90, [&](int) { SendAim(a, pistolPad, pistolPad + Vec3(100, 0, 0), 0, 0, 0, 0); SendAim(b, homeB, homeB + Vec3(100, 0, 0), 0, 0, 0, 0); },
+			[&] { return failsOf(a, wire::PICKUP_FAIL_FULL) > 0; });
+		PumpFor(clients, 2, 0.3);
+		const int aFails1 = failsOf(a, wire::PICKUP_FAIL_FULL), bFails1 = failsOf(b, wire::PICKUP_FAIL_FULL);
+		const wire::Pickup* fail = nullptr;
+		for (const wire::Pickup& m : a.pickups) if (m.reason == wire::PICKUP_FAIL_FULL) fail = &m;
+		if (fail)
+			std::printf("FAILFULL ① 소식 tick=%u pad=%u picker=%u(A=%u) kind=%u give=%u weapon=%u slot=%u mag=%d spare=%d available=%u\n", fail->tick, (unsigned)fail->pad, fail->picker, a.welcome.playerId,
+				(unsigned)fail->kind, (unsigned)fail->give, (unsigned)fail->weapon, (unsigned)fail->slot, (int)fail->magazine, (int)fail->spare, (unsigned)fail->available);
+		std::printf("FAILFULL ① A 실패 소식=%d B 실패 소식=%d\n", aFails1, bFails1);
+		check(aFails1 == 1 && bFails1 == 0, "① 예비 가득 — A 에게만 하나");
+		check(fail && fail->picker == a.welcome.playerId && fail->give == (uint8_t)EGiveResult::Full && fail->weapon == (uint8_t)EWeapon::Pistol && fail->slot == 0
+			&& fail->magazine == 12 && fail->spare == 48 && fail->available == 1, "① 소식 칸(give Full · 권총 · 칸 0 · 12/48 · 받침 켜짐)");
+		// ② 예비를 줄이고 다시 선다 — 집으로 물러나 겹침을 끝낸 뒤
+		a.Place(home, hp, wire::DEBUG_PLACE_SET_AMMO, (uint8_t)EWeapon::Pistol, 12, 10);
+		RunTicks(clients, 2, 30, idle, [] { return false; });
+		a.Place(pistolPad, hp);
+		const auto takesOf = [&](const ShotClient& c)
+		{
+			int n = 0;
+			for (const wire::Pickup& m : c.pickups) n += (m.reason == wire::PICKUP_TAKE && m.picker == a.welcome.playerId && m.give == (uint8_t)EGiveResult::Ammo) ? 1 : 0;
+			return n;
+		};
+		RunTicks(clients, 2, 90, [&](int) { SendAim(a, pistolPad, pistolPad + Vec3(100, 0, 0), 0, 0, 0, 0); SendAim(b, homeB, homeB + Vec3(100, 0, 0), 0, 0, 0, 0); },
+			[&] { return takesOf(a) > 0; });
+		PumpFor(clients, 2, 0.3);
+		timeEndPeriod(1);
+		const int aFails2 = failsOf(a, wire::PICKUP_FAIL_FULL), bFails2 = failsOf(b, wire::PICKUP_FAIL_FULL);
+		std::printf("FAILFULL ② A 탄 채움 집음=%d(B 가 본 것 %d) A 실패 소식=%d B 실패 소식=%d\n", takesOf(a), takesOf(b), aFails2, bFails2);
+		check(takesOf(a) == 1 && takesOf(b) == 1 && aFails2 == 1 && bFails2 == 0, "② 예비 10 — 실패 없이 탄 채움(집음은 방 전원)");
+		a.net.Close();
+		b.net.Close();
+		return fails == 0;
+	}
+
 	bool RunGrenadeLeave(int port, const CMapCollision& map, const std::vector<Row>& rows)
 	{
 		int fails = 0;
@@ -3009,7 +3190,7 @@ int main(int argc, char** argv)
 	int port = 7791;
 	size_t rowLimit = (size_t)-1;
 	bool breakMirror = false, breakSpread = false, breakDamage = false, rulesOnly = false;
-	bool authorityOnly = false, rewindOnly = false, padsOnly = false, weaponsOnly = false, grenadeLeaveOnly = false;
+	bool authorityOnly = false, rewindOnly = false, padsOnly = false, weaponsOnly = false, grenadeLeaveOnly = false, pressOrderOnly = false, failFullOnly = false;
 	std::string meleeLog;
 	std::string serverLog;
 	std::string startsDump;
@@ -3027,6 +3208,8 @@ int main(int argc, char** argv)
 		else if (s == "--pads") padsOnly = true;
 		else if (s == "--weapons") weaponsOnly = true;
 		else if (s == "--grenadeLeave") grenadeLeaveOnly = true;
+		else if (s == "--pressOrder") pressOrderOnly = true;
+		else if (s == "--failFull") failFullOnly = true;
 		else if (s.rfind("--melee=", 0) == 0) meleeLog = s.substr(8);
 		else if (s.rfind("--serverLog=", 0) == 0) serverLog = s.substr(12);
 		else if (s.rfind("--checkStarts=", 0) == 0) startsDump = s.substr(14);
@@ -3087,6 +3270,18 @@ int main(int argc, char** argv)
 		const bool weaponsOk = RunWeapons(port, serverLog);
 		std::printf("RESULT %s (무기 받침 구동 — 대조는 check_weapon_pads.py)\n", weaponsOk ? "PASS" : "FAIL");
 		return weaponsOk ? 0 : 1;
+	}
+	if (failFullOnly)
+	{
+		const bool failOk = RunFailFull(port);
+		std::printf("RESULT %s (예비 가득 실패 소식)\n", failOk ? "PASS" : "FAIL");
+		return failOk ? 0 : 1;
+	}
+	if (pressOrderOnly)
+	{
+		const bool pressOk = RunPressOrder(port, serverLog);
+		std::printf("RESULT %s (한 입력 안 누름 차례)\n", pressOk ? "PASS" : "FAIL");
+		return pressOk ? 0 : 1;
 	}
 	if (grenadeLeaveOnly)
 	{

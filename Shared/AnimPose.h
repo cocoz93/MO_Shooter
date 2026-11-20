@@ -36,6 +36,8 @@ namespace mo
 		uint8_t kind = 0;		// EMontageKind
 		float position = 0;		// 몽타주 시각(초)
 		float weight = 0;		// 0~1 몽타주 비중
+		float blendOut = -1.f;	// 빼기 진행 0~1(엔진 FAlphaBlend 선형 진행) — 빼기 비중 표가 걸린 몽타주가 빠지는 중일 때만, 아니면 -1(L-4 · 와이어 판 14).
+								// 자세 계산은 아직 안 쓴다 — 뼈별 비중 길은 L-6-b
 	};
 
 	// 자세 계산의 입력. 언리얼 쪽 재생 상태(FMOBSimpleAnimProxy)와 칸마다 같은 뜻이다

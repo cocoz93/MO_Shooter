@@ -4270,8 +4270,9 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 		UE_LOG(LogMOB, Log, TEXT("MOB_DEVICES found=%d launchers=%d teleports=%d shapesOff=%d lightsOff=%d glowOff=%d sounds=%d fx=%d break=%d insideSelf=%lld insideRemote=%lld overlapSelf=%lld overlapRemote=%lld"),
 			Devices.Num(), Devices.Num() - Teleports, Teleports, DeviceShapesOff, DeviceLightsOff, DeviceGlowOff, DeviceSounds, DeviceFx, bBreakDevices ? 1 : 0, DeviceInsideSelf, DeviceInsideRemote, DeviceOverlapSelf, DeviceOverlapRemote);
 	}
-	UE_LOG(LogMOB, Log, TEXT("MOB_PADS pads=%d msgs=%lld takes=%lld readies=%lld syncs=%lld badIndex=%lld noActor=%lld bound=%lld heals=%lld healBeforeFix=%lld healMismatch=%lld healNoPawn=%lld stateChecks=%lld stateDiff=%lld lastStateTick=%u"),
-		Pads.Num(), PadMsgs, PadTakes, PadReadies, PadSyncs, PadBadIndex, PadNoActor, PadBound, PadHeals, PadHealBeforeFix, PadHealMismatch, PadHealNoPawn, PadStateChecks, PadStateDiff, LastStateTick);
+	// fails = 예비 가득 실패 소식(판 14 · L-4) · failBad = 그중 남 이름 · give ≠ Full(기대 0)
+	UE_LOG(LogMOB, Log, TEXT("MOB_PADS pads=%d msgs=%lld takes=%lld readies=%lld syncs=%lld badIndex=%lld noActor=%lld bound=%lld heals=%lld healBeforeFix=%lld healMismatch=%lld healNoPawn=%lld stateChecks=%lld stateDiff=%lld lastStateTick=%u fails=%lld failBad=%lld"),
+		Pads.Num(), PadMsgs, PadTakes, PadReadies, PadSyncs, PadBadIndex, PadNoActor, PadBound, PadHeals, PadHealBeforeFix, PadHealMismatch, PadHealNoPawn, PadStateChecks, PadStateDiff, LastStateTick, PadFails, PadFailBad);
 	// 무기 받침 · 가방(W-4) — 판정은 Tools/LyraPilot/check_pads_bridge.py --weapons(서버 PADEV 줄과 견준다). 예측 줍기 칸은 봇 「BOT weapons」 줄과 같은 이름
 	{
 		const mo::CSelfPrediction::PickupCounters PickupFix = Core ? Core->Prediction.GetPickupCounters() : mo::CSelfPrediction::PickupCounters();
@@ -4684,8 +4685,15 @@ void UMOBridgeSubsystem::HandlePickup(const wire::Pickup& M)
 	}
 	++PadMsgs;
 	const bool bTake = M.reason == wire::PICKUP_TAKE || M.reason == wire::PICKUP_TAKE_RECHECK;
+	const bool bFail = M.reason == wire::PICKUP_FAIL_FULL;
 	if (bTake) ++PadTakes;
 	else if (M.reason == wire::PICKUP_READY) ++PadReadies;
+	else if (bFail)
+	{
+		// 예비 가득 실패(판 14 · L-4) — 서버는 집으려던 사람에게만 · give = Full 로 보낸다. 그 밖의 모양은 failBad
+		++PadFails;
+		if (M.picker != PlayerId || M.give != (uint8)mo::EGiveResult::Full) ++PadFailBad;
+	}
 	else ++PadSyncs;
 	if (Pads.Num() < M.padCount) Pads.SetNum(M.padCount);
 	if (M.pad >= Pads.Num())
@@ -4703,8 +4711,9 @@ void UMOBridgeSubsystem::HandlePickup(const wire::Pickup& M)
 	ALyraWeaponSpawner* Actor = bKeepPickups ? nullptr : Pad.Actor.Get();
 	if (!Actor && !bKeepPickups) Actor = BindPad(M.pad);	// 묶을 때 지금 상태로 그린다
 	if (!Actor) ++PadNoActor;
-	// 효과는 집음 · 다시 켜짐만 — 현황(들어올 때 · 경기 시작)은 상태만 맞춘다. Lyra 도 새로 놓은 받침은 효과 없이 켜진다
-	if (Actor) ApplyPadLook(*Actor, Pad.bAvailable, M.reason != wire::PICKUP_SYNC);
+	// 효과는 집음 · 다시 켜짐만 — 현황(들어올 때 · 경기 시작)은 상태만 맞춘다. Lyra 도 새로 놓은 받침은 효과 없이 켜진다.
+	// 실패 소식은 받침이 그대로라 그리지 않는다(「예비 탄약 가득 참」 알림 띄우기는 L-9-a — 이 판은 싣고 읽기만)
+	if (Actor && !bFail) ApplyPadLook(*Actor, Pad.bAvailable, M.reason != wire::PICKUP_SYNC);
 	// 받침 종류로 가른다(W-4) — 체력 받침은 회복, 무기 받침은 가방. 무기 받침 집음은 줍기 칸(give)이 늘 차 있다(서버 SendPad)
 	const bool bHealPad = M.kind == (uint8)mo::EPadKind::Heal;
 	const float LyraHp = bTake && !bKeepPickups && bHealPad ? ApplyPadHeal(M, Actor) : -1.f;
@@ -4713,7 +4722,7 @@ void UMOBridgeSubsystem::HandlePickup(const wire::Pickup& M)
 		if (M.give == wire::kPickupGiveNone || M.weapon >= (uint8)mo::EWeapon::Count) ++PadWeaponBad;
 		else ApplyWeaponPickup(M, Actor);
 	}
-	static const TCHAR* ReasonNames[] = { TEXT("take"), TEXT("takeRecheck"), TEXT("ready"), TEXT("sync") };
+	static const TCHAR* ReasonNames[] = { TEXT("take"), TEXT("takeRecheck"), TEXT("ready"), TEXT("sync"), TEXT("failFull") };	// EPickupReason 차례
 	UE_LOG(LogMOB, Log, TEXT("MOB_PAD tick=%u pad=%u reason=%s avail=%u ready=%u picker=%u heal=%.1f hpAfter=%.1f lyraHp=%.1f actor=%d kind=%u give=%u weapon=%u slot=%u mag=%d spare=%d seq=%u"), M.tick, M.pad,
 		M.reason < UE_ARRAY_COUNT(ReasonNames) ? ReasonNames[M.reason] : TEXT("?"), M.available, M.readyTick, M.picker, M.heal, M.hpAfter, LyraHp, Actor ? 1 : 0,
 		M.kind, M.give, M.weapon, M.slot, (int32)M.magazine, (int32)M.spare, M.seq);

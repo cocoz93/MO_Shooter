@@ -658,7 +658,8 @@ namespace mo
 	}
 
 	// B_WeaponSpawner GiveWeapon(weapon-pickup-plan.md 「Lyra」 표 · W-0 실측) — 경기 끝 단계면 실패, 그 밖은 가방 Give 결과대로.
-	// 실패(예비 가득 · 경기 끝 · 빈 칸 없음)는 받침이 안 꺼지고 소식도 안 보낸다(체력 가득과 같은 길). 무기를 바꿨으면 바꾸기 몽타주를 튼다(키로 바꿀 때와 같은 사건)
+	// 실패(예비 가득 · 경기 끝 · 빈 칸 없음)는 받침이 안 꺼진다(체력 가득과 같은 길). 예비 가득만 집으려던 사람에게 실패 소식 PICKUP_FAIL_FULL 을 보낸다 —
+	// Lyra 는 그때 「예비 탄약 가득 참」을 띄우고(W-0 FAILMSG) 경기 끝 · 빈 칸 없음은 알림 기록이 없다(L-4). 무기를 바꿨으면 바꾸기 몽타주를 튼다(키로 바꿀 때와 같은 사건)
 	bool CRoom::TryWeaponPickup(size_t padIndex, Player& player, bool fromTimer)
 	{
 		const PickupPad& pad = (*_pickups.pads)[padIndex];
@@ -690,6 +691,11 @@ namespace mo
 		if (!IsGiveTaken(result))
 		{
 			if (_allowDebug) std::printf("PADEV tick=%u room=%u pad=%zu kind=full give=%s player=%u weapon=%u mag=%d spare=%d\n", _tick, _roomId, padIndex, GiveResultName(result), player.id, (unsigned)weapon, cycle.GetMagazine(), cycle.GetSpare());
+			if (result == EGiveResult::Full)
+			{
+				++_stats.weaponPickupFailMsgs;
+				SendPad(padIndex, wire::PICKUP_FAIL_FULL, &player, 0.f, &player, (uint8_t)result, (uint8_t)weapon);
+			}
 			return false;
 		}
 		player.weapon = player.loadout.Held();
@@ -748,7 +754,7 @@ namespace mo
 		for (size_t i = 0; i < PadCount(); ++i) SendPad(i, wire::PICKUP_SYNC, nullptr, 0.f, nullptr);	// 경기 시작 — 꺼져 있던 받침도 켜진다
 	}
 
-	// S2C_PICKUP — only 가 있으면 그 사람에게만(들어올 때 현황), 없으면 방 전원
+	// S2C_PICKUP — only 가 있으면 그 사람에게만(들어올 때 현황 · 예비 가득 실패), 없으면 방 전원
 	void CRoom::SendPad(size_t padIndex, wire::EPickupReason reason, const Player* picker, float heal, const Player* only, uint8_t give, uint8_t weapon)
 	{
 		const PickupPad& pad = (*_pickups.pads)[padIndex];
@@ -847,6 +853,18 @@ namespace mo
 	void CRoom::ApplyInput(Player& player, const wire::Input& input, const bool serverMade)
 	{
 		player.lastSeq = input.seq;
+		// 한 입력 안 누름 차례(L-4 · 판 14) — 실린 차례를 읽어 세기만 한다. 켜는 차례는 아직 고정(대시 먼저 D102 · 수류탄 먼저 D112 ①), 따르기는 L-5
+		if (!serverMade)
+		{
+			uint8_t order[wire::kPressKeyCount];
+			const int pressed = wire::ReadPressOrder(input.buttons, input.pressOrder, order);
+			if (pressed < 0 || pressed >= 2)
+			{
+				++_stats.pressMulti;
+				if (pressed < 0) ++_stats.pressUnordered;
+				else ++_stats.pressOrdered;
+			}
+		}
 		if (player.dead)
 		{
 			++_stats.inputsWhileDead;
@@ -1826,6 +1844,10 @@ namespace mo
 			{
 				player->anim.ToWire(sample.anim);
 				sample.animWeapon = player->animWeapon;
+				for (int m = 0; m < (int)sample.anim.montageCount; ++m)
+				{
+					if (sample.anim.montages[m].blendOut != 0) ++_stats.animBlendOutCells;
+				}
 			}
 		}
 	}

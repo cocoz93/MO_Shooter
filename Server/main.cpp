@@ -710,6 +710,8 @@ int main(int argc, char** argv)
 	std::printf("SERVER inputs received=%llu applied=%llu whileDead=%llu droppedFull=%llu droppedOldSeq=%llu starvedTicks=%llu idleMoves=%llu debugPlaces=%llu statesSent=%llu\n",
 		(unsigned long long)room.inputsReceived, (unsigned long long)room.inputsApplied, (unsigned long long)room.inputsWhileDead, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq,
 		(unsigned long long)room.starvedTicks, (unsigned long long)room.idleMoves, (unsigned long long)room.debugPlaces, (unsigned long long)room.statesSent);
+	// 한 입력 안 누름 차례(판 14 · L-4) — 근접 · 대시 · 수류탄 · 재장전 중 둘 이상 켜진 클라 입력 = 차례 믿음 + 못 믿음(0 · 겹침). 봇 · 다리는 L-5 전까지 0 을 실어 전부 못 믿음
+	std::printf("SERVER pressOrder multi=%llu ordered=%llu unordered=%llu\n", (unsigned long long)room.pressMulti, (unsigned long long)room.pressOrdered, (unsigned long long)room.pressUnordered);
 	std::printf("SERVER lockstep players=%d waits=%llu timeouts=%llu\n", args.testLockstep, (unsigned long long)lockstepWaits, (unsigned long long)lockstepTimeouts);
 	std::printf("SERVER shots=%llu bullets=%llu hitMap=%llu hitBody=%llu hitImmune=%llu missed=%llu damageEvents=%llu\n",
 		(unsigned long long)room.shots, (unsigned long long)room.bullets, (unsigned long long)room.bulletsHitMap, (unsigned long long)room.bulletsHitBody, (unsigned long long)room.bulletsHitImmune, (unsigned long long)room.bulletsMissed, (unsigned long long)room.damageEvents);
@@ -777,10 +779,11 @@ int main(int argc, char** argv)
 			ev(EAnimEvent::Melee), ev(EAnimEvent::HitBack), ev(EAnimEvent::HitFront), dropped(EAnimEvent::Melee), dropped(EAnimEvent::HitBack), dropped(EAnimEvent::HitFront),
 			starts(mo::MONTAGE_MELEE), starts(mo::MONTAGE_HIT_BACK), starts(mo::MONTAGE_HIT_FRONT), (unsigned long long)room.meleeReloadMontageCancels);
 		// 대시 몽타주(D-4) — 방향마다 사건 − 버림 = 튼 수. 사건 = SERVER dash 의 montage 칸(켠 방향)
-		std::printf("SERVER animDash events forward=%llu backward=%llu left=%llu right=%llu dropped forward=%llu backward=%llu left=%llu right=%llu starts forward=%llu backward=%llu left=%llu right=%llu\n",
+		// blendOutCells = 빼기 진행을 실은 몽타주 칸(판 14 · L-4) — 사람 × 틱 되감기 기록 칸 수. 빼기 비중 표가 걸린 대시 넷이 빠지는 동안만
+		std::printf("SERVER animDash events forward=%llu backward=%llu left=%llu right=%llu dropped forward=%llu backward=%llu left=%llu right=%llu starts forward=%llu backward=%llu left=%llu right=%llu blendOutCells=%llu\n",
 			ev(EAnimEvent::DashForward), ev(EAnimEvent::DashBackward), ev(EAnimEvent::DashLeft), ev(EAnimEvent::DashRight),
 			dropped(EAnimEvent::DashForward), dropped(EAnimEvent::DashBackward), dropped(EAnimEvent::DashLeft), dropped(EAnimEvent::DashRight),
-			starts(mo::MONTAGE_DASH_FORWARD), starts(mo::MONTAGE_DASH_BACKWARD), starts(mo::MONTAGE_DASH_LEFT), starts(mo::MONTAGE_DASH_RIGHT));
+			starts(mo::MONTAGE_DASH_FORWARD), starts(mo::MONTAGE_DASH_BACKWARD), starts(mo::MONTAGE_DASH_LEFT), starts(mo::MONTAGE_DASH_RIGHT), (unsigned long long)room.animBlendOutCells);
 		// 수류탄 몽타주(G-4) — 사건 − 버림 = 튼 수. 사건 = SERVER grenade 의 thrown. afterFire = 같은 입력 쏘기를 던짐 앞에 끼운 수 · reloadCancels = 던짐이 먼저 끈 재장전 칸
 		std::printf("SERVER animGrenade events=%llu dropped=%llu starts=%llu afterFire=%llu reloadCancels=%llu\n",
 			ev(EAnimEvent::Grenade), dropped(EAnimEvent::Grenade), starts(mo::MONTAGE_GRENADE), (unsigned long long)room.grenadeAnimAfterFire,
@@ -788,10 +791,11 @@ int main(int argc, char** argv)
 	}
 	std::printf("SERVER pickups=%llu fromRecheck=%llu fullHealth=%llu padRespawns=%llu padRechecks=%llu\n", (unsigned long long)room.pickups, (unsigned long long)room.pickupsFromRecheck,
 		(unsigned long long)room.pickupsFullHealth, (unsigned long long)room.padRespawns, (unsigned long long)room.padRechecks);
-	std::printf("SERVER weaponPickups new=%llu noSwitch=%llu ammo=%llu full=%llu noSlot=%llu postGame=%llu fromRecheck=%llu switchRejected=%llu debugAmmoSets=%llu debugKills=%llu\n",
+	// failMsgs = 예비 가득 실패로 집으려던 사람에게 보낸 소식(판 14 · L-4) — full 과 같아야 한다
+	std::printf("SERVER weaponPickups new=%llu noSwitch=%llu ammo=%llu full=%llu noSlot=%llu postGame=%llu fromRecheck=%llu switchRejected=%llu debugAmmoSets=%llu debugKills=%llu failMsgs=%llu\n",
 		(unsigned long long)room.weaponPickupsNew, (unsigned long long)room.weaponPickupsNoSwitch, (unsigned long long)room.weaponPickupsAmmo, (unsigned long long)room.weaponPickupsFull,
 		(unsigned long long)room.weaponPickupsNoSlot, (unsigned long long)room.weaponPickupsPostGame, (unsigned long long)room.weaponPickupsFromRecheck, (unsigned long long)room.weaponSwitchRejected,
-		(unsigned long long)room.debugAmmoSets, (unsigned long long)room.debugKills);
+		(unsigned long long)room.debugAmmoSets, (unsigned long long)room.debugKills, (unsigned long long)room.weaponPickupFailMsgs);
 	std::printf("SERVER kills=%llu assists=%llu falls=%llu spawns=%llu spawnsFromFallback=%llu phaseChanges=%llu finished=%d\n",
 		(unsigned long long)room.kills, (unsigned long long)room.assists, (unsigned long long)room.falls, (unsigned long long)room.spawns, (unsigned long long)room.spawnsFromFallback, (unsigned long long)room.phaseChanges, firstFinished ? 1 : 0);
 	if (firstFinished)

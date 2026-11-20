@@ -89,6 +89,11 @@ namespace mo
 		uint64_t inputsDroppedOldSeq = 0;	// 번호가 앞선 입력보다 작거나 같음
 		uint64_t firesDroppedSeqGap = 0;	// 입력 번호를 건너뛴 입력의 사격을 버림(D15)
 		uint64_t inputsWhileDead = 0;		// 죽어 있는 동안 온 입력 — 번호만 기록하고 안 쓴다
+		// 한 입력 안 누름 차례(L-4 · 판 14) — 근접 · 대시 · 수류탄 · 재장전 중 둘 이상 켜진 클라 입력(multi) = 차례를 믿음(ordered) + 못 믿음(unordered, 0 · 겹침).
+		// 서버는 아직 고정 차례로 켜고 세기만 한다(따르기는 L-5)
+		uint64_t pressMulti = 0;
+		uint64_t pressOrdered = 0;
+		uint64_t pressUnordered = 0;
 		uint64_t starvedTicks = 0;			// 입력이 안 와서 그 틱에 꺼낼 것이 없음
 		uint64_t idleMoves = 0;				// 입력 없이 오래 지나 빈 입력으로 움직임(공중에 멈추지 않게)
 		uint64_t debugPlaces = 0;
@@ -125,6 +130,7 @@ namespace mo
 		uint64_t weaponPickupsNoSwitch = 0;		// 없던 무기 — 재장전 중이라 넣기만(IgnorePickUpWhenReload)
 		uint64_t weaponPickupsAmmo = 0;			// 가진 무기 예비를 기본값까지 채움
 		uint64_t weaponPickupsFull = 0;			// 가진 무기 예비가 이미 기본값 — 실패, 받침 안 꺼짐
+		uint64_t weaponPickupFailMsgs = 0;		// 그 실패로 집으려던 사람에게 보낸 PICKUP_FAIL_FULL 소식(L-4) — weaponPickupsFull 과 같아야 한다
 		uint64_t weaponPickupsNoSlot = 0;		// 빈 칸 없음 — 무기 셋 · 칸 셋이라 0 이어야 한다
 		uint64_t weaponPickupsPostGame = 0;		// 경기 끝 단계라 실패(GiveWeapon 의 IsPhaseActive(PostGame)) — 받침 안 꺼짐
 		uint64_t weaponPickupsFromRecheck = 0;	// 집은 것(새 무기 · 탄) 중 다시 검사로 집은 것
@@ -264,6 +270,7 @@ namespace mo
 		uint64_t animEvents[(size_t)EAnimEvent::Count] = {};		// 쌓은 사건(EAnimEvent 차례)
 		uint64_t animEventsDropped[(size_t)EAnimEvent::Count] = {};	// 틀기 전에 버린 사건 — 같은 틱에 죽었거나 시험용 자리 옮기기 · 칸 넘침
 		uint64_t montageStarts[(size_t)MONTAGE_KIND_COUNT] = {};	// 튼 몽타주(EMontageKind 차례)
+		uint64_t animBlendOutCells = 0;		// 빼기 진행을 실은 몽타주 칸 — 사람 × 틱 되감기 기록(= 상태 꼬리) 칸 수(L-4). 빼기 비중 표가 걸린 대시 몽타주가 빠지는 동안만
 		uint64_t montageFails = 0;				// 묶음에 그 종류가 없어 못 틈 — 시작할 때 세 묶음을 다 읽으므로 0 이어야 한다
 		uint64_t reloadCancels = 0;				// 쏘기가 재장전 칸을 먼저 끔
 		uint64_t montageDrops = 0;				// 칸이 차서 버린 몽타주(플랜 montageDropped). 0 이 아니면 칸 수를 다시 본다

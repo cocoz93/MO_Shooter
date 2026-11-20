@@ -732,6 +732,12 @@ namespace
 		uint64_t GetInvDiff() const { return _invDiff; }
 		uint64_t GetInvMulti() const { return _invMulti; }
 		uint64_t GetWeaponPickupsMine() const { return _weaponPickupsMine; }
+		uint64_t GetWeaponFailMine() const { return _weaponFailMine; }
+		uint64_t GetWeaponFailBad() const { return _weaponFailBad; }
+		uint64_t GetAnimTails() const { return _animTails; }
+		uint64_t GetAnimMontageCells() const { return _animMontageCells; }
+		uint64_t GetAnimBlendOutCells() const { return _animBlendOutCells; }
+		uint64_t GetAnimBlendOutBad() const { return _animBlendOutBad; }
 		uint64_t GetWeaponSeekStarts() const { return _weaponSeekStarts; }
 		uint64_t GetWeaponSeekTicks() const { return _weaponSeekTicks; }
 		uint64_t GetWeaponTakesSought() const { return _weaponTakesSought; }
@@ -1134,7 +1140,9 @@ namespace
 				if (g_traceInputs && p.id == _welcome.playerId)
 					std::fprintf(g_traceInputs, "S %u tick=%u lastSeq=%u hp=%.6g flags=%u at=%.3f,%.3f,%.3f\n", p.id, stateTick, p.lastSeq, (double)p.hp, (unsigned)p.flags, (double)p.x, (double)p.y, (double)p.z);
 				wire::AnimStateWire anim{};
-				const bool hasAnim = (_judge || _scripted) && ReadAnimTail(data, size, tailAt, anim);
+				// 꼬리는 늘 읽는다(L-4) — 판 14 몽타주 칸의 빼기 진행을 센다. 꼬리가 없는 판(서버에 클립 없음)은 첫 사람에서 끝까지 건너뛴다
+				const bool hasAnim = ReadAnimTail(data, size, tailAt, anim);
+				if (hasAnim) CountAnimTail(anim);
 				if (_scripted && hasAnim && _scriptPlaced && p.id == _welcome.playerId)
 				{
 					// 경로 모드 — 받은 자기 몽타주 칸(칸 번호 = 묶음 << 4 | 종류, 시각 1/6000초, 비중 0~255). 서버 무기 · 마지막 적용 입력 번호와 함께
@@ -1182,6 +1190,13 @@ namespace
 			pad.available = m.available != 0;
 			pad.at = Vec3(m.x, m.y, m.z);
 			pad.kind = m.kind;
+			if (m.reason == wire::PICKUP_FAIL_FULL)
+			{
+				// 예비 가득 실패(판 14 · L-4) — 서버는 집으려던 사람에게만 · give = Full 로 보낸다. 남 이름이거나 다른 결과가 오면 bad
+				if (m.picker == _welcome.playerId && m.give == (uint8_t)EGiveResult::Full && m.weapon == PadWeapon(m.kind)) ++_weaponFailMine;
+				else ++_weaponFailBad;
+				return;
+			}
 			const bool take = m.reason == wire::PICKUP_TAKE || m.reason == wire::PICKUP_TAKE_RECHECK;
 			if (!take || m.picker != _welcome.playerId) return;
 			if (m.kind == (uint8_t)EPadKind::Heal)
@@ -1202,6 +1217,21 @@ namespace
 				// 서버가 무기를 바꿨으면 고른 무기도 따라 맞춘다 — 「앞 입력과 달라졌을 때만 바꾼다」(Loadout.h)라 옛 번호를 보내도 안 되돌아가지만,
 				// 탄이 떨어져 다음 무기로 넘길 때(NextOwnedWeapon) 기준이 든 무기여야 한다. 다리 · 서버 프로브도 같은 규칙(W-2 기록)
 				if (m.give == (uint8_t)EGiveResult::NewEquipped) _chosenWeapon = m.weapon;
+			}
+		}
+
+		// 받은 꼬리 한 사람치의 몽타주 칸 — 빼기 진행(판 14 · L-4)을 실은 칸 수 · 그중 빼기 비중 표가 없는 몽타주(대시 넷 밖)에 실린 칸 수(기대 0)
+		void CountAnimTail(const wire::AnimStateWire& anim)
+		{
+			constexpr uint8_t kKindMask = (uint8_t)((1 << wire::kAnimMontageKindBits) - 1);
+			++_animTails;
+			for (int m = 0; m < (int)anim.montageCount; ++m)
+			{
+				++_animMontageCells;
+				if (anim.montages[m].blendOut == 0) continue;
+				++_animBlendOutCells;
+				const uint8_t kind = (uint8_t)(anim.montages[m].montage & kKindMask);
+				if (kind < MONTAGE_DASH_FORWARD || kind > MONTAGE_DASH_RIGHT) ++_animBlendOutBad;
 			}
 		}
 
@@ -2250,6 +2280,8 @@ namespace
 		bool _hasStateTime = false;
 		uint64_t _compared = 0, _posDiff = 0, _velDiff = 0, _ammoDiff = 0, _flagDiff = 0;
 		uint64_t _invDiff = 0, _invMulti = 0, _weaponPickupsMine = 0;	// 가방(W-3) — 빠른 칸이 서버와 다른 비교 줄 · 무기 둘 이상 든 비교 줄 · 내가 집은 무기 받침
+		uint64_t _weaponFailMine = 0, _weaponFailBad = 0;				// 예비 가득 실패 소식(L-4) — 내게 온 것 · 모양이 틀린 것(남 이름 · give ≠ Full · 받침과 다른 무기)
+		uint64_t _animTails = 0, _animMontageCells = 0, _animBlendOutCells = 0, _animBlendOutBad = 0;	// 받은 꼬리 · 몽타주 칸 · 빼기 진행 실린 칸 · 대시 밖에 실린 칸(L-4)
 		uint32_t _lockstepAcked = 0;		// 받은 자기 상태의 lastSeq — 서버가 적용한 마지막 입력 번호(기다림 판)
 		Clock::time_point _lockstepWaitSince = Clock::now();
 		uint64_t _lockstepTimeouts = 0;
@@ -2661,6 +2693,7 @@ int main(int argc, char** argv)
 	uint64_t meleePendingLeft = 0;
 	uint64_t padMsgs = 0, padBad = 0, padSeekStarts = 0, padSeekTicks = 0, padHealsMine = 0, padHealsSought = 0;
 	uint64_t invDiff = 0, invMulti = 0, weaponPickupsMine = 0, weaponSeekStarts = 0, weaponSeekTicks = 0, weaponTakesSought = 0, weaponSeekAmmoStarts = 0, spareOutTicks = 0;
+	uint64_t weaponFailMine = 0, weaponFailBad = 0, animTails = 0, animMontageCells = 0, animBlendOutCells = 0, animBlendOutBad = 0;
 	CSelfPrediction::PickupCounters pickupFixes;
 	size_t padCountMax = 0;
 	uint64_t shotsWhileDead = 0, damageOutside = 0, damageImmune = 0, recordDiff = 0, tallyDiff = 0, noResult = 0, immuneHits = 0;
@@ -2711,6 +2744,12 @@ int main(int argc, char** argv)
 		invDiff += bot.GetInvDiff();
 		invMulti += bot.GetInvMulti();
 		weaponPickupsMine += bot.GetWeaponPickupsMine();
+		weaponFailMine += bot.GetWeaponFailMine();
+		weaponFailBad += bot.GetWeaponFailBad();
+		animTails += bot.GetAnimTails();
+		animMontageCells += bot.GetAnimMontageCells();
+		animBlendOutCells += bot.GetAnimBlendOutCells();
+		animBlendOutBad += bot.GetAnimBlendOutBad();
 		weaponSeekStarts += bot.GetWeaponSeekStarts();
 		weaponSeekTicks += bot.GetWeaponSeekTicks();
 		weaponTakesSought += bot.GetWeaponTakesSought();
@@ -2818,11 +2857,15 @@ int main(int argc, char** argv)
 	// 무기 받침(W-3) — pickupsMine 합 = 서버 SERVER weaponPickups new + noSwitch + ammo(봇만 든 판). 예측이 받은 수 received = rerun + noSlot,
 	// invMulti = 무기 둘 이상 든 비교 줄(가방 비교가 실제로 돌았나). 세는 자리를 받음 · 다시 돌림 · 칸 없음으로 나눠 0 이 「안 지나감」인지 가린다.
 	// seekStarts · seekTicks · sought = 무기 받침 찾아가기(W-5) 시작 수 · 틱 수 · 찾아가던 중에 집은 수(갈래가 실제로 닿았나).
-	// seekAmmoStarts = 그중 든 무기 예비가 바닥나 찾아간 수, spareOutTicks = 산 채로 든 무기 예비가 0 인 틱
-	std::printf("BOT weapons pickupsMine=%llu received=%llu rerun=%llu noSlot=%llu resultDiffs=%llu ammoFixes=%llu meleeInWindow=%llu invDiff=%llu invMulti=%llu seekStarts=%llu seekTicks=%llu sought=%llu seekAmmoStarts=%llu spareOutTicks=%llu\n",
+	// seekAmmoStarts = 그중 든 무기 예비가 바닥나 찾아간 수, spareOutTicks = 산 채로 든 무기 예비가 0 인 틱.
+	// failMine = 내게 온 예비 가득 실패 소식(판 14 · L-4) 합 = 서버 SERVER weaponPickups full(봇만 든 판), failBad = 모양이 틀린 실패 소식(기대 0)
+	std::printf("BOT weapons pickupsMine=%llu received=%llu rerun=%llu noSlot=%llu resultDiffs=%llu ammoFixes=%llu meleeInWindow=%llu invDiff=%llu invMulti=%llu seekStarts=%llu seekTicks=%llu sought=%llu seekAmmoStarts=%llu spareOutTicks=%llu failMine=%llu failBad=%llu\n",
 		(unsigned long long)weaponPickupsMine, (unsigned long long)pickupFixes.received, (unsigned long long)pickupFixes.rerun, (unsigned long long)pickupFixes.noSlot,
 		(unsigned long long)pickupFixes.resultDiffs, (unsigned long long)pickupFixes.ammoFixes, (unsigned long long)pickupFixes.meleeInWindow, (unsigned long long)invDiff, (unsigned long long)invMulti,
-		(unsigned long long)weaponSeekStarts, (unsigned long long)weaponSeekTicks, (unsigned long long)weaponTakesSought, (unsigned long long)weaponSeekAmmoStarts, (unsigned long long)spareOutTicks);
+		(unsigned long long)weaponSeekStarts, (unsigned long long)weaponSeekTicks, (unsigned long long)weaponTakesSought, (unsigned long long)weaponSeekAmmoStarts, (unsigned long long)spareOutTicks,
+		(unsigned long long)weaponFailMine, (unsigned long long)weaponFailBad);
+	// 받은 애니 꼬리(판 14 · L-4) — tails = 사람 × 상태 꼬리 · cells = 몽타주 칸 · blendOut = 빼기 진행 실린 칸 · blendOutBad = 그중 대시 넷 밖(기대 0). 서버에 클립이 없으면 꼬리 0
+	std::printf("BOT animWire tails=%llu cells=%llu blendOut=%llu blendOutBad=%llu\n", (unsigned long long)animTails, (unsigned long long)animMontageCells, (unsigned long long)animBlendOutCells, (unsigned long long)animBlendOutBad);
 	std::printf("BOT 규칙: kills=%llu damages=%llu shots=%llu spawns=%llu | 죽은 뒤 발사=%llu 대기·경기 뒤 피해=%llu 무적 중 피해=%llu | 적이 맞았는데 피해 0(무적 분모)=%llu\n",
 		(unsigned long long)first.GetChecks().kills, (unsigned long long)first.GetChecks().damages, (unsigned long long)first.GetChecks().shots, (unsigned long long)first.GetChecks().spawnsSeen,
 		(unsigned long long)shotsWhileDead, (unsigned long long)damageOutside, (unsigned long long)damageImmune, (unsigned long long)immuneHits);
@@ -2849,6 +2892,7 @@ int main(int argc, char** argv)
 	if (args.push && args.pawnBlock && predCount.pawnHits == 0) ok = false;		// 막기를 켜고 밀었는데 예측이 한 번도 안 닿음 = 갈래가 안 돎
 	if (padBad != 0) ok = false;
 	if (invDiff != 0 || pickupFixes.noSlot != 0 || pickupFixes.resultDiffs != 0 || pickupFixes.ammoFixes != 0 || pickupFixes.received != weaponPickupsMine) ok = false;
+	if (weaponFailBad != 0 || animBlendOutBad != 0) ok = false;		// 판 14 칸(L-4) — 남에게 간 실패 소식 · 대시 밖 빼기 진행
 	// 근접 — 규칙 위반 · 피해 소식 짝 · 켠 입력 어긋남은 늘 0. --melee 판은 내 근접 결과가 하나 이상(갈래가 실제로 돌았다)
 	if (melee.badShape != 0 || melee.badDead != 0 || melee.badDamage != 0 || melee.badZero != 0 || meleePendingLeft != 0) ok = false;
 	if (melee.noGuess != 0 || meleeFixes.startMismatches != 0 || meleeFixes.rerunsMissed != 0 || meleeFixes.pushesIgnored != 0) ok = false;

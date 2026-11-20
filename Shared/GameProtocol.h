@@ -11,7 +11,8 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 13;		// 13 = 수류탄 단추 BUTTON_GRENADE 를 보냄 · 입력 끝 카메라 거리 camBack · 수류탄 소식 S2C_GRENADE · 수류탄 상태 S2C_GRENADE_STATE(컨텐츠 G-3)
+		constexpr uint32_t kProtocolVersion = 14;		// 14 = 몽타주 칸 빼기 진행 blendOut · 입력 끝 누름 차례 pressOrder · 받침 까닭 PICKUP_FAIL_FULL(L-4)
+														// 13 = 수류탄 단추 BUTTON_GRENADE 를 보냄 · 입력 끝 카메라 거리 camBack · 수류탄 소식 S2C_GRENADE · 수류탄 상태 S2C_GRENADE_STATE(컨텐츠 G-3)
 														// 12 = 대시 단추 BUTTON_DASH 를 보냄 · 대시 소식 S2C_DASH(컨텐츠 D-3)
 														// 11 = 상태의 빠른 칸 quickSlots · 받침 소식의 종류 · 줍기 결과 · 무기 · 칸 · 탄 · 입력 번호 · 시험 입력의 탄 정하기 · 죽음(컨텐츠 W-2 · W-3)
 														// 10 = 근접 단추 BUTTON_MELEE · 근접 결과 S2C_MELEE · 피해 · 처치 소식의 무기 번호 근접 kWeaponMelee(컨텐츠 E-3)
@@ -66,6 +67,8 @@ namespace mo
 			PICKUP_TAKE_RECHECK = 1,	// 다시 켜진 0.25초 뒤 이미 서 있던 사람이 집음(CheckForExistingOverlaps)
 			PICKUP_READY = 2,			// 대기가 끝나 다시 켜짐(ResetCoolDown)
 			PICKUP_SYNC = 3,			// 지금 상태만 — 들어올 때 · 경기 시작(받침을 새로 놓음). 화면 효과 없음
+			PICKUP_FAIL_FULL = 4,		// 무기 받침을 집으려다 예비 가득이라 못 집음(B_WeaponSpawner GiveWeapon 실패 길 — Lyra 는 「예비 탄약 가득 참」을 띄운다, W-0 FAILMSG).
+										// 집으려던 사람에게만 · 받침 상태는 그대로 · give = Full 과 그 무기 · 칸 · 탄을 싣는다(L-4). 경기 끝 단계 · 빈 칸 없음 실패는 Lyra 알림 기록이 없어 안 보낸다
 		};
 
 		enum EStateFlag : uint8_t
@@ -126,6 +129,7 @@ namespace mo
 			uint32_t viewTick;		// 쏠 때 화면에 그리던 틱의 정수 부분. 0 = 시점 없음 → 서버는 현재 자리로 판정
 			float viewAlpha;		// viewTick 에서 다음 틱까지의 비율 0~1 — 틱 간격이 달리기로 약 8cm 라 정수 틱만으로는 모자란다
 			float camBack;			// 카메라에서 사격 시작점(aim)까지 시선 방향 거리(cm) — 수류탄 겨눔 선이 카메라에서 시작한다(G-3). 서버가 정직한 Lyra 값이 드는 범위로 자른다(ClampGrenadeCamBack · L-3-c)
+			uint8_t pressOrder;		// 이 입력에 켜진 근접 · 대시 · 수류탄 · 재장전의 누른 차례(L-4 · 판 14) — 2비트씩 k 번째 칸 = k 번째로 누른 단추(EPressKey). 쓰고 읽기는 아래 MakePressOrder · ReadPressOrder
 		};
 
 		// 시험 입력 DebugPlace 의 덧붙임(flags) — 0 이면 자리 · 체력만(전부터의 뜻)
@@ -176,7 +180,7 @@ namespace mo
 		};
 
 		// 애니 상태 한 사람치. S2C_STATE 의 players[count] 바로 뒤에 같은 차례로 붙는다(꼬리, 클립 파일을 준 서버만).
-		// - 머리 뒤에 겹침 칸 layerCount 개, 그 뒤에 몽타주 칸 montageCount 개만 싣는다 — 사람마다 23 + 4 × layerCount + 4 × montageCount 바이트, 최대 51(D35 · D51 · D60 · D62).
+		// - 머리 뒤에 겹침 칸 layerCount 개, 그 뒤에 몽타주 칸 montageCount 개만 싣는다 — 사람마다 23 + 4 × layerCount + 5 × montageCount 바이트, 최대 54(D35 · D51 · D60 · D62 · 몽타주 칸 빼기 진행 L-4).
 		//   쓰고 읽는 식은 아래 WriteAnimTail · ReadAnimTail 한 벌이다(서버가 쓰고 봇 · 다리가 읽는다)
 		// - 앞부분(State)만 읽는 쪽은 count 로 끝을 정하므로 꼬리를 무시해도 깨지지 않는다
 		inline constexpr int kAnimLayersOnWire = 4;
@@ -197,6 +201,8 @@ namespace mo
 			uint8_t montage;		// 묶음 번호(클립 파일 차례) << 4 | 종류(EMontageKind)
 			uint16_t time;			// 몽타주 시각, 1/6000초 칸
 			uint8_t weight;			// 몽타주 비중 0~255. 0 으로 반올림되는 칸은 안 싣는다
+			uint8_t blendOut;		// 빼기 진행(L-4 · 판 14) — 0 = 빼기 비중 표가 없거나 빠지는 중이 아님, 1~255 = 선형 진행 0~1(엔진 FAlphaBlend 의 선형 진행).
+									// 엔진은 빼기 비중 표(대시 넷 = FastFeet)가 걸린 몽타주를 이 진행으로 뼈마다 빼는데(D103) 서버 되감기 판정이 와이어 기록으로 자세를 만들어 와이어에 싣는다
 		};
 
 		struct AnimStateWire
@@ -420,7 +426,7 @@ namespace mo
 
 		static_assert(sizeof(Header) == 4, "ServerCore MsgHeader 와 같아야 한다");
 		static_assert(sizeof(State) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
-		static_assert(sizeof(AnimStateWire) == 51, "패킷 크기 어림(D35 · D51 · D60 · D62)과 같아야 한다");
+		static_assert(sizeof(AnimStateWire) == 54, "패킷 크기 어림(D35 · D51 · D60 · D62 · L-4)과 같아야 한다");
 		inline constexpr size_t kAnimStateHeadSize = offsetof(AnimStateWire, layers);
 		static_assert(kAnimStateHeadSize == 23, "머리 = 18 + 덮기 · 왼손 · 몽타주 칸 수(D51) + 조준 묶음 비중(D60) + 앉기 묶음 비중(D62)");
 		inline constexpr size_t kMaxStatePacketSize = sizeof(State) + sizeof(AnimStateWire) * kMaxPlayersInRoom;		// 꼬리까지 넣은 최대
@@ -467,6 +473,57 @@ namespace mo
 		static_assert(sizeof(GrenadeStateEntry) == 41 && sizeof(GrenadeStateHead) == 9, "수류탄 상태 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 		inline constexpr size_t kMaxGrenadeStatePacketSize = sizeof(GrenadeStateHead) + sizeof(GrenadeStateEntry) * kMaxPlayersInRoom;
 		static_assert(kMaxGrenadeStatePacketSize <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
-		static_assert(sizeof(Input) == 50, "입력 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드(판 번호를 올린다)");
+		static_assert(sizeof(Input) == 51, "입력 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드(판 번호를 올린다)");
+
+		// 한 입력 안 누름 차례(L-4 · 판 14). 근접 · 대시 · 수류탄 · 재장전은 넷 다 누른 입력 하나에만 켜지는 단추라 한 입력에 둘 이상 켜질 수 있다.
+		// 그때 Lyra 는 눌린 차례대로 켜고 차례가 결과를 바꾼다(L-1-c 기록 — 근접 + 대시 피해 100 ↔ 0 · 재장전 + Q 채움 ↔ 안 채움 · 근접 + Q 몽타주).
+		// 서버가 이 차례를 따르는 것은 L-5 — 이 판은 싣고 읽기만 한다
+		enum EPressKey : uint8_t
+		{
+			PRESS_MELEE = 0,
+			PRESS_DASH = 1,
+			PRESS_GRENADE = 2,
+			PRESS_RELOAD = 3,
+			kPressKeyCount = 4,
+		};
+		inline constexpr uint8_t kPressKeyButtons[kPressKeyCount] = { BUTTON_MELEE, BUTTON_DASH, BUTTON_GRENADE, BUTTON_RELOAD };
+
+		// keys[0..count) = 누른 차례의 단추 → pressOrder. 2비트씩 아래부터 — k 번째 칸 = k 번째로 누른 단추. 남는 칸은 0
+		inline uint8_t MakePressOrder(const uint8_t* keys, int count)
+		{
+			uint8_t order = 0;
+			for (int k = 0; k < count && k < kPressKeyCount; ++k) order = (uint8_t)(order | ((keys[k] & 3u) << (2 * k)));
+			return order;
+		}
+
+		// buttons 에 켜진 넷 중 몇 개인가(n)와 그 차례(out[0..n)). 돌려주는 값 = n, 차례를 못 믿으면 -1.
+		// n ≤ 1 이면 차례가 뜻이 없어 pressOrder 를 안 보고 켜진 하나만 담는다. n ≥ 2 면 앞 n 칸이 켜진 단추를 한 번씩 다 담고 남는 칸이 0 일 때만 믿는다
+		// (보내는 쪽이 차례를 안 채운 0 은 n ≥ 2 에서 「근접 근접」이 되어 -1 — 판 13 까지의 고정 차례로 돌아갈 자리)
+		inline int ReadPressOrder(uint8_t buttons, uint8_t pressOrder, uint8_t (&out)[kPressKeyCount])
+		{
+			int pressed = 0;
+			uint8_t single = 0;
+			for (uint8_t key = 0; key < kPressKeyCount; ++key)
+			{
+				if ((buttons & kPressKeyButtons[key]) == 0) continue;
+				++pressed;
+				single = key;
+			}
+			if (pressed <= 1)
+			{
+				out[0] = single;
+				return pressed;
+			}
+			uint8_t seen = 0;
+			for (int k = 0; k < pressed; ++k)
+			{
+				const uint8_t key = (uint8_t)((pressOrder >> (2 * k)) & 3u);
+				if ((buttons & kPressKeyButtons[key]) == 0 || (seen & (1u << key)) != 0) return -1;
+				seen = (uint8_t)(seen | (1u << key));
+				out[k] = key;
+			}
+			if (pressed < kPressKeyCount && (pressOrder >> (2 * pressed)) != 0) return -1;
+			return pressed;
+		}
 	}
 }

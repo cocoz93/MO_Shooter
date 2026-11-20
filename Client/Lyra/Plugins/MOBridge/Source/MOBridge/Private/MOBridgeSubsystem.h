@@ -451,6 +451,7 @@ private:
 	// healNoPawn = 집은 사람 몸이 없거나 죽어 있던 수, stateChecks · stateDiff = 1초마다 묶인 받침의 Lyra 켜짐 · 구슬 보임 · 충돌 꺼짐을 서버 상태와 견준 수 · 다른 수(그때 서버 상태로 다시 그림)
 	int64 PadMsgs = 0, PadTakes = 0, PadReadies = 0, PadSyncs = 0, PadBadIndex = 0, PadNoActor = 0, PadBound = 0;
 	int64 PadHeals = 0, PadHealBeforeFix = 0, PadHealMismatch = 0, PadHealNoPawn = 0, PadStateChecks = 0, PadStateDiff = 0;
+	int64 PadFails = 0, PadFailBad = 0;		// 예비 가득 실패 소식(판 14 · L-4) · 그중 모양이 틀린 것(남 이름 · give ≠ Full)
 	int32 PadDiffLinesLeft = 10;
 	// 무기 받침(W-4) — takesMine · takesOther = 무기 받침 집음 소식(내 것 · 남의 것), gives = 내 몸에 받침 그래프 GiveWeapon 을 부른 수,
 	// giveDiff = 그 뒤 Lyra 빠른 칸 · 든 칸 · 그 무기 탄이 서버 소식과 다른 수(탄은 그 자리에서, 칸은 그 틱 상태의 가방 맞추기가 서버 값으로 고친다),

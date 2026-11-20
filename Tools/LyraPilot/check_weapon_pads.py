@@ -33,6 +33,7 @@ WEAPON_NAMES = {"pistol": 0, "rifle": 1, "shotgun": 2}
 PAD_KINDS = {"heal": 0, "pistol": 1, "rifle": 2, "shotgun": 3}       # EPadKind (Shared/Pickups.h)
 GIVE_CODES = {"new": 0, "newNoSwitch": 1, "ammo": 2, "full": 3, "noSlot": 4}   # EGiveResult (Shared/Loadout.h) = GiveResultName
 GIVE_NONE = 0xFF                                                     # wire::kPickupGiveNone
+REASON_FAIL_FULL = 4                                                 # wire::PICKUP_FAIL_FULL (wire 14, L-4)
 
 
 def arg(name):
@@ -138,6 +139,11 @@ def pickup_messages(lines):
         if m:
             takes.append(dict(tick=int(m.group(1)), pad=int(m.group(2)), reason=0 if m.group(3) == "take" else 1, give=m.group(4), player=int(m.group(5)),
                               weapon=int(m.group(6)), mag=int(m.group(7)), spare=int(m.group(8)), slots=[int(m.group(i)) for i in (9, 10, 11)]))
+        # spare-full failure (wire 14, L-4) — the server sends PICKUP_FAIL_FULL to the picker only, with the bag's weapon and ammo
+        m = re.match(r"PADEV tick=(\d+) room=\d+ pad=(\d+) kind=full give=full player=(\d+) weapon=(\d+) mag=(-?\d+) spare=(-?\d+)", line)
+        if m:
+            takes.append(dict(tick=int(m.group(1)), pad=int(m.group(2)), reason=REASON_FAIL_FULL, give="full", player=int(m.group(3)),
+                              weapon=int(m.group(4)), mag=int(m.group(5)), spare=int(m.group(6)), slots=None))
     return msgs, takes
 
 
@@ -250,8 +256,10 @@ def main():
     wrong = []
     kind_bad = [x for x in msgs if pads.get(x["pad"]) is None or PAD_KINDS[pads[x["pad"]]] != x["kind"]]
     wrong += [f"kind pad={x['pad']} msg={x['kind']} file={pads.get(x['pad'])}" for x in kind_bad]
+    own_fails = [t for t in takes if t["reason"] == REASON_FAIL_FULL]
+    takes = [t for t in takes if t["reason"] != REASON_FAIL_FULL]
     own_takes = [t for t in takes if t["player"] == player and pads.get(t["pad"]) not in (None, "heal")]
-    take_msgs = [x for x in msgs if x["give"] != GIVE_NONE]
+    take_msgs = [x for x in msgs if x["give"] != GIVE_NONE and x["reason"] in (0, 1)]
     matched = 0
     for t in own_takes:
         found = [x for x in take_msgs if x["tick"] == t["tick"] and x["pad"] == t["pad"] and x["reason"] == t["reason"] and x["picker"] == player]
@@ -275,6 +283,35 @@ def main():
     ok = matched > 0 and not wrong
     print(f"{'PASS' if ok else 'FAIL'} pickup msgs: {len(msgs)} messages name the pad kind · weapon takes {matched}/{len(own_takes)} same result · weapon · slot · ammo · input number "
           f"(take {sum(t['reason'] == 0 for t in own_takes)} · recheck {sum(t['reason'] == 1 for t in own_takes)})")
+    for w in wrong:
+        print(f"    !! {w}")
+    fails += not ok
+
+    # 7b. fail msgs (wire 14, L-4) — each spare-full failure of the server is one message to the picker (same tick · pad · weapon · ammo,
+    # a slot inside the bag), no fail message for anyone else, and as many as Lyra showed "spare ammo full" (MOB_CPROBE_FAILMSG)
+    fail_msgs = [x for x in msgs if x["reason"] == REASON_FAIL_FULL]
+    srv_fails = [t for t in own_fails if t["player"] == player]
+    wrong = []
+    matched = 0
+    for t in srv_fails:
+        found = [x for x in fail_msgs if x["tick"] == t["tick"] and x["pad"] == t["pad"]]
+        if len(found) != 1:
+            wrong.append(f"fail tick={t['tick']} pad={t['pad']} messages={len(found)}")
+            continue
+        x = found[0]
+        want = (player, GIVE_CODES["full"], t["weapon"], t["mag"], t["spare"])
+        got = (x["picker"], x["give"], x["weapon"], x["mag"], x["spare"])
+        if want != got or not 0 <= x["slot"] < 3:
+            wrong.append(f"fail tick={t['tick']} pad={t['pad']} server(picker,give,weapon,mag,spare)={want} msg={got} slot={x['slot']}")
+            continue
+        matched += 1
+    if len(fail_msgs) != len(srv_fails):
+        wrong.append(f"fail messages {len(fail_msgs)} != server spare-full failures {len(srv_fails)} (all players {len(own_fails)})")
+    lyra_fails = sum(1 for e in lyra if e[1] == "fail")
+    if lyra_fails != len(fail_msgs):
+        wrong.append(f"Lyra 'spare ammo full' {lyra_fails} != fail messages {len(fail_msgs)}")
+    ok = matched > 0 and not wrong
+    print(f"{'PASS' if ok else 'FAIL'} fail msgs: {len(fail_msgs)} = server spare-full {len(srv_fails)} = Lyra {lyra_fails} · same picker · weapon · ammo {matched}/{len(srv_fails)}")
     for w in wrong:
         print(f"    !! {w}")
     fails += not ok
