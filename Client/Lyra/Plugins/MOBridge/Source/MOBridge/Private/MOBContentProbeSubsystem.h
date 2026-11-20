@@ -67,7 +67,7 @@ private:
 	void GoHome() const;
 	void PlaceFoe(double Distance, bool bFacingMe, double Side = 0.0) const;
 	void LogScores(const TCHAR* When) const;
-	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? 5 : (bGrenade ? (bGrenL1A ? 7 : 6) : 0))))); }
+	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? 5 : (bGrenade ? (bGrenL1B ? 8 : (bGrenL1A ? 7 : 6)) : 0))))); }
 	// 수류탄 판(G-0, grenade-plan.md) — 생김 · 부딪힘 · 튕김 · 멈춤은 엔진 알림을 받은 그 자리에서 적고(MOB_CPROBE_GSPAWN · _GHIT · _GBOUNCE · _GSTOP),
 	// 터짐(메시 숨김)은 틱에서 보고 폭발 판정을 같은 식으로 다시 해 본다(MOB_CPROBE_GBOOM — 겹친 성분은 comps 칸 · _GTRACE). 칸 끝 요약 = MOB_CPROBE_GREN
 	void OnActorSpawned(AActor* A);
@@ -135,6 +135,7 @@ private:
 	bool bDash = false;		// D-0 대시 각본(연습장, -MOBCPMode=dash)
 	bool bGrenade = false;	// G-0 수류탄 각본(연습장, -MOBCPMode=grenade)
 	bool bGrenL1A = false;	// L-1-a 수류탄 장면 각본(-MOBCPMode=grenade -MOBCPGrenSet=l1a — 구석 · 높은 데서 아래로 · 벽 스침 · 턱 틈 + 옮겨 놓기 10칸. G-0 각본은 그대로)
+	bool bGrenL1B = false;	// L-1-b 수류탄 expanse 장면 각본(-MOBCPGrenSet=l1b, 맵 L_Expanse — 이동은 지나고 수류탄은 막는 창틀 띠 셋 + 무기 광선은 지나고 폭발 선은 막는 문틀 뒤 · 막힘 없는 대조 = 다섯 칸)
 	bool bReady = false;
 	bool bDone = false;
 	TWeakObjectPtr<APawn> ClearPawn;

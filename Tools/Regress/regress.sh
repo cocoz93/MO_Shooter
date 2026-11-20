@@ -82,6 +82,13 @@ run_checks() {
 	[ "$BREAK" = 1 ] && ltags="l1a1"
 	"$tools/GrenadeCheck/Release/GrenadeCheck.exe" "$DATA/map_gym.mocl" "$DATA" $ltags > "$OUT/grenade_l1a.log" 2>&1
 	sed 's/^/grenade_l1a /' "$OUT/grenade_l1a.log" >> "$g"
+	# 수류탄 L_Expanse 장면(L-1-b) — 같은 각본 두 판(cprobe_l1b1 · l1b2, 5칸 = 이동은 지나고 수류탄은 막는 창틀 띠 셋 · 무기 광선은 지나고 폭발 선은 막는 문틀 뒤 · 막힘 없는 대조).
+	# 맵은 $MAP(map_expanse.mocl). 지금 FAIL 줄도 그대로 기준선에 든다 — 겨눔 선 갈림(맵 파일에 단순 모양 무기 깃발이 없음, 미결 21 → L-7) · 1cm 띠 맞은 점(Lyra 쪽 맞은 점이
+	# 면 위에서 0.003~0.004cm 비껴 법선 x 가 생김, lyra-match-progress L-1-b). --break 이면 l1b2 를 빼 합계 줄이 어긋나야 한다
+	local btags="l1b1 l1b2"
+	[ "$BREAK" = 1 ] && btags="l1b1"
+	"$tools/GrenadeCheck/Release/GrenadeCheck.exe" "$MAP" "$DATA" $btags > "$OUT/grenade_l1b.log" 2>&1
+	sed 's/^/grenade_l1b /' "$OUT/grenade_l1b.log" >> "$g"
 	for t in expanse gym; do
 		local m="map_$t.mocl"
 		"$tools/MapCheck/Release/MapCheck.exe" "$DATA/$m" "$DATA/trace_$t.csv" > "$OUT/map_$t.log" 2>&1

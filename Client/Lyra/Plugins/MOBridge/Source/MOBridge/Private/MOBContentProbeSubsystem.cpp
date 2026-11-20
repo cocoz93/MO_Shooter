@@ -350,8 +350,9 @@ namespace
 	// SelfNear(G-0-b2) = 피해 칸과 같은 세움을 상대 대신 나에게(자기 피해 · 자기 처치)
 	// Fixed(L-1-a) = 정한 자리(GREN_FIXED[Arg])에 서서 정한 점을 겨누거나 정한 요 · 피치로 던진다 — 폭발 칸이 아니라 맨 뒤에 붙인다(앞 값 그대로, GPLACE place= 칸)
 	// Placed(L-1-a) = 집에서 수평으로 던지고(Open 피치 0 과 같음) 생긴 그 프레임(내 틱 — 나이 0 줄을 적은 뒤)에 GREN_PLACED[Arg] 자리 · 속도로 옮긴다(GDROP 줄, 회전은 그대로)
-	enum class EGrenPlace : uint8 { Open, WallCam, WallGap, WallBack, FoeAt, Slope, Corner, BlastHit, BlastCap, BlastCenter, BlastCrouch, WallLedge, WallRoof, SelfNear, Fixed, Placed };
-	bool IsBlastPlace(EGrenPlace P) { return P >= EGrenPlace::BlastHit && P <= EGrenPlace::SelfNear; }
+	// WallAt(L-1-b) = 피해 칸 — 던진 수류탄을 생긴 프레임에 GREN_PLACED[GREN_WALLAT[Arg].Drop] 으로 옮겨 떨구고, 세울 나이(GREN_BLAST_AT)에 GREN_WALLAT[Arg] 자리로 옮겨 상대를 그 표의 자리(바닥은 수류탄 높이 둘레에서 찾음)에 세운다(GWALLSET 줄)
+	enum class EGrenPlace : uint8 { Open, WallCam, WallGap, WallBack, FoeAt, Slope, Corner, BlastHit, BlastCap, BlastCenter, BlastCrouch, WallLedge, WallRoof, SelfNear, Fixed, Placed, WallAt };
+	bool IsBlastPlace(EGrenPlace P) { return (P >= EGrenPlace::BlastHit && P <= EGrenPlace::SelfNear) || P == EGrenPlace::WallAt; }
 	// 뒤 셋(G-0-b2) — 칸 시작 체력(0 = 1000) · 수류탄이 생기고 이 프레임 뒤 스스로 죽음(−1 = 안 죽음). 최대 체력은 늘 1000
 	// 마지막(G-0-b3) — 수류탄이 생기고 이 프레임 뒤 상대가 나를 죽임(−1 = 안 함)
 	// G-0-c 섞어 누름(묶음 13~16) — Spam = 칸 안 GREN_PRESS_AT ~ GREN_SPAM_UNTIL 동안 매 프레임 Q(떼지 않음) · QFire / FireQ = 한 프레임에 Q 와 사격 탭(앞이 먼저 누름) ·
@@ -457,6 +458,13 @@ namespace
 		{ TEXT("p_crease_move2"),   EGrenPlace::Placed,      0.f,   7.f,   false, false },	// 72
 		{ TEXT("p_crease_comb1"),   EGrenPlace::Placed,      0.f,   8.f,   false, false },	// 73
 		{ TEXT("p_crease_comb2"),   EGrenPlace::Placed,      0.f,   9.f,   false, false },	// 74
+		// L-1-b(lyra-match-plan, 미결 17 · 맵 L_Expanse) — 이동은 지나고 수류탄은 막는 창틀 띠(GDIFF grenOnly)에 옮겨 놓기 셋(GREN_PLACED 10~12) · 무기 광선은 지나고 폭발 선은 막는 문틀(blastOnly) 뒤 · 같은 거리 대조(GREN_WALLAT 0 · 1,
+		// 폭발 칸 피치 −60 은 던짐만 일으키고, 생긴 프레임에 GREN_PLACED 13 으로 옮겨 떨군다 — 나이 57 에 멈춤, 세움 GREN_BLAST_AT 96 앞). GRENADE_L1B_SCRIPT 만 쓴다
+		{ TEXT("b_gonly650"),       EGrenPlace::Placed,      0.f,   10.f,  false, false },	// 75
+		{ TEXT("b_gonly650_slant"), EGrenPlace::Placed,      0.f,   11.f,  false, false },	// 76
+		{ TEXT("b_gonly647"),       EGrenPlace::Placed,      0.f,   12.f,  false, false },	// 77
+		{ TEXT("b_blast623"),       EGrenPlace::WallAt,      -60.f, 0.f,   false, false },	// 78
+		{ TEXT("b_blast_open"),     EGrenPlace::WallAt,      -60.f, 1.f,   false, false },	// 79
 	};
 	// L-1-a 옮겨 놓을 자리 · 속도 — 값은 Shared 탄체 걸음으로 골랐다(리포 밖 C:\tmp\mob\lm\l1a\search — 집 수평 던짐 회전 1.1957 · 1.5889 · 0 의 캡슐로
 	// 면까지 틈을 재고, 소수 여섯째 자리로 자른 값 그대로 걸어 그 갈래가 나고 이웃 값에서도 나는 자리). 정답지는 이 값의 Lyra 기록이다.
@@ -477,8 +485,59 @@ namespace
 		{ 994.562576, -998.993635, 150.0,     0.0,    0.0,     -500.0 },
 		{ 994.562576, -994.493635, 150.0,     0.0,    0.0,     -500.0 },
 		{ 997.062576, -994.493635, 150.0,     0.0,    0.0,     -500.0 },
+		// L-1-b(L_Expanse) — 창틀 650 · 647 의 벽 앞 1cm 띠(y −1674 면, x −315~−314 · 313~314, z −846~−147 — 뒤 벽 621 · 629 면 y −1675 보다 1cm 앞, 깃발 WbGB = 이동만 지나감)를 −y 로 맞힌다.
+		// 값은 Shared 탄체 걸음으로 골랐다(리포 밖 C:\tmp\mob\lm\l1b\search) — 나이 15 에 띠 가운데(x −314.5 · 313.5)에 법선 +y 로 맞음. 0.16초 뒤라 회전이 속도를 따라
+		// 캡슐 축이 수평으로 안 기울어 던짐 회전과 상관없다. 비스듬(−x 400)은 시작 x 를 ±0.6 옮기면 띠 끝(법선 x ±0.02)에 맞아 그 가운데로 골랐다
+		{ -314.5,     -1420.0,     -480.0,    0.0,    -1000.0, 0.0 },
+		{ -214.9,     -1420.0,     -480.0,    -400.0, -1000.0, 0.0 },
+		{ 313.5,      -1420.0,     -480.0,    0.0,    -1000.0, 0.0 },
+		// 13 = L-1-b 폭발 칸(WallAt) 떨굼 — 집에서 던지면 카메라 선이 앞 118cm 바닥을 맞혀 피치 −38 · 요 23.7 로 나가 비탈 BlockingVolume 에 튀고 나이 96 까지 안 멈췄다(l1b1 첫 판 GAIM · GHIT).
+		// 그래서 생긴 프레임에 집 옆 빈 바닥 위 141cm 로 옮겨 그냥 떨군다 — Shared 걸음(던짐 회전 −38.11 · 23.69)으로 나이 32 · 51 · 57 바닥 783, 57 에 멈춤. x · y · z ±1 도 같은 나이
+		{ 800.0,      -1500.0,     -700.0,    0.0,    0.0,     0.0 },
 	};
 	const FGrenPlaced& GrenPlacedAt(float Arg) { return GREN_PLACED[FMath::Clamp((int32)Arg, 0, (int32)UE_ARRAY_COUNT(GREN_PLACED) - 1)]; }
+	// L-1-b 폭발 선 자리(L_Expanse) — 수류탄(멈춘 것을 옮김) · 상대 몸 가운데 x · y(바닥은 수류탄 높이 위 150 ~ 아래 300 에서 찾음). 높이 −748 = 바닥 윗면 −838 + 반높이 90(상대 몸 가운데는 GREN_FOE_FLOOR_GAP 2.15 더 높아 선이 250 에 2.15 오른다 — 그 선도 맞음 같음)
+	//   0 = 문틀 623(폭발 선은 막고 무기 광선은 지남 — 깃발 MbGB, GDIFF blastOnly) 기둥이 바깥 틀 633 보다 3.2cm 앞으로 나온 층(y −1716.2~−1713) 안 y −1714.6 을 따라 +x — 첫 맞음 623 거리 14.75(x 164.75), 623 을 빼면 기둥 629 거리 50
+	//   1 = 같은 y · 같은 거리 250 에서 막힘 없는 대조(x 1150 → 900, 광선 맞음 0 — C:\tmp\mob\lm\l1b\mocl_ray.py)
+	//   Drop = 생긴 프레임에 옮겨 떨굴 GREN_PLACED 줄(멈춘 뒤 BlastPass 가 GX · GY · GZ 로 옮긴다 — 멈춘 수류탄은 공중에 그대로)
+	//   0 의 수류탄 자리는 문틀 안 순간이동 칸(B_Teleport) 속이라 l1b 판은 장치 겹침을 끈다(DevicesOff — 다리 판 D91 과 같은 끔, 첫 판은 안 꺼 y +1573.88 로 옮겨졌다)
+	struct FGrenWallAt { double GX, GY, GZ, FX, FY; int32 Drop; };
+	const FGrenWallAt GREN_WALLAT[] = {
+		{ 150.0,  -1714.6, -748.0, 400.0, -1714.6, 13 },
+		{ 1150.0, -1714.6, -748.0, 900.0, -1714.6, 13 },
+	};
+	const FGrenWallAt& GrenWallAtOf(float Arg) { return GREN_WALLAT[FMath::Clamp((int32)Arg, 0, (int32)UE_ARRAY_COUNT(GREN_WALLAT) - 1)]; }
+	// L-1-b — 점프대 · 순간이동 장치 칸의 겹침을 끈다. 다리 판(MOBridgeSubsystem FindDevices, D91)과 같은 끔 — 우리 게임엔 장치 동작이 없어 정답지도 끈 Lyra 로 뜬다.
+	// 청사진 클래스라 부모 줄을 따라 이름으로 가른다. 이미 든 겹침은 칸이 겹침을 다시 셀 때에야 끝나 바로 다시 센다(다리 쪽 주석 그대로)
+	void DevicesOff(UWorld* World, const TCHAR* When)
+	{
+		static const FName LauncherName(TEXT("B_Launcher_C"));
+		static const FName TeleportName(TEXT("B_Teleport_C"));
+		int32 Found = 0, Teleports = 0, Off = 0;
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			int32 Kind = 0;	// 1 = 점프대 · 2 = 순간이동
+			for (const UClass* C = It->GetClass(); C && !Kind; C = C->GetSuperClass())
+			{
+				if (C->GetFName() == LauncherName) Kind = 1;
+				else if (C->GetFName() == TeleportName) Kind = 2;
+			}
+			if (!Kind) continue;
+			++Found;
+			Teleports += Kind == 2 ? 1 : 0;
+			TInlineComponentArray<UPrimitiveComponent*> Prims(*It);
+			for (UPrimitiveComponent* P : Prims)
+			{
+				if (!P->GetGenerateOverlapEvents()) continue;
+				P->SetGenerateOverlapEvents(false);
+				P->UpdateOverlaps();
+				++Off;
+			}
+		}
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_DEVICES when=%s found=%d teleports=%d shapesOff=%d"), When, Found, Teleports, Off);
+	}
+	// L-1-b 집(L_Expanse) — 바닥 783 윗면 −841 · −y 200 의 떨굼 자리(GREN_PLACED 13)도 같은 바닥 · 등 뒤 400(상대 · 바닥 741 윗면 −843.7). 폭발 칸 수류탄에서 450 밖(가장 가까운 대조 수류탄에서 내 몸 가운데까지 542)
+	constexpr double L1B_HOME_X = 800.0, L1B_HOME_Y = -1300.0, L1B_HOME_FLOOR_HINT = -841.0;
 	// L-1-a 정한 자리 — 자리는 L_ShooterGym 충돌 덤프(map_g1a_gym.mocl, C:\tmp\mob\lm\l1a\mocl_list3.py)의 상자로 정했다(바닥 윗면 z 50).
 	//   구석 = 지붕(물체 6, x 1000~1500 · y −3000~0 · 윗면 350) 서쪽 면 x 1000 과 둔덕(물체 8, x 500~1000 · y −3000~−1000 · 윗면 250) 북쪽 면 y −1000 이 만나는 안쪽 (1000, −1000).
 	//     대각 바깥 800(나지막한 상자 20~27 · 윗면 55~60 위로 날아감) · 둔덕 면을 따라(x 쪽) · 지붕 면을 따라(y 쪽) 셋 — 둘째 면을 잇달아 맞는지(구석 · 한 프레임 여러 번 맞음)
@@ -629,6 +688,18 @@ namespace
 		{ TEXT("p_crease_comb1"),   5.1f, EAct::GrenThrow, 73.f, false },
 		{ TEXT("p_crease_comb2"),   5.1f, EAct::GrenThrow, 74.f, false },
 	};
+	// L-1-b 장면 각본(-MOBCPGrenSet=l1b, 맵 L_Expanse) — 칸 길이 · 누름 시각은 G-0 던짐 칸과 같다. 창틀 띠 셋은 상대를 숨긴 채, 폭발 둘은 다시 켜고(G-0 각본 foe_show · foe_setup2 와 같은 차례)
+	const FStep GRENADE_L1B_SCRIPT[] = {
+		{ TEXT("settle"),           1.0f, EAct::Home,      0.f,  false },
+		{ TEXT("foe_setup"),        0.5f, EAct::FoeSetup,  0.f,  false },	// 다른 팀 · 체력 1000(숨긴 채)
+		{ TEXT("b_gonly650"),       5.1f, EAct::GrenThrow, 75.f, false },
+		{ TEXT("b_gonly650_slant"), 5.1f, EAct::GrenThrow, 76.f, false },
+		{ TEXT("b_gonly647"),       5.1f, EAct::GrenThrow, 77.f, false },
+		{ TEXT("foe_show"),         0.3f, EAct::FoeShow,   0.f,  false },
+		{ TEXT("foe_setup2"),       0.5f, EAct::FoeSetup,  0.f,  false },
+		{ TEXT("b_blast623"),       5.1f, EAct::GrenThrow, 78.f, false },
+		{ TEXT("b_blast_open"),     5.1f, EAct::GrenThrow, 79.f, false },
+	};
 	const TCHAR* const GREN_TAG = TEXT("InputTag.Weapon.Grenade");	// Q(IMC_ShooterGame) → GA_Grenade, 켜기 = OnInputTriggered
 	constexpr float GREN_PRESS_AT = 0.5f;		// 칸 시작에서 Q 까지 — 겨눔(AimAt)이 모이고 벽 거리 맞춤 두 번이 끝난 뒤(제안값)
 	constexpr float GREN_ADJUST_AT0 = 0.2f;		// 벽 카메라 칸 — 몸 앞뒤 맞춤 두 번(순간이동 뒤 카메라가 따라온 다음, 제안값)
@@ -756,7 +827,7 @@ namespace
 	constexpr float MELEE_SIDE_FORWARD = 250.f;	// 옆 거리 칸에서 상대를 세우는 앞 거리 — 맞는 앞 범위(150~520, gym1) 한가운데쯤
 	constexpr float WATCH_LOG_EVERY = 5.f;		// 다리 판 마지막 칸에서 점수를 적는 간격(초)
 
-	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장) · 6 = 수류탄(연습장) · 7 = 수류탄 L-1-a 장면(연습장)
+	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장) · 6 = 수류탄(연습장) · 7 = 수류탄 L-1-a 장면(연습장) · 8 = 수류탄 L-1-b 장면(L_Expanse)
 	const FStep& StepAt(int32 Script, int32 I)
 	{
 		switch (Script)
@@ -768,6 +839,7 @@ namespace
 		case 5: return DASH_SCRIPT[I];
 		case 6: return GRENADE_SCRIPT[I];
 		case 7: return GRENADE_L1A_SCRIPT[I];
+		case 8: return GRENADE_L1B_SCRIPT[I];
 		default: return GYM_SCRIPT[I];
 		}
 	}
@@ -782,6 +854,7 @@ namespace
 		case 5: return UE_ARRAY_COUNT(DASH_SCRIPT);
 		case 6: return UE_ARRAY_COUNT(GRENADE_SCRIPT);
 		case 7: return UE_ARRAY_COUNT(GRENADE_L1A_SCRIPT);
+		case 8: return UE_ARRAY_COUNT(GRENADE_L1B_SCRIPT);
 		default: return UE_ARRAY_COUNT(GYM_SCRIPT);
 		}
 	}
@@ -888,6 +961,8 @@ void UMOBContentProbeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FParse::Value(Cmd, TEXT("MOBCPGrenSet="), GrenSet);
 	bGrenL1A = bGrenade && GrenSet == TEXT("l1a");
 	if (bGrenL1A) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l1a steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L1A_SCRIPT));
+	bGrenL1B = bGrenade && GrenSet == TEXT("l1b");
+	if (bGrenL1B) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l1b steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L1B_SCRIPT));
 	bForceQuinn = FParse::Param(Cmd, TEXT("MOBCPQuinn"));
 	StartRealAt = FPlatformTime::Seconds();
 	GAreScreenMessagesEnabled = false;
@@ -1077,7 +1152,26 @@ bool UMOBContentProbeSubsystem::Prepare()
 		if (bDash || bGrenade)
 		{
 			SetFoeActive(false);
-			PickDashHome();
+			if (bGrenL1B)
+			{
+				// L-1-b — 연습장 집(GYM_HOME · 고리 고르기)은 연습장 바닥 z 50 에 맞춘 자리라 L_Expanse 에선 정한 집에 선다. 바닥은 힌트 높이 둘레에서만(위 지붕을 안 잡게)
+				const UCapsuleComponent* Cap = Ch->GetCapsuleComponent();
+				FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBCProbeHome), false, Ch);
+				if (Foe.IsValid()) Params.AddIgnoredActor(Foe.Get());
+				const FCollisionResponseParams Response(Cap->GetCollisionResponseToChannels());
+				const FVector XY(L1B_HOME_X, L1B_HOME_Y, L1B_HOME_FLOOR_HINT);
+				FHitResult Floor;
+				const bool bFloor = World->LineTraceSingleByChannel(Floor, XY + FVector(0.0, 0.0, 150.0), XY - FVector(0.0, 0.0, 300.0), Cap->GetCollisionObjectType(), Params, Response);
+				Home = FVector(XY.X, XY.Y, (bFloor ? Floor.ImpactPoint.Z : XY.Z) + Cap->GetScaledCapsuleHalfHeight() + 3.0);
+				UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_L1BHOME floor=%d floorActor=%s clear=%d home=%s"), bFloor ? 1 : 0, bFloor ? *GetNameSafe(Floor.GetActor()) : TEXT("-"),
+					ClearAround(Home, false) ? 1 : 0, *Home.ToString());
+				ClearAround(Home, true);
+				DevicesOff(World, TEXT("prepare"));
+			}
+			else
+			{
+				PickDashHome();
+			}
 			GoHome();
 			PlaceFoe(-400.0, true);
 		}
@@ -2983,6 +3077,7 @@ void UMOBContentProbeSubsystem::BeginGrenade()
 	if (Ch) Ch->ConsumeMovementInputVector();	// 순간이동으로 시작 — 앞 칸 이동 입력을 비운다(대시 칸과 같은 까닭)
 	SetHealthOf(Ch, 1000.f, G.MyHp > 0.f ? G.MyHp : 1000.f);
 	SetHealthOf(Foe.Get(), 1000.f, G.FoeHp > 0.f ? G.FoeHp : 1000.f);
+	if (bGrenL1B) DevicesOff(GetWorld(), S.Name);	// 나중에 불러온 장치가 있으면 그것도(다리 판은 매 프레임 찾는다)
 	GoHome();
 	switch (G.Place)
 	{
@@ -3039,6 +3134,7 @@ void UMOBContentProbeSubsystem::BeginGrenade()
 	case EGrenPlace::WallLedge:
 	case EGrenPlace::WallRoof:
 	case EGrenPlace::SelfNear:
+	case EGrenPlace::WallAt:
 		// 던지는 동안 상대는 등 뒤 400(FoeSetup 자리) — 세우기는 터지기 전 BlastPass(SelfNear 는 나를 세운다)
 		if (ACharacter* F = Foe.Get()) F->UnCrouch();
 		PlaceFoe(-400.0, true);
@@ -3131,14 +3227,15 @@ void UMOBContentProbeSubsystem::DuringGrenade()
 		return;
 	}
 	// 옮겨 놓기 칸(L-1-a) — 이 칸 수류탄을 생긴 그 프레임(나이 0 줄을 적은 뒤)에 정한 자리 · 속도로. 줄 꼴은 GDROP 과 같다(대조 도구가 그 프레임 걸음 뒤를 덮는다)
-	if (G.Place == EGrenPlace::Placed && GrenSpawnFrame >= 0 && GrenPlacedFrame < 0)
+	// L-1-b 폭발 칸(WallAt)도 같은 길로 떨군다(GREN_WALLAT Drop 줄)
+	if ((G.Place == EGrenPlace::Placed || G.Place == EGrenPlace::WallAt) && GrenSpawnFrame >= 0 && GrenPlacedFrame < 0)
 	{
 		for (const FGrenRec& R : Grens)
 		{
 			AActor* A = R.A.Get();
 			UProjectileMovementComponent* PM = A ? A->FindComponentByClass<UProjectileMovementComponent>() : nullptr;
 			if (R.SpawnFrame != GrenSpawnFrame || !A || !PM) continue;
-			const FGrenPlaced& P = GrenPlacedAt(G.Arg);
+			const FGrenPlaced& P = GrenPlacedAt(G.Place == EGrenPlace::WallAt ? (float)GrenWallAtOf(G.Arg).Drop : G.Arg);
 			const FVector Before = A->GetActorLocation();
 			A->SetActorLocation(FVector(P.X, P.Y, P.Z), false, nullptr, ETeleportType::TeleportPhysics);
 			PM->Velocity = FVector(P.VX, P.VY, P.VZ);
@@ -3228,6 +3325,7 @@ void UMOBContentProbeSubsystem::BlastPass(AActor* G, int32 Pass)
 	const UProjectileMovementComponent* PM = G->FindComponentByClass<UProjectileMovementComponent>();
 	const bool bStopped = !PM || !PM->UpdatedComponent;
 	const bool bWall = Shot.Place == EGrenPlace::WallLedge || Shot.Place == EGrenPlace::WallRoof;
+	const bool bWallAt = Shot.Place == EGrenPlace::WallAt;	// L-1-b — 수류탄 · 상대 자리를 표(GREN_WALLAT)에서
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBCProbeBlast), false, Me());
 	Params.AddIgnoredActor(F);
 	Params.AddIgnoredActor(G);
@@ -3247,7 +3345,21 @@ void UMOBContentProbeSubsystem::BlastPass(AActor* G, int32 Pass)
 		FVector L = G->GetActorLocation();
 		double FloorZ = 0.0;
 		bool bFloor = false;
-		if (bWall)
+		if (bWallAt)
+		{
+			// 수류탄 = 표 자리(공중이어도 멈춘 채 그대로), 상대 = 표 x · y · 수류탄을 본다. 바닥은 수류탄 높이 위 150 ~ 아래 300(FloorAt 의 연습장 높이 1000 ~ −200 은 L_Expanse 에 안 맞음)
+			const FGrenWallAt& W = GrenWallAtOf(Shot.Arg);
+			G->SetActorLocation(FVector(W.GX, W.GY, W.GZ), false, nullptr, ETeleportType::TeleportPhysics);
+			L = G->GetActorLocation();
+			const FVector D(W.FX - L.X, W.FY - L.Y, 0.0);
+			GrenBlastS = D.Size();
+			GrenBlastDir = D.GetSafeNormal();
+			FHitResult FH;
+			bFloor = GetWorld()->LineTraceSingleByChannel(FH, FVector(W.FX, W.FY, L.Z + 150.0), FVector(W.FX, W.FY, L.Z - 300.0), Cap->GetCollisionObjectType(), Params, Response);
+			FloorZ = bFloor ? FH.ImpactPoint.Z : 0.0;
+			Set = FString::Printf(TEXT("moved=1 at=%d floorHit=%d floorActor=%s topZ=%.3f"), (int32)Shot.Arg, bFloor ? 1 : 0, *GetNameSafe(FH.GetActor()), FloorZ);
+		}
+		else if (bWall)
 		{
 			// 수류탄 = 면 앞 GREN_WALL_BLAST_GAP 바닥(높이는 멈춘 그대로 — 같은 바닥 z 50), 상대 = 면 너머 Arg 윗면 · 수류탄을 본다
 			const bool bLedge = Shot.Place == EGrenPlace::WallLedge;
@@ -3297,7 +3409,7 @@ void UMOBContentProbeSubsystem::BlastPass(AActor* G, int32 Pass)
 		if (UCharacterMovementComponent* M = F->GetCharacterMovement()) M->StopMovementImmediately();
 		if (AController* C = F->GetController()) C->SetControlRotation(FRotator(0.0, Face.Yaw, 0.0));
 		if (Shot.Place == EGrenPlace::BlastCrouch) F->Crouch();
-		if (bWall)
+		if (bWall || bWallAt)
 		{
 			UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GWALLSET frame=%d step=%s grenade=%.6f,%.6f,%.6f foe=%s %s"), Frame, S.Name, L.X, L.Y, L.Z, *F->GetActorLocation().ToString(), *Set);
 		}
