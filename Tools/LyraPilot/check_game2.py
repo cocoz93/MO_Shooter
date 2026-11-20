@@ -34,7 +34,7 @@ def check(label, ok, detail=""):
 
 def load_lyra(lines):
     out = {"lines": [strip(x) for x in lines if "MOB_" in x or "Fatal error" in x or "Assertion failed" in x]}
-    for key in ["MOB_SUMMARY ", "MOB_SUMMARY2", "MOB_SUMMARY3", "MOB_SUMMARY4", "MOB_SUMMARY5", "MOB_SUMMARY6", "MOB_WELCOME", "MOB_RESULT", "MOB_PICKUPS"]:
+    for key in ["MOB_SUMMARY ", "MOB_SUMMARY2", "MOB_SUMMARY3", "MOB_SUMMARY4", "MOB_SUMMARY5", "MOB_SUMMARY6", "MOB_WELCOME", "MOB_RESULT", "MOB_PICKUPS", "MOB_PAWN "]:
         out[key.strip()] = next((x for x in out["lines"] if key in x), "")
     # Kill identity = everything the server sent. Own kill and death counts differ per player only by target, so they stay in.
     out["kills"] = [
@@ -103,7 +103,14 @@ def main():
         check("no crash line", not l["fatal"], str(l["fatal"][:1]))
         check("reached result", field(l["MOB_SUMMARY"], "why") == "result", f"why={field(l['MOB_SUMMARY'], 'why')}")
         check(f"{players - 1} others on screen", field(s4, "remotes") == str(players - 1) and field(s4, "remoteFail") == "0", f"remotes={field(s4, 'remotes')} fail={field(s4, 'remoteFail')}")
-        check("corrections=0", field(s3, "corrections") == "0", f"corrections={field(s3, 'corrections')} of states={field(s2, 'states')}")
+        # Pawn blocking (D83) is always on for the bridge (it has no switch to turn it off), so this is the regress / load rule for a blocking run
+        # (BotClient pawnBlock branch, c290178): reconciled states exist and the prediction saw no odd pawn overlap. Corrections then come from
+        # knowing the other pawn's place one state late, so they are printed, not judged. A strict corrections=0 run needs blocking off.
+        m = re.search(r"\bposDiff n=(\d+)", s2)
+        reconciled = int(m.group(1)) if m else 0
+        pawn = l["MOB_PAWN"]
+        check("pawn blocking: reconciled and predOdd=0", reconciled > 0 and field(pawn, "predOdd") == "0",
+              f"reconciled={reconciled} predOdd={field(pawn, 'predOdd')} corrections={field(s3, 'corrections')} correctionMax={field(s3, 'correctionMax')} of states={field(s2, 'states')}")
         hp_n = int(field(s5, "hpCompared") or 0)
         check("hp compared and equal", hp_n > 0 and field(s5, "hpDiffCount") == "0", f"hpCompared={hp_n} hpDiffCount={field(s5, 'hpDiffCount')} hpFixes={field(l['MOB_PICKUPS'], 'hpFixes')}")
         check("damage equal", int(field(s5, "damageApplied") or 0) > 0 and field(s5, "damageMismatch") == "0", f"damageApplied={field(s5, 'damageApplied')} mismatch={field(s5, 'damageMismatch')} noTarget={field(s5, 'damageNoTarget')}")
