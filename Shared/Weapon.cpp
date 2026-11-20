@@ -703,8 +703,13 @@ namespace mo
 		// 입력 처리 — 재장전. 발사 능력 · 근접 능력 · 대시가 켜져 있으면 막힌다(Ability.ActivateFail.TagsBlocked)
 		if (input.reloadPressed && !_fireActive && !input.meleeActive && !dashBlocks && _reloadLeft <= 0 && _magazine < _def->magazineSize && _spare > 0)
 		{
-			StartReload();
-			ev.reloadStarted = true;
+			// 수류탄보다 먼저 누른 재장전(L-5-a) — 켜진 그 프레임에 던짐이 끊었다. 타이머 앞이라 탄 · 시간이 안 남는다(위 도는 재장전 끊기와 같은 결과)
+			if (input.reloadBeforeGrenade && input.grenadeThrown) ev.reloadPressCutByGrenade = true;
+			else
+			{
+				StartReload();
+				ev.reloadStarted = true;
+			}
 		}
 
 		_spread.Tick(deltaTime, motion);

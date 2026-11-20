@@ -34,11 +34,18 @@ namespace mo
 			bool meleeStarted = false;	// 이 입력에 내 근접 능력이 켜졌다(E-3)
 			bool meleeServer = false;	// 서버 근접 결과(S2C_MELEE)를 받았다 — 받은 뒤의 밀기는 서버 값이다
 			bool meleeWasActive = false;	// 이 입력의 근접 NextInput 뒤에 근접이 켜져 있었나 — 대시를 켜면 끊는다(다시 고르기가 끊음을 다시 정할 때 읽는다, D-3)
+			// 능력 자리 켜는 차례(L-5-a) — wire::AbilityOrder 값(서버 ApplyInput 과 같은 차례). 걸음 쪽 힘 넣기 · 지우기와 다시 고르기(ReplayDash · ReplayGrenade)가
+			// 이 차례로 「그 능력 차례에 근접이 켜져 있었나 · 대시가 막았나」를 다시 본다. 서버가 켰다는데 내 누름이 없던 능력은 다시 고르기가 고정 차례 자리에 끼운다
+			// (Prediction.cpp AddServerAbility — StepAbilities 가 입력으로 다시 정해 지운다)
+			uint8_t abilityOrder[3] = {};
+			uint8_t abilityCount = 0;
+			bool reloadBeforeGrenade = false;	// 재장전 누름이 수류탄보다 먼저 — 무기 쪽이 던진 입력의 그 누름을 끊는다
+			bool dashBlocksBefore = false;		// 이 입력 대시 NextInput 뒤 · 켜기 앞의 BlocksPresses — 대시보다 먼저 켠 능력은 이 값으로 막힌다
 			// 대시(D-3) — 입력 쪽(StepAbilities · ReplayDash)이 정하고 걸음 · 무기 쪽이 읽는다. 서버 ApplyInput 의 대시 자리와 같은 값
 			bool dashStarted = false;	// 이 입력에 대시를 켰다
 			uint8_t dashDir = 0;		// EDashDir — 켰을 때
 			Vec3 dashForce;				// 켰을 때 넣는 힘
-			bool dashBlocks = false;	// CDashAbility::BlocksPresses — 점프 · 조준 · 근접 · 재장전 누름을 막는다(켠 입력 포함)
+			bool dashBlocks = false;	// CDashAbility::BlocksPresses(능력 자리 뒤) — 점프 · 조준 · 재장전 누름과 대시 뒤 차례의 근접 · 수류탄을 막는다(켠 입력 포함)
 			bool dashBlocksFire = false;	// CDashAbility::BlocksHeldFire — 쥔 사격을 막는다(켠 입력 다음부터)
 			bool dashCutMelee = false;	// 켜며 근접을 끊었다 — 걸음 쪽이 그 근접의 밀기 힘을 지운다
 			bool dashServer = false;	// 서버 대시 소식(켬)을 받았다 — 다시 고를 때도 서버 값으로 켠다

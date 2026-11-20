@@ -23,6 +23,7 @@
 // 일부러 틀리기: --breakMirror 는 여기 쪽 가속을, --breakSpread 는 여기 쪽 퍼짐을 「이번 발의 열이 더해진 뒤」 값으로 바꿔 1번이,
 // --breakDamage 는 여기 쪽 기대 피해를 바꿔 2번이 실패해야 한다.
 #include "GameProtocol.h"
+#include "AnimClips.h"
 #include "Grenade.h"
 #include "Loadout.h"
 #include "MapCollision.h"
@@ -525,6 +526,9 @@ namespace
 		std::vector<wire::Melee> melees;
 		std::vector<wire::Pickup> pickups;
 		std::vector<wire::Grenade> grenades;		// S2C_GRENADE — 던짐 · 터짐(⑧ 경기 끝 수류탄)
+		std::vector<wire::Dash> dashes;				// S2C_DASH — 대시 켬(누름 차례 칸 · L-5-a)
+		wire::AnimStateWire selfAnim = wire::AnimStateWire();	// 받은 상태 꼬리의 내 칸(서버에 클립이 있을 때만 — 누름 차례 칸의 몽타주)
+		bool hasSelfAnim = false;
 		std::vector<wire::PlayerState> history;
 		std::vector<uint32_t> historyTicks;		// history 와 같은 칸 — 그 상태가 어느 틱 것인가
 		wire::Result result = wire::Result();
@@ -532,6 +536,28 @@ namespace
 		wire::PlayerState self = wire::PlayerState();
 		bool hasSelf = false;
 		uint32_t seq = 0;
+
+		// 상태 꼬리에서 내 칸을 읽는다 — 꼬리는 사람 차례대로 붙는다(서버 SendState · 봇 ReadAnimTail 과 같은 걸음). 꼬리가 없으면(클립 없음) 그대로 둔다
+		void ReadSelfAnim(const char* data, int size)
+		{
+			uint8_t count = 0;
+			std::memcpy(&count, data + offsetof(wire::State, count), 1);
+			size_t at = offsetof(wire::State, players) + sizeof(wire::PlayerState) * count;
+			for (int i = 0; i < count; ++i)
+			{
+				wire::PlayerState p;
+				std::memcpy(&p, data + offsetof(wire::State, players) + sizeof(wire::PlayerState) * i, sizeof(p));
+				wire::AnimStateWire anim = wire::AnimStateWire();
+				size_t used = 0;
+				if (at >= (size_t)size || !wire::ReadAnimTail(data + at, (size_t)size - at, anim, used)) return;
+				at += used;
+				if (p.id == welcome.playerId)
+				{
+					selfAnim = anim;
+					hasSelfAnim = true;
+				}
+			}
+		}
 
 		void Pump()
 		{
@@ -547,6 +573,7 @@ namespace
 						uint32_t stateTick = 0;
 						std::memcpy(&stateTick, data + offsetof(wire::State, tick), sizeof(stateTick));
 						historyTicks.push_back(stateTick);
+						ReadSelfAnim(data, size);
 					}
 					break;
 				case wire::Msg::S2C_SHOT:
@@ -603,6 +630,13 @@ namespace
 					wire::Grenade grenade = wire::Grenade();
 					std::memcpy(&grenade, data, std::min(size, (int)sizeof(grenade)));
 					grenades.push_back(grenade);
+					break;
+				}
+				case wire::Msg::S2C_DASH:
+				{
+					wire::Dash dash = wire::Dash();
+					std::memcpy(&dash, data, std::min(size, (int)sizeof(dash)));
+					dashes.push_back(dash);
 					break;
 				}
 				case wire::Msg::S2C_RESULT:
@@ -1578,6 +1612,138 @@ namespace
 		const bool read = at != std::string::npos && std::sscanf(log.c_str() + at, "SERVER pressOrder multi=%llu ordered=%llu unordered=%llu", &multi, &ordered, &unordered) == 3;
 		std::printf("PRESSORDER 서버 %s multi=%llu ordered=%llu unordered=%llu (보낸 입력 %d — 기대 3 · 2 · 1)\n", read ? "읽음" : "못 읽음", multi, ordered, unordered, sentCount);
 		check(read && multi == 3 && ordered == 2 && unordered == 1, "서버 세기(3 · 2 · 1)");
+		return fails == 0;
+	}
+
+	// ─── 같은 입력 두 누름 차례(--pressCells, L-5-a) ─────────────
+	// L-1-c Lyra 기록(cprobe_l1cd1 · l1c1 — lyra-match-progress L-1-c 표)의 칸 여섯을 연습장에서 같은 짝 · 차례로 보낸다(서버 --clips 필요 — 근접 손 자세 · 몽타주 꼬리).
+	// 마지막 칸 하나는 기록이 없는 판 13 규칙(근접 → Q + 쥔 사격 — 이 입력에 켠 근접이 쏘기를 막음, D127 ⑤)
+	// 나 = 기록 자리(−1656.4, −1706.4, 142.15) · 요 0(+X 를 봄). 근접 칸은 상대를 앞 150 에(기록 L1C_MELEE_FOE · foeX −1506.4), 재장전 칸은 멀리.
+	// 대시 칸은 누름 앞 입력부터 +Y 이동(기록 vy 360 · 대시 오른쪽), 수류탄 칸은 피치 45(기록이 상대 위로 던짐). 칸마다 보는 것 = 근접 맞음 · 피해(누른 입력의 S2C_MELEE) ·
+	// 대시 켬(S2C_DASH) · 던짐(S2C_GRENADE THROW) · 탄창(90틱 뒤, 재장전 칸은 권총 4/48 에서) · 25틱 뒤 내 몽타주 칸(종류 = 칸 번호 아래 4비트)
+	bool RunPressCells(int port)
+	{
+		struct PressCell
+		{
+			const char* name;
+			wire::EPressKey first, second;
+			bool foeFront;			// 상대를 앞 150 에(근접 칸)
+			bool moveRight;			// 누름 앞 입력부터 +Y 이동(대시 칸)
+			bool lowAmmo;			// 권총 4/48(재장전 칸)
+			// 기대 = L-1-c 표(Lyra)
+			bool hit;				// 근접 맞음 · 피해 100
+			bool dash;
+			bool thrown;
+			int magAfter;			// −1 = 안 봄
+			uint8_t montage;		// 25틱 뒤 남아 있어야 할 몽타주 종류
+			uint8_t gone;			// 25틱 뒤 없어야 할 몽타주 종류(짝의 다른 능력)
+			bool fireHeld = false;	// 누른 입력에 쏘기도 쥠 — 마지막 칸만(D127 ⑤ 「이 입력에 켠 근접은 뒤 차례가 끊어도 쏘기를 막음」, Lyra 기록 없음 · 판 13 규칙)
+		};
+		const PressCell cells[] = {
+			{ "melee_dash", wire::PRESS_MELEE, wire::PRESS_DASH, true, true, false, true, true, false, -1, MONTAGE_DASH_RIGHT, MONTAGE_MELEE },
+			{ "dash_melee", wire::PRESS_DASH, wire::PRESS_MELEE, true, true, false, false, true, false, -1, MONTAGE_DASH_RIGHT, MONTAGE_MELEE },
+			{ "melee_q", wire::PRESS_MELEE, wire::PRESS_GRENADE, true, false, false, true, false, true, -1, MONTAGE_GRENADE, MONTAGE_MELEE },
+			{ "q_melee", wire::PRESS_GRENADE, wire::PRESS_MELEE, true, false, false, true, false, true, -1, MONTAGE_MELEE, MONTAGE_GRENADE },
+			{ "reload_q", wire::PRESS_RELOAD, wire::PRESS_GRENADE, false, false, true, false, false, true, 4, MONTAGE_GRENADE, MONTAGE_RELOAD },
+			{ "q_reload", wire::PRESS_GRENADE, wire::PRESS_RELOAD, false, false, true, false, false, true, 12, MONTAGE_RELOAD, MONTAGE_GRENADE },
+			// 근접 → Q + 쥔 사격 — 근접이 켜지고 던짐이 끊어도 그 입력의 쏘기는 막힌다(앞 칸에서 채운 탄창 12 그대로)
+			{ "melee_q_fire", wire::PRESS_MELEE, wire::PRESS_GRENADE, true, false, false, true, false, true, 12, MONTAGE_GRENADE, MONTAGE_MELEE, true },
+		};
+		ShotClient clients[2];
+		ShotClient& a = clients[0];
+		ShotClient& b = clients[1];
+		if (!ConnectAndHello(a.net, port, a.welcome) || !ConnectAndHello(b.net, port, b.welcome))
+		{
+			std::printf("PRESSCELL 접속 실패\n");
+			return false;
+		}
+		if (a.welcome.team == b.welcome.team)
+		{
+			std::printf("PRESSCELL 두 사람 팀이 같음 — 근접이 안 맞는다\n");
+			return false;
+		}
+		timeBeginPeriod(1);
+		const Vec3 me(-1656.3961, -1706.3961, 142.15);
+		const Vec3 front = me + Vec3(150.0, 0.0, 0.0);
+		const Vec3 farSpot = me + Vec3(-1200.0, 0.0, 0.0);		// 재장전 칸 — 상대를 멀리(기록은 뒤 400 에 숨김)
+		constexpr int kCellSettleTicks = 40;		// 놓은 뒤 서 있는 틱 — 근접 판 kMeleeSettleTicks 와 같은 값
+		const auto send = [](ShotClient& c, uint8_t buttons, uint8_t pressOrder, float pitch, float moveY)
+		{
+			wire::Input input = wire::Input();
+			input.seq = ++c.seq;
+			input.yaw = 0.f;
+			input.pitch = pitch;
+			input.moveY = moveY;
+			input.buttons = buttons;
+			input.pressOrder = pressOrder;
+			input.weapon = (uint8_t)EWeapon::Pistol;
+			c.net.SendPacket(input, wire::Msg::C2S_INPUT);
+		};
+		const auto kindsOf = [](const wire::AnimStateWire& anim, char* text, size_t textSize, uint16_t& mask)
+		{
+			mask = 0;
+			int used = std::snprintf(text, textSize, "[");
+			for (int m = 0; m < (int)anim.montageCount && used > 0 && (size_t)used < textSize; ++m)
+			{
+				const uint8_t kind = (uint8_t)(anim.montages[m].montage & 0x0F);
+				mask = (uint16_t)(mask | (1u << kind));
+				used += std::snprintf(text + used, textSize - (size_t)used, "%s%u:%u", m ? " " : "", (unsigned)kind, (unsigned)anim.montages[m].weight);
+			}
+			if (used > 0 && (size_t)used < textSize) std::snprintf(text + used, textSize - (size_t)used, "]");
+		};
+		RunTicks(clients, 2, 60, [&](int) { send(a, 0, 0, 0.f, 0.f); send(b, 0, 0, 0.f, 0.f); }, [&] { return a.hasSelf && b.hasSelf; });
+		int fails = 0, noAnim = 0;
+		for (const PressCell& cell : cells)
+		{
+			a.Place(me, 100.f, cell.lowAmmo ? (uint8_t)wire::DEBUG_PLACE_SET_AMMO : (uint8_t)0, (uint8_t)EWeapon::Pistol, 4, 48);
+			b.Place(cell.foeFront ? front : farSpot, 1000.f);
+			// 놓고 서기 — 앞 입력의 요 · 애니 서기 · 되감기 기록이 놓은 자리로 찬다. 쿨다운(수류탄 301 · 대시 91 입력)은 칸 뒤 기다림이 넘긴다
+			RunTicks(clients, 2, kCellSettleTicks, [&](int i)
+			{
+				send(a, 0, 0, 0.f, cell.moveRight && i == kCellSettleTicks - 1 ? 1.f : 0.f);
+				send(b, 0, 0, 0.f, 0.f);
+			}, [] { return false; });
+			const uint8_t keys[2] = { (uint8_t)cell.first, (uint8_t)cell.second };
+			const uint8_t buttons = (uint8_t)(wire::kPressKeyButtons[cell.first] | wire::kPressKeyButtons[cell.second] | (cell.fireHeld ? wire::BUTTON_FIRE : 0));
+			const bool grenadeCell = cell.first == wire::PRESS_GRENADE || cell.second == wire::PRESS_GRENADE;
+			send(a, buttons, wire::MakePressOrder(keys, 2), grenadeCell ? 45.f : 0.f, cell.moveRight ? 1.f : 0.f);
+			send(b, 0, 0, 0.f, 0.f);
+			const uint32_t pressSeq = a.seq;
+			char montageText[160] = "[]";
+			uint16_t montageMask = 0;
+			bool montageSeen = false;
+			const int wait = grenadeCell ? 320 : 120;	// 수류탄 칸은 다음 칸 쿨다운(301 입력)까지 — 서기 40 과 합쳐 넘긴다
+			RunTicks(clients, 2, wait, [&](int i)
+			{
+				send(a, 0, 0, 0.f, 0.f);
+				send(b, 0, 0, 0.f, 0.f);
+				if (i == 25)
+				{
+					for (int k = 0; k < 2; ++k) clients[k].Pump();
+					montageSeen = a.hasSelfAnim && a.self.lastSeq >= pressSeq;
+					kindsOf(a.selfAnim, montageText, sizeof(montageText), montageMask);
+				}
+			}, [] { return false; });
+			PumpFor(clients, 2, 0.1);
+			const wire::Melee* melee = nullptr;
+			for (const wire::Melee& m : a.melees) if (m.attacker == a.welcome.playerId && m.seq == pressSeq) melee = &m;
+			int dashes = 0, throws = 0;
+			for (const wire::Dash& d : a.dashes) dashes += (d.player == a.welcome.playerId && d.seq == pressSeq) ? 1 : 0;
+			for (const wire::Grenade& g : a.grenades) throws += (g.kind == wire::GRENADE_THROW && g.thrower == a.welcome.playerId && g.seq == pressSeq) ? 1 : 0;
+			const bool hit = melee && melee->result == wire::MELEE_HIT && melee->damage == 100.f;
+			const int mag = a.self.magazine;
+			if (!montageSeen) ++noAnim;
+			const bool ok = hit == cell.hit && (dashes == 1) == cell.dash && (throws == 1) == cell.thrown && dashes <= 1 && throws <= 1
+				&& (cell.magAfter < 0 || mag == cell.magAfter) && montageSeen && (montageMask & (1u << cell.montage)) != 0 && (montageMask & (1u << cell.gone)) == 0;
+			if (!ok) ++fails;
+			std::printf("PRESSCELL %s %s order=%u 근접=%s(%s · 피해 %.1f) 대시=%d 던짐=%d 탄창=%d 몽타주25=%s | 기대 근접 %s · 대시 %d · 던짐 %d · 탄창 %d · 남음 %u · 없음 %u\n",
+				ok ? "통과" : "실패", cell.name, (unsigned)wire::MakePressOrder(keys, 2), hit ? "맞음" : "안 맞음", melee ? "소식 있음" : "소식 없음", melee ? (double)melee->damage : 0.0,
+				dashes, throws, mag, montageText, cell.hit ? "맞음" : "안 맞음", cell.dash ? 1 : 0, cell.thrown ? 1 : 0, cell.magAfter, (unsigned)cell.montage, (unsigned)cell.gone);
+		}
+		timeEndPeriod(1);
+		a.net.Close();
+		b.net.Close();
+		std::printf("PRESSCELLS cells=%d fails=%d noAnim=%d\n", (int)(sizeof(cells) / sizeof(cells[0])), fails, noAnim);
 		return fails == 0;
 	}
 
@@ -3190,7 +3356,7 @@ int main(int argc, char** argv)
 	int port = 7791;
 	size_t rowLimit = (size_t)-1;
 	bool breakMirror = false, breakSpread = false, breakDamage = false, rulesOnly = false;
-	bool authorityOnly = false, rewindOnly = false, padsOnly = false, weaponsOnly = false, grenadeLeaveOnly = false, pressOrderOnly = false, failFullOnly = false;
+	bool authorityOnly = false, rewindOnly = false, padsOnly = false, weaponsOnly = false, grenadeLeaveOnly = false, pressOrderOnly = false, failFullOnly = false, pressCellsOnly = false;
 	std::string meleeLog;
 	std::string serverLog;
 	std::string startsDump;
@@ -3210,6 +3376,7 @@ int main(int argc, char** argv)
 		else if (s == "--grenadeLeave") grenadeLeaveOnly = true;
 		else if (s == "--pressOrder") pressOrderOnly = true;
 		else if (s == "--failFull") failFullOnly = true;
+		else if (s == "--pressCells") pressCellsOnly = true;
 		else if (s.rfind("--melee=", 0) == 0) meleeLog = s.substr(8);
 		else if (s.rfind("--serverLog=", 0) == 0) serverLog = s.substr(12);
 		else if (s.rfind("--checkStarts=", 0) == 0) startsDump = s.substr(14);
@@ -3270,6 +3437,12 @@ int main(int argc, char** argv)
 		const bool weaponsOk = RunWeapons(port, serverLog);
 		std::printf("RESULT %s (무기 받침 구동 — 대조는 check_weapon_pads.py)\n", weaponsOk ? "PASS" : "FAIL");
 		return weaponsOk ? 0 : 1;
+	}
+	if (pressCellsOnly)
+	{
+		const bool cellsOk = RunPressCells(port);
+		std::printf("RESULT %s (같은 입력 두 누름 차례 — L-1-c 칸 여섯 + 판 13 규칙 칸 하나)\n", cellsOk ? "PASS" : "FAIL");
+		return cellsOk ? 0 : 1;
 	}
 	if (failFullOnly)
 	{

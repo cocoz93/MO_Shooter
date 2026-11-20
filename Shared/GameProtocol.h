@@ -477,7 +477,7 @@ namespace mo
 
 		// 한 입력 안 누름 차례(L-4 · 판 14). 근접 · 대시 · 수류탄 · 재장전은 넷 다 누른 입력 하나에만 켜지는 단추라 한 입력에 둘 이상 켜질 수 있다.
 		// 그때 Lyra 는 눌린 차례대로 켜고 차례가 결과를 바꾼다(L-1-c 기록 — 근접 + 대시 피해 100 ↔ 0 · 재장전 + Q 채움 ↔ 안 채움 · 근접 + Q 몽타주).
-		// 서버가 이 차례를 따르는 것은 L-5 — 이 판은 싣고 읽기만 한다
+		// 서버 · 예측은 아래 AbilityOrder 로 이 차례를 따른다(L-5-a)
 		enum EPressKey : uint8_t
 		{
 			PRESS_MELEE = 0,
@@ -524,6 +524,38 @@ namespace mo
 			}
 			if (pressed < kPressKeyCount && (pressOrder >> (2 * pressed)) != 0) return -1;
 			return pressed;
+		}
+
+		// 능력 자리에서 켜는 차례(L-5-a) — 근접 · 대시 · 수류탄 중 켜진 것을 켤 차례로 out[0..n) 에 담고 n 을 돌려준다. 서버 ApplyInput 과 예측 StepAbilities 가 같이 쓴다.
+		// 차례를 믿으면(ReadPressOrder ≥ 0) 실린 차례, 못 믿으면 판 13 고정 차례(대시 → 수류탄 → 근접 — D102 · D112 ①).
+		// 재장전은 무기 순환(걸음 뒤)이 받으므로 빼고, 믿는 차례에서 수류탄보다 먼저 눌렸는지만 reloadBeforeGrenade 로 넘긴다(던지면 그 재장전은 켜졌다 바로 끊긴 것 — L-1-c reload_q)
+		inline int AbilityOrder(uint8_t buttons, uint8_t pressOrder, uint8_t (&out)[3], bool& reloadBeforeGrenade)
+		{
+			reloadBeforeGrenade = false;
+			uint8_t order[kPressKeyCount];
+			const int pressed = ReadPressOrder(buttons, pressOrder, order);
+			int n = 0;
+			if (pressed < 0)
+			{
+				const uint8_t fixed[3] = { PRESS_DASH, PRESS_GRENADE, PRESS_MELEE };
+				for (int k = 0; k < 3; ++k)
+				{
+					if ((buttons & kPressKeyButtons[fixed[k]]) != 0) out[n++] = fixed[k];
+				}
+				return n;
+			}
+			bool reloadSeen = false;
+			for (int k = 0; k < pressed; ++k)
+			{
+				if (order[k] == PRESS_RELOAD)
+				{
+					reloadSeen = true;
+					continue;
+				}
+				if (order[k] == PRESS_GRENADE && reloadSeen) reloadBeforeGrenade = true;
+				out[n++] = order[k];
+			}
+			return n;
 		}
 	}
 }

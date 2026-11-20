@@ -710,8 +710,10 @@ int main(int argc, char** argv)
 	std::printf("SERVER inputs received=%llu applied=%llu whileDead=%llu droppedFull=%llu droppedOldSeq=%llu starvedTicks=%llu idleMoves=%llu debugPlaces=%llu statesSent=%llu\n",
 		(unsigned long long)room.inputsReceived, (unsigned long long)room.inputsApplied, (unsigned long long)room.inputsWhileDead, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq,
 		(unsigned long long)room.starvedTicks, (unsigned long long)room.idleMoves, (unsigned long long)room.debugPlaces, (unsigned long long)room.statesSent);
-	// 한 입력 안 누름 차례(판 14 · L-4) — 근접 · 대시 · 수류탄 · 재장전 중 둘 이상 켜진 클라 입력 = 차례 믿음 + 못 믿음(0 · 겹침). 봇 · 다리는 L-5 전까지 0 을 실어 전부 못 믿음
-	std::printf("SERVER pressOrder multi=%llu ordered=%llu unordered=%llu\n", (unsigned long long)room.pressMulti, (unsigned long long)room.pressOrdered, (unsigned long long)room.pressUnordered);
+	// 한 입력 안 누름 차례(판 14 · L-4) — 근접 · 대시 · 수류탄 · 재장전 중 둘 이상 켜진 클라 입력 = 차례 믿음 + 못 믿음(0 · 겹침). 봇 · 다리는 L-5-c 전까지 0 을 실어 전부 못 믿음.
+	// 능력 자리(L-5-a) — abilityMulti = 근접 · 대시 · 수류탄 둘 이상 · reordered = 그중 고정 차례와 다르게 켠 입력 · reloadFirst = 재장전이 수류탄 앞 · reloadPressCut = 그 누름을 던짐이 끊음
+	std::printf("SERVER pressOrder multi=%llu ordered=%llu unordered=%llu abilityMulti=%llu reordered=%llu reloadFirst=%llu reloadPressCut=%llu\n", (unsigned long long)room.pressMulti, (unsigned long long)room.pressOrdered, (unsigned long long)room.pressUnordered,
+		(unsigned long long)room.pressAbilityMulti, (unsigned long long)room.pressAbilityReordered, (unsigned long long)room.pressReloadBeforeGrenade, (unsigned long long)room.grenadeReloadPressCuts);
 	std::printf("SERVER lockstep players=%d waits=%llu timeouts=%llu\n", args.testLockstep, (unsigned long long)lockstepWaits, (unsigned long long)lockstepTimeouts);
 	std::printf("SERVER shots=%llu bullets=%llu hitMap=%llu hitBody=%llu hitImmune=%llu missed=%llu damageEvents=%llu\n",
 		(unsigned long long)room.shots, (unsigned long long)room.bullets, (unsigned long long)room.bulletsHitMap, (unsigned long long)room.bulletsHitBody, (unsigned long long)room.bulletsHitImmune, (unsigned long long)room.bulletsMissed, (unsigned long long)room.damageEvents);

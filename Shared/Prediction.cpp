@@ -14,6 +14,60 @@ namespace mo
 		{
 			return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 		}
+
+		// 칸의 켜는 차례에서 key 의 자리(없으면 3 — 셋 다 지난 뒤)
+		int AbilityPos(const CSelfPrediction::Slot& slot, uint8_t key)
+		{
+			for (int k = 0; k < slot.abilityCount; ++k)
+			{
+				if (slot.abilityOrder[k] == key) return k;
+			}
+			return 3;
+		}
+
+		// 서버가 켰다는 능력이 칸 차례에 없으면(내 입력엔 그 누름이 없었다 — 서버의 앞 입력이 달랐던 갈래, DashCheck predictFix serverStart · spawnBase)
+		// 판 13 고정 차례(대시 → 수류탄 → 근접) 자리에 끼운다 — 서버가 어느 차례로 켰는지 모르니 차례 없는 입력과 같은 자리
+		void AddServerAbility(CSelfPrediction::Slot& slot, uint8_t key)
+		{
+			if (AbilityPos(slot, key) < 3 || slot.abilityCount >= 3) return;
+			const auto rank = [](uint8_t k) { return k == wire::PRESS_DASH ? 0 : (k == wire::PRESS_GRENADE ? 1 : 2); };
+			int at = 0;
+			while (at < slot.abilityCount && rank(slot.abilityOrder[at]) < rank(key)) ++at;
+			for (int k = slot.abilityCount; k > at; --k) slot.abilityOrder[k] = slot.abilityOrder[k - 1];
+			slot.abilityOrder[at] = key;
+			++slot.abilityCount;
+		}
+
+		// key 차례에 대시가 누름을 막나 — 대시가 그보다 먼저면 능력 자리 뒤 값(이 입력에 켰으면 막음), 아니면 켜기 앞 값
+		bool DashBlocksAt(const CSelfPrediction::Slot& slot, uint8_t key)
+		{
+			return AbilityPos(slot, wire::PRESS_DASH) < AbilityPos(slot, key) ? slot.dashBlocks : slot.dashBlocksBefore;
+		}
+
+		// key 차례에 근접이 켜져 있나 — 이 입력 앞부터 켜진 값에서 그보다 먼저 켠 능력을 차례로 탄다(근접 켬 → 켜짐 · 대시 켬 · 던짐 → 끊김).
+		// 다시 고르기는 근접을 다시 안 고르므로 칸의 켬 · 던짐 값을 그대로 읽는다(StepAbilities 의 차례 고리와 같은 결과)
+		bool MeleeActiveAt(const CSelfPrediction::Slot& slot, uint8_t key)
+		{
+			bool active = slot.meleeWasActive;
+			for (int k = 0; k < slot.abilityCount && slot.abilityOrder[k] != key; ++k)
+			{
+				switch (slot.abilityOrder[k])
+				{
+				case wire::PRESS_MELEE:
+					if (slot.meleeStarted) active = true;
+					break;
+				case wire::PRESS_DASH:
+					if (slot.dashStarted) active = false;
+					break;
+				case wire::PRESS_GRENADE:
+					if (slot.grenadeThrown && !slot.grenadeDead) active = false;
+					break;
+				default:
+					break;
+				}
+			}
+			return active;
+		}
 	}
 
 	CSelfPrediction::CSelfPrediction(CMoveSim& sim, const MatchRules& rules, float maxWalkSpeed)
@@ -48,6 +102,9 @@ namespace mo
 		slot.grenadeTicks = true;
 		slot.grenadeServer = false;
 		slot.grenadeDenied = false;
+		slot.dashBlocksBefore = false;
+		// 켜는 차례는 입력으로 정해진다(서버 ApplyInput 과 같은 함수) — 부활 대기 칸도 채워 다시 고르기가 남은 값을 안 읽게
+		slot.abilityCount = (uint8_t)wire::AbilityOrder(input.buttons, input.pressOrder, slot.abilityOrder, slot.reloadBeforeGrenade);
 		if ((input.buttons & wire::BUTTON_GRENADE) != 0) ++_grenadeCounters.presses;
 		_lastWeaponEvents = WeaponEvents();
 		if (_waitingSpawn)
@@ -368,15 +425,33 @@ namespace mo
 	bool CSelfPrediction::WillMeleeStart(const wire::Input& input) const
 	{
 		if ((input.buttons & wire::BUTTON_MELEE) == 0 || _waitingSpawn) return false;
-		CDashAbility dash = _dash;		// StepAbilities 의 대시 자리를 사본으로 — 켜거나 켜져 있으면 근접 누름은 막힌다
+		// StepAbilities 의 능력 자리를 사본으로 같은 차례(AbilityOrder)대로 — 근접 차례에 대시가 켜져 있으면 막히고,
+		// 도는 근접은 그보다 먼저 던진 수류탄 · 켠 대시가 끊어야 켜진다(대시가 끊었으면 대시가 막는다)
+		CDashAbility dash = _dash;
 		dash.NextInput();
-		if ((input.buttons & wire::BUTTON_DASH) != 0) (void)dash.TryActivate(input.pitch, input.yaw, false);
-		if (dash.BlocksPresses()) return false;
-		if (_melee.WillActivateNextInput()) return true;
-		// 도는 근접 — 이 입력에 수류탄을 던지면 그 자리에서 끊겨(StepAbilities) 뒤의 근접 누름이 켜진다
 		CGrenadeAbility grenade = _grenade;
 		grenade.NextInput();
-		return (input.buttons & wire::BUTTON_GRENADE) != 0 && grenade.TryActivate(false, false) == EGrenadeResult::Thrown;
+		bool meleeFree = _melee.WillActivateNextInput();
+		uint8_t order[3];
+		bool reloadFirst = false;
+		const int abilities = wire::AbilityOrder(input.buttons, input.pressOrder, order, reloadFirst);
+		for (int k = 0; k < abilities; ++k)
+		{
+			switch (order[k])
+			{
+			case wire::PRESS_DASH:
+				if (dash.TryActivate(input.pitch, input.yaw, false).result == EDashResult::Started) meleeFree = true;
+				break;
+			case wire::PRESS_GRENADE:
+				if (grenade.TryActivate(false, dash.BlocksPresses()) == EGrenadeResult::Thrown) meleeFree = true;
+				break;
+			case wire::PRESS_MELEE:
+				return !dash.BlocksPresses() && meleeFree;
+			default:
+				break;
+			}
+		}
+		return false;
 	}
 
 	void CSelfPrediction::OnDashResult(uint32_t seq, uint8_t dir, const Vec3& force)
@@ -441,11 +516,13 @@ namespace mo
 			if (later.seq != at) continue;
 			const bool oldCut = later.dashCutMelee;
 			dash.NextInput();
+			later.dashBlocksBefore = dash.BlocksPresses();
 			bool started = false;
 			if (later.dashServer)
 			{
 				dash.StartFromServer();		// 방향 · 힘은 소식 값 그대로(OnDashResult 가 칸에 넣었다)
 				started = true;
+				AddServerAbility(later, wire::PRESS_DASH);
 			}
 			else if (!later.dashDenied && (later.input.buttons & wire::BUTTON_DASH) != 0)
 			{
@@ -463,10 +540,10 @@ namespace mo
 				later.dashForce = Vec3();
 			}
 			later.dashStarted = started;
-			later.dashCutMelee = started && later.meleeWasActive;
+			later.dashCutMelee = started && MeleeActiveAt(later, wire::PRESS_DASH);		// 대시 차례에 켜져 있던 근접(앞 차례에 켠 근접 포함 · 앞 차례 던짐이 끊었으면 없음)
 			later.dashBlocks = dash.BlocksPresses();
 			later.dashBlocksFire = dash.BlocksHeldFire();
-			if (oldCut != later.dashCutMelee || (later.dashBlocks && later.meleeStarted)) ++_dashCounters.meleeInReplay;
+			if (oldCut != later.dashCutMelee || (DashBlocksAt(later, wire::PRESS_MELEE) && later.meleeStarted)) ++_dashCounters.meleeInReplay;
 			dash.RememberInput(later.dashMove, later.input.yaw);
 			later.dashAfter = dash;
 		}
@@ -561,10 +638,12 @@ namespace mo
 			{
 				grenade.StartFromServer();
 				thrown = true;
+				AddServerAbility(later, wire::PRESS_GRENADE);
 			}
 			else if (!later.grenadeDenied && (later.input.buttons & wire::BUTTON_GRENADE) != 0)
-				thrown = grenade.TryActivate(later.grenadeDead, later.dashBlocks) == EGrenadeResult::Thrown;
-			const bool cut = thrown && !later.grenadeDead && later.meleeWasActive;	// 던질 수 있는 입력은 대시를 안 켰다 — 근접은 NextInput 뒤 그대로 켜져 있다
+				thrown = grenade.TryActivate(later.grenadeDead, DashBlocksAt(later, wire::PRESS_GRENADE)) == EGrenadeResult::Thrown;
+			// 던질 차례에 켜져 있던 근접을 끊는다 — 앞 차례에 켠 근접 포함(근접 → Q, L-5-a). 던질 수 있으면 앞 차례 대시는 안 켜졌다(켜졌으면 막힘)
+			const bool cut = thrown && !later.grenadeDead && MeleeActiveAt(later, wire::PRESS_GRENADE);
 			if (cut != later.grenadeCutMelee)
 			{
 				cutChanged = true;
@@ -573,6 +652,17 @@ namespace mo
 			if (thrown != later.grenadeThrown) ++(thrown ? _grenadeCounters.replayGained : _grenadeCounters.replayLost);
 			later.grenadeThrown = thrown;
 			later.grenadeCutMelee = cut;
+			// Q → 대시 차례면 던짐이 대시보다 먼저 근접을 끊는다 — 던짐이 바뀌면 대시의 근접 끊음도 바뀐다(걸음 쪽 밀기 지우기)
+			if (later.dashStarted && AbilityPos(later, wire::PRESS_GRENADE) < AbilityPos(later, wire::PRESS_DASH))
+			{
+				const bool dashCut = MeleeActiveAt(later, wire::PRESS_DASH);
+				if (dashCut != later.dashCutMelee)
+				{
+					later.dashCutMelee = dashCut;
+					cutChanged = true;
+					++_grenadeCounters.meleeInReplay;
+				}
+			}
 			later.grenadeAfter = grenade;
 		}
 		_grenade = grenade;
@@ -610,43 +700,63 @@ namespace mo
 		return true;
 	}
 
-	// 근접 · 대시 능력 — 서버 ApplyInput 과 같은 자리(무기 교체 뒤 · 걸음 앞). 두 입력 수를 먼저 세고(NextInput 둘), 대시 누름 → 켜면 근접을 끊는다(StartDash) →
-	// 근접 누름은 대시가 켜져 있으면(켠 입력 포함) 막힌다(TryMelee). 죽음은 모른다(서버만 막는다 — 소식이 안 와 AckMelee · AckDash 가 지운다).
+	// 근접 · 대시 · 수류탄 능력 — 서버 ApplyInput 과 같은 자리(무기 교체 뒤 · 걸음 앞) · 같은 차례(실린 누름 차례 — wire::AbilityOrder, L-5-a).
+	// 세 입력 수를 먼저 세고(NextInput 셋), 차례대로 켠다 — 대시 켬 → 근접을 끊는다(StartDash) · 뒤 누름을 막는다 / 던짐 → 근접을 끊는다(ThrowGrenade) ·
+	// 대시가 켜져 있으면 막힘 / 근접 → 대시가 켜져 있으면 막힘(TryMelee). 죽음은 모른다(서버만 막는다 — 소식이 안 와 AckMelee · AckDash 가 지운다).
 	// 경기 끝 단계는 서버도 막지 않는다(L-3-b — Dash.h EDashResult)
 	void CSelfPrediction::StepAbilities(Slot& slot, bool count)
 	{
 		const wire::Input& input = slot.input;
 		_melee.NextInput();
 		_dash.NextInput();
+		// 자리 옮기기 칸(OnSpawn 다시 돌리기에서만 여기로 온다)은 서버 ApplyPlace 처럼 수류탄 입력 수를 안 센다
+		if (slot.grenadeTicks) _grenade.NextInput();
 		slot.meleeWasActive = _melee.IsActive();
+		slot.dashBlocksBefore = _dash.BlocksPresses();
 		slot.dashStarted = false;
 		slot.dashDir = 0;
 		slot.dashForce = Vec3();
 		slot.dashCutMelee = false;
-		if ((input.buttons & wire::BUTTON_DASH) != 0)
+		slot.grenadeThrown = false;
+		slot.grenadeCutMelee = false;
+		slot.meleeStarted = false;
+		// 차례는 입력으로 다시 정한다 — 서버 소식이 끼운 능력(AddServerAbility)은 부활 다시 돌리기(OnSpawn)가 내 누름으로 다시 고를 때 남기지 않는다
+		slot.abilityCount = (uint8_t)wire::AbilityOrder(input.buttons, input.pressOrder, slot.abilityOrder, slot.reloadBeforeGrenade);
+		for (int k = 0; k < slot.abilityCount; ++k)
 		{
-			if (count) ++_dashCounters.presses;
-			const DashStart dash = _dash.TryActivate(input.pitch, input.yaw, false);
-			if (dash.result == EDashResult::Started)
+			switch (slot.abilityOrder[k])
 			{
-				slot.dashStarted = true;
-				slot.dashDir = (uint8_t)dash.dir;
-				slot.dashForce = dash.force;
-				slot.dashCutMelee = _melee.Cut();
-				if (count) ++_dashCounters.started;
+			case wire::PRESS_DASH:
+			{
+				if (count) ++_dashCounters.presses;
+				const DashStart dash = _dash.TryActivate(input.pitch, input.yaw, false);
+				if (dash.result == EDashResult::Started)
+				{
+					slot.dashStarted = true;
+					slot.dashDir = (uint8_t)dash.dir;
+					slot.dashForce = dash.force;
+					slot.dashCutMelee = _melee.Cut();
+					if (count) ++_dashCounters.started;
+				}
+				break;
+			}
+			case wire::PRESS_GRENADE:
+				// 수류탄(G-3) — 대시가 켜져 있으면(이 입력에 먼저 켠 것 포함) 막힌다. 던지면 그 자리에서 근접을 끊는다(ThrowGrenade)
+				slot.grenadeThrown = slot.grenadeTicks && _grenade.TryActivate(false, _dash.BlocksPresses()) == EGrenadeResult::Thrown;
+				slot.grenadeCutMelee = slot.grenadeThrown && _melee.Cut();
+				if (slot.grenadeThrown && count) ++_grenadeCounters.thrown;
+				break;
+			case wire::PRESS_MELEE:
+				slot.meleeStarted = !_dash.BlocksPresses() && _melee.TryActivate(GetWeaponDef((EWeapon)_weapon), kTick);
+				if (slot.meleeStarted) ++_meleeCounters.started;
+				break;
+			default:
+				break;
 			}
 		}
 		slot.dashBlocks = _dash.BlocksPresses();
 		slot.dashBlocksFire = _dash.BlocksHeldFire();
-		// 수류탄(G-3) — 서버와 같은 자리(대시 뒤 · 근접 앞). 대시가 켜져 있으면(켠 입력 포함) 막힌다. 던지면 그 자리에서 근접을 끊는다(ThrowGrenade)
-		// 자리 옮기기 칸(OnSpawn 다시 돌리기에서만 여기로 온다)은 서버 ApplyPlace 처럼 안 센다
-		if (slot.grenadeTicks) _grenade.NextInput();
-		slot.grenadeThrown = slot.grenadeTicks && (input.buttons & wire::BUTTON_GRENADE) != 0 && _grenade.TryActivate(false, slot.dashBlocks) == EGrenadeResult::Thrown;
-		slot.grenadeCutMelee = slot.grenadeThrown && _melee.Cut();
-		if (slot.grenadeThrown && count) ++_grenadeCounters.thrown;
 		slot.grenadeAfter = _grenade;
-		slot.meleeStarted = (input.buttons & wire::BUTTON_MELEE) != 0 && !slot.dashBlocks && _melee.TryActivate(GetWeaponDef((EWeapon)_weapon), kTick);
-		if (slot.meleeStarted) ++_meleeCounters.started;
 	}
 
 	void CSelfPrediction::RememberDash(Slot& slot, const Vec3& moveUsed)
@@ -660,21 +770,46 @@ namespace mo
 	Vec3 CSelfPrediction::ApplyMove(const Slot& slot)
 	{
 		const wire::Input& input = slot.input;
-		// 대시를 켠 입력 — 서버 StartDash 와 같은 차례: 끊은 근접의 밀기 힘 지우기 → 점프 끊기 → 일어서기 → 대시 힘
-		if (slot.dashStarted)
+		// 능력 자리 — 서버 ApplyInput 과 같은 켜는 차례(slot.abilityOrder, L-5-a)로 힘을 넣고 지운다. 근접이 먼저 켜져 밀기를 넣고 뒤 차례 대시 · 던짐이 그 힘을 지우는 입력이 있다
+		const auto meleePush = [&]()
 		{
-			if (slot.dashCutMelee && _meleePushId != 0) _sim.RemoveRootForce(_move, _meleePushId);
-			_meleePushId = 0;
-			if (_jump.Cut()) _sim.ReleaseJump(_move);
-			if (_move.crouched) _sim.RequestUnCrouch(_move);
-			_sim.ApplyRootForce(_move, slot.dashForce, kDashForceDuration, DashForceSettings());
-		}
-		// 수류탄을 던져 근접을 끊은 입력 — 서버 ThrowGrenade 처럼 끊은 근접의 밀기 힘을 지운다(대시 뒤 · 점프 앞, 끊었을 때만 번호를 0 으로)
-		if (slot.grenadeCutMelee)
+			// 근접 밀기 — Lyra 는 능력이 켜지는 입력 처리에서 넣고 그 프레임 이동이 민다(E-2-1). 서버 TryMelee 와 같은 자리(능력 자리 근접 차례)
+			if (slot.meleeStarted) _meleePushId = 0;		// 서버 TryMelee 와 같다 — 맞아야 밀기 번호가 생긴다
+			if (slot.meleePush) _meleePushId = _sim.ApplyRootForce(_move, slot.meleePushForce, kMeleePushDuration);
+		};
+		bool meleeDone = false;
+		for (int k = 0; k < slot.abilityCount; ++k)
 		{
-			if (_meleePushId != 0) _sim.RemoveRootForce(_move, _meleePushId);
-			_meleePushId = 0;
+			switch (slot.abilityOrder[k])
+			{
+			case wire::PRESS_DASH:
+				// 대시를 켠 입력 — 서버 StartDash 와 같은 차례: 끊은 근접의 밀기 힘 지우기 → 점프 끊기 → 일어서기 → 대시 힘
+				if (slot.dashStarted)
+				{
+					if (slot.dashCutMelee && _meleePushId != 0) _sim.RemoveRootForce(_move, _meleePushId);
+					_meleePushId = 0;
+					if (_jump.Cut()) _sim.ReleaseJump(_move);
+					if (_move.crouched) _sim.RequestUnCrouch(_move);
+					_sim.ApplyRootForce(_move, slot.dashForce, kDashForceDuration, DashForceSettings());
+				}
+				break;
+			case wire::PRESS_GRENADE:
+				// 수류탄을 던져 근접을 끊은 입력 — 서버 ThrowGrenade 처럼 끊은 근접의 밀기 힘을 지운다(끊었을 때만 번호를 0 으로)
+				if (slot.grenadeCutMelee)
+				{
+					if (_meleePushId != 0) _sim.RemoveRootForce(_move, _meleePushId);
+					_meleePushId = 0;
+				}
+				break;
+			case wire::PRESS_MELEE:
+				meleePush();
+				meleeDone = true;
+				break;
+			default:
+				break;
+			}
 		}
+		if (!meleeDone) meleePush();		// 근접 누름이 없는 칸 — 켬 · 밀기가 둘 다 없어 아무것도 안 한다(칸 값만 믿지 않고 같은 길로)
 		const bool jump = (input.buttons & wire::BUTTON_JUMP) != 0;
 		switch (_jump.Apply(jump, slot.dashBlocks))		// 대시가 켜져 있으면 새 누름은 버려진다(쥐고 있어도 끝난 뒤 안 켜진다)
 		{
@@ -703,9 +838,7 @@ namespace mo
 		if (_debugMoveScale != 1.0) moveInput = moveInput * _debugMoveScale;
 		_ads.Apply((input.buttons & wire::BUTTON_ADS) != 0, slot.dashBlocks);		// 대시가 켜지는 입력에 끄고, 막힌 누름은 떼었다 다시 눌러야 켜진다(서버와 같다)
 		_move.maxSpeed = AdsWalkSpeed(_maxWalkSpeed, _ads.active);
-		// 근접 밀기는 걸음 바로 앞 — Lyra 는 능력이 켜지는 입력 처리에서 넣고 그 프레임 이동이 민다(E-2-1). 서버도 이 자리에서 넣는다(E-3)
-		if (slot.meleeStarted) _meleePushId = 0;		// 서버 TryMelee 와 같다 — 맞아야 밀기 번호가 생긴다
-		if (slot.meleePush) _meleePushId = _sim.ApplyRootForce(_move, slot.meleePushForce, kMeleePushDuration);
+		// 근접 밀기는 위 능력 자리에서 넣었다 — 점프 깃발 · 앉기 바람 · 조준 속도는 힘 묶음을 안 건드려 걸음 바로 앞에서 넣던 판 13 과 같은 결과(L-5-a)
 		_sim.Tick(_move, moveInput, kTick);
 		return moveUsed;
 	}
@@ -721,8 +854,9 @@ namespace mo
 		WeaponInput weaponInput;
 		weaponInput.fireHeld = (input.buttons & wire::BUTTON_FIRE) != 0;
 		weaponInput.reloadPressed = (input.buttons & wire::BUTTON_RELOAD) != 0;
-		weaponInput.meleeActive = meleeActive;
+		weaponInput.meleeActive = meleeActive || slot.meleeStarted;		// 서버와 같다 — 이 입력에 켠 근접은 뒤 차례가 끊었어도 켜진 셈(L-5-a)
 		weaponInput.meleeStarted = slot.meleeStarted;
+		weaponInput.reloadBeforeGrenade = slot.reloadBeforeGrenade;
 		weaponInput.dashActive = slot.dashBlocksFire;
 		weaponInput.dashStarted = slot.dashStarted;
 		weaponInput.grenadeThrown = slot.grenadeThrown;		// 도는 재장전만 끊는다(서버 ApplyInput 과 같은 값)

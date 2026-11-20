@@ -197,8 +197,11 @@ namespace mo
 		bool dashStarted = false;	// 이 입력에 대시가 켜졌다 — 쥔 사격은 먼저 켜진 뒤 끊기고, 도는 재장전이 끊기고, 재장전 입력 · 자동 재장전은 막힌다
 		// 이 입력에 수류탄을 던졌다(G-2) — 도는 재장전을 끊는다(수류탄의 끊기 태그 · G-0-c 재장전 중 Q 탄창 4 → 4).
 		// 막기는 없다 — 수류탄 능력은 켜진 그 자리에서 끝나(GA_Grenade → K2_EndAbility) 같은 입력에 뒤로 켜지는 재장전 · 사격을 막는 창이 없다.
-		// 같은 입력의 재장전 누름은 수류탄 뒤에 받는다(수류탄이 먼저 — 서버 입력 차례, content-impl-progress.md 미결 22)
+		// 같은 입력의 재장전 누름은 수류탄 뒤에 받는다 — 차례가 수류탄 먼저면 그대로 켜진다(L-1-c q_reload 4 → 12)
 		bool grenadeThrown = false;
+		// 이 입력의 재장전 누름이 수류탄보다 먼저였다(실린 누름 차례 — wire::AbilityOrder, L-5-a). 던졌으면 그 재장전은 켜진 프레임에 수류탄이 끊은 것이라
+		// 켜지 않고 reloadPressCutByGrenade 로 센다(L-1-c reload_q 탄창 4 → 4 · 몽타주 던짐). 차례가 없으면 false — 판 13 차례(수류탄 먼저) 그대로
+		bool reloadBeforeGrenade = false;
 	};
 
 	struct WeaponEvents
@@ -210,6 +213,7 @@ namespace mo
 		bool reloadCancelledByDash = false;		// 이번 입력에 켜진 대시가 도는 재장전을 끊었다 — 탄이 안 들어간다(D-0 기록 reload_dash 4 → 4)
 		bool fireCancelledByDash = false;		// 이번 입력에 켜진 대시가 켜져 있던 사격 능력을 끊었다(이 입력에 쏜 발 포함)
 		bool reloadCancelledByGrenade = false;	// 이번 입력에 던진 수류탄이 도는 재장전을 끊었다 — 탄이 안 들어간다(G-0-c)
+		bool reloadPressCutByGrenade = false;	// 이번 입력에 수류탄보다 먼저 누른 재장전 — 켜진 프레임에 끊겨 탄 · 재장전 사건이 없다(L-5-a)
 		float spreadAngle = 0;			// fired 일 때 — 이번 발의 퍼짐. 이번 발이 더하는 열은 들어가지 않는다(Lyra 는 광선을 쏜 뒤 열을 더한다)
 		float spreadMultiplier = 1;
 	};

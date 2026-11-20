@@ -90,10 +90,15 @@ namespace mo
 		uint64_t firesDroppedSeqGap = 0;	// 입력 번호를 건너뛴 입력의 사격을 버림(D15)
 		uint64_t inputsWhileDead = 0;		// 죽어 있는 동안 온 입력 — 번호만 기록하고 안 쓴다
 		// 한 입력 안 누름 차례(L-4 · 판 14) — 근접 · 대시 · 수류탄 · 재장전 중 둘 이상 켜진 클라 입력(multi) = 차례를 믿음(ordered) + 못 믿음(unordered, 0 · 겹침).
-		// 서버는 아직 고정 차례로 켜고 세기만 한다(따르기는 L-5)
+		// 켜는 차례는 L-5-a 부터 실린 차례를 따른다(D127)
 		uint64_t pressMulti = 0;
 		uint64_t pressOrdered = 0;
 		uint64_t pressUnordered = 0;
+		// 능력 자리(L-5-a) — 근접 · 대시 · 수류탄 중 둘 이상 켠 입력(abilityMulti) · 그중 켠 차례가 판 13 고정 차례(대시 → 수류탄 → 근접)와 다른 입력(reordered) ·
+		// 재장전이 수류탄보다 먼저 눌린 입력(reloadBeforeGrenade — 던졌으면 무기 순환이 그 누름을 켜자마자 끊는다)
+		uint64_t pressAbilityMulti = 0;
+		uint64_t pressAbilityReordered = 0;
+		uint64_t pressReloadBeforeGrenade = 0;
 		uint64_t starvedTicks = 0;			// 입력이 안 와서 그 틱에 꺼낼 것이 없음
 		uint64_t idleMoves = 0;				// 입력 없이 오래 지나 빈 입력으로 움직임(공중에 멈추지 않게)
 		uint64_t debugPlaces = 0;
@@ -202,6 +207,7 @@ namespace mo
 		uint64_t grenadeMeleeCancels = 0;	// 던진 입력에 끊은 근접(던짐 몽타주가 근접 몽타주를 바꿔 낌 — G-0-c)
 		uint64_t grenadeMeleePushRemoved = 0;	// 그중 밀기 힘 번호가 있어 지움(대시 끊기와 같은 길)
 		uint64_t grenadeReloadCancels = 0;	// 던진 입력에 끊은 재장전(탄이 안 들어감)
+		uint64_t grenadeReloadPressCuts = 0;	// 같은 입력에 수류탄보다 먼저 누른 재장전을 켜자마자 끊음(L-5-a · L-1-c reload_q 탄창 4 → 4)
 		uint64_t grenadeAnimAfterFire = 0;	// 같은 입력에 쏘기가 있어 쏘기 사건을 던짐 사건 앞에 끼운 수(G-4-b)
 		uint64_t grenadeReloadMontageCancels = 0;	// 던짐 몽타주가 먼저 끈 재장전 칸(근접의 meleeReloadMontageCancels 와 같은 길, G-4-b)
 		uint64_t grenadeBounces = 0;		// 날아감이 튕김 셈을 한 맞음

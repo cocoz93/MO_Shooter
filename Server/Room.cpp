@@ -853,7 +853,7 @@ namespace mo
 	void CRoom::ApplyInput(Player& player, const wire::Input& input, const bool serverMade)
 	{
 		player.lastSeq = input.seq;
-		// 한 입력 안 누름 차례(L-4 · 판 14) — 실린 차례를 읽어 세기만 한다. 켜는 차례는 아직 고정(대시 먼저 D102 · 수류탄 먼저 D112 ①), 따르기는 L-5
+		// 한 입력 안 누름 차례(L-4 · 판 14) — 실린 차례를 읽어 센다. 켜는 차례는 아래 능력 자리가 따른다(L-5-a · D127 — 못 믿으면 판 13 고정 차례)
 		if (!serverMade)
 		{
 			uint8_t order[wire::kPressKeyCount];
@@ -904,33 +904,63 @@ namespace mo
 		}
 
 		int grenadeEventSlot = -1;	// 이번 입력의 던짐 사건 자리 — 아래 무기 순환이 같은 입력의 쏘기 사건을 그 앞에 끼운다(사건을 버렸으면 -1)
-		// 대시(D-2) — 무기 바꾸기 뒤 · 점프 앞. 켜면 그 자리에서 근접(밀기 힘까지) · 점프를 끊고 일어서기 · 힘을 넣는다(StartDash).
-		// 조준 · 사격 · 재장전의 막기 · 끊기는 각자의 자리(ads.Apply · 무기 순환)가 대시 상태를 본다. 근접 입력 수도 여기서 센다 — 끊을지를 이번 입력 값으로 본다
-		if (!serverMade)	// 빈 입력은 대시 · 근접 시계를 안 센다(D87)
+		bool meleeStarted = false;
+		bool reloadBeforeGrenade = false;	// 같은 입력 재장전 누름이 수류탄보다 먼저 — 던지면 무기 순환이 그 누름을 켜자마자 끊는다(L-5-a)
+		// 능력 자리 — 무기 바꾸기 뒤(켜는 무기의 간격 · 몽타주) · 점프 앞. 근접 · 대시 · 수류탄을 실린 누름 차례대로 하나씩 켠다(L-5-a · D127).
+		// Lyra 는 셋 다 누름 능력이라 그 프레임에 눌린 차례대로 켠다(LyraAbilitySystemComponent.cpp:250-283 InputPressedSpecHandles — L-1-c 칸 여섯).
+		// 차례가 없거나 못 믿으면 판 13 고정 차례(대시 → 수류탄 → 근접 — D102 · D112 ①). 켤 때마다 지금 있는 막기 · 끊기를 그대로 탄다:
+		// 대시 켬 = 근접(밀기 힘까지) · 점프 끊기 · 일어서기 · 힘(StartDash), 뒤 누름 막기(BlocksPresses) / 던짐 = 근접 끊기(ThrowGrenade) / 근접 = 대시가 켜져 있으면 막힘(TryMelee).
+		// 근접이 점프 · 앉기 키 앞으로 왔다 — 근접이 읽는 것(요 · 손 자세 · 무기 · 남 자리)을 점프 깃발 · 앉기 바람이 안 바꿔 차례 없는 입력의 결과는 같다.
+		// 몽타주 사건도 켠 차례로 쌓여 나중 것이 남는다. 조준 · 사격 · 재장전의 막기 · 끊기는 각자의 자리(ads.Apply · 무기 순환)가 능력 상태를 본다
+		if (!serverMade)	// 빈 입력은 대시 · 근접 · 수류탄 시계를 안 센다(D87)
 		{
 			player.melee.NextInput();
 			player.dash.NextInput();
-			if ((input.buttons & wire::BUTTON_DASH) != 0)
-			{
-				const DashStart dash = player.dash.TryActivate(input.pitch, input.yaw, false);
-				CountDash(dash.result);
-				if (dash.result == EDashResult::Started) StartDash(player, dash, input.seq);
-			}
-			// 수류탄(G-2) — 대시 뒤 · 점프 앞. 대시가 켜져 있으면(켠 입력 포함) 막힌다(Ability.Type.Action — 대시 먼저, D102 와 같은 꼴).
-			// 같은 입력의 근접 누름은 이 뒤 TryMelee 가 받는다(수류탄 먼저 — 기록 없음, content-impl-progress.md 미결 22)
 			player.grenade.NextInput();
-			if ((input.buttons & wire::BUTTON_GRENADE) != 0)
+			uint8_t order[3];
+			const int abilities = wire::AbilityOrder(input.buttons, input.pressOrder, order, reloadBeforeGrenade);
+			if (abilities >= 2)
 			{
-				const EGrenadeResult grenade = player.grenade.TryActivate(false, player.dash.BlocksPresses());
-				CountGrenade(grenade);
-				if (grenade == EGrenadeResult::Thrown)
+				// 실린 차례가 판 13 고정 차례와 다른 입력 — 이 조각이 결과를 바꾸는 입력만 센다(차례를 안 싣는 봇 판은 0)
+				uint8_t fixedOrder[3];
+				bool fixedReload = false;
+				(void)wire::AbilityOrder(input.buttons, 0, fixedOrder, fixedReload);
+				++_stats.pressAbilityMulti;
+				if (order[0] != fixedOrder[0] || order[1] != fixedOrder[1] || (abilities == 3 && order[2] != fixedOrder[2])) ++_stats.pressAbilityReordered;
+			}
+			if (reloadBeforeGrenade) ++_stats.pressReloadBeforeGrenade;
+			for (int k = 0; k < abilities; ++k)
+			{
+				switch (order[k])
 				{
-					const double camBack = ClampGrenadeCamBack(input.camBack);		// 정직한 Lyra 값이 드는 범위로(플랜 101줄 · Grenade.h kGrenadeCamBackMin) — NaN · 무한은 입력째 버렸다(IsFiniteInput)
-					if (camBack != (double)input.camBack) ++_stats.grenadeCamBackClamped;
-					ThrowGrenade(player, input, camBack);
-					const int slot = player.animEventCount;
-					PushAnimEvent(player, EAnimEvent::Grenade, player.weapon);	// 던짐 몽타주(G-4) — 같은 입력의 근접 · 재장전 사건은 이 뒤에 쌓인다(서버 차례 = 수류탄 먼저, 미결 22)
-					if (player.animEventCount > slot) grenadeEventSlot = slot;
+				case wire::PRESS_DASH:
+				{
+					const DashStart dash = player.dash.TryActivate(input.pitch, input.yaw, false);
+					CountDash(dash.result);
+					if (dash.result == EDashResult::Started) StartDash(player, dash, input.seq);
+					break;
+				}
+				case wire::PRESS_GRENADE:
+				{
+					// 수류탄(G-2) — 대시가 켜져 있으면(이 입력에 먼저 켠 것 포함) 막힌다(Ability.Type.Action)
+					const EGrenadeResult grenade = player.grenade.TryActivate(false, player.dash.BlocksPresses());
+					CountGrenade(grenade);
+					if (grenade == EGrenadeResult::Thrown)
+					{
+						const double camBack = ClampGrenadeCamBack(input.camBack);		// 정직한 Lyra 값이 드는 범위로(플랜 101줄 · Grenade.h kGrenadeCamBackMin) — NaN · 무한은 입력째 버렸다(IsFiniteInput)
+						if (camBack != (double)input.camBack) ++_stats.grenadeCamBackClamped;
+						ThrowGrenade(player, input, camBack);
+						const int slot = player.animEventCount;
+						PushAnimEvent(player, EAnimEvent::Grenade, player.weapon);	// 던짐 몽타주(G-4) — 같은 입력의 재장전 사건은 이 뒤에 쌓인다(재장전은 무기 순환 자리)
+						if (player.animEventCount > slot) grenadeEventSlot = slot;
+					}
+					break;
+				}
+				case wire::PRESS_MELEE:
+					meleeStarted = TryMelee(player, input);
+					break;
+				default:
+					break;
 				}
 			}
 		}
@@ -958,8 +988,7 @@ namespace mo
 			_moveSim.ToggleCrouch(player.move);
 			++_stats.crouchPresses;
 		}
-		// 근접(E-3) — 무기 교체 뒤(켜는 무기의 간격 · 몽타주) · 걸음 앞(밀기가 이 걸음부터). 예측(CSelfPrediction::StepMelee)도 같은 자리
-		const bool meleeStarted = serverMade ? false : TryMelee(player, input);	// 빈 입력은 근접 입력 수(melee.NextInput — 위 대시 자리)도 안 센다(D87)
+		// 근접(E-3)은 위 능력 자리에서 켰다 — 무기 교체 뒤(켜는 무기의 간격 · 몽타주) · 걸음 앞(밀기가 이 걸음부터). 예측(CSelfPrediction::StepAbilities)도 같은 자리
 
 		Vec3 moveInput(input.moveX, input.moveY, 0);
 		const double moveLength = Length(moveInput);
@@ -1052,8 +1081,10 @@ namespace mo
 		weaponInput.meleeStarted = meleeStarted;
 		// 경기 끝 단계에도 쏘기 · 재장전을 막지 않는다 — Lyra 는 능력 입력 막음(GE_BlockAbilityInput)을 맵을 다시 열기 한 틱 전에야 건다(L-3-b · Dash.h EDashResult).
 		// 피해는 끝 단계 무적이 막는다(IsImmune)
-		// 근접이 켜져 있으면 발사 · 재장전 입력 · 자동 재장전이 막힌다(근접의 막기 태그). 발사는 간격 검사 · 빈 탄 집계 앞에서 뺀다 — 정직한 누름이 거절로 안 세지게
-		weaponInput.meleeActive = player.melee.IsActive();
+		// 근접이 켜져 있으면 발사 · 재장전 입력 · 자동 재장전이 막힌다(근접의 막기 태그). 발사는 간격 검사 · 빈 탄 집계 앞에서 뺀다 — 정직한 누름이 거절로 안 세지게.
+		// 이 입력에 켠 근접은 뒤 차례 대시 · 수류탄이 끊었어도 켜진 셈이다 — 판 13 의 「근접이 켜진 입력은 쏘기가 막힌다」를 그대로 둔다(L-5-a · 차례 없는 입력은 같은 값)
+		weaponInput.meleeActive = player.melee.IsActive() || meleeStarted;
+		weaponInput.reloadBeforeGrenade = reloadBeforeGrenade;
 		if (weaponInput.fireHeld && weaponInput.meleeActive)
 		{
 			++_stats.meleeFiresBlocked;
@@ -1079,6 +1110,7 @@ namespace mo
 		if (events.reloadCancelledByMelee) ++_stats.meleeReloadCancels;
 		if (events.reloadCancelledByDash) ++_stats.dashReloadCancels;
 		if (events.reloadCancelledByGrenade) ++_stats.grenadeReloadCancels;
+		if (events.reloadPressCutByGrenade) ++_stats.grenadeReloadPressCuts;
 		if (events.fireCancelledByDash) ++_stats.dashFireCancels;
 		player.aimCamera.Tick(player.ads.active, kTickSeconds);		// 이 입력의 조준으로 카메라를 굴린다 — 다음 입력의 퍼짐이 읽는다
 		if (weaponInput.fireHeld && !events.fired)
@@ -1496,8 +1528,9 @@ namespace mo
 	{
 		if ((input.buttons & wire::BUTTON_MELEE) == 0) return false;
 		++_stats.meleePresses;		// 경기 끝 단계에도 켠다 — 쏘기와 같다(ApplyInput 의 무기 입력 주석)
-		// 대시가 켜져 있으면(켠 입력 포함) 막힌다 — 같은 프레임에 근접과 대시를 누르면 Lyra 는 둘 다 누름 능력이라 그 프레임에 눌린 차례대로 켠다
-		// (LyraAbilitySystemComponent.cpp:250-283 InputPressedSpecHandles). 입력 하나에는 그 차례가 없어 대시 먼저로 둔다(제 판단 · 기록 없음 — 근접이 먼저면 피해가 들어간 뒤 끊긴다)
+		// 대시가 켜져 있으면(이 입력에 먼저 켠 것 포함) 막힌다 — 같은 프레임에 근접과 대시를 누르면 Lyra 는 둘 다 누름 능력이라 그 프레임에 눌린 차례대로 켠다
+		// (LyraAbilitySystemComponent.cpp:250-283 InputPressedSpecHandles). 부르는 쪽(ApplyInput 능력 자리)이 실린 차례로 부른다 — 근접이 먼저면 피해가 들어간 뒤 대시가 끊는다
+		// (L-1-c melee_dash 100 · L-5-a — 판 13 까지는 입력에 차례가 없어 대시 먼저였다, D102 → D127)
 		if (player.dash.BlocksPresses())
 		{
 			++_stats.dashMeleeBlocked;
