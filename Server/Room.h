@@ -3,6 +3,7 @@
 #include "AnimState.h"
 #include "Dash.h"
 #include "GameProtocol.h"
+#include "Grenade.h"
 #include "Loadout.h"
 #include "MapCollision.h"
 #include "MatchRules.h"
@@ -182,6 +183,36 @@ namespace mo
 		uint64_t dashMontage[4] = {};		// 켠 방향(EDashDir — 앞 · 뒤 · 왼 · 오른)
 		uint64_t dashMsgs = 0;				// 보낸 S2C_DASH — started 와 같아야 한다(세는 자리를 따로 둬 보내는 길이 빠졌는지 가린다)
 
+		// 수류탄(컨텐츠 G-2) — 누름(grenadePresses) = 던짐 + 쿨다운 + 대시 중 + 죽음 + 경기 끝. 갈래마다 따로 센다(0 이 「안 지나감」인지 가리려고)
+		uint64_t grenadePresses = 0;		// 수류탄 단추가 든 입력(서버가 만든 빈 입력 제외)
+		uint64_t grenadeThrown = 0;			// 쿨다운을 건 던짐 — 목록이 차 버린 것(grenadeListFull) 포함
+		uint64_t grenadeOnCooldown = 0;
+		uint64_t grenadeWhileDash = 0;
+		uint64_t grenadeDead = 0;
+		uint64_t grenadePostGame = 0;		// 경기 끝 단계 — 우리는 막는다(Lyra 는 던진다, content-impl-progress.md 미결 15)
+		uint64_t grenadeAimReplaced = 0;	// 입력 시작점이 몸에서 허용 범위 밖 — 사격과 같은 눈높이로 바꿔 카메라를 셈
+		uint64_t grenadeAimNoHit = 0;		// 겨눔 선이 안 맞음 — 거리 0 이라 조종 회전 그대로(짐작 1)
+		uint64_t grenadeAimNear45 = 0;		// 맞았지만 선 시작에서 45 안 — 조종 회전 그대로
+		uint64_t grenadeAimLookAt = 0;		// 놓을 자리에서 맞은 곳을 보는 회전
+		uint64_t grenadeAimLookAtEnd = 0;	// 거리 ≥ 45 인데 안 맞음 — 그래프에만 있는 갈래, 0 이어야 한다
+		uint64_t grenadeListFull = 0;		// 산 수류탄 칸(방 크기)이 차 버린 던짐 — 사람당 하나라 0 이어야 한다
+		uint64_t grenadeMeleeCancels = 0;	// 던진 입력에 끊은 근접(던짐 몽타주가 근접 몽타주를 바꿔 낌 — G-0-c)
+		uint64_t grenadeMeleePushRemoved = 0;	// 그중 밀기 힘 번호가 있어 지움(대시 끊기와 같은 길)
+		uint64_t grenadeReloadCancels = 0;	// 던진 입력에 끊은 재장전(탄이 안 들어감)
+		uint64_t grenadeBounces = 0;		// 날아감이 튕김 셈을 한 맞음
+		uint64_t grenadeStops = 0;			// 멈춘 수류탄(튕긴 뒤 느려 멈춤)
+		uint64_t grenadeDetonateTimer = 0;	// 신관 kGrenadeFuseFrames 걸음 뒤 터짐
+		uint64_t grenadeDetonateHit = 0;	// 다른 팀 사람에 맞아 그 자리에서 터짐
+		uint64_t grenadeOwnerLeft = 0;		// 던진 사람이 나가 지운 산 수류탄
+		uint64_t grenadeTargets = 0;		// 폭발 선을 쏜 산 몸(몸까지 450 안)
+		uint64_t grenadeWallHits = 0;		// 그중 맵이 먼저 맞아 피해 0
+		uint64_t grenadeImmune = 0;			// 그중 무적이라 피해 0(부활 · 경기 중 아님)
+		uint64_t grenadeZeroDamage = 0;		// 그중 곡선 피해가 0 — 450 안이면 등급 < 1 이라 0 보다 커서 0 이어야 한다(세는 자리를 따로 둬 합이 맞는지 본다)
+		uint64_t grenadeSameTeam = 0;		// 그중 같은 팀(던진 사람 빼고)이라 피해 0 — 소식 없음(총알 같은 팀 길과 같다)
+		uint64_t grenadeDamageEvents = 0;	// 보낸 S2C_DAMAGE(무기 kWeaponGrenade)
+		uint64_t grenadeSelfDamage = 0;		// 그중 던진 사람 자신
+		uint64_t grenadeKills = 0;			// 수류탄 피해로 체력 0(자기 처치 포함)
+
 		// 권위 확인 — 일부러 보낸 나쁜 입력을 사유별로 센다. 정직한 클라는 여기 일곱이 전부 0 이어야 한다
 		uint64_t inputsRejectedBadValue = 0;	// NaN·무한대 — 통째로 버림
 		uint64_t movesOverLength = 0;			// 이동 입력 길이가 1을 넘음 — 1로 줄여 씀
@@ -310,6 +341,7 @@ namespace mo
 			CMeleeAbility melee;			// 근접 능력(E-3) — 입력 개수로 센다. 부활하면 꺼진 채
 			uint16_t meleePushId = 0;		// 이번 근접이 넣은 밀기 힘 번호(0 = 없음) — 대시가 근접을 끊으면 지운다(D-2)
 			CDashAbility dash;				// 대시 능력(D-2) — 켜짐 · 쿨다운을 입력 개수로 센다. 부활하면 꺼진 채
+			CGrenadeAbility grenade;		// 수류탄 능력(G-2) — 쿨다운을 입력 개수로 센다. 죽은 동안에도 줄고 부활에 안 풀린다(G-0-b2)
 			bool dead = false;
 			uint32_t respawnTick = 0;		// dead 일 때
 			uint32_t immuneUntilTick = 0;
@@ -370,6 +402,17 @@ namespace mo
 			uint32_t seq;
 		};
 
+		// 산 수류탄 하나(G-2) — 던진 입력에 생겨 그 틱 TickGrenades 가 첫 걸음(나이 0)을 걷고, 터지는 틱에 지운다(꼬리를 기다리는 것은 화면 몫)
+		struct LiveGrenade
+		{
+			uint32_t id = 0;			// 방 안 번호(1 부터) — 소식(G-3)이 싣는다
+			uint32_t owner = 0;			// 던진 사람 번호
+			uint8_t team = 0;			// 던질 때 팀 — 맞아 터짐 · 폭발 팀 규칙이 이것을 본다
+			uint32_t seq = 0;			// 던진 입력 번호
+			bool stopCounted = false;	// grenadeStops 를 셌나
+			ProjectileState state;
+		};
+
 		// ALyraWeaponSpawner 하나의 상태 — bIsWeaponAvailable · CoolDownTimerHandle · CheckOverlapsDelayTimerHandle
 		struct PadState
 		{
@@ -417,6 +460,12 @@ namespace mo
 		bool TryMelee(Player& player, const wire::Input& input);	// 부르기 전에 melee.NextInput — 대시가 끊을지를 이번 입력 값으로 보려고 ApplyInput 이 앞에서 센다
 		void CountDash(EDashResult result);
 		void StartDash(Player& player, const DashStart& dash, uint32_t seq);	// seq = 켠 입력 번호(S2C_DASH 에 싣는다)
+		void CountGrenade(EGrenadeResult result);
+		// 던진 입력 — 근접 끊기 · 겨눔 선 · 던짐 계산 · 목록에 넣기. 걸음 앞에서 부른다(놓을 자리 = 이번 입력 걸음 전 몸, 짐작 4).
+		// camBack = 카메라에서 입력 시작점까지 시선 방향 거리(와이어 칸은 G-3)
+		void ThrowGrenade(Player& player, const wire::Input& input, double camBack);
+		void TickGrenades();	// 입력 · 받침 뒤 — 산 수류탄마다 한 걸음 · 맞아 터짐 · 신관 터짐
+		void DetonateGrenade(const LiveGrenade& grenade, bool byHit);	// 폭발 — 산 몸마다 선 · 피해 · 처치
 		bool MeleeHandOf(const Player& player, Vec3& out);
 		void RecordRewindSamples();
 		bool GetRewoundBody(const Player& player, uint32_t viewTick, float viewAlpha, BodyPlacement& out, float& outAlpha) const;
@@ -465,6 +514,11 @@ namespace mo
 		std::vector<MeleeTarget> _meleeTargets;	// 근접 판정 때마다 다시 채운다
 		std::vector<PawnCapsule> _pawnScratch;	// 사람끼리 막기 — 입력마다 남의 캡슐을 다시 채운다(할당을 안 하려고 멤버)
 		std::vector<Player*> _meleeOwners;
+		std::vector<LiveGrenade> _grenades;				// 산 수류탄 — 방 크기(kMaxPlayersInRoom)까지. 사람당 하나(쿨다운 301 입력 > 수명 121 틱)
+		uint32_t _nextGrenadeId = 1;
+		std::vector<BodyPlacement> _grenadeBodies;		// 겨눔 선이 보는 남의 부위 몸 — 던질 때마다 다시 채운다
+		std::vector<ProjectileObstacle> _grenadeObstacles;	// 한 수류탄 걸음이 보는 막는 것(산 사람 · 다른 수류탄)
+		std::vector<ProjectileObstacle> _grenadeCapsules;	// 이 틱 걸음 전 수류탄 캡슐 — 서로 막는 것은 걸음 전 자리로(대조 도구와 같은 꼴)
 		bool _animReady = false;
 		std::array<CAnimPoseEvaluator, (size_t)EWeapon::Count> _poseEvaluators;	// 무기 번호 차례 — 묶음마다 하나
 		std::array<CAnimState, (size_t)EWeapon::Count> _animCodecs;			// 받은 상태를 자세 입력으로 푸는 데만 쓴다 — 재생 상태는 안 쓴다

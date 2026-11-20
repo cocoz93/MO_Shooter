@@ -195,6 +195,10 @@ namespace mo
 		bool meleeStarted = false;	// 이 입력에 근접 능력이 켜졌다 — 도는 재장전을 끊는다(같은 표의 근접 끊기)
 		bool dashActive = false;	// 대시가 앞 입력부터 켜져 있다(CDashAbility::BlocksHeldFire) — 사격 · 재장전 입력 · 자동 재장전이 막힌다(D-2)
 		bool dashStarted = false;	// 이 입력에 대시가 켜졌다 — 쥔 사격은 먼저 켜진 뒤 끊기고, 도는 재장전이 끊기고, 재장전 입력 · 자동 재장전은 막힌다
+		// 이 입력에 수류탄을 던졌다(G-2) — 도는 재장전을 끊는다(수류탄의 끊기 태그 · G-0-c 재장전 중 Q 탄창 4 → 4).
+		// 막기는 없다 — 수류탄 능력은 켜진 그 자리에서 끝나(GA_Grenade → K2_EndAbility) 같은 입력에 뒤로 켜지는 재장전 · 사격을 막는 창이 없다.
+		// 같은 입력의 재장전 누름은 수류탄 뒤에 받는다(수류탄이 먼저 — 서버 입력 차례, content-impl-progress.md 미결 22)
+		bool grenadeThrown = false;
 	};
 
 	struct WeaponEvents
@@ -205,6 +209,7 @@ namespace mo
 		bool reloadCancelledByMelee = false;	// 이번 입력에 켜진 근접이 도는 재장전을 끊었다 — 탄이 안 들어간다
 		bool reloadCancelledByDash = false;		// 이번 입력에 켜진 대시가 도는 재장전을 끊었다 — 탄이 안 들어간다(D-0 기록 reload_dash 4 → 4)
 		bool fireCancelledByDash = false;		// 이번 입력에 켜진 대시가 켜져 있던 사격 능력을 끊었다(이 입력에 쏜 발 포함)
+		bool reloadCancelledByGrenade = false;	// 이번 입력에 던진 수류탄이 도는 재장전을 끊었다 — 탄이 안 들어간다(G-0-c)
 		float spreadAngle = 0;			// fired 일 때 — 이번 발의 퍼짐. 이번 발이 더하는 열은 들어가지 않는다(Lyra 는 광선을 쏜 뒤 열을 더한다)
 		float spreadMultiplier = 1;
 	};

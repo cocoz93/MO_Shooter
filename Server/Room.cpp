@@ -34,6 +34,11 @@ namespace mo
 		constexpr double kAimFallbackCrouchDrop = 80.0 - 32.0;
 		constexpr int kAimStaleInputs = 30;				// 부활 뒤 이만큼은 부활 소식을 듣기 전에 보낸 입력일 수 있다(0.5초치)
 
+		// 수류탄(G-2) — B_Grenade 날아감 틀 값 그대로(Projectile.h). 다른 수류탄을 막는 것으로 넣을 때 번호는 사람 번호와 안 겹치게 위 비트를 켠다
+		const ProjectileParams kGrenadeParams{};
+		constexpr uint32_t kGrenadeObstacleIdBit = 0x80000000u;
+		constexpr size_t kGrenadeHitSlots = 16;			// 한 걸음 맞음 칸 — 대조 도구와 같은 수. 넘는 것은 TickProjectile 이 세기만 한다
+
 		bool IsAimInRange(const Vec3& aim, const Vec3& location)
 		{
 			const Vec3 d = aim - location;
@@ -111,6 +116,8 @@ namespace mo
 	}
 
 	static_assert(wire::kWeaponMelee == (uint8_t)EWeapon::Count, "근접 무기 번호 = 무기 셋 뒤");
+	static_assert(wire::kWeaponGrenade == wire::kWeaponMelee + 1, "수류탄 무기 번호 = 근접 다음");
+	static_assert(wire::BUTTON_GRENADE == 0x80, "수류탄 단추 = buttons 의 마지막 비트");
 	static_assert(wire::MELEE_NONE == (uint8_t)EMeleeHit::None && wire::MELEE_SAME_TEAM == (uint8_t)EMeleeHit::SameTeam
 		&& wire::MELEE_BLOCKED == (uint8_t)EMeleeHit::Blocked && wire::MELEE_HIT == (uint8_t)EMeleeHit::Hit, "S2C_MELEE 결과 = EMeleeHit 차례");
 	// 대시 사건 · 몽타주 종류 = 기준 + EDashDir(StartDash · PlayAnimEvents 가 더해서 쓴다)
@@ -262,6 +269,12 @@ namespace mo
 		{
 			if (slot.claimedBy == player->id) slot.claimedBy = 0;
 		}
+		// 산 수류탄을 지운다 — 피해는 던진 사람 능력 시스템으로 들어가는데 나가면 그 선수 상태가 없다(제 판단 · Lyra 로 안 돌려 봄).
+		// 남겨 두면 없는 번호가 공격자 · 도움 기록에 다시 들어간다
+		const uint32_t leaverId = player->id;
+		const size_t grenadesBefore = _grenades.size();
+		_grenades.erase(std::remove_if(_grenades.begin(), _grenades.end(), [leaverId](const LiveGrenade& g) { return g.owner == leaverId; }), _grenades.end());
+		_stats.grenadeOwnerLeft += grenadesBefore - _grenades.size();
 		_players.erase(std::remove_if(_players.begin(), _players.end(), [session](const std::unique_ptr<Player>& p) { return p->session == session; }), _players.end());
 	}
 
@@ -834,6 +847,11 @@ namespace mo
 		{
 			++_stats.inputsWhileDead;
 			if (!serverMade && (input.buttons & wire::BUTTON_DASH) != 0) CountDash(player.dash.TryActivate(input.pitch, input.yaw, true, _phase == wire::EMatchPhase::PostGame).result);
+			if (!serverMade)
+			{
+				player.grenade.NextInput();		// 수류탄 쿨다운은 죽은 동안에도 준다 — Lyra 쿨다운 효과는 선수 상태 능력 시스템에 있다(G-0-b2)
+				if ((input.buttons & wire::BUTTON_GRENADE) != 0) CountGrenade(player.grenade.TryActivate(true, false, _phase == wire::EMatchPhase::PostGame));
+			}
 			return;
 		}
 		++_stats.inputsApplied;
@@ -874,6 +892,15 @@ namespace mo
 				const DashStart dash = player.dash.TryActivate(input.pitch, input.yaw, false, _phase == wire::EMatchPhase::PostGame);
 				CountDash(dash.result);
 				if (dash.result == EDashResult::Started) StartDash(player, dash, input.seq);
+			}
+			// 수류탄(G-2) — 대시 뒤 · 점프 앞. 대시가 켜져 있으면(켠 입력 포함) 막힌다(Ability.Type.Action — 대시 먼저, D102 와 같은 꼴).
+			// 같은 입력의 근접 누름은 이 뒤 TryMelee 가 받는다(수류탄 먼저 — 기록 없음, content-impl-progress.md 미결 22)
+			player.grenade.NextInput();
+			if ((input.buttons & wire::BUTTON_GRENADE) != 0)
+			{
+				const EGrenadeResult grenade = player.grenade.TryActivate(false, player.dash.BlocksPresses(), _phase == wire::EMatchPhase::PostGame);
+				CountGrenade(grenade);
+				if (grenade == EGrenadeResult::Thrown) ThrowGrenade(player, input, 0.0);	// 카메라 거리 칸은 G-3 이 와이어에 더한다 — 그 전엔 0(카메라 = 입력 시작점)
 			}
 		}
 
@@ -1007,6 +1034,7 @@ namespace mo
 		// 대시(D-2) — 앞 입력부터 켜져 있으면 쥔 사격을 뺀다(근접과 같은 까닭). 켜는 입력의 쥔 사격은 무기 순환이 먼저 쏘고 끊는다(Dash.h BlocksHeldFire)
 		weaponInput.dashActive = player.dash.BlocksHeldFire();
 		weaponInput.dashStarted = player.dash.JustStarted();
+		weaponInput.grenadeThrown = player.grenade.JustThrown();	// 도는 재장전만 끊는다 — 막기는 없다(Weapon.h)
 		if (weaponInput.fireHeld && weaponInput.dashActive)
 		{
 			++_stats.dashFiresBlocked;
@@ -1022,6 +1050,7 @@ namespace mo
 		const WeaponEvents events = cycle.Tick(kTickSeconds, weaponInput, motion);
 		if (events.reloadCancelledByMelee) ++_stats.meleeReloadCancels;
 		if (events.reloadCancelledByDash) ++_stats.dashReloadCancels;
+		if (events.reloadCancelledByGrenade) ++_stats.grenadeReloadCancels;
 		if (events.fireCancelledByDash) ++_stats.dashFireCancels;
 		player.aimCamera.Tick(player.ads.active, kTickSeconds);		// 이 입력의 조준으로 카메라를 굴린다 — 다음 입력의 퍼짐이 읽는다
 		if (weaponInput.fireHeld && !events.fired)
@@ -1107,6 +1136,242 @@ namespace mo
 		msg.dir = (uint8_t)dash.dir;
 		SendToAll(&msg, (int)sizeof(msg));
 		++_stats.dashMsgs;
+	}
+
+	// ─── 수류탄(컨텐츠 G-2, GA_Grenade · B_Grenade) ─────────────────
+	// 누름 결과 — 갈래마다 따로 센다(합 = grenadePresses)
+	void CRoom::CountGrenade(EGrenadeResult result)
+	{
+		switch (result)
+		{
+		case EGrenadeResult::NotPressed: return;		// TryActivate 는 안 낸다 — 누른 입력에만 부른다
+		case EGrenadeResult::Thrown: ++_stats.grenadeThrown; break;
+		case EGrenadeResult::OnCooldown: ++_stats.grenadeOnCooldown; break;
+		case EGrenadeResult::WhileDash: ++_stats.grenadeWhileDash; break;
+		case EGrenadeResult::Dead: ++_stats.grenadeDead; break;
+		case EGrenadeResult::PostGame: ++_stats.grenadePostGame; break;
+		}
+		++_stats.grenadePresses;
+	}
+
+	// 켜진 입력 — 근접 끊기 → 겨눔 선 → 던짐 계산 → 목록. 걸음 앞이라 몸 자리 = 이번 입력 걸음 전, 몸 요 = 앞 입력 요(짐작 4 — G-0-a 20/20).
+	// 카메라 = 입력 시작점에서 시선 방향으로 camBack 만큼 뒤(플랜 101줄 — 시작점 = 카메라 + ((몸 − 카메라) · 방향) × 방향).
+	// 시선 방향 = 이번 입력 회전 — 와이어엔 회전이 하나고 사격도 그 회전을 시작점과 짝지어 쓴다. Lyra 카메라 회전은 앞 프레임 끝 값이라 도는 중엔 다를 수 있다(D112)
+	void CRoom::ThrowGrenade(Player& player, const wire::Input& input, double camBack)
+	{
+		// 던짐 몽타주가 근접 몽타주를 그 프레임에 바꿔 껴 근접 능력이 끝난다(G-0-c — 켜진 지 6프레임에 끝남, 안 끊기면 33).
+		// 능력이 끝나며 밀기 작업도 지운다 — 대시 끊기와 같은 길(StartDash). 근접 피해는 켜진 입력에 이미 들어갔다
+		if (player.melee.Cut())
+		{
+			++_stats.grenadeMeleeCancels;
+			if (player.meleePushId != 0)
+			{
+				_moveSim.RemoveRootForce(player.move, player.meleePushId);
+				++_stats.grenadeMeleePushRemoved;
+			}
+			player.meleePushId = 0;
+		}
+
+		const Vec3 bodyBefore = player.move.location;
+		const Vec3 spawn = GrenadeSpawnLocation(bodyBefore, player.yaw);
+		Rotator control;
+		control.pitch = input.pitch;
+		control.yaw = input.yaw;
+		Vec3 aim(input.aimX, input.aimY, input.aimZ);
+		if (!IsAimInRange(aim, bodyBefore))
+		{
+			aim = bodyBefore + Vec3(0, 0, player.move.crouched ? kAimFallbackHeight - kAimFallbackCrouchDrop : kAimFallbackHeight);	// 사격과 같은 눈높이(ResolveAimStart)
+			++_stats.grenadeAimReplaced;
+		}
+		const Vec3 camera = aim - AimDirection(input.yaw, input.pitch) * camBack;
+		Vec3 traceStart, traceEnd;
+		GrenadeTraceSegment(camera, control, traceStart, traceEnd);
+
+		// 겨눔 선이 보는 남 — 되감기 없이 「지금」(플랜 206줄 — Lyra 서버도 지금 자리로 쏜다). 지금 = 마지막으로 적은 틱(_tick − 1)의 자리 · 자세 —
+		// 이 틱에 먼저 걸은 사람 · 아직 안 걸은 사람이 섞이지 않게 방 사람 차례와 무관한 한 시점으로 둔다(제 판단, D112)
+		_grenadeBodies.clear();
+		const uint32_t nowTick = _tick - 1;
+		for (const std::unique_ptr<Player>& other : _players)
+		{
+			if (other.get() == &player || other->dead) continue;
+			BodyPlacement body;
+			float poseAlpha = 0.f;
+			if (!GetRewoundBody(*other, nowTick, 0.f, body, poseAlpha)) continue;	// 그 틱 기록이 없다(이 틱에 부활) — 사격 · 근접과 같이 뺀다
+			if (_animReady)
+			{
+				body.pose = GetPoseAt(*other, nowTick, 0.f, false);
+				body.shapes = _anim.clips->Bodies().data();
+				body.shapeCount = (uint32_t)_anim.clips->Bodies().size();
+			}
+			_grenadeBodies.push_back(body);
+		}
+		const GrenadeAimHit aimHit = TraceGrenadeAim(_map, traceStart, traceEnd, _grenadeBodies.data(), _grenadeBodies.size(), player.id);
+		const GrenadeThrow thrown = ComputeGrenadeThrow(spawn, control, traceEnd, aimHit, kGrenadeParams);
+		switch (thrown.branch)
+		{
+		case EGrenadeAimBranch::Control:
+			if (aimHit.hit) ++_stats.grenadeAimNear45;
+			else ++_stats.grenadeAimNoHit;
+			break;
+		case EGrenadeAimBranch::LookAtHit: ++_stats.grenadeAimLookAt; break;
+		case EGrenadeAimBranch::LookAtEnd: ++_stats.grenadeAimLookAtEnd; break;
+		}
+
+		if (_grenades.size() >= (size_t)wire::kMaxPlayersInRoom)
+		{
+			++_stats.grenadeListFull;		// 쿨다운은 이미 걸렸다 — Lyra 는 생성이 실패해도 능력은 끝난다
+			return;
+		}
+		LiveGrenade grenade;
+		grenade.id = _nextGrenadeId++;
+		grenade.owner = player.id;
+		grenade.team = player.team;
+		grenade.seq = input.seq;
+		grenade.state.location = thrown.location;
+		grenade.state.rotation = thrown.rotation;
+		grenade.state.velocity = thrown.velocity;
+		_grenades.push_back(grenade);
+		if (_allowDebug)
+		{
+			std::printf("GRENADEEV tick=%u room=%u kind=throw id=%u player=%u seq=%u loc=%.4f,%.4f,%.4f rot=%.5f,%.5f vel=%.4f,%.4f,%.4f branch=%u aimHit=%d aimDist=%.4f\n",
+				_tick, _roomId, grenade.id, player.id, input.seq, thrown.location.x, thrown.location.y, thrown.location.z, thrown.rotation.pitch, thrown.rotation.yaw,
+				thrown.velocity.x, thrown.velocity.y, thrown.velocity.z, (unsigned)thrown.branch, aimHit.hit ? 1 : 0, aimHit.distance);
+		}
+	}
+
+	// 산 수류탄마다 한 걸음 — 입력 · 받침 뒤(Lyra 「이동 뒤 액터 틱」과 같은 차례, 플랜 94줄). 던진 틱에도 걷는다(짐작 5 — 생긴 프레임에 한 걸음).
+	// 막는 것 = 산 사람 캡슐(이 틱 걸음 뒤 자리) · 다른 수류탄(이 틱 걸음 전 자리). 다른 팀 사람에 맞으면 그 걸음에서 터진다(B_Grenade ReceiveHit → Detonate)
+	void CRoom::TickGrenades()
+	{
+		if (_grenades.empty()) return;
+		_grenadeCapsules.clear();
+		for (const LiveGrenade& g : _grenades)
+		{
+			ProjectileObstacle o;
+			o.center = g.state.location + RotateVector(g.state.rotation, kGrenadeParams.capsuleOffset);
+			o.axis = RotateVector(g.state.rotation, Vec3(0.0, 0.0, 1.0));
+			o.radius = kGrenadeParams.capsuleRadius;
+			o.halfHeight = kGrenadeParams.capsuleHalfHeight;
+			o.id = kGrenadeObstacleIdBit | g.id;
+			o.kind = EProjectileHitKind::Projectile;
+			_grenadeCapsules.push_back(o);
+		}
+
+		size_t index = 0;
+		while (index < _grenades.size())
+		{
+			LiveGrenade& grenade = _grenades[index];
+			_grenadeObstacles.clear();
+			for (const std::unique_ptr<Player>& p : _players)
+			{
+				if (p->dead) continue;		// 죽으면 충돌이 꺼진다(LyraCharacter.cpp:350)
+				ProjectileObstacle o;
+				o.center = p->move.location;
+				o.radius = _params.capsuleRadius;
+				o.halfHeight = _moveSim.HalfHeightOf(p->move);
+				o.id = p->id;
+				o.kind = EProjectileHitKind::Pawn;
+				o.owner = p->id == grenade.owner;		// 생긴 뒤 0.16초 서로 무시 — 날아감이 launchCleanedUp 으로 가른다
+				o.detonateOnHit = !o.owner && p->team != grenade.team;	// 같은 팀 · 자기 몸은 튕긴다
+				_grenadeObstacles.push_back(o);
+			}
+			for (const ProjectileObstacle& other : _grenadeCapsules)
+			{
+				if (other.id != (kGrenadeObstacleIdBit | grenade.id)) _grenadeObstacles.push_back(other);
+			}
+
+			ProjectileHit hits[kGrenadeHitSlots];
+			const size_t hitCount = TickProjectile(_map, kGrenadeParams, grenade.state, kTickSeconds, _grenadeObstacles.data(), _grenadeObstacles.size(), hits, kGrenadeHitSlots);
+			for (size_t i = 0; i < std::min(hitCount, kGrenadeHitSlots); ++i)
+			{
+				if (hits[i].bounced) ++_stats.grenadeBounces;
+			}
+			if (grenade.state.stopped && !grenade.stopCounted)
+			{
+				grenade.stopCounted = true;
+				++_stats.grenadeStops;
+			}
+
+			// 나이 = 걸은 수 − 1(생긴 틱 걸음이 나이 0). 맞아 터짐이 먼저 — 그 걸음에서 이미 멈췄다
+			const bool byHit = grenade.state.detonated;
+			if (byHit || grenade.state.frames > kGrenadeFuseFrames)
+			{
+				const LiveGrenade done = grenade;
+				_grenades.erase(_grenades.begin() + (std::ptrdiff_t)index);		// 폭발이 처치 · 경기 끝을 불러도 목록은 안 만진다 — 먼저 뺀다
+				DetonateGrenade(done, byHit);
+				continue;
+			}
+			++index;
+		}
+	}
+
+	// 폭발(B_Grenade Detonate, 서버 몫) — 수류탄 자리에서 산 몸마다 선 · 등급 · 곡선 피해(Shared/Grenade, G-2-b 대조).
+	// 피해는 총알 길과 같은 꼴(체력 → 도움 기록 → S2C_DAMAGE 무기 4 → 0 이면 처치). 던진 사람이 죽어 있어도 들어간다(G-0-b2 실측 — 짐작 3 틀림).
+	// 몸 차례 = 방 사람 차례. 앞 몸이 이 폭발로 죽으면 뒤 몸 차례엔 이미 죽은 몸이라 뺀다 — 처치로 경기가 끝나면 뒤 몸은 무적이다(IsImmune)
+	void CRoom::DetonateGrenade(const LiveGrenade& grenade, bool byHit)
+	{
+		if (byHit) ++_stats.grenadeDetonateHit;
+		else ++_stats.grenadeDetonateTimer;
+		const Vec3 at = grenade.state.location;
+		if (_allowDebug)
+		{
+			std::printf("GRENADEEV tick=%u room=%u kind=%s id=%u player=%u age=%d loc=%.4f,%.4f,%.4f\n",
+				_tick, _roomId, byHit ? "hit" : "timer", grenade.id, grenade.owner, grenade.state.frames - 1, at.x, at.y, at.z);
+		}
+		Player* const owner = FindById(grenade.owner);
+		for (const std::unique_ptr<Player>& p : _players)
+		{
+			Player& target = *p;
+			if (target.dead) continue;		// 겹침은 사람 몸(Pawn)만 — 죽은 몸은 충돌이 꺼져 안 걸린다
+			GrenadeBlastTarget body;
+			body.center = target.move.location;
+			body.radius = _params.capsuleRadius;
+			body.halfHeight = _moveSim.HalfHeightOf(target.move);
+			const GrenadeBlastHit hit = TraceGrenadeBlast(_map, at, body);
+			if (hit.bodyDistance >= kGrenadeBlastRadius) continue;		// 곡선(1) = 0 — 겹침 밖과 피해가 같다(D111)
+			++_stats.grenadeTargets;
+			if (hit.blocked)
+			{
+				++_stats.grenadeWallHits;		// 벽이 먼저 — 피해 0(D107)
+				continue;
+			}
+			const bool self = target.id == grenade.owner;
+			const bool sameTeam = target.team == grenade.team;
+			const bool immune = IsImmune(target);
+			if (!GrenadeDamageApplies(true, self, sameTeam, immune))
+			{
+				if (immune) ++_stats.grenadeImmune;
+				else ++_stats.grenadeSameTeam;
+				continue;
+			}
+			const float amount = (float)hit.damage;
+			if (amount <= 0.f)
+			{
+				++_stats.grenadeZeroDamage;		// LyraHealthSet 은 0보다 큰 피해만 알린다(LyraHealthSet.cpp:131)
+				continue;
+			}
+			target.hp = std::max(target.hp - amount, 0.f);
+			NoteDamage(target, grenade.owner);
+			wire::Damage damage = wire::Damage();
+			damage.h.size = (uint16_t)sizeof(wire::Damage);
+			damage.h.type = (uint16_t)wire::Msg::S2C_DAMAGE;
+			damage.tick = _tick;
+			damage.attacker = grenade.owner;
+			damage.target = target.id;
+			damage.amount = amount;
+			damage.hpAfter = target.hp;
+			damage.weapon = wire::kWeaponGrenade;
+			damage.weakSpot = 0;
+			SendToAll(&damage, (int)sizeof(damage));
+			++_stats.damageEvents;
+			++_stats.grenadeDamageEvents;
+			if (self) ++_stats.grenadeSelfDamage;
+			if (target.hp <= 0.f)
+			{
+				++_stats.grenadeKills;
+				KillPlayer(target, owner, wire::kWeaponGrenade, false);
+			}
+		}
 	}
 
 	// 근접(GA_Melee, 컨텐츠 E-3) — 켜지는 입력에 판정 · 피해 · 밀기 · 몽타주를 다 한다. 걸음 앞에서 불러 밀기가 이 입력 걸음부터 먹는다(E-2-1 · D73).
@@ -1401,12 +1666,16 @@ namespace mo
 		}
 		if (attacker) ++_stats.kills;
 
-		// AssistProcessor::OnEliminationMessage — 피해를 준 사람 중 처치자를 뺀 전원이 +1, 문턱 없음. 떨어져 죽으면 처치자가 없어 전원이 받는다.
+		// AssistProcessor::OnEliminationMessage — 피해를 준 사람 중 처치자를 뺀 전원이 +1, 문턱 없음. 떨어져 죽으면 처치자가 없어 자기 말고 전원이 받는다.
 		// 그 사람 기록은 지운다(AssistProcessor.cpp:40-71)
+		// 빼는 쪽 = 처치 소식의 시킨 쪽(AssistPS != Payload.Instigator, :51). 처치자가 없는 자기 파괴(떨어짐)면 자기 선수 상태다 —
+		// DamageSelfDestruct 가 MakeEffectContext 로 효과를 걸어 원래 시킨 쪽 = 자기 능력 시스템 주인(LyraHealthComponent.cpp:290, LyraHealthSet.cpp:125).
+		// 자기 수류탄 피해가 기록에 들어간 뒤 떨어져 죽어도 자기 도움은 없다(원본 기준 · Lyra 로 안 돌려 봄)
+		const uint32_t eliminationInstigator = attacker ? attacker->id : target.id;
 		wire::Kill kill = wire::Kill();
 		for (int i = 0; i < target.damagedByCount; ++i)
 		{
-			if (attacker && target.damagedBy[i] == attacker->id) continue;
+			if (target.damagedBy[i] == eliminationInstigator) continue;
 			Player* const assister = FindById(target.damagedBy[i]);
 			if (!assister) continue;
 			++assister->assists;
@@ -1437,14 +1706,16 @@ namespace mo
 		}
 	}
 
-	// AssistProcessor::OnDamageMessage — 때린 사람별로 쌓는다. 자기 피해는 뺀다(AssistProcessor.cpp:25). 피해량은 도움 수에 안 쓰이므로 번호만 든다
+	// AssistProcessor::OnDamageMessage — 때린 사람별로 쌓는다. 피해량은 도움 수에 안 쓰이므로 번호만 든다.
+	// 자기 피해도 쌓는다 — 그 줄(AssistProcessor.cpp:25)은 시킨 쪽 ≠ 맞은 쪽을 보지만 피해 소식의 시킨 쪽은 몸(폰), 맞은 쪽은 선수 상태라 늘 다르다
+	// (LyraHealthSet.cpp:135,137). G-0-b2 실측 — 자기 수류탄 93.114 뒤 상대에게 죽자 내 도움 +1(D98 「자기 도움 Lyra 그대로」). 자기 처치면 KillPlayer 가 처치자로 뺀다.
+	// 자기 피해를 내는 것은 수류탄뿐이다(총알 · 근접은 자기 몸을 안 본다)
 	void CRoom::NoteDamage(Player& target, uint32_t attackerId)
 	{
-		if (attackerId == target.id) return;
 		const uint32_t* const begin = target.damagedBy.data();
 		const uint32_t* const end = begin + target.damagedByCount;
 		if (std::find(begin, end, attackerId) != end) return;
-		if (target.damagedByCount < (int)target.damagedBy.size()) target.damagedBy[target.damagedByCount++] = attackerId;	// 나간 사람은 RemovePlayer 가 빼므로 방 인원 − 1 을 넘지 않는다
+		if (target.damagedByCount < (int)target.damagedBy.size()) target.damagedBy[target.damagedByCount++] = attackerId;	// 나간 사람은 RemovePlayer 가 빼므로 방 인원(자기 피해 포함, 칸 수 = kMaxPlayersInRoom)을 넘지 않는다
 	}
 
 	// 틱마다 입력을 모두 적용한 뒤, 사격 판정 앞에서 적는다 — 상태 패킷으로 나가는 자리와 같은 틱 값이어야 화면 자리와 맞는다
@@ -2027,6 +2298,7 @@ namespace mo
 			TickPlayerInputs(*player);
 		}
 		TickPads();	// Lyra 도 이동(겹침 시작 집기) 뒤에 타이머(다시 켜짐 · 다시 검사)를 돌린다
+		TickGrenades();	// 입력 뒤 · 애니 앞 — 던진 틱 걸음 · 터짐 피해가 이 틱 상태 · 처치에 든다(플랜 94줄)
 		if (_allowDebug) LogLoadouts();		// 부활 · 입력 · 받침이 다 돈 뒤 — 이 틱에 바뀐 가방을 한 줄로
 		UpdateAnimStates();
 		RecordRewindSamples();

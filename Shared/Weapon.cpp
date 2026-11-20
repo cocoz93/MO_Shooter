@@ -674,6 +674,14 @@ namespace mo
 			ev.fired = true;
 		}
 
+		// 수류탄을 던진 입력 — 도는 재장전을 끊는다(수류탄 끊기 태그). 쥔 사격 뒤 — Lyra 는 쥔 입력 고리를 먼저 돌아
+		// 같은 프레임 Q + 사격은 사격이 먼저다(G-0-c). 그 발이 이미 재장전을 끊었으면 수류탄 몫으로 안 센다. 근접과 같은 입력이면 근접이 먼저 센다
+		if (input.grenadeThrown && _reloadLeft > 0)
+		{
+			_reloadLeft = 0;
+			ev.reloadCancelledByGrenade = true;
+		}
+
 		// 대시가 켜지는 입력 — 켜져 있던 사격(방금 쏜 발 포함)과 도는 재장전을 끊는다(대시의 끊기 태그 Ability.Type.Action). 타이머 앞이라 끊긴 재장전은 탄이 안 들어간다
 		const bool dashBlocks = input.dashActive || input.dashStarted;
 		if (input.dashStarted)

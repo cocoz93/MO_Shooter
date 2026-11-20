@@ -53,6 +53,7 @@ namespace mo
 			BUTTON_CROUCH = 1 << 4,	// 누른 입력 하나에만 켠다 — 앉기 키 한 번 = ALyraCharacter::ToggleCrouch 한 번(D-5)
 			BUTTON_MELEE = 1 << 5,	// Lyra 근접 입력이 눌림을 낸 입력에 켠다 — 근접 능력이 꺼져 있으면 그 입력에 켜지고, 켜진 동안의 누름은 버린다(E-3)
 			BUTTON_DASH = 1 << 6,	// Lyra 대시 입력이 눌림을 낸 입력에 켠다 — 켜짐 · 쿨다운 중이면 버린다(서버 규칙 D-2). 보내는 쪽 = 봇 --dash(D-3) · 다리 Shift(D-5)
+			BUTTON_GRENADE = 1 << 7,	// Q 를 누른 입력 하나에만 켠다 — 쿨다운 · 대시 중이면 버린다(서버 규칙 G-2. 보내는 쪽 · 판 번호 올림 · 카메라 거리 칸은 G-3)
 		};
 
 		// S2C_PICKUP 의 까닭 — 화면 효과를 낼지 다리가 이것으로 가른다
@@ -83,6 +84,7 @@ namespace mo
 
 		// 피해 · 처치 소식의 무기 번호 — 0~2 = EWeapon, 이 값 = 근접(무기 셋 뒤 번호, 컨텐츠 E-3). EWeapon::Count 와 같은지는 서버가 검사한다
 		constexpr uint8_t kWeaponMelee = 3;
+		constexpr uint8_t kWeaponGrenade = 4;	// 수류탄 폭발(컨텐츠 G-2) — 근접 다음 번호. 서버가 검사한다. 받는 쪽(봇 · 다리) 셈은 G-3 · G-5
 
 		// S2C_MELEE 의 결과 — Shared EMeleeHit 와 같은 차례(서버가 검사한다)
 		enum EMeleeResult : uint8_t

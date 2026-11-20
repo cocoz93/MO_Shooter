@@ -737,14 +737,16 @@ namespace
 			if (kill.attacker != 0) ++_killTally[kill.attacker];
 			++_deathTally[kill.target];
 			_deadSince[kill.target] = kill.tick;
-			// 도움 — ShooterCore AssistProcessor 규칙을 서버와 따로 적는다. 때린 사람 중 처치자를 뺀 전원 +1, 그 사람 기록은 지운다
+			// 도움 — ShooterCore AssistProcessor 규칙을 서버와 따로 적는다. 때린 사람 중 처치자를 뺀 전원 +1, 그 사람 기록은 지운다.
+			// 처치자가 없으면(떨어짐) 죽은 사람 자신을 뺀다 — 자기 파괴의 처치 소식 시킨 쪽 = 자기 선수 상태(원본 기준, D112)
 			std::vector<uint32_t> expect;
+			const uint32_t instigator = kill.attacker != 0 ? kill.attacker : kill.target;
 			const auto by = _damagedBy.find(kill.target);
 			if (by != _damagedBy.end())
 			{
 				for (const uint32_t attacker : by->second)
 				{
-					if (attacker != kill.attacker) expect.push_back(attacker);
+					if (attacker != instigator) expect.push_back(attacker);
 				}
 				_damagedBy.erase(by);
 			}
@@ -766,8 +768,9 @@ namespace
 			if (_playTick == 0 || damage.tick < _playTick || (_postTick != 0 && damage.tick > _postTick)) ++_checks.damageOutsidePlaying;
 			const auto spawned = _spawnTick.find(damage.target);
 			if (spawned != _spawnTick.end() && damage.tick < spawned->second + SecondsToTicks(_rules.spawnImmunitySeconds)) ++_checks.damageWhileImmune;
-			// 도움 셈 — 0보다 큰 피해만 알림이 오고(LyraHealthSet), 자기 피해는 뺀다(AssistProcessor). 받은 차례 그대로 든다
-			if (damage.amount > 0 && damage.attacker != damage.target)
+			// 도움 셈 — 0보다 큰 피해만 알림이 오고(LyraHealthSet), 받은 차례 그대로 든다.
+			// 자기 피해(수류탄)도 든다 — AssistProcessor 의 「시킨 쪽 ≠ 맞은 쪽」은 몸 · 선수 상태라 늘 다르다(G-0-b2 실측 · 서버 NoteDamage 와 같은 규칙, D112)
+			if (damage.amount > 0)
 			{
 				std::vector<uint32_t>& by = _damagedBy[damage.target];
 				if (std::find(by.begin(), by.end(), damage.attacker) == by.end()) by.push_back(damage.attacker);
