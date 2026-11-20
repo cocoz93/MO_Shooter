@@ -32,6 +32,7 @@ namespace mo
 			: _owner(owner)
 			, _id(id)
 			, _room(*settings.map, *settings.params, settings.rules, settings.seed, settings.debug, *this, id, settings.rewind, settings.anim, settings.pickups)
+			, _lockstepPlayers(settings.lockstepPlayers)
 		{
 			if (!settings.recordPath.empty()) _record = std::fopen(settings.recordPath.c_str(), "wb");
 		}
@@ -105,6 +106,7 @@ namespace mo
 		// 반환 = 이 방을 닫을 때가 됐나
 		bool Tick()
 		{
+			if (!LockstepReady()) return false;
 			_room.Tick();
 
 			const wire::EMatchPhase phase = _room.GetPhase();
@@ -139,10 +141,35 @@ namespace mo
 			summary->playersPeak = _playersPeak;
 			summary->finished = _room.GetPhase() == wire::EMatchPhase::Finished;
 			if (summary->finished) summary->result = _room.GetResult().packet;
+			summary->lockstepWaits = _lockstepWaits;
+			summary->lockstepTimeouts = _lockstepTimeouts;
 			return summary;
 		}
 
 	private:
+		// 기다림 판(RoomSettings::lockstepPlayers) — 이 게임 스레드 틱에 방 틱을 돌려도 되나. 끝난 방 · 끈 판은 늘 돈다.
+		// 봇이 받은 상태 틱이 늘 「직전 입력을 적용한 틱」이 되려면 서버가 그 다음 입력 없이 앞서 가면 안 된다.
+		// 한도(시작 10초 · 틱마다 1초)는 봇이 멎어도 판이 안 멈추게 — 걸리면 lockstepTimeouts 로 세고 판정이 FAIL 로 본다
+		bool LockstepReady()
+		{
+			if (_lockstepPlayers <= 0 || _room.GetPhase() == wire::EMatchPhase::Finished) return true;
+			const bool seated = _lockstepStarted || (int)_room.GetPlayerCount() >= _lockstepPlayers;
+			if (seated && _room.EveryPlayerHasInput())
+			{
+				_lockstepStarted = true;
+				_lockstepWaited = 0;
+				return true;
+			}
+			++_lockstepWaits;
+			if (++_lockstepWaited < (_lockstepStarted ? kLockstepTickLimit : kLockstepStartLimit)) return false;
+			++_lockstepTimeouts;
+			_lockstepStarted = true;
+			_lockstepWaited = 0;
+			return true;
+		}
+		static constexpr int kLockstepStartLimit = 10 * wire::kTickRate;
+		static constexpr int kLockstepTickLimit = wire::kTickRate;
+
 		void WriteRecord(const std::string& text)
 		{
 			if (!_record) return;
@@ -173,6 +200,11 @@ namespace mo
 		bool _used = false;
 		bool _closedToNew = false;
 		bool _resultWritten = false;
+		const int _lockstepPlayers;
+		bool _lockstepStarted = false;
+		int _lockstepWaited = 0;
+		uint64_t _lockstepWaits = 0;
+		uint64_t _lockstepTimeouts = 0;
 	};
 
 	CGameThread::CGameThread(int index, NetIoModel& net)

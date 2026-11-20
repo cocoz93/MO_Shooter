@@ -293,6 +293,13 @@ namespace mo
 		void RemovePlayer(int64_t session);
 		bool HasPlayer(int64_t session) const { return Find(session) != nullptr; }
 		size_t GetPlayerCount() const { return _players.size(); }
+		// 기다림 판(시험 전용 --testLockstep) — 모든 사람의 큐에 다음 입력이 있나
+		bool EveryPlayerHasInput() const
+		{
+			for (const std::unique_ptr<Player>& player : _players)
+				if (player->queueCount == 0) return false;
+			return true;
+		}
 
 		void OnInput(int64_t session, const wire::Input& input);
 		void OnDebugPlace(int64_t session, const wire::DebugPlace& place);

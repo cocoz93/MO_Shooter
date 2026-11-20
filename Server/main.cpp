@@ -61,6 +61,7 @@ namespace
 		double durationSeconds = 0;
 		bool exitWhenEmpty = false;
 		bool debug = false;
+		int testLockstep = 0;		// --testLockstep=N — 시험 전용 기다림 판(RoomSettings::lockstepPlayers)
 		int gameThreads = 1;
 		int maxSessions = 64;
 		double measureFromSeconds = 0;
@@ -96,6 +97,7 @@ namespace
 			else if (value("--matchSeconds=", v)) out.rules.bigMatchSeconds = out.rules.smallMatchSeconds = std::atof(v.c_str());
 			else if (value("--targetScore=", v)) out.rules.bigMatchTargetScore = out.rules.smallMatchTargetScore = std::atoi(v.c_str());
 			else if (value("--fallKillZ=", v)) out.rules.fallKillZ = std::atof(v.c_str());	// 재생 시험용 — Lyra 기록은 낙사 높이 아래까지 떨어진다(-27952)
+			else if (value("--testLockstep=", v)) out.testLockstep = std::atoi(v.c_str());
 			else if (value("--gameThreads=", v)) out.gameThreads = std::atoi(v.c_str());
 			else if (value("--maxSessions=", v)) out.maxSessions = std::atoi(v.c_str());
 			else if (value("--measureFrom=", v)) out.measureFromSeconds = std::atof(v.c_str());
@@ -346,6 +348,7 @@ namespace
 			settings.rules = _args.rules;
 			settings.seed = _args.seed + (id - 1);		// 방마다 시작 자리 난수를 다르게 둔다. 탄 방향은 입력 번호로 정해져 이 값을 안 쓴다
 			settings.debug = _args.debug;
+			settings.lockstepPlayers = _args.testLockstep;
 			settings.rewind = _args.rewind;
 			settings.anim = _args.anim;
 			settings.pickups = _args.pickups;
@@ -637,10 +640,13 @@ int main(int argc, char** argv)
 	mo::RoomStats room;
 	uint64_t badPackets = server.GetBadPackets();
 	const mo::RoomSummary* firstFinished = nullptr;
+	uint64_t lockstepWaits = 0, lockstepTimeouts = 0;
 	for (const std::shared_ptr<mo::RoomSummary>& summary : summaries)
 	{
 		mo::AddRoomStats(room, summary->stats);
 		badPackets += summary->badPackets;
+		lockstepWaits += summary->lockstepWaits;
+		lockstepTimeouts += summary->lockstepTimeouts;
 		if (summary->finished && !firstFinished) firstFinished = summary.get();
 		std::printf("ROOM id=%u thread=%d playersPeak=%zu ticks=%llu finished=%d score=%u:%u kills=%llu shots=%llu badPackets=%llu\n",
 			summary->id, summary->thread, summary->playersPeak, (unsigned long long)summary->stats.ticks, summary->finished ? 1 : 0, summary->result.teamScoreA, summary->result.teamScoreB,
@@ -704,6 +710,7 @@ int main(int argc, char** argv)
 	std::printf("SERVER inputs received=%llu applied=%llu whileDead=%llu droppedFull=%llu droppedOldSeq=%llu starvedTicks=%llu idleMoves=%llu debugPlaces=%llu statesSent=%llu\n",
 		(unsigned long long)room.inputsReceived, (unsigned long long)room.inputsApplied, (unsigned long long)room.inputsWhileDead, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq,
 		(unsigned long long)room.starvedTicks, (unsigned long long)room.idleMoves, (unsigned long long)room.debugPlaces, (unsigned long long)room.statesSent);
+	std::printf("SERVER lockstep players=%d waits=%llu timeouts=%llu\n", args.testLockstep, (unsigned long long)lockstepWaits, (unsigned long long)lockstepTimeouts);
 	std::printf("SERVER shots=%llu firesBlockedPostGame=%llu bullets=%llu hitMap=%llu hitBody=%llu hitImmune=%llu missed=%llu damageEvents=%llu\n",
 		(unsigned long long)room.shots, (unsigned long long)room.firesBlockedPostGame, (unsigned long long)room.bullets, (unsigned long long)room.bulletsHitMap, (unsigned long long)room.bulletsHitBody, (unsigned long long)room.bulletsHitImmune, (unsigned long long)room.bulletsMissed, (unsigned long long)room.damageEvents);
 	std::printf("SERVER ads inputs=%llu shotsAimed=%llu (applied=%llu shots=%llu)\n",

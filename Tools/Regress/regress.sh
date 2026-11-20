@@ -93,9 +93,11 @@ run_bots() {
 	[ "$BREAK" = 1 ] && break_arg="--breakMirror"
 	# 받침을 켠다(컨텐츠 B) — 기록은 처치 · 결과 줄뿐이라 받침이 있어도 서버 ↔ 봇 바이트 비교는 그대로다
 	# 사람끼리 막기는 끈다(시험 전용 --testNoPawnBlock, D83) — 봇끼리 부딪히면 남 자리를 늦게 알아 위치가 갈려, 서버 ↔ 같은 코드 위치 차이 0 을 못 본다. 막기 판은 run_block
-	"$SRV" "--map=$MAP" --port=7953 --exitWhenEmpty "--record=$OUT_W/bots_srv.csv" --warmup=2 --matchSeconds=40 --seed=21 "--pads=$PADS" --testNoPawnBlock > "$OUT/bots_srv.log" 2>&1 &
+	# 기다림 판(시험 전용 --testLockstep, L-0-c · D121) — 서버는 봇 10명의 다음 입력이 다 와야 틱을 넘기고, 봇은 직전 입력을 적용한 상태를 받은 뒤 다음 입력을 만든다.
+	# 벽시계로 돌면 상태가 막 도착하는 중에 만든 입력 · 접속 차례가 판마다 달라 같은 빌드도 판이 갈렸다(받침갈래가 가끔 회복 0 으로 FAIL — 미결 6). 이 판은 같은 빌드면 기록이 바이트째 같다
+	"$SRV" "--map=$MAP" --port=7953 --exitWhenEmpty "--record=$OUT_W/bots_srv.csv" --warmup=2 --matchSeconds=40 --seed=21 "--pads=$PADS" --testNoPawnBlock --testLockstep=10 > "$OUT/bots_srv.log" 2>&1 &
 	local spid=$!
-	"$BOT" "--map=$MAP" --port=7953 "--record=$OUT_W/bots_bot.csv" --seed=21 --testNoPawnBlock $break_arg > "$OUT/bots_bot.log" 2>&1
+	"$BOT" "--map=$MAP" --port=7953 "--record=$OUT_W/bots_bot.csv" --seed=21 --testNoPawnBlock --testLockstep $break_arg > "$OUT/bots_bot.log" 2>&1
 	local brc=$?
 	wait $spid
 	local src=$? ok=1
@@ -103,6 +105,15 @@ run_bots() {
 	cmp -s "$OUT/bots_srv.csv" "$OUT/bots_bot.csv" || ok=0
 	grep -q '^RESULT PASS' "$OUT/bots_bot.log" || ok=0
 	verdict 봇한판 $ok "봇 rc=$brc 서버 rc=$src $(grep -E 'BOT 서버' "$OUT/bots_bot.log" | tail -1 | cut -c1-110)"
+
+	# 기다림 판이 실제로 기다렸나 — 서버 · 봇 모두 한도에 안 걸렸고(걸리면 덜 온 채로 돈 틱이 있다) 서버에 입력이 늦은 틱이 없다
+	local sl bl si
+	sl="$(grep -a '^SERVER lockstep' "$OUT/bots_srv.log")"
+	bl="$(grep -a '^BOT lockstep' "$OUT/bots_bot.log")"
+	si="$(grep -a '^SERVER inputs' "$OUT/bots_srv.log")"
+	ok=1
+	[ "$(num "$sl" players)" = 10 ] && [ "$(num "$sl" timeouts)" = 0 ] && [ "$(num "$bl" on)" = 1 ] && [ "$(num "$bl" timeouts)" = 0 ] && [ "$(num "$si" starvedTicks)" = 0 ] || ok=0
+	verdict 기다림판 $ok "서버 기다림=$(num "$sl" waits) 한도=$(num "$sl" timeouts) 봇 보냄=$(num "$bl" sends) 한도=$(num "$bl" timeouts) 입력 늦은 틱=$(num "$si" starvedTicks)"
 
 	# 시점을 안 보내는 봇은 전부 시점 없음 갈래여야 한다 — 다른 갈래가 늘면 기존 판정이 바뀐 것
 	local rew shots noview

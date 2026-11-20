@@ -156,6 +156,10 @@ namespace
 		std::string script;				// 주면 두뇌 대신 정해진 경로를 달린다
 		double scriptHoldSeconds = 4.5;	// 자리에 선 뒤 경로 시작까지 — 촬영 쪽 대기 4초보다 길고, 첫 서 있기 2초를 더해도 제자리 장난 동작(서 있은 지 7.35초)이 나오기 전에 출발해야 합격 영상과 같다. 권총은 6.35초라 촬영 스크립트(record_remote_shot.ps1)가 4.25초를 준다
 		uint8_t scriptWeapon = (uint8_t)EWeapon::Rifle;	// --scriptWeapon=pistol|rifle|shotgun — 경로 중 드는 무기(무기별 자세 촬영, 9단계)
+		std::string traceInputsPath;	// --traceInputs=파일 — g_traceInputs
+		// --testLockstep(L-0-c) — 서버 --testLockstep=N 과 같이 준다. 벽시계로 보내지 않고, 직전 입력을 적용한 틱의 상태를 받은 뒤에 다음 입력을 만든다.
+		// 서버는 모든 사람의 다음 입력이 와야 틱을 넘기므로, 입력을 만들 때 가진 최신 상태가 늘 같은 틱이다 — 같은 빌드면 판마다 같은 판
+		bool lockstep = false;
 	};
 
 	// 경로 안의 사건 — MOBAnimCompareSubsystem.cpp EACEvent 와 같은 뜻. Fire = 방아쇠를 kScriptFireTapTicks 동안 · Hold/Release = 당긴 채 두기/놓기
@@ -303,6 +307,8 @@ namespace
 
 	// 대조군 — 서버 숫자가 멀쩡한데 이 값이 나쁘면 송신 쪽 문제다. 측정 구간에만 가리킨다
 	std::vector<float>* g_stateGapsMs = nullptr;
+	// --traceInputs(시험 전용, L-0-c) — 입력마다 「그때 받아 둔 최신 상태 틱」, 자기 상태마다 「서버가 적용한 입력 번호」. 같은 빌드 두 판이 어디서 갈리나를 줄로 본다
+	FILE* g_traceInputs = nullptr;
 
 	double ProcessCpuSeconds()
 	{
@@ -530,8 +536,9 @@ namespace
 	{
 	public:
 		CBot(const CMapCollision& map, CMoveSim& sim, const MatchRules& rules, uint32_t seed)
-			: _map(map), _rules(rules), _sim(sim), _rng(seed), _self(sim, rules, MakeLyraMoveParams().maxWalkSpeed), _judgeRng(seed ^ 0x5A5A1234u), _crouchRng(seed ^ 0x3C3C5678u), _dashRng(seed ^ 0x6A6A9ABCu), _grenadeRng(seed ^ 0x4E4E2B1Du)
+			: _map(map), _rules(rules), _sim(sim), _self(sim, rules, MakeLyraMoveParams().maxWalkSpeed)
 		{
+			SeedRngs(seed);
 			const MoveParams params = MakeLyraMoveParams();		// 서버 CRoom 의 _params 와 같은 값 — 근접 화면 판정의 상대 캡슐
 			_capsuleRadius = params.capsuleRadius;
 			_capsuleHalfHeight = params.capsuleHalfHeight;
@@ -615,6 +622,9 @@ namespace
 				std::printf("SCRIPT start seq=%u\n", input.seq);	// 경로 첫 틱의 입력 번호 — SCRIPTANIM 의 seq 에서 빼면 경로 몇 번째 틱인지 나온다
 			}
 			if (_judge && _self.GetLastWeaponEvents().fired) JudgeShot(input, _self.GetLastWeaponEvents());
+			if (g_traceInputs)
+				std::fprintf(g_traceInputs, "I %u seq=%u st=%u mv=%.6g,%.6g aim=%.6g,%.6g b=%u w=%u at=%.3f,%.3f,%.3f\n", _welcome.playerId, input.seq, _newestStateTick,
+					input.moveX, input.moveY, input.yaw, input.pitch, (unsigned)input.buttons, (unsigned)input.weapon, _self.GetMove().location.x, _self.GetMove().location.y, _self.GetMove().location.z);
 			if (!_net.SendPacket(input, wire::Msg::C2S_INPUT)) _net.Close();
 			_lastSentSeq = input.seq;
 		}
@@ -688,6 +698,24 @@ namespace
 		uint32_t GetRoomId() const { return _welcome.roomId; }
 		uint8_t GetTeam() const { return _welcome.team; }
 		bool HasResult() const { return _hasResult; }
+		// 기다림 판(--testLockstep) — 난수를 봇 순번이 아니라 서버가 준 자리 번호로 심는다. 접속이 도착한 차례가 판마다 바뀌어도
+		// 같은 자리 번호(같은 팀 · 같은 시작 자리)에 같은 난수가 붙는다. 보통 차례(순번 i → 번호 i + 1)면 순번으로 심은 값과 같다
+		void SetSeedByPlayerId(uint32_t base) { _seedByPlayerBase = base; }
+		// 기다림 판(--testLockstep) — 보낸 입력을 서버가 다 적용한 상태를 받았으면 다음 입력을 만든다. 10초 넘게 못 받으면 그냥 보내고 센다(판정이 FAIL 로 본다)
+		bool LockstepWantsInput(Clock::time_point now)
+		{
+			if (!_hasSpawn || !_net.IsOpen() || _hasResult) return false;
+			if (_self.GetSeq() == 0 || _lockstepAcked >= _self.GetSeq())
+			{
+				_lockstepWaitSince = now;
+				return true;
+			}
+			if (now - _lockstepWaitSince < std::chrono::seconds(10)) return false;
+			++_lockstepTimeouts;
+			_lockstepWaitSince = now;
+			return true;
+		}
+		uint64_t GetLockstepTimeouts() const { return _lockstepTimeouts; }
 		bool IsOpen() const { return _net.IsOpen(); }
 		const std::string& GetRecord() const { return _record; }
 		const wire::Result& GetResult() const { return _result; }
@@ -750,6 +778,7 @@ namespace
 			{
 			case wire::Msg::S2C_WELCOME:
 				_welcome = Copy<wire::Welcome>(data, size);
+				if (_seedByPlayerBase != 0) SeedRngs(_seedByPlayerBase + _welcome.playerId - 1);
 				break;
 			case wire::Msg::S2C_STATE:
 				OnState(data, size);
@@ -1098,6 +1127,9 @@ namespace
 				std::memcpy(&p, data + offsetof(wire::State, players) + sizeof(wire::PlayerState) * i, sizeof(p));
 				_players[p.id] = p;
 				_playerTick[p.id] = stateTick;
+				if (p.id == _welcome.playerId) _lockstepAcked = p.lastSeq;
+				if (g_traceInputs && p.id == _welcome.playerId)
+					std::fprintf(g_traceInputs, "S %u tick=%u lastSeq=%u hp=%.6g flags=%u at=%.3f,%.3f,%.3f\n", p.id, stateTick, p.lastSeq, (double)p.hp, (unsigned)p.flags, (double)p.x, (double)p.y, (double)p.z);
 				wire::AnimStateWire anim{};
 				const bool hasAnim = (_judge || _scripted) && ReadAnimTail(data, size, tailAt, anim);
 				if (_scripted && hasAnim && _scriptPlaced && p.id == _welcome.playerId)
@@ -2081,6 +2113,16 @@ namespace
 		const CMapCollision& _map;
 		const MatchRules& _rules;
 		CMoveSim& _sim;			// 봇끼리 나눠 쓴다 — 사람끼리 막기의 남 캡슐은 넣기 · 다시 돌리기 동안만 걸고 바로 뗀다
+		// 난수 다섯 — 씨앗 하나에서 갈라 심는다(전부터의 값). 기다림 판은 환영 때 자리 번호로 다시 심는다(SetSeedByPlayerId)
+		void SeedRngs(uint32_t seed)
+		{
+			_rng = CSpreadRng(seed);
+			_judgeRng = CSpreadRng(seed ^ 0x5A5A1234u);
+			_crouchRng = CSpreadRng(seed ^ 0x3C3C5678u);
+			_dashRng = CSpreadRng(seed ^ 0x6A6A9ABCu);
+			_grenadeRng = CSpreadRng(seed ^ 0x4E4E2B1Du);
+		}
+		uint32_t _seedByPlayerBase = 0;
 		CSpreadRng _rng;
 		CNetClient _net;
 		wire::Welcome _welcome = wire::Welcome();
@@ -2208,6 +2250,9 @@ namespace
 		bool _hasStateTime = false;
 		uint64_t _compared = 0, _posDiff = 0, _velDiff = 0, _ammoDiff = 0, _flagDiff = 0;
 		uint64_t _invDiff = 0, _invMulti = 0, _weaponPickupsMine = 0;	// 가방(W-3) — 빠른 칸이 서버와 다른 비교 줄 · 무기 둘 이상 든 비교 줄 · 내가 집은 무기 받침
+		uint32_t _lockstepAcked = 0;		// 받은 자기 상태의 lastSeq — 서버가 적용한 마지막 입력 번호(기다림 판)
+		Clock::time_point _lockstepWaitSince = Clock::now();
+		uint64_t _lockstepTimeouts = 0;
 		uint32_t _lastSentSeq = 0;		// 마지막으로 보낸 입력 번호 — 화면 판정 기록 BOTPICKUP 의 줍기 창 끝(컨텐츠 D-6)
 		uint64_t _lockDiff = 0, _lockCompared = 0;		// 이동 막음(부활 직후) 깃발이 서버와 다른 줄 — flagDiff 안에도 든다
 		uint64_t _adsCompared = 0, _adsDiff = 0, _adsInputs = 0;	// 서버가 조준 켜짐으로 보낸 비교 줄 · 그중 어긋남 · 조준을 누른 입력
@@ -2333,6 +2378,8 @@ namespace
 			else if (s == "--breakMelee") out.breakMelee = true;
 			else if (s == "--breakRecord") out.breakRecord = true;
 			else if (s == "--breakMirror") out.breakMirror = true;
+			else if (s.rfind("--traceInputs=", 0) == 0) out.traceInputsPath = s.substr(14);
+			else if (s == "--testLockstep") out.lockstep = true;
 			else if (s == "--breakCrouch") out.breakCrouch = true;
 			else if (s.rfind("--testPauseAfterSpawn=", 0) == 0) out.testPauseAfterSpawn = std::atoi(s.c_str() + 22);
 			else
@@ -2417,6 +2464,7 @@ int main(int argc, char** argv)
 		bots.back()->SetPush(args.push);
 		bots.back()->SetFireAlways(args.judgeFireAlways);
 		bots.back()->SetPauseAfterSpawn(args.testPauseAfterSpawn);
+		if (args.lockstep) bots.back()->SetSeedByPlayerId(args.seed + 100);
 		bots.back()->SetJudge(judging ? &judge : nullptr);
 		if (!args.script.empty()) bots.back()->SetScript(args.scriptHoldSeconds, args.scriptWeapon, args.script);
 		if (!bots.back()->Connect(args.port))
@@ -2426,9 +2474,11 @@ int main(int argc, char** argv)
 		}
 	}
 
+	if (!args.traceInputsPath.empty()) g_traceInputs = std::fopen(args.traceInputsPath.c_str(), "wb");
 	timeBeginPeriod(1);
 	const auto start = Clock::now();
 	uint64_t sentTicks = 0;
+	uint64_t lockstepSends = 0;		// 기다림 판에서 부른 SendNextInput 수(봇 합)
 	uint64_t lastReportSecond = 0;
 	bool allDone = false;
 	std::vector<float> stateGapsMs;
@@ -2464,11 +2514,23 @@ int main(int argc, char** argv)
 		}
 		lastLoop = loopNow;
 		if (args.seconds > 0 && elapsed >= args.seconds) break;
-		const uint64_t target = (uint64_t)(elapsed * wire::kTickRate) + (uint64_t)args.lead;
-		while (sentTicks < target)
+		if (args.lockstep)
 		{
-			for (const std::unique_ptr<CBot>& bot : bots) bot->SendNextInput(args.breakMirror);
-			++sentTicks;
+			for (const std::unique_ptr<CBot>& bot : bots)
+			{
+				if (!bot->LockstepWantsInput(loopNow)) continue;
+				bot->SendNextInput(args.breakMirror);
+				++lockstepSends;
+			}
+		}
+		else
+		{
+			const uint64_t target = (uint64_t)(elapsed * wire::kTickRate) + (uint64_t)args.lead;
+			while (sentTicks < target)
+			{
+				for (const std::unique_ptr<CBot>& bot : bots) bot->SendNextInput(args.breakMirror);
+				++sentTicks;
+			}
 		}
 		allDone = true;
 		for (const std::unique_ptr<CBot>& bot : bots)
@@ -2485,6 +2547,8 @@ int main(int argc, char** argv)
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	timeEndPeriod(1);
+	if (g_traceInputs) std::fclose(g_traceInputs);
+	g_traceInputs = nullptr;
 	size_t botsOpen = 0;
 	for (const std::unique_ptr<CBot>& bot : bots)
 	{
@@ -2581,7 +2645,7 @@ int main(int argc, char** argv)
 		}
 	}
 
-	uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, detours = 0;
+	uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, detours = 0, lockstepTimeouts = 0;
 	uint64_t adsCompared = 0, adsDiff = 0, adsInputs = 0, lockDiff = 0, lockCompared = 0;
 	uint64_t crouchCompared = 0, crouchDiff = 0, crouchPresses = 0;
 	uint64_t pawnReconciles = 0, pawnCorrected = 0, fallDiff = 0;
@@ -2637,6 +2701,7 @@ int main(int argc, char** argv)
 		meleePendingLeft += bot.GetMeleePendingDamage();
 		states += bot.GetStates();
 		detours += bot.GetDetours();
+		lockstepTimeouts += bot.GetLockstepTimeouts();
 		padMsgs += bot.GetPadMsgs();
 		padBad += bot.GetPadBad();
 		padSeekStarts += bot.GetPadSeekStarts();
@@ -2695,7 +2760,8 @@ int main(int argc, char** argv)
 	}
 
 	const wire::Result& result = first.GetResult();
-	std::printf("BOT bots=%d inputsSent=%llu statesSeen=%llu detours=%llu\n", args.bots, (unsigned long long)sentTicks * bots.size(), (unsigned long long)states, (unsigned long long)detours);
+	std::printf("BOT bots=%d inputsSent=%llu statesSeen=%llu detours=%llu\n", args.bots, args.lockstep ? (unsigned long long)lockstepSends : (unsigned long long)sentTicks * bots.size(), (unsigned long long)states, (unsigned long long)detours);
+	std::printf("BOT lockstep on=%d sends=%llu timeouts=%llu\n", args.lockstep ? 1 : 0, (unsigned long long)lockstepSends, (unsigned long long)lockstepTimeouts);
 	std::printf("BOT 단계:");
 	for (const wire::Match& match : first.GetPhaseChanges()) std::printf(" [%u 틱=%u 남은초=%.2f 목표=%u]", match.phase, match.tick, match.secondsLeft, match.targetScore);
 	std::printf("\n");
@@ -2798,6 +2864,7 @@ int main(int argc, char** argv)
 	if (grenadeDiff != 0 || grenadeFixes.resultsNoSlot != 0 || grenadeFixes.replaysMissed != 0 || grenadeFixes.results + grenadeFixes.resultsNoSlot != grenade.mine || grenadeFinal != grenade.mine) ok = false;
 	if (args.grenade && (grenade.mine == 0 || grenade.presses != grenadeFixes.presses || grenade.stateMsgs == 0)) ok = false;
 	if (shotsWhileDead != 0 || damageOutside != 0 || damageImmune != 0) ok = false;
+	if (lockstepTimeouts != 0) ok = false;		// 기다림 판이 한도에 걸려 벽시계로 보냄 — 판마다 같다는 보장이 깨졌다
 	std::printf("RESULT %s\n", ok ? "PASS" : "FAIL");
 	return ok ? 0 : 1;
 }

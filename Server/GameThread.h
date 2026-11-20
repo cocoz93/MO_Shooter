@@ -37,6 +37,9 @@ namespace mo
 		RewindOptions rewind;
 		AnimOptions anim;
 		PickupOptions pickups;
+		// 시험 전용 --testLockstep=N(L-0-c) — N 명이 다 앉기 전엔 틱을 안 돌리고, 그 뒤엔 모든 사람의 다음 입력이 와야 틱을 넘긴다.
+		// 회귀 봇 한 판이 봇 · 서버 벽시계 차(입력이 늦은 틱 · 상태가 막 도착하는 중에 만든 입력)로 판마다 갈리지 않게 둔다. 0 = 끔(늘 60Hz)
+		int lockstepPlayers = 0;
 	};
 
 	struct RoomSummary
@@ -48,6 +51,8 @@ namespace mo
 		size_t playersPeak = 0;
 		bool finished = false;
 		wire::Result result = wire::Result();
+		uint64_t lockstepWaits = 0;		// 사람이 덜 앉았거나 입력이 덜 와 방 틱을 미룬 게임 스레드 틱 수(--testLockstep)
+		uint64_t lockstepTimeouts = 0;	// 미루다 한도에 걸려 덜 앉은 · 덜 온 채로 돌린 틱 수 — 0 이 아니면 그 판은 판마다 같다는 보장이 없다
 	};
 
 	struct GameReport
