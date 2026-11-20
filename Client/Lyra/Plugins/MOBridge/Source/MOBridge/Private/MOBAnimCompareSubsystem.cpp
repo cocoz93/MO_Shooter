@@ -65,7 +65,7 @@ namespace
 	// AdsOn · AdsOff = 조준을 누른다 · 뗀다(-MOBACScript=ads)
 	// CrouchOn · CrouchOff = 앉기 단추를 눌러 앉는다 · 일어선다(-MOBACScript=crouch). Lyra 단추는 누를 때마다 뒤집으므로(ToggleCrouch) 이미 그 상태면 안 누른다
 	// Melee = 근접 단추 · HitBack · HitFront = 맞은 쪽 반응 몽타주를 피해 연출과 같은 길로 튼다(-MOBACScript=melee)
-	enum class EACEvent : uint8 { None, Fire, Hold, Release, Reload, Swap, Back, Spawn, AdsOn, AdsOff, CrouchOn, CrouchOff, Melee, HitBack, HitFront, Dash };
+	enum class EACEvent : uint8 { None, Fire, Hold, Release, Reload, Swap, Back, Spawn, AdsOn, AdsOff, CrouchOn, CrouchOff, Melee, HitBack, HitFront, Dash, Grenade };
 
 	// 경로 한 조각. Angle = 몸 앞 기준 이동 방향(+90 오른쪽). AngleRate·YawRate = 초당 돌리는 각도
 	// PitchFrom → PitchTo = 조각 동안 시선 위아래 각(+ 위). bJump = 조각 처음에 뛴다. Ev0·Ev1 = 조각 시작에서 At0·At1 초에 일으킬 사건
@@ -384,6 +384,27 @@ namespace
 	// 판 1 끝에 오래 서 있으면 판 2 idle 에서 Lyra 만 몸짓을 튼다(파일럿 3: c_dash 2.35 + idle_end 2.0 → 판 2 시작 남은 1.03초, 63프레임째 IdleBreak, 80프레임부터 22부위 평균 12cm).
 	// 지금(파일럿 4) = 판 2 시작 남은 3.3초 · idle 끝 1.3초 · 몸짓 0줄
 	constexpr int32 NUM_DASH_SEGMENTS = UE_ARRAY_COUNT(DASH_SCRIPT);
+
+	// 수류탄 경로(-MOBACScript=grenade, content-impl-progress.md G-4-b). 던짐 몽타주가 몸에 얹히는 자리를 한 번씩 —
+	// 선 채 · 재장전 중(능력이 재장전을 끊는다, grenade-plan.md 「막기 · 끊기」) · 근접 직후(던짐 몽타주가 근접 몽타주를 바꿔 낀다, G-0-c) ·
+	// 한 발 쏜 직후 · 달리며 · 앉아서. 재장전 앞 fire_r = 탄창을 하나 비운다 — 탄창이 차 있으면 재장전이 안 켜진다(파일럿 1 판 1, 재장전 몽타주 없음). 근접 뒤 0.1초 = G-0-c 의 「근접 켜진 뒤 5프레임 Q」 근처(제안값), 재장전 뒤 0.4초 = 재장전 몽타주가 한창 도는 자리(제안값).
+	// 던짐 사이는 쿨다운 301프레임(Shared/Grenade.h kGrenadeCooldownInputs, G-0-c 실측)보다 길게 — 가장 짧은 사이 = 근접 던짐 − 재장전 던짐 5.1초.
+	// 선 채 서 있는 틈은 쉼 몸짓 시계(IdleBreakDelayTime 6초, 몽타주 · 앉음 · 움직임이 되돌림)보다 짧게 둔다 — 던짐이 끝난 뒤 다음 사건까지 가장 긴 틈은 멈춤 구간 stop_g(4.4초) 안이다(달리며 던진 몽타주 0.867초가 그 구간에 0.17초 걸쳐 약 4.23초).
+	// 시선은 몸 요 그대로(피치 0) — 집(-1020,-1070) 몸 요 180 이라 -x 로 던진다. 끝을 짧게 둔 까닭은 대시 각본 끝 주석과 같다
+	const FScriptSegment GRENADE_SCRIPT[] = {
+		{ TEXT("idle"),          2.0f, false,    0.f, 0.f, 0.f },
+		{ TEXT("g_stand"),       5.3f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Grenade, 0.3f },
+		{ TEXT("fire_r"),        0.6f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Fire, 0.f },
+		{ TEXT("rl_gren"),      5.4f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Reload, 0.f, ACE::Grenade, 0.4f },
+		{ TEXT("ml_gren"),       5.4f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Melee, 0.f, ACE::Grenade, 0.1f },
+		{ TEXT("fr_gren"),       5.4f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Fire, 0.f, ACE::Grenade, 0.1f },
+		{ TEXT("run_gren"),      1.2f, true,     0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Grenade, 0.5f },
+		{ TEXT("stop_g"),        4.4f, false,    0.f, 0.f, 0.f },
+		{ TEXT("c_on"),          1.0f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOn, 0.f },
+		{ TEXT("c_gren"),        5.0f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::Grenade, 0.2f },
+		{ TEXT("idle_end"),      0.5f, false,    0.f, 0.f, 0.f,   0.f,   0.f, false, ACE::CrouchOff, 0.f },
+	};
+	constexpr int32 NUM_GRENADE_SEGMENTS = UE_ARRAY_COUNT(GRENADE_SCRIPT);
 	const TCHAR* const HIT_BACK_PATH = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_HitReact_Back_Med_01.AM_MM_HitReact_Back_Med_01");
 	const TCHAR* const HIT_FRONT_PATH = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_HitReact_Front_Med_02.AM_MM_HitReact_Front_Med_02");
 	constexpr float FIRE_TAP_SECONDS = 0.05f;	// 한 발 사건의 방아쇠 시간 — 3프레임. 연사 소총이 한 발만 내도록 짧게(제안값)
@@ -407,6 +428,7 @@ namespace
 		case EMOBACScript::Crouch: return CROUCH_SCRIPT[I];
 		case EMOBACScript::Melee: return MELEE_SCRIPT[I];
 		case EMOBACScript::Dash: return DASH_SCRIPT[I];
+		case EMOBACScript::Grenade: return GRENADE_SCRIPT[I];
 		case EMOBACScript::Run: break;
 		}
 		return SCRIPT[I];
@@ -423,6 +445,7 @@ namespace
 		case EMOBACScript::Crouch: return NUM_CROUCH_SEGMENTS;
 		case EMOBACScript::Melee: return NUM_MELEE_SEGMENTS;
 		case EMOBACScript::Dash: return NUM_DASH_SEGMENTS;
+		case EMOBACScript::Grenade: return NUM_GRENADE_SEGMENTS;
 		case EMOBACScript::Run: break;
 		}
 		return NUM_SEGMENTS;
@@ -473,9 +496,10 @@ void UMOBAnimCompareSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Script = ScriptName == TEXT("aimjump") ? EMOBACScript::AimJump : ScriptName == TEXT("startstop") ? EMOBACScript::StartStop
 		: ScriptName == TEXT("events") ? EMOBACScript::Events : ScriptName == TEXT("ads") ? EMOBACScript::Ads
 		: ScriptName == TEXT("crouch") ? EMOBACScript::Crouch : ScriptName == TEXT("melee") ? EMOBACScript::Melee
-		: ScriptName == TEXT("adslong") ? EMOBACScript::AdsLong : ScriptName == TEXT("dash") ? EMOBACScript::Dash : EMOBACScript::Run;
+		: ScriptName == TEXT("adslong") ? EMOBACScript::AdsLong : ScriptName == TEXT("dash") ? EMOBACScript::Dash
+		: ScriptName == TEXT("grenade") ? EMOBACScript::Grenade : EMOBACScript::Run;
 	bAimJump = Script != EMOBACScript::Run;
-	bSelfBody = Script == EMOBACScript::Dash;
+	bSelfBody = Script == EMOBACScript::Dash || Script == EMOBACScript::Grenade;		// 헤더 대시 · 수류탄 주석
 	if (bSelfBody) bVideo = false;		// 기록용 카메라를 안 보므로 찍을 화면이 없다(헤더 bSelfBody 주석)
 	FString WeaponName = WEAPON_KEYS[1];
 	FParse::Value(Cmd, TEXT("MOBACWeapon="), WeaponName);
@@ -1065,7 +1089,7 @@ void UMOBAnimCompareSubsystem::DriveFoe(float DeltaTime)
 		else Target->StopJumping();
 	}
 	if (S.bMove) Target->AddMovementInput(FRotator(0.f, BodyYaw + MoveAngle, 0.f).Vector(), 1.f);
-	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::AdsLong || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee || Script == EMOBACScript::Dash) RunEvents(DeltaTime);
+	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::AdsLong || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee || Script == EMOBACScript::Dash || Script == EMOBACScript::Grenade) RunEvents(DeltaTime);
 }
 
 // 사건 경로 — 조각 안의 사건 시각이 이 프레임 [SegmentTime, SegmentTime + DeltaTime) 에 들면 일으킨다. 대기(DeltaTime 0)에는 안 일으킨다.
@@ -1092,6 +1116,12 @@ void UMOBAnimCompareSubsystem::RunEvents(float DeltaTime)
 	{
 		bFoeDashReleasePending = false;
 		if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get()))) A->AbilityInputTagReleased(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Ability.Dash")));
+		else ++EvNoAsc;
+	}
+	if (bFoeGrenadeReleasePending)
+	{
+		bFoeGrenadeReleasePending = false;
+		if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get()))) A->AbilityInputTagReleased(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Grenade")));
 		else ++EvNoAsc;
 	}
 	const FScriptSegment& S = Seg(Script, Segment);
@@ -1178,6 +1208,17 @@ void UMOBAnimCompareSubsystem::RunEvents(float DeltaTime)
 			}
 			else ++EvNoAsc;
 			FrameEvents += TEXT("dash;");
+			break;
+		case EACEvent::Grenade:
+			// 사람 입력과 같은 InputTag.Weapon.Grenade 누름(Q · IMC_ShooterGame, 내용 기록 도구 GREN_TAG 와 같음), 다음 프레임에 뗀다
+			if (ULyraAbilitySystemComponent* A = Cast<ULyraAbilitySystemComponent>(FindASC(Foe.Get())))
+			{
+				A->AbilityInputTagPressed(FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Grenade")));
+				bFoeGrenadeReleasePending = true;
+				++EvGrenade;
+			}
+			else ++EvNoAsc;
+			FrameEvents += TEXT("grenade;");
 			break;
 		case EACEvent::None:
 			break;
@@ -1578,7 +1619,7 @@ void UMOBAnimCompareSubsystem::Finish()
 		const bool bProfSaved = !BlendProfileCsv.IsEmpty() && FFileHelper::SaveStringToFile(BlendProfileCsv, *ProfilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP montages seen=%d maxLive=%d saved=%d profilesSaved=%d"), SeenMontages.Num(), MaxLiveMontages, bMontSaved ? 1 : 0, bProfSaved ? 1 : 0);
 	}
-	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::AdsLong || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee || Script == EMOBACScript::Dash)
+	if (Script == EMOBACScript::Events || Script == EMOBACScript::Ads || Script == EMOBACScript::AdsLong || Script == EMOBACScript::Crouch || Script == EMOBACScript::Melee || Script == EMOBACScript::Dash || Script == EMOBACScript::Grenade)
 	{
 		// 종류마다 센 값 — 경로 표에 적힌 수(판 둘 × 조각의 사건 수)와 대조한다
 		UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP events weapon=%s fire=%d hold=%d release=%d reload=%d swap=%d swapFail=%d spawn=%d spawnFail=%d adsOn=%d adsOff=%d noAsc=%d"),
@@ -1592,6 +1633,12 @@ void UMOBAnimCompareSubsystem::Finish()
 			// 누름 수 = 경로 표의 대시 수 × 판 둘. 켜짐 · 꺼짐 = 실제 능력 가장자리(누름보다 적으면 막힌 누름이 있었다)
 			UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP dashEvents weapon=%s dash=%d start=%d end=%d melee=%d crouchOn=%d crouchOff=%d selfBody=%d bodyTries=%d"),
 				WEAPON_KEYS[WeaponIndex], EvDash, EvDashStart, EvDashEnd, EvMelee, EvCrouchOn, EvCrouchOff, bSelfBody ? 1 : 0, BodyTries);
+		}
+		if (Script == EMOBACScript::Grenade)
+		{
+			// 누름 수 = 경로 표의 던짐 수 × 판 둘. 켜진 수는 기록의 던짐 몽타주 수로 본다(헤더 수류탄 주석)
+			UE_LOG(LogMOBAComp, Log, TEXT("MOB_ACOMP grenadeEvents weapon=%s grenade=%d reload=%d melee=%d fire=%d crouchOn=%d crouchOff=%d selfBody=%d bodyTries=%d"),
+				WEAPON_KEYS[WeaponIndex], EvGrenade, EvReload, EvMelee, EvFire, EvCrouchOn, EvCrouchOff, bSelfBody ? 1 : 0, BodyTries);
 		}
 		if (Script == EMOBACScript::Crouch)
 		{

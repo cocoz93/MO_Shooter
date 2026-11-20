@@ -35,7 +35,7 @@ class UPhysicalMaterial;
  * 판정에 쓰는 줄은 전부 「MOB_ACOMP」 로 시작한다.
  * 데디 서버(-server)에 주면 서버의 봇을 같은 경로로 움직인다. 카메라와 촬영은 건너뛴다(candidate1-impl-plan.md 0단계)
  */
-enum class EMOBACScript : uint8 { Run, AimJump, StartStop, Events, Ads, Crouch, Melee, AdsLong, Dash };
+enum class EMOBACScript : uint8 { Run, AimJump, StartStop, Events, Ads, Crouch, Melee, AdsLong, Dash, Grenade };
 
 UCLASS()
 class UMOBAnimCompareSubsystem : public UTickableWorldSubsystem
@@ -57,7 +57,7 @@ private:
 	enum class EStage : uint8 { WaitActors, Settle, Run, Stopping, Done };
 
 	bool IsMatchPlaying(float DeltaTime);
-	bool SelfBodyReady(float DeltaTime);		// 대시 각본 — 내 캐릭터 몸을 Quinn 으로 맞추고 다시 쥐는 몽타주가 끝날 때까지 false
+	bool SelfBodyReady(float DeltaTime);		// 대시 · 수류탄 각본 — 내 캐릭터 몸을 Quinn 으로 맞추고 다시 쥐는 몽타주가 끝날 때까지 false
 	bool Prepare();
 	void LogBody() const;
 	void BeginPass();
@@ -189,6 +189,11 @@ private:
 	float NextBodyTryAt = 0.f;
 	float BodyReadyAt = -1.f;
 	int32 BodyTries = 0;
+	// 수류탄(-MOBACScript=grenade, 컨텐츠 G-4). GA_Grenade 는 던질 방향을 Lyra 플레이어 조종기의 카메라 관리자 회전으로 구해
+	// (ga_flow.txt 94-97 GetLyraPlayerControllerFromActorInfo → PlayerCameraManager → GetCameraRotation, 원본 기준) AI 조종기 몸엔 그 길이 없다 — 대시처럼 내 캐릭터를 몸으로 쓴다.
+	// 누름 = InputTag.Weapon.Grenade(다음 프레임에 뗌). 능력은 켜진 그 프레임에 끝나 켜짐 가장자리를 못 본다 — 켜졌는지는 기록의 몽타주 칸(AM_MM_Rifle_GrenadeToss)으로 본다
+	bool bFoeGrenadeReleasePending = false;
+	int32 EvGrenade = 0;
 	int32 MaxLiveMontages = 0;		// 한 프레임에 살아 있던 몽타주 최대 수(패킷 칸 수를 정한다)
 	TSet<FName> SeenMontages;
 	FString MontageCsv;

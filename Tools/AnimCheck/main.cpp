@@ -956,7 +956,7 @@ namespace
 		DiffColumn* const fireColumns[] = { &fireSince, &fireOverride, &lyraAim, &handLeft, &leftCurve };
 		size_t montRows = 0, montCountDiff = 0, montNameDiff = 0, births = 0, unknownBirths = 0, failedPlays = 0, lateBirths = 0;
 		size_t bundleChanges = 0, multiUpdateRows = 0, udwRows = 0, udwBelow = 0;
-		size_t reloadCancels = 0, layerRows = 0, layerSwapRows = 0;		// 재장전 중 쏘기로 재장전을 먼저 끈 수 · 층 변수를 댄 줄 · 교체 사건 줄이라 뺀 줄
+		size_t reloadCancels = 0, layerRows = 0, layerSwapRows = 0;		// 재장전 중 쏘기 · 던짐으로 재장전을 먼저 끈 수 · 층 변수를 댄 줄 · 교체 사건 줄이라 뺀 줄
 		size_t beforeFireRows = 0;		// 판에서 처음 쏘기 전이라 쏜 뒤 시간 · 덮기 비중을 안 댄 줄
 		bool firedSinceReset = false;
 		// 조준(C-3) — 갱신 f 의 조준 입력 = 기록 줄 f−adsLag 의 IsADS. Lyra 는 사건 f 에 변수가 바뀌고 갱신 f+1 에 상태 기계가 반응한다(D60 6, 실측) → 1 이 실제 경로.
@@ -1142,6 +1142,13 @@ namespace
 					{
 						bool cancelledReload = false;
 						played = state.PlayFireMontage(m.rate, weaponBundle, cancelledReload);
+						if (cancelledReload) ++reloadCancels;
+					}
+					else if (kind == MONTAGE_GRENADE)
+					{
+						// 수류탄도 켤 때 재장전 능력을 끊는다(G-0-c) — 서버 CRoom::PlayAnimEvents 와 같은 함수. 재장전 칸이 자산 빼기 곡선을 지닌 채 빠져 Lyra 와 같은 프레임에 지워진다(G-4-b)
+						bool cancelledReload = false;
+						played = state.PlayMontageCancellingReload(MONTAGE_GRENADE, m.rate, weaponBundle, cancelledReload);
 						if (cancelledReload) ++reloadCancels;
 					}
 					else
