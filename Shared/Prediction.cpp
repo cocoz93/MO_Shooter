@@ -42,8 +42,22 @@ namespace mo
 		slot.dashCutMelee = false;
 		slot.dashServer = false;
 		slot.dashDenied = false;
+		slot.grenadeThrown = false;
+		slot.grenadeCutMelee = false;
+		slot.grenadeDead = _waitingSpawn;
+		slot.grenadeTicks = true;
+		slot.grenadeServer = false;
+		slot.grenadeDenied = false;
+		if ((input.buttons & wire::BUTTON_GRENADE) != 0) ++_grenadeCounters.presses;
 		_lastWeaponEvents = WeaponEvents();
-		if (_waitingSpawn) return;
+		if (_waitingSpawn)
+		{
+			// 서버 죽은 갈래(Room.cpp ApplyInput) — 수류탄 쿨다운은 죽은 입력에도 준다(G-0-b2). 누름은 죽음으로 안 켜진다
+			_grenade.NextInput();
+			if ((input.buttons & wire::BUTTON_GRENADE) != 0) (void)_grenade.TryActivate(true, false, false);
+			slot.grenadeAfter = _grenade;
+			return;
+		}
 		Equip(input);
 		StepAbilities(slot, true);
 		if (meleePush)
@@ -87,6 +101,12 @@ namespace mo
 		SaveWeapon(_spawnWeapon, lastSeq, false);
 		_meleeAckedSeq = lastSeq;
 		_dashAckedSeq = lastSeq;
+		// 수류탄은 부활이 안 지운다(서버 SpawnPlayer 도 안 건드림, G-0-b2) — 부활 번호까지는 서버가 (죽은 몸으로) 돌렸으니 소식으로 정하고,
+		// 그 칸 상태에서 뒤 입력을 새 몸으로 다시 돈다(아래 StepAbilities). 걸음은 아래 고리가 어차피 다시 돈다
+		bool grenadeCutChanged = false;
+		(void)MarkGrenadeAcked(lastSeq, true, grenadeCutChanged);		// 부활 번호까지는 서버가 죽은 몸으로 돌렸다
+		const Slot& grenadeBase = _ring[lastSeq % kRingSize];
+		if (grenadeBase.seq == lastSeq) _grenade = grenadeBase.grenadeAfter;
 
 		// 서버는 이 번호 뒤의 입력을 새 자리에서 쓴다 — 여기도 똑같이 다시 돌린다.
 		// 앞 목숨 자리에서 정한 근접 밀기는 버린다 — 새 자리 판정은 서버 결과(OnMeleeResult)가 채운다
@@ -99,10 +119,12 @@ namespace mo
 			slot.meleeServer = false;
 			slot.dashServer = false;		// 앞 목숨에서 받은 대시 소식 · 확인도 버린다 — 새 몸에서 다시 고른다
 			slot.dashDenied = false;
+			slot.grenadeDead = false;		// 서버는 부활 번호 뒤 입력을 새 몸으로 쓴다 — 대기 중 죽은 갈래로 센 칸을 산 갈래로 다시 고른다
 			Equip(slot.input);
 			const bool dashStartedBefore = slot.dashStarted;
 			StepAbilities(slot, false);
 			if (slot.dashStarted != dashStartedBefore) ++(slot.dashStarted ? _dashCounters.respawnGained : _dashCounters.respawnLost);
+			if (slot.grenadeThrown) ++_grenadeCounters.respawnThrown;
 			RememberDash(slot, ApplyMove(slot));
 			ApplyWeapon(slot, _melee.IsActive());
 			RememberMove(slot);
@@ -133,6 +155,8 @@ namespace mo
 		RememberMove(_spawnBase);
 		_spawnBase.dashAfter = _dash;
 		slot.dashAfter = _dash;
+		slot.grenadeTicks = false;		// 서버 ApplyPlace 는 수류탄 입력 수를 안 센다 — 사슬만 잇는다
+		slot.grenadeAfter = _grenade;
 		// 서버는 겹침(받침 집기)을 탄 정하기 앞에 본다 — 이 번호로 집은 소식의 앞 칸은 탄 정하기 앞 무기 쪽, 집은 뒤 탄 정하기를 다시 건다(OnPickup)
 		const bool meleeActive = _melee.IsActive();
 		SaveWeapon(_placeWeapon, seq, meleeActive);
@@ -164,6 +188,7 @@ namespace mo
 			AckMelee(server.lastSeq);
 			AckDash(server.lastSeq);
 		}
+		AckGrenade(server.lastSeq, _waitingSpawn || (server.flags & wire::STATE_DEAD) != 0);		// 부활 대기 · 죽음 중에도 — 서버는 죽은 입력에도 수류탄 쿨다운을 센다(대시 확인 뒤 — 대시 막기가 고쳐진 칸으로 고른다)
 		const Slot* found = FindComparable(server);
 		if (!found || _waitingSpawn) return result;
 		result.compared = true;
@@ -334,11 +359,16 @@ namespace mo
 
 	bool CSelfPrediction::WillMeleeStart(const wire::Input& input) const
 	{
-		if ((input.buttons & wire::BUTTON_MELEE) == 0 || _waitingSpawn || !_melee.WillActivateNextInput()) return false;
+		if ((input.buttons & wire::BUTTON_MELEE) == 0 || _waitingSpawn) return false;
 		CDashAbility dash = _dash;		// StepAbilities 의 대시 자리를 사본으로 — 켜거나 켜져 있으면 근접 누름은 막힌다
 		dash.NextInput();
 		if ((input.buttons & wire::BUTTON_DASH) != 0) (void)dash.TryActivate(input.pitch, input.yaw, false, false);
-		return !dash.BlocksPresses();
+		if (dash.BlocksPresses()) return false;
+		if (_melee.WillActivateNextInput()) return true;
+		// 도는 근접 — 이 입력에 수류탄을 던지면 그 자리에서 끊겨(StepAbilities) 뒤의 근접 누름이 켜진다
+		CGrenadeAbility grenade = _grenade;
+		grenade.NextInput();
+		return (input.buttons & wire::BUTTON_GRENADE) != 0 && grenade.TryActivate(false, false, false) == EGrenadeResult::Thrown;
 	}
 
 	void CSelfPrediction::OnDashResult(uint32_t seq, uint8_t dir, const Vec3& force)
@@ -433,6 +463,99 @@ namespace mo
 			later.dashAfter = dash;
 		}
 		_dash = dash;
+		// 대시 막기가 바뀐 칸은 수류탄 던짐도 바뀐다(대시 중 막힘) — 같은 번호부터 다시 고른다. 걸음은 부르는 쪽이 이 번호부터 다시 돈다
+		bool grenadeCutChanged = false;
+		(void)ReplayGrenade(seq, grenadeCutChanged);
+		return true;
+	}
+
+	void CSelfPrediction::OnGrenadeThrown(uint32_t seq)
+	{
+		Slot& slot = _ring[seq % kRingSize];
+		if (seq == 0 || slot.seq != seq)
+		{
+			++_grenadeCounters.resultsNoSlot;
+			return;
+		}
+		++_grenadeCounters.results;
+		slot.grenadeServer = true;
+		slot.grenadeDenied = false;
+		if (slot.grenadeThrown) return;
+		++_grenadeCounters.startMismatches;
+		bool cutChanged = false;
+		if (ReplayGrenade(seq, cutChanged) && cutChanged && !_waitingSpawn) RerunMovesFrom(seq);
+	}
+
+	void CSelfPrediction::AckGrenade(uint32_t lastSeq, bool serverDead)
+	{
+		bool cutChanged = false;
+		const uint32_t replayFrom = MarkGrenadeAcked(lastSeq, serverDead, cutChanged);
+		if (replayFrom != 0 && cutChanged && !_waitingSpawn) RerunMovesFrom(replayFrom);
+	}
+
+	uint32_t CSelfPrediction::MarkGrenadeAcked(uint32_t lastSeq, bool serverDead, bool& cutChanged)
+	{
+		cutChanged = false;
+		if (lastSeq > _seq) lastSeq = _seq;
+		uint32_t replayFrom = 0;
+		for (uint32_t seq = _grenadeAckedSeq + 1; seq <= lastSeq; ++seq)
+		{
+			Slot& slot = _ring[seq % kRingSize];
+			if (slot.seq != seq || slot.grenadeServer) continue;
+			slot.grenadeDenied = true;		// 서버가 돌린 입력인데 던짐 소식이 없다 = 서버는 안 던졌다. 다시 고를 때 이 칸에서는 안 던진다
+			if (!slot.grenadeThrown) continue;
+			++_grenadeCounters.unconfirmed;
+			if (serverDead) ++_grenadeCounters.unconfirmedDead;
+			if (replayFrom == 0) replayFrom = seq;
+		}
+		if (lastSeq > _grenadeAckedSeq) _grenadeAckedSeq = lastSeq;
+		if (replayFrom != 0 && !ReplayGrenade(replayFrom, cutChanged)) return 0;
+		return replayFrom;
+	}
+
+	// 서버 소식 · 확인으로 정해진 칸을 따라 seq 부터 수류탄을 다시 고른다 — 던짐 · 근접 끊음을 칸에 다시 쓰고, 지금 수류탄 상태(_grenade)도 바꾼다.
+	// 앞 칸 = 바로 앞 번호 칸(목숨을 넘어 잇는다 — 부활 대기 칸 · 자리 옮기기 칸도 grenadeAfter 를 남긴다). 서버가 던진 칸은 켜기 조건을 안 본다(StartFromServer).
+	// 그 밖의 누름은 칸의 대시 막기 · 죽은 갈래로 다시 본다. 근접 능력(무기 쪽)은 다시 안 고른다 — 끊음이 바뀐 칸은 meleeInReplay 로 센다
+	bool CSelfPrediction::ReplayGrenade(uint32_t seq, bool& cutChanged)
+	{
+		cutChanged = false;
+		const Slot& before = _ring[(seq - 1) % kRingSize];
+		if (seq == 0 || before.seq != seq - 1)		// seq 1 의 앞 칸 = 처음부터 비어 있는 0 번 칸(seq 0) — 새 수류탄 상태
+		{
+			++_grenadeCounters.replaysMissed;
+			return false;
+		}
+		++_grenadeCounters.replays;
+		CGrenadeAbility grenade = before.grenadeAfter;
+		for (uint32_t at = seq; at <= _seq; ++at)
+		{
+			Slot& later = _ring[at % kRingSize];
+			if (later.seq != at) continue;
+			if (!later.grenadeTicks)
+			{
+				later.grenadeAfter = grenade;
+				continue;
+			}
+			grenade.NextInput();
+			bool thrown = false;
+			if (later.grenadeServer)
+			{
+				grenade.StartFromServer();
+				thrown = true;
+			}
+			else if (!later.grenadeDenied && (later.input.buttons & wire::BUTTON_GRENADE) != 0)
+				thrown = grenade.TryActivate(later.grenadeDead, later.dashBlocks, false) == EGrenadeResult::Thrown;
+			const bool cut = thrown && !later.grenadeDead && later.meleeWasActive;	// 던질 수 있는 입력은 대시를 안 켰다 — 근접은 NextInput 뒤 그대로 켜져 있다
+			if (cut != later.grenadeCutMelee)
+			{
+				cutChanged = true;
+				++_grenadeCounters.meleeInReplay;
+			}
+			later.grenadeThrown = thrown;
+			later.grenadeCutMelee = cut;
+			later.grenadeAfter = grenade;
+		}
+		_grenade = grenade;
 		return true;
 	}
 
@@ -494,6 +617,13 @@ namespace mo
 		}
 		slot.dashBlocks = _dash.BlocksPresses();
 		slot.dashBlocksFire = _dash.BlocksHeldFire();
+		// 수류탄(G-3) — 서버와 같은 자리(대시 뒤 · 근접 앞). 대시가 켜져 있으면(켠 입력 포함) 막힌다. 던지면 그 자리에서 근접을 끊는다(ThrowGrenade)
+		// 자리 옮기기 칸(OnSpawn 다시 돌리기에서만 여기로 온다)은 서버 ApplyPlace 처럼 안 센다
+		if (slot.grenadeTicks) _grenade.NextInput();
+		slot.grenadeThrown = slot.grenadeTicks && (input.buttons & wire::BUTTON_GRENADE) != 0 && _grenade.TryActivate(false, slot.dashBlocks, false) == EGrenadeResult::Thrown;
+		slot.grenadeCutMelee = slot.grenadeThrown && _melee.Cut();
+		if (slot.grenadeThrown && count) ++_grenadeCounters.thrown;
+		slot.grenadeAfter = _grenade;
 		slot.meleeStarted = (input.buttons & wire::BUTTON_MELEE) != 0 && !slot.dashBlocks && _melee.TryActivate(GetWeaponDef((EWeapon)_weapon), kTick);
 		if (slot.meleeStarted) ++_meleeCounters.started;
 	}
@@ -517,6 +647,12 @@ namespace mo
 			if (_jump.Cut()) _sim.ReleaseJump(_move);
 			if (_move.crouched) _sim.RequestUnCrouch(_move);
 			_sim.ApplyRootForce(_move, slot.dashForce, kDashForceDuration, DashForceSettings());
+		}
+		// 수류탄을 던져 근접을 끊은 입력 — 서버 ThrowGrenade 처럼 끊은 근접의 밀기 힘을 지운다(대시 뒤 · 점프 앞, 끊었을 때만 번호를 0 으로)
+		if (slot.grenadeCutMelee)
+		{
+			if (_meleePushId != 0) _sim.RemoveRootForce(_move, _meleePushId);
+			_meleePushId = 0;
 		}
 		const bool jump = (input.buttons & wire::BUTTON_JUMP) != 0;
 		switch (_jump.Apply(jump, slot.dashBlocks))		// 대시가 켜져 있으면 새 누름은 버려진다(쥐고 있어도 끝난 뒤 안 켜진다)
@@ -568,6 +704,7 @@ namespace mo
 		weaponInput.meleeStarted = slot.meleeStarted;
 		weaponInput.dashActive = slot.dashBlocksFire;
 		weaponInput.dashStarted = slot.dashStarted;
+		weaponInput.grenadeThrown = slot.grenadeThrown;		// 도는 재장전만 끊는다(서버 ApplyInput 과 같은 값)
 		// 서버와 같은 순서(Room.cpp ApplyInput) — 대시가 앞 입력부터 켜져 있으면 쥔 사격을 발사 문 앞에서 뺀다
 		if (weaponInput.fireHeld && weaponInput.dashActive) weaponInput.fireHeld = false;
 		_fireGate.NextInput();

@@ -9,6 +9,7 @@
 
 #include "Dash.h"
 #include "GameProtocol.h"
+#include "Grenade.h"
 #include "Loadout.h"
 #include "MatchRules.h"
 #include "Movement.h"
@@ -44,6 +45,15 @@ namespace mo
 			bool dashDenied = false;	// 서버가 이 입력까지 돌렸는데 소식이 없었다(서버는 안 켬) — 다시 고를 때 안 켠다
 			Vec3 dashMove;				// 걸음이 쓴 이동(막음 뒤) — 다음 입력의 「앞 입력」(RememberInput)
 			CDashAbility dashAfter;		// 이 입력 뒤 대시 상태 — 다시 고르기(ReplayDash)의 앞 칸
+			// 수류탄(G-3) — 쿨다운만 서버와 같은 입력 수로 돌려 「이 입력에 던졌다」를 낸다(수류탄 자체는 예측 안 함, grenade-plan 「예측」).
+			// 서버는 죽은 입력에도 쿨다운을 세고 부활에 안 지운다 — 부활 대기 입력까지 칸마다 grenadeAfter 를 남겨 한 사슬로 잇는다
+			bool grenadeThrown = false;		// 이 입력에 던졌다 — 무기 쪽 재장전 끊기 · 걸음 쪽 근접 밀기 지우기가 읽는다
+			bool grenadeCutMelee = false;	// 던지며 근접을 끊었다 — 걸음 쪽이 그 근접의 밀기 힘을 지운다(서버 ThrowGrenade)
+			bool grenadeDead = false;		// 부활을 기다리는 동안 넣은 입력 — 서버 죽은 갈래처럼 쿨다운만 준다(OnSpawn 이 새 몸으로 다시 돌리면 꺼짐)
+			bool grenadeTicks = true;		// 수류탄 입력 수를 센다 — 자리 옮기기 칸은 서버도 안 센다(ApplyPlace)
+			bool grenadeServer = false;		// 서버 던짐 소식을 받았다 — 다시 고를 때도 던진 것으로
+			bool grenadeDenied = false;		// 서버가 이 입력까지 돌렸는데 던짐 소식이 없었다(서버는 안 던짐) — 다시 고를 때 안 던진다
+			CGrenadeAbility grenadeAfter;	// 이 입력 뒤 수류탄 상태 — 다시 고르기(ReplayGrenade)의 앞 칸
 			bool valid = false;		// 아래 값이 지금 목숨 기준으로 계산됐나
 			MoveState move;			// 이 입력을 돌린 뒤
 			JumpAbility jump;		// 점프 능력(버튼 · 켜짐) — 다시 돌릴 때 잇는다
@@ -69,7 +79,7 @@ namespace mo
 		// 입력에 번호를 붙이고 기억한다. 부활을 기다리는 중이 아니면 바로 돌린다.
 		// meleePush = 이 입력에서 내 화면 근접이 맞았을 때의 밀기 힘(MeleePushForce). 부르는 쪽이 화면 상대 자리 · 내 손으로 ResolveMelee 를 불러 정한다(E-3 연결).
 		//   이 입력에 근접 능력이 안 켜지면 버리고 센다(WillMeleeStart 로 미리 본다). 서버 결과가 오면 OnMeleeResult 가 서버 값으로 바꾼다
-		// 부활을 기다리는 중이면 버린다 — 서버도 죽은 동안 입력을 안 쓴다
+		// 부활을 기다리는 중이면 버린다 — 서버도 죽은 동안 입력을 안 쓴다(수류탄 쿨다운만 센다 — 서버 죽은 갈래와 같다, G-3)
 		void AddInput(wire::Input& input, const Vec3* meleePush = nullptr);
 
 		// 서버가 시작 자리로 옮겼다 — 그 번호 뒤의 입력을 새 자리에서 다시 돌린다
@@ -90,7 +100,8 @@ namespace mo
 		ReconcileResult Reconcile(const wire::PlayerState& server, double tolerance);
 
 		// 다음 AddInput 에서 이 입력이 근접 능력을 켜나 — 켜질 입력에만 화면 근접 판정을 해 밀기를 넘기려고 넣기 전에 본다(E-3).
-		// 대시가 켜져 있거나 이 입력에 켜지면 근접은 막힌다(D-2) — 대시 능력 사본을 한 입력 돌려 본다
+		// 대시가 켜져 있거나 이 입력에 켜지면 근접은 막힌다(D-2) — 대시 능력 사본을 한 입력 돌려 본다.
+		// 이 입력에 수류탄을 던지면 도는 근접이 끊겨 같은 입력의 근접 누름이 켜진다(서버 TryMelee 가 ThrowGrenade 뒤, G-3) — 수류탄 사본도 돌려 본다
 		bool WillMeleeStart(const wire::Input& input) const;
 
 		// 서버 근접 결과(S2C_MELEE 중 공격자가 나) — 그 입력의 밀기를 서버 값으로 바꾸고, 예측과 다르면 그 입력부터 걸음을 다시 돌린다.
@@ -162,6 +173,35 @@ namespace mo
 		const DashCounters& GetDashCounters() const { return _dashCounters; }
 		bool IsDashActive() const { return _dash.Active(); }
 
+		// 서버 수류탄 소식 중 내가 던진 것(G-3) — 서버가 입력 seq 에 던졌다. 그 칸이 안 던졌으면(앞 칸들이 서버와 갈렸다 — 죽음을 늦게 앎 · 대시 갈림 · 경기 끝.
+		// 서버가 채운 빈 입력은 서버도 수류탄을 안 센다) 그 칸을 던짐으로 놓고 그 칸부터 수류탄을 다시 고른다(뒤 칸의 쿨다운 · 던짐). 근접 끊음이 바뀐 칸이 있으면 걸음을 다시 돌린다.
+		// 무기 쪽(재장전 끊기)은 다시 안 돈다(근접 · 대시와 같은 범위). 서버는 이 소식을 그 입력을 돈 틱의 상태보다 먼저 보낸다(대시 소식과 같은 자리 — 보내는 쪽은 G-3-b)
+		void OnGrenadeThrown(uint32_t seq);
+		// 서버가 이 번호까지 입력을 돌렸다 — 그 안에서 내가 던졌는데 소식이 없는 것(서버는 안 던짐)을 안 던진 것으로 놓고 다시 고른다.
+		// Reconcile 이 처음에 부른다 — 대시와 달리 부활 대기 · 죽음 중에도(서버는 죽은 입력에도 쿨다운을 센다).
+		// serverDead = 이 확인을 실은 서버 상태가 죽음이거나 내가 부활을 기다리는 중 — 그때 지운 던짐은 unconfirmedDead 로 따로 센다
+		void AckGrenade(uint32_t lastSeq, bool serverDead);
+
+		struct GrenadeCounters
+		{
+			uint64_t presses = 0;			// 수류탄 단추가 든 입력(부활 대기 포함 — 서버도 죽은 입력의 누름을 센다) — AddInput 에서만 센다
+			uint64_t thrown = 0;			// 그중 내가 던진 것(AddInput 때 판단, 다시 고르기로 바뀐 것은 안 셈)
+			uint64_t respawnThrown = 0;		// 부활 다시 돌리기(OnSpawn)에서 새 몸으로 던진 칸 — 대기 중엔 죽은 갈래라 안 던졌다
+			uint64_t results = 0;			// 받은 서버 던짐 소식(내 것)
+			uint64_t resultsNoSlot = 0;		// 받았지만 그 번호 칸이 없음(고리를 넘은 옛 번호) — 못 고친다. 0 이어야 한다
+			uint64_t startMismatches = 0;	// 서버는 던졌는데 나는 안 던짐 — 고침. 봇 판 기대 0
+			uint64_t unconfirmed = 0;		// 내가 던졌는데 서버 소식 없이 지나감(서버는 안 던짐) — 고침. 봇 판 기대 0(아래 죽음 몫 뺀 수)
+			// 그중 죽음을 늦게 안 몫 — 서버가 이미 죽은 몸으로 돌린 입력에 내가 산 몸으로 던졌다. 정직한 클라도 못 피한다(죽음 소식 전에 보낸 입력).
+			// 대시는 부활이 쿨다운을 지워 이 고침이 필요 없지만 수류탄은 쿨다운이 목숨을 넘어 이어져 고친다. 서버 상태가 죽음인 확인으로 세므로,
+			// 그 틱에 산 채로 돈 뒤 죽은 입력의 갈림도 여기 든다(그 앞이 이미 갈렸어야 생긴다)
+			uint64_t unconfirmedDead = 0;
+			uint64_t replays = 0;			// 다시 고른 번(ReplayDash 끝의 다시 고르기 포함)
+			uint64_t replaysMissed = 0;		// 다시 고를 앞 칸이 없어 못 함. 0 이어야 한다
+			uint64_t meleeInReplay = 0;		// 다시 고르며 근접 끊음이 바뀐 칸 — 걸음은 다시 돌리고, 근접 능력(무기 쪽)은 다시 안 고른다. 고침이 0 이면 0
+		};
+		const GrenadeCounters& GetGrenadeCounters() const { return _grenadeCounters; }
+		int GetGrenadeCooldownLeft() const { return _grenade.CooldownLeft(); }	// 남은 입력 수 — 다리가 던진 입력에 쿨다운 메시지를 낼 때 읽는다(grenade-plan 「예측」, G-5)
+
 		// 맞춰 보기만 하는 쪽(봇)이 쓰는 슬롯. 비교할 수 없으면 nullptr
 		const Slot* FindComparable(const wire::PlayerState& server) const;
 
@@ -200,6 +240,9 @@ namespace mo
 		void StepAbilities(Slot& slot, bool count);
 		void RememberDash(Slot& slot, const Vec3& moveUsed);	// 걸음 뒤 — 다음 입력의 「앞 입력」 · 칸의 대시 사본
 		bool ReplayDash(uint32_t seq);		// 그 앞 칸의 대시 상태에서 seq 부터 켬 · 막기를 다시 고른다(서버 소식 · 확인 못 함 칸을 따른다)
+		// 바로 앞 칸의 수류탄 상태에서 seq 부터 던짐 · 근접 끊음을 다시 고른다(서버 소식 · 확인 칸을 따른다, 대시 막기는 칸 값). cutChanged = 근접 끊음이 바뀐 칸이 있다
+		bool ReplayGrenade(uint32_t seq, bool& cutChanged);
+		uint32_t MarkGrenadeAcked(uint32_t lastSeq, bool serverDead, bool& cutChanged);	// AckGrenade 의 걸음 앞 몫 — 다시 고른 첫 번호(0 = 없음)
 		void ApplyWeapon(const Slot& slot, bool meleeActive);
 		bool RerunMovesFrom(uint32_t seq);	// 그 앞 칸의 상태에서 seq 부터 걸음을 다시 돌린다
 		void Equip(const wire::Input& input);
@@ -235,6 +278,9 @@ namespace mo
 		CDashAbility _dash;			// 입력 쪽 — 다시 돌리기(걸음)는 칸에 남긴 켬 · 막기만 읽는다. 서버 소식이 다르면 ReplayDash 가 다시 고른다
 		DashCounters _dashCounters;
 		uint32_t _dashAckedSeq = 0;	// AckDash 가 본 마지막 번호
+		CGrenadeAbility _grenade;	// 입력 쪽 — 목숨을 넘어 잇는다(서버 Player::grenade 도 부활에 안 지운다)
+		GrenadeCounters _grenadeCounters;
+		uint32_t _grenadeAckedSeq = 0;	// AckGrenade 가 본 마지막 번호
 		int _lockInputs = 0;
 		AdsAbility _ads;
 		CAimCamera _aimCamera;		// 무기 쪽 — 다시 돌리기(Reconcile)는 걸음만 다시 하므로 건드리지 않는다
