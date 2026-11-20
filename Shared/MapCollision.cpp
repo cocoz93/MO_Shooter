@@ -18,6 +18,9 @@ namespace mo
 		constexpr int kBins = 16;
 		constexpr int kMaxStack = 128;
 		constexpr double kOpposingSearch = 1.0;	// 언리얼 FindFaceIndex 가 쓰는 거리(cm) — 맞은 점 근처의 면을 찾는 범위
+		// 쓸기 맞음 법선을 면 법선으로 붙이는 문턱(두 단위 벡터 외적 크기 = 사이 각 라디안) — 반올림 찌꺼기(L-1-a 실측 1e-13)보다 넉넉히 크고,
+		// 모서리 · 꼭짓점 맞음의 둥근 법선이 면과 갈리는 각(그 차이가 튕김 · 미끄러짐을 바꿀 만한 크기)보다 한참 작은 값
+		constexpr double kFaceNormalSnap = 1e-9;
 
 		inline double Dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 		inline Vec3 Cross(const Vec3& a, const Vec3& b)
@@ -1210,6 +1213,20 @@ namespace mo
 		out.impactPoint = onShape;
 		if (bestTri)
 		{
+			// 면 안쪽에 닿았으면(두 점 차가 면 법선과 나란함) 법선 = 그 삼각형의 평면 법선. 면 위 가장 가까운 점을 무게중심 좌표로 셈한 반올림이
+			// 법선에 1e-13 쯤 섞이면 부호로 갈리는 판정(튕김 v·n ≤ 0 마찰 · 구석 두 법선 내적 ≤ 0 · 거의 수직 속도의 요)이 Lyra 와 반대로 간다.
+			// L-1-a 기록 l1a1 옮겨 놓기 칸 — Lyra 는 미끄러지다 다시 닿을 때 0.36 배(마찰) · 바닥 + 벽 밑동에서 그 자리 멈춤 · 요 0, 셋 다 법선이 축과 딱 맞아야 나는 값
+			if (len > 1e-9)
+			{
+				const Vec3 a = VertexOf(bestTri->v, 0), b = VertexOf(bestTri->v, 1), c = VertexOf(bestTri->v, 2);
+				const Vec3 cross = Cross(b - a, c - a);
+				const double crossLen = Length(cross);
+				if (crossLen > 1e-12)
+				{
+					const Vec3 face = cross * (1.0 / crossLen);
+					if (Length(Cross(out.normal, face)) < kFaceNormalSnap) out.normal = Dot(diff, face) >= 0 ? face : face * -1.0;
+				}
+			}
 			out.impactNormal = OpposingNormal(tree, *bestTri, onShape, length > 1e-9 ? delta * (1.0 / length) : Vec3(0, 0, -1));
 		}
 		else
