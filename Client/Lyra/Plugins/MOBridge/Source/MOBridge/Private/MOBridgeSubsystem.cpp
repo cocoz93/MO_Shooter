@@ -70,6 +70,8 @@
 #include "Inventory/LyraInventoryItemDefinition.h"
 #include "Inventory/LyraInventoryItemInstance.h"
 #include "Inventory/LyraInventoryManagerComponent.h"
+#include "AbilitySystem/LyraAbilityTagRelationshipMapping.h"
+#include "Interaction/LyraInteractionDurationMessage.h"
 #include "LyraGameplayTags.h"
 #include "EngineUtils.h"
 #include "Weapons/LyraWeaponSpawner.h"
@@ -206,6 +208,13 @@ namespace
 	// 예측이 켠 대시를 Lyra 가 못 켤 때 다시 해 보는 프레임 상한. Lyra 쿨다운 1.5초가 예측 91입력(1.517초)보다 짧지만, 다리는 입력을 만든 프레임에 켜므로
 	// 앞 대시를 늦은 프레임(끊김)에 켰으면 두 켬의 간격이 1.5초 아래로 줄 수 있다 — 근접과 같은 여섯(제 판단). 넘으면 그 대시는 Lyra 몽타주 없이 지나간다(DashDropped)
 	constexpr uint64 kMaxDashWaitFrames = 6;
+	// Lyra 수류탄 능력(GA_Grenade) 칸 — 표식을 뗀 뒤 손잡이로 기억한다(TickAbilityGrenade). 다리는 이 능력을 켜지 않고 켜지는지만 본다
+	FGameplayAbilitySpecHandle GGrenadeSpecHandle;
+	// 쿨다운 메시지의 남은 시간 — Lyra 는 켤 때 쿨다운 효과를 걸고 그 남은 시간(GetCooldownTimeRemaining)을 싣는다 = 효과 길이
+	// (GE_Grenade_Cooldown DurationMagnitude 5.0, 원본 기준 C:\tmp\mob\gren0\t3d\GE_Grenade_Cooldown_cdo.t3d · ga_flow.txt:22-29)
+	constexpr float kLyraGrenadeCooldownSeconds = 5.0f;
+	// 몽타주 칸을 능력 클래스에서 못 읽을 때 쓰는 자산(GA_Grenade CDO 의 GrenadeThrowMontage 값, 원본 기준 GA_Grenade_cdo.t3d)
+	const TCHAR* const kGrenadeThrowMontagePath = TEXT("/Game/Characters/Heroes/Mannequin/Animations/Actions/AM_MM_Rifle_GrenadeToss.AM_MM_Rifle_GrenadeToss");
 	void KeepBridgeCrouch(ULyraCharacterMovementComponent* Self, FVector&, float)
 	{
 		const ACharacter* C = Self->GetCharacterOwner();
@@ -487,6 +496,8 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bBreakDashBlock = FParse::Param(Cmd, TEXT("MOBBreakDashBlock"));
 	bBreakDashDir = FParse::Param(Cmd, TEXT("MOBBreakDashDir"));
 	bAutoDashOn = FParse::Param(Cmd, TEXT("MOBAutoDash"));
+	bBreakGrenadeBlock = FParse::Param(Cmd, TEXT("MOBBreakGrenadeBlock"));
+	bAutoGrenadeOn = FParse::Param(Cmd, TEXT("MOBAutoGrenade"));
 	FParse::Value(Cmd, TEXT("MOBRayBreak="), RayBreak);
 	bViewClamp = !FParse::Param(Cmd, TEXT("MOBNoViewClamp"));
 	FParse::Value(Cmd, TEXT("MOBBreakAt="), BreakAt);
@@ -546,6 +557,7 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 	TickAbilityFire();
 	TickAbilityMelee();
 	TickAbilityDash();
+	TickAbilityGrenade();
 	if (bHumanCheck) SampleHumanCheck(T);
 	if (Core && BreakPredictAt > 0 && T >= BreakPredictAt)
 	{
@@ -928,6 +940,15 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 		HandleDash(M);
 		break;
 	}
+	case wire::Msg::S2C_GRENADE:
+	{
+		wire::Grenade M = wire::Grenade(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
+		HandleGrenade(M);
+		break;
+	}
+	case wire::Msg::S2C_GRENADE_STATE:
+		++GrenadeStatePackets;	// 겉모습 수류탄의 자리 · 부딪힘(G-5-b 가 읽는다). 지금은 세기만
+		break;
 	case wire::Msg::S2C_RESULT:
 	{
 		wire::Result M = wire::Result(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));	// 사람 칸은 수만큼만 온다 — 뒤는 0
@@ -1790,6 +1811,15 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	const FRotator Control = PC->GetControlRotation();
 	const FVector Location = Ch->GetActorLocation();
 	const FVector Aim = TargetingStart(PC, Location);
+	// 수류탄 카메라 거리(입력 camBack, G-3) — 카메라에서 사격 시작점까지 시선 방향 거리 = (몸 − 카메라) · 시선(G-0 「camBack」 줄의 식 — 시작점은 시선 위 몸에 가장 가까운 점이라 같은 값).
+	// 서버가 G-0 범위로 자르고 던진 입력에만 쓴다(ClampGrenadeCamBack)
+	float CamBack = 0.f;
+	{
+		FVector CamLoc;
+		FRotator CamRot;
+		PC->GetPlayerViewPoint(CamLoc, CamRot);
+		CamBack = (float)((Location - CamLoc) | CamRot.Vector().GetSafeNormal());
+	}
 
 	// 시작점 거리 훑기 — 서버가 부활 뒤 낡은 값으로 따로 세는 첫 30입력(Room.cpp kAimStaleInputs)과 죽은 동안은 뺀다.
 	// 조준 칸은 누름 기준이라 카메라가 섞이는 0.22초는 누른 쪽 칸에 든다 — 허용 거리는 두 칸을 합친 최대로 본다
@@ -1863,6 +1893,8 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	const bool bMelee = bAutoInput ? bAutoMelee : (PC->IsInputKeyDown(EKeys::C) || PC->IsInputKeyDown(EKeys::E));
 	// 대시 = 왼쪽 Shift(IMC_Default 의 IA_Ability_Dash, Pressed 트리거 — 원본 기준). 누른 입력 하나에만 단추를 싣는다(서버 · 예측도 누름 하나에 한 번)
 	const bool bDashDown = bAutoInput ? bAutoDash : PC->IsInputKeyDown(EKeys::LeftShift);
+	// 수류탄 = Q(IMC_ShooterGame 의 IA_Grenade, 원본 기준 C:\tmp\mob\gren0\t3d\IMC_ShooterGame.t3d). 누른 입력 하나에만 단추를 싣는다(서버 · 예측도 누름 하나에 한 번)
+	const bool bGrenadeDown = bAutoInput ? bAutoGrenade : PC->IsInputKeyDown(EKeys::Q);
 	// D61 확인 — 서버는 이 입력부터 조준이다. Lyra 도 같은 프레임에 최대 속도를 바꾸나(0 = 같은 프레임). 이 함수는 그 프레임 Lyra 입력 처리 뒤에 돈다
 	if (const UCharacterMovementComponent* AdsMove = Ch->GetCharacterMovement())
 	{
@@ -1939,6 +1971,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		In.weapon = Weapon;
 		In.viewTick = ViewTick;
 		In.viewAlpha = ViewAlpha;
+		In.camBack = CamBack;
 		if (bJump) In.buttons |= wire::BUTTON_JUMP;
 		if (bFire) In.buttons |= wire::BUTTON_FIRE;
 		if (bReloadDown && !bReloadWasDown) { In.buttons |= wire::BUTTON_RELOAD; ++InputsReload; }
@@ -1951,6 +1984,24 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		// 봇 --dash 와 같은 규칙(BotClient/main.cpp _phase != PostGame)
 		if (bDashDown && !bDashWasDown && MatchPhase != (uint8)wire::EMatchPhase::PostGame) { In.buttons |= wire::BUTTON_DASH; ++InputsDash; }
 		bDashWasDown = bDashDown;
+		// 수류탄(G-5-a) — 경기 끝 단계엔 대시와 같은 까닭으로 싣지 않는다: 서버는 끝 단계 내내 막고(Room.cpp TryActivate 의 PostGame) 예측은 단계를 몰라 던졌다가 고친다.
+		// Lyra 는 끝 단계에도 던진다(G-0-b3) — 어느 쪽에 맞출지는 미결 15
+		if (bGrenadeDown && !bGrenadeWasDown)
+		{
+			if (MatchPhase != (uint8)wire::EMatchPhase::PostGame)
+			{
+				In.buttons |= wire::BUTTON_GRENADE;
+				++InputsGrenade;
+				GrenadeCamBackMin = FMath::Min(GrenadeCamBackMin, (double)CamBack);
+				GrenadeCamBackMax = FMath::Max(GrenadeCamBackMax, (double)CamBack);
+				// 서버가 자르는 범위(G-0 20칸 30.0~417.3) 밖을 센다 — 판 grn1 최소 17.25 · 서버 camBackClamped 1. 자세는 아래 AddInput 뒤 MOB_GRENADE_PRESS 줄로 본다
+				// (판 grn2: 조준 없이 선 채 27.14 · 조준은 80 안팎이라 범위 안 — 미결 25)
+				if (CamBack < mo::kGrenadeCamBackMin) ++GrenadeCamBackBelow;
+				else if (CamBack > mo::kGrenadeCamBackMax) ++GrenadeCamBackAbove;
+			}
+			else ++GrenadePressPost;
+		}
+		bGrenadeWasDown = bGrenadeDown;
 
 		// 번호를 붙이고 여기서도 돌린다 — 서버 답을 기다리지 않고 바로 움직이려고
 		// 근접(E-3) — 이 입력이 근접을 켜면 넣기 전에 화면 판정을 해, 맞음이면 밀기를 같이 넣는다(봇과 같은 길, D75). Lyra 근접 능력은 TickAbilityMelee 가 켠다
@@ -1959,12 +2010,19 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		mo::Vec3 MeleePush;
 		if (bMeleeStarts) MeleeGuess = JudgeMelee(MeleePush);
 		const uint64 DashStartedBefore = Core->Prediction.GetDashCounters().started;
+		const uint64 GrenadeThrownBefore = Core->Prediction.GetGrenadeCounters().thrown;
 		{
 			const FMOBCore::FPawnScope PawnScope(*Core);	// 화면 판정(JudgeMelee) 뒤에 넘긴다 — 봇과 같은 차례
 			Core->Prediction.AddInput(In, bMeleeStarts && MeleeGuess.Kind == wire::MELEE_HIT ? &MeleePush : nullptr);
 		}
 		Seq = In.seq;
 		MeleeYaw = In.yaw;
+		if ((In.buttons & wire::BUTTON_GRENADE) != 0 && GrenadePressLinesLeft > 0)
+		{
+			--GrenadePressLinesLeft;
+			UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE_PRESS seq=%u frame=%llu camBack=%.2f ads=%d crouch=%d pitch=%.2f thrown=%d"), In.seq, (unsigned long long)GFrameCounter, CamBack, bAds ? 1 : 0, bSweepCrouchNow ? 1 : 0, In.pitch,
+				Core->Prediction.GetGrenadeCounters().thrown != GrenadeThrownBefore ? 1 : 0);
+		}
 		// 대시(D-5) — 예측이 이 입력에 대시를 켰으면 Lyra 대시 능력은 TickAbilityDash 가 켠다. 방향 = 예측이 고른 방향(그 칸의 dashDir)
 		if (Core->Prediction.GetDashCounters().started != DashStartedBefore)
 		{
@@ -1999,6 +2057,15 @@ void UMOBridgeSubsystem::TickInput(double Now)
 			DashStartNext = (DashStartNext + 1) % UE_ARRAY_COUNT(DashStartSeqs);
 		}
 		LastInputRawMove = RawMove;
+		// 수류탄(G-5-a) — 예측이 이 입력에 던졌으면 끊기 · 몽타주 · 쿨다운 메시지는 TickAbilityGrenade 가 낸다(같은 프레임)
+		if (Core->Prediction.GetGrenadeCounters().thrown != GrenadeThrownBefore)
+		{
+			if (bGrenadePending) ++GrenadeDropped;	// 앞 던짐을 아직 못 냈다 — 쿨다운(301입력)이 한 프레임보다 길어 안 나와야 한다
+			bGrenadePending = true;
+			GrenadePendingSeq = In.seq;
+			GrenadePendingFrame = GFrameCounter;
+			++GrenadeQueued;
+		}
 		if (bMeleeStarts)
 		{
 			MeleeGuesses.Add(In.seq, MeleeGuess);
@@ -2287,6 +2354,35 @@ void UMOBridgeSubsystem::HandleDash(const wire::Dash& M)
 	}
 }
 
+// 서버 수류탄 소식(G-5-a) — 내 던짐이면 예측을 서버 값으로 고친다(그 입력이 안 던졌으면 던짐으로 놓고 뒤 칸의 쿨다운 · 던짐을 다시 고른다 — 봇 OnGrenade 와 같은 길).
+// 남의 던짐 · 터짐은 세기만 — 겉모습 수류탄 · 터짐 신호는 G-5-b
+void UMOBridgeSubsystem::HandleGrenade(const wire::Grenade& M)
+{
+	switch (M.kind)
+	{
+	case wire::GRENADE_THROW:
+		break;
+	case wire::GRENADE_BOOM_TIMER:
+	case wire::GRENADE_BOOM_HIT:
+		++GrenadeBooms;
+		return;
+	default:
+		++GrenadeBadKind;
+		return;
+	}
+	if (M.thrower != PlayerId)
+	{
+		++GrenadeOthers;
+		return;
+	}
+	++GrenadeMine;
+	if (Core)
+	{
+		const FMOBCore::FPawnScope PawnScope(*Core);	// 근접 끊음이 바뀌어 다시 돌리는 걸음도 남 캡슐을 본다(봇과 같다)
+		Core->Prediction.OnGrenadeThrown(M.seq);
+	}
+}
+
 // 남의 대시 효과 — GA_Hero_Dash 가 켤 때 내는 신호와 같은 값(원본 기준: 신호 GameplayCue.Character.Dash · NormalizedMagnitude = RootMotionDuration 0.25 ·
 // RawMagnitude = Strength 1850 · Normal = 방향 · Location 0 · 능력 · 효과 단계 1). 방향은 소식의 힘(단위 벡터 × 1850)을 정규화한 것 —
 // 원본은 정규화 전 방향(앞이면 카메라 앞 × (1, 1, 1.2), 그 밖이면 이동 입력 날 값)이라 길이가 다를 수 있다. 시점 = 그 몸을 보간하는 화면 틱이 대시 틱의 앞 틱을 넘은 첫 프레임
@@ -2466,6 +2562,153 @@ void UMOBridgeSubsystem::TickAbilityDash()
 	}
 	const FGameplayAbilitySpec* After = LASC && GDashSpecHandle.IsValid() ? LASC->FindAbilitySpecFromHandle(GDashSpecHandle) : nullptr;
 	bLyraDashWasActive = After && After->IsActive();
+}
+
+// Lyra 수류탄 능력(GA_Grenade)은 다리가 켜지 않는다 — 독립 실행이라 권한 갈래에서 진짜 수류탄을 만들어 제 물리 · 타이머로 터뜨린다(grenade-plan 「화면(다리)」 · 결정 감사).
+// 능력 칸의 입력 표식(InputTag.Weapon.Grenade)을 떼어 Q 로 Lyra 가 혼자 못 켜게 하고(근접 · 대시와 같은 꼴), 예측이 던진 입력에서 능력이 켤 때 화면에 내는 셋을 다리가 낸다 —
+// ① 능력 무리 규칙의 끊기(재장전 · 감정 표현) ② 던짐 몽타주 ③ 쿨다운 메시지. 수류탄 액터는 서버 소식으로 G-5-b 가 만든다
+void UMOBridgeSubsystem::TickAbilityGrenade()
+{
+	static const FGameplayTag GrenadeInputTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Grenade"), false);
+	static const FGameplayTag GrenadeAbilityTag = FGameplayTag::RequestGameplayTag(TEXT("Ability.Type.Action.Grenade"), false);
+	static const FGameplayTag ReloadAbilityTag = FGameplayTag::RequestGameplayTag(TEXT("Ability.Type.Action.Reload"), false);
+	static const FGameplayTag DurationChannel = FGameplayTag::RequestGameplayTag(TEXT("Ability.Grenade.Duration.Message"), false);
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ACharacter* Ch = PC ? Cast<ACharacter>(PC->GetPawn()) : nullptr;
+	ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch));
+
+	// Lyra 혼자 켬 — 이 능력은 켜진 그 프레임에 끝나 프레임마다 켜짐을 봐서는 못 잡는다. 능력 시스템의 켬 알림(PreActivate 가 부름)을 듣는다.
+	// 능력 시스템은 선수 상태에 있어 부활해도 같지만, 바뀌면 옮겨 단다
+	if (LASC && GrenadeWatchAsc.Get() != LASC)
+	{
+		if (UAbilitySystemComponent* Old = GrenadeWatchAsc.Get()) Old->AbilityActivatedCallbacks.Remove(GrenadeWatchHandle);
+		GrenadeWatchHandle = LASC->AbilityActivatedCallbacks.AddUObject(this, &UMOBridgeSubsystem::OnLyraAbilityActivated);
+		GrenadeWatchAsc = LASC;
+	}
+
+	const FGameplayAbilitySpec* Spec = nullptr;
+	if (LASC && GrenadeInputTag.IsValid())
+	{
+		for (FGameplayAbilitySpec& Each : LASC->GetActivatableAbilities())
+		{
+			if (!Each.Ability || !Each.GetDynamicSpecSourceTags().HasTagExact(GrenadeInputTag)) continue;
+			if (!bBreakGrenadeBlock || GGrenadeSpecHandle != Each.Handle) UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE_SPEC ability=%s handle=%s strip=%d"), *GetNameSafe(Each.Ability), *Each.Handle.ToString(), bBreakGrenadeBlock ? 0 : 1);
+			GGrenadeSpecHandle = Each.Handle;
+			if (!bBreakGrenadeBlock)
+			{
+				Each.GetDynamicSpecSourceTags().RemoveTag(GrenadeInputTag);
+				LASC->MarkAbilitySpecDirty(Each);
+				++LyraGrenadeStripped;
+			}
+			break;
+		}
+		Spec = GGrenadeSpecHandle.IsValid() ? LASC->FindAbilitySpecFromHandle(GGrenadeSpecHandle) : nullptr;
+	}
+	if (!bGrenadePending) return;
+	bGrenadePending = false;
+	UAnimInstance* AI = Ch && Ch->GetMesh() ? Ch->GetMesh()->GetAnimInstance() : nullptr;
+	if (!LASC || !AI)
+	{
+		++GrenadeNoSpec;	// 몸 · 애님 인스턴스 · 능력 시스템이 없다 — 화면에 낼 곳이 없다
+		return;
+	}
+
+	// ① 끊기 — Lyra 는 능력을 켤 때 능력 표식을 무리 규칙(TagRelationshipMapping, TagRelationships_ShooterHero)으로 넓혀 그 표식을 단 켜진 능력을 끊는다
+	// (LyraAbilitySystemComponent::ApplyAbilityBlockAndCancelTags → CancelAbilities). 그 함수는 보호, 넓히는 함수(GetAbilityTagsToBlockAndCancel)는 내보내지 않아
+	// 다리에서 못 부르므로 같은 규칙 표를 반사로 읽어 넓히고 공개 CancelAbilities 를 부른다. 능력 자신의 끊기 표식(CancelAbilitiesWithTag)은 비어 있다(원본 기준 GA_Grenade_cdo.t3d).
+	// 막기(켜진 동안 사격 · 재장전)는 안 한다 — Lyra 능력이 켜진 그 프레임에 끝나 막는 창이 없다(grenade-plan 「막기 · 끊기」, G-0-c 실측)
+	static bool bCancelTagsLogged = false;
+	FGameplayTagContainer CancelTags;
+	{
+		const FGameplayTagContainer AbilityTags = Spec && Spec->Ability ? Spec->Ability->GetAssetTags() : FGameplayTagContainer(GrenadeAbilityTag);
+		const UObject* Mapping = nullptr;
+		if (const FObjectProperty* MapProp = CastField<FObjectProperty>(LASC->GetClass()->FindPropertyByName(TEXT("TagRelationshipMapping"))))
+		{
+			Mapping = MapProp->GetObjectPropertyValue_InContainer(LASC);
+		}
+		const FArrayProperty* RelProp = Mapping ? CastField<FArrayProperty>(Mapping->GetClass()->FindPropertyByName(TEXT("AbilityTagRelationships"))) : nullptr;
+		const FStructProperty* RelInner = RelProp ? CastField<FStructProperty>(RelProp->Inner) : nullptr;
+		// 칸 형이 머리 파일의 것과 같을 때만 그 꼴로 읽는다
+		if (RelInner && RelInner->Struct && RelInner->Struct->GetFName() == FName(TEXT("LyraAbilityTagRelationship")) && RelInner->Struct->GetStructureSize() == (int32)sizeof(FLyraAbilityTagRelationship))
+		{
+			const TArray<FLyraAbilityTagRelationship>& Rels = *RelProp->ContainerPtrToValuePtr<TArray<FLyraAbilityTagRelationship>>(Mapping);
+			for (const FLyraAbilityTagRelationship& Rel : Rels)
+			{
+				if (AbilityTags.HasTag(Rel.AbilityTag)) CancelTags.AppendTags(Rel.AbilityTagsToCancel);
+			}
+		}
+		if (!bCancelTagsLogged)
+		{
+			bCancelTagsLogged = true;
+			UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE_CANCELTAGS mapping=%s rels=%d abilityTags=%s cancel=%s"), *GetNameSafe(Mapping), RelProp && RelInner ? FScriptArrayHelper(RelProp, RelProp->ContainerPtrToValuePtr<void>(Mapping)).Num() : -1,
+				*AbilityTags.ToStringSimple(), *CancelTags.ToStringSimple());
+		}
+	}
+	int32 Cancelled = 0, CancelledReload = 0;
+	FString CancelledNames;
+	if (!CancelTags.IsEmpty())
+	{
+		// CancelAbilities 가 고르는 조건 그대로(켜짐 · 능력 표식이 끊기 표식 중 하나) 먼저 세고 끊는다
+		for (const FGameplayAbilitySpec& Each : LASC->GetActivatableAbilities())
+		{
+			if (!Each.IsActive() || !Each.Ability || !Each.Ability->GetAssetTags().HasAny(CancelTags)) continue;
+			++Cancelled;
+			if (Each.Ability->GetAssetTags().HasTag(ReloadAbilityTag)) ++CancelledReload;
+			CancelledNames += (CancelledNames.IsEmpty() ? TEXT("") : TEXT(",")) + GetNameSafe(Each.Ability);
+		}
+		LASC->CancelAbilities(&CancelTags, nullptr, nullptr);
+		for (const FGameplayAbilitySpec& Each : LASC->GetActivatableAbilities())
+		{
+			if (Each.IsActive() && Each.Ability && Each.Ability->GetAssetTags().HasAny(CancelTags)) ++GrenadeCancelLeft;
+		}
+	}
+	GrenadeCancelled += Cancelled;
+	GrenadeCancelledReload += CancelledReload;
+
+	// ② 몽타주 — 능력이 PlayMontageAndWait(속도 1 · 시작 0)로 트는 자산을 능력 클래스의 칸(GrenadeThrowMontage)에서 읽는다. 능력 시스템의 몽타주 틀기는
+	// 능력 없이 부르는 쪽(PlayMontageSimulated)도 같은 Montage_Play 를 부르고 능력 시스템의 지금 몽타주 칸을 채운다
+	UAnimMontage* Montage = nullptr;
+	const TCHAR* MontageFrom = TEXT("spec");
+	if (Spec && Spec->Ability)
+	{
+		if (const FObjectProperty* MontProp = CastField<FObjectProperty>(Spec->Ability->GetClass()->FindPropertyByName(TEXT("GrenadeThrowMontage"))))
+		{
+			Montage = Cast<UAnimMontage>(MontProp->GetObjectPropertyValue_InContainer(Spec->Ability));
+		}
+	}
+	if (!Montage)
+	{
+		MontageFrom = TEXT("path");
+		Montage = LoadObject<UAnimMontage>(nullptr, kGrenadeThrowMontagePath);
+	}
+	const float MontageLength = Montage ? LASC->PlayMontageSimulated(Montage, 1.f) : -1.f;
+	if (MontageLength <= 0.f) ++GrenadeMontageFail;
+
+	// ③ 쿨다운 메시지 — HUD W_GrenadeCooldown 이 듣는다(형 LyraInteractionDurationMessage = 던진 캐릭터 · 남은 시간, 원본 기준 ga_flow.txt:22-29 · :165-169)
+	if (DurationChannel.IsValid())
+	{
+		FLyraInteractionDurationMessage Msg;
+		Msg.Instigator = Ch;
+		Msg.Duration = kLyraGrenadeCooldownSeconds;
+		UGameplayMessageSubsystem::Get(this).BroadcastMessage(DurationChannel, Msg);
+	}
+	++GrenadeDriven;
+	if (GrenadeLinesLeft > 0)
+	{
+		--GrenadeLinesLeft;
+		UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE_ONE seq=%u lastSeq=%u frame=%llu waitFrames=%llu cooldownLeft=%d montage=%s from=%s length=%.4f cancelled=%d reload=%d names=[%s]"),
+			GrenadePendingSeq, Seq, (unsigned long long)GFrameCounter, (unsigned long long)(GFrameCounter - GrenadePendingFrame), Core ? Core->Prediction.GetGrenadeCooldownLeft() : -1,
+			*GetNameSafe(Montage), MontageFrom, MontageLength, Cancelled, CancelledReload, *CancelledNames);
+	}
+}
+
+void UMOBridgeSubsystem::OnLyraAbilityActivated(UGameplayAbility* Ability)
+{
+	static const FGameplayTag GrenadeAbilityTag = FGameplayTag::RequestGameplayTag(TEXT("Ability.Type.Action.Grenade"), false);
+	if (!Ability || !GrenadeAbilityTag.IsValid() || !Ability->GetAssetTags().HasTagExact(GrenadeAbilityTag)) return;
+	// 다리는 이 능력을 켜지 않으므로 켜짐은 모두 Lyra 혼자(-MOBBreakGrenadeBlock 이면 Q 로)
+	if (LyraGrenadeSelf < 10) UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE_LYRA_SELF frame=%llu seq=%u ability=%s"), (unsigned long long)GFrameCounter, Seq, *GetNameSafe(Ability));
+	++LyraGrenadeSelf;
 }
 
 // Lyra 근접 능력(GA_Melee)을 예측이 켠 근접 입력에서 켠다(사격 TickAbilityFire 와 같은 꼴, D77). 능력 칸의 입력 표식(InputTag.Ability.Melee)을 떼어
@@ -2852,6 +3095,22 @@ void UMOBridgeSubsystem::TickAutoInput(double T)
 	}
 	bAutoDash = bAutoDashKey;
 	bAutoDashKey = bDashKeyNow;
+	// 수류탄(-MOBAutoGrenade) — 2.6초마다 0.05초 누름(쿨다운 5초 · 301입력이라 둘에 하나는 쿨다운에 걸려 서버 · 예측이 버린다 — 버림 길도 지나게) ·
+	// 20초마다 재장전 누름(아래 bAutoReload, 19초부터) 0.4초 뒤 한 번(재장전 중 던짐 — 끊기 길). 주기 · 자리는 제 판단.
+	// 대시와 같이 Lyra 입력 표식에도 누름을 넣고(뗐으면 아무 일도 없어야 한다 — -MOBBreakGrenadeBlock 이면 Lyra 가 혼자 켠다) 다리는 다음 프레임에 읽는다
+	const double ReloadCycle = FMath::Fmod(S, 20.0);
+	const bool bGrenadeKeyNow = bAutoGrenadeOn && (FMath::Fmod(S, 2.6) < 0.05 || (ReloadCycle >= 19.4 && ReloadCycle < 19.45));
+	{
+		static const FGameplayTag GrenadeTag = FGameplayTag::RequestGameplayTag(TEXT("InputTag.Weapon.Grenade"), false);
+		ULyraAbilitySystemComponent* LASC = Cast<ULyraAbilitySystemComponent>(FindASC(Ch));
+		if (LASC && GrenadeTag.IsValid())
+		{
+			if (bGrenadeKeyNow && !bAutoGrenadeKey) LASC->AbilityInputTagPressed(GrenadeTag);
+			else if (!bGrenadeKeyNow && bAutoGrenadeKey) LASC->AbilityInputTagReleased(GrenadeTag);
+		}
+	}
+	bAutoGrenade = bAutoGrenadeKey;
+	bAutoGrenadeKey = bGrenadeKeyNow;
 	bAutoReload = FMath::Fmod(S, 20.0) >= 19.0 || (bAutoAim && ServerMagazine == 0);
 	if (bAutoReload != bAutoReloadPressed)
 	{
@@ -3571,6 +3830,20 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 			InputsDash, DashQueued, DashDriven, DashActivateFail, DashNoSpec, DashDropped, DashWaitFrames, LyraDashSelf, LyraDashStripped, DashMontChecked, DashMontageMismatch, DashMontNone, DashDirSwapMattered, DashPrevFromSlot,
 			DashDirCount[0], DashDirCount[1], DashDirCount[2], DashDirCount[3], DashCues, DashCueNoPawn, DashCueDropped, PendingDashCues.Num(),
 			DashCues ? DashCueWaitSum / DashCues : 0.0, DashCueWaitMax, DashCorrections, DashCorrectionMax);
+		// 수류탄(G-5-a) — 받은 소식(내 던짐 · 남의 던짐 · 터짐 · 모르는 종류 · 상태 패킷) · 예측 쪽 셈. grenadeDiff = 서버 소식으로 고친 던짐(어긋남 + 소식 없이 지나감 − 죽음을 늦게 안 몫).
+		// 봇 식의 경기 끝 몫(unconfirmedPost)은 다리가 끝 단계에 단추를 안 실어 뺄 것이 없다. finalThrown = 칸마다 마지막으로 정한 던짐의 합(봇 판정과 같은 식) — 확인 안 된 몫(unacked)을 빼면 내 던짐 소식 수와 같아야 한다
+		const mo::CSelfPrediction::GrenadeCounters& GC = Core->Prediction.GetGrenadeCounters();
+		const uint64 GrenadeUnacked = Core->Prediction.CountGrenadeThrownUnacked();
+		const uint64 GrenadeFinal = GC.thrown + GC.respawnThrown - GC.respawnLost + GC.replayGained - GC.replayLost;
+		UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE mine=%lld others=%lld booms=%lld badKind=%lld statePackets=%lld presses=%llu thrown=%llu respawn=+%llu/-%llu replay=+%llu/-%llu finalThrown=%llu unacked=%llu sameFinal=%d results=%llu resultsNoSlot=%llu grenadeDiff=%llu startMismatches=%llu unconfirmed=%llu unconfirmedDead=%llu replays=%llu replaysMissed=%llu meleeInReplay=%llu"),
+			GrenadeMine, GrenadeOthers, GrenadeBooms, GrenadeBadKind, GrenadeStatePackets, (unsigned long long)GC.presses, (unsigned long long)GC.thrown, (unsigned long long)GC.respawnThrown, (unsigned long long)GC.respawnLost,
+			(unsigned long long)GC.replayGained, (unsigned long long)GC.replayLost, (unsigned long long)GrenadeFinal, (unsigned long long)GrenadeUnacked, GrenadeFinal - GrenadeUnacked == (uint64)GrenadeMine ? 1 : 0,
+			(unsigned long long)GC.results, (unsigned long long)GC.resultsNoSlot, (unsigned long long)(GC.startMismatches + GC.unconfirmed - GC.unconfirmedDead),
+			(unsigned long long)GC.startMismatches, (unsigned long long)GC.unconfirmed, (unsigned long long)GC.unconfirmedDead, (unsigned long long)GC.replays, (unsigned long long)GC.replaysMissed, (unsigned long long)GC.meleeInReplay);
+		// 수류탄 다리(G-5-a) — 단추를 실은 입력 · 끝 단계라 안 실은 누름 · 예측이 던진 입력 · 다리가 냄 · 버림 · 몽타주 실패 · 몸 없음 · Lyra 혼자 · 뗀 칸 · 끊은 능력(그중 재장전) · 실은 camBack 범위
+		UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE2 inputs=%lld pressPost=%lld queued=%lld driven=%lld dropped=%lld montageFail=%lld noSpec=%lld lyraSelf=%lld stripped=%lld cancelled=%lld cancelledReload=%lld cancelLeft=%lld camBackMin=%.2f camBackMax=%.2f camBackBelow=%lld camBackAbove=%lld pending=%d"),
+			InputsGrenade, GrenadePressPost, GrenadeQueued, GrenadeDriven, GrenadeDropped, GrenadeMontageFail, GrenadeNoSpec, LyraGrenadeSelf, LyraGrenadeStripped, GrenadeCancelled, GrenadeCancelledReload, GrenadeCancelLeft,
+			InputsGrenade ? GrenadeCamBackMin : 0.0, InputsGrenade ? GrenadeCamBackMax : 0.0, GrenadeCamBackBelow, GrenadeCamBackAbove, bGrenadePending ? 1 : 0);
 	}
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY4 remotes=%d remoteFail=%d frames=%lld underrun=%lld teleports=%lld driftMax=%.3f driftOver1cm=%lld yawDiffMax=%.3f lagAvg=%.1f behindTicksAvg=%.2f"),
 		RemoteSpawned, RemoteSpawnFail, RemoteFrames, RemoteUnderrun, RemoteTeleports, RemoteDriftMax, RemoteDriftOver1cm, RemoteYawDiffMax, RemoteFrames ? RemoteLagSum / RemoteFrames : 0.0, RemoteFrames ? RemoteBehindSum / RemoteFrames : 0.0);

@@ -15,7 +15,7 @@ class ALyraWeaponSpawner;
 struct FMOBCore;
 struct FGameplayAbilityActorInfo;
 
-namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; } struct Vec3; }
+namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; struct Grenade; } struct Vec3; }
 
 // 남의 캐릭터 — 서버 상태를 틱 번호와 함께 쌓아 0.1초 뒤 시점을 보여 준다
 struct FMOBSnapshot
@@ -108,6 +108,9 @@ struct FMOBPendingDashCue
  *                               사람 키처럼 Lyra 입력 표식에도 누름을 넣고, 다리는 그다음 프레임에 읽는다(사람 키는 Lyra 입력 처리가 다리보다 먼저 본다)
  *   -MOBBreakDashBlock          일부러 틀리기 — Lyra 대시 능력의 입력 표식을 안 떼어 Lyra 가 키로 혼자 대시를 켠다(MOB_DASH2 lyraSelf 가 늘어야 한다)
  *   -MOBBreakDashDir            일부러 틀리기 — 다리가 대시를 켤 때 마지막 이동 입력을 앞 입력 것으로 안 바꾼다(MOB_DASH2 montMismatch 가 늘어야 한다 — dirSwapMattered 만큼)
+ *   -MOBAutoGrenade             자동 입력에 수류탄을 더한다 — 2.6초마다 Q 를 0.05초(쿨다운 5초라 둘에 하나는 쿨다운에 걸린다) · 20초마다 재장전을 누른 0.4초 뒤 한 번(재장전 끊기 길).
+ *                               대시와 같이 Lyra 입력 표식에도 누름을 넣고, 다리는 그다음 프레임에 읽는다
+ *   -MOBBreakGrenadeBlock       일부러 틀리기 — Lyra 수류탄 능력의 입력 표식을 안 떼어 Lyra 가 키로 혼자 수류탄을 켠다(MOB_GRENADE2 lyraSelf 가 늘어야 한다)
  *   -MOBBreakPadsAt=N           일부러 틀리기 — 준비된 뒤 N초에 묶인 받침 하나의 Lyra 켜짐을 뒤집고 · 다음 회복 효과를 건너뛰고 · 다음 받침 소식 하나를 버린다(check_pads_bridge.py 가 잡는지 보려고)
  *   -MOBBreakDevices            일부러 틀리기 — 점프대 · 순간이동의 겹침을 안 끈다(MOB_DEVICES overlap 이 늘어야 한다 — 끈 판의 0 이 「못 셌다」가 아님을 보려고)
  *   -MOBHumanCheck              사람 확인 자동화(MyDocs human-check-auto-plan.md) — 자동 입력 앞에 각본(샷건 조준 · 허리 사격, 앉기 · 앉은 채 점프, 무기별 근접 누른 채)을 돌리고
@@ -168,6 +171,8 @@ private:
 	void TickAbilityFire();
 	void TickAbilityMelee();
 	void TickAbilityDash();
+	void TickAbilityGrenade();	// 매 프레임(TickAbilityDash 뒤) — Lyra 수류탄 능력의 입력 표식을 떼고, 예측이 던진 입력에 끊기 · 몽타주 · 쿨다운 메시지를 낸다(G-5-a)
+	void OnLyraAbilityActivated(class UGameplayAbility* Ability);	// 내 능력 시스템이 능력을 켤 때마다 — 수류탄 능력이면 Lyra 혼자 켠 것(LyraGrenadeSelf)
 	FMOBMeleeGuess JudgeMelee(mo::Vec3& OutPush);
 	void TickAutoInput(double T);
 	bool TickHumanScript(double T);		// -MOBHumanCheck 각본 — 이 프레임 입력을 맡았으면 true(끝났으면 false = 자동 입력으로)
@@ -180,6 +185,7 @@ private:
 	void HandlePickup(const mo::wire::Pickup& M);
 	void HandleMelee(const mo::wire::Melee& M);
 	void HandleDash(const mo::wire::Dash& M);
+	void HandleGrenade(const mo::wire::Grenade& M);		// 서버 수류탄 소식(G-5-a) — 내 던짐이면 예측을 서버 값으로 고친다. 남의 던짐 · 터짐은 세기만(겉모습은 G-5-b)
 	void TickRemoteDashCues();		// 매 프레임(TickRemotes 뒤) — 받아 둔 남의 대시 효과 중 화면 시점이 닿은 것을 낸다
 	ALyraWeaponSpawner* BindPad(int32 Index);
 	void ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects);
@@ -242,6 +248,8 @@ private:
 	bool bBreakDashBlock = false;	// -MOBBreakDashBlock — 일부러 틀림: Lyra 대시 능력의 입력 표식을 안 뗀다(Lyra 가 혼자 켜 lyraSelf 가 는다)
 	bool bBreakDashDir = false;		// -MOBBreakDashDir — 일부러 틀림: 켤 때 마지막 이동 입력을 앞 입력 것으로 안 바꾼다(montMismatch 가 는다)
 	bool bAutoDashOn = false;		// -MOBAutoDash — 자동 입력에 대시를 더한다
+	bool bBreakGrenadeBlock = false;	// -MOBBreakGrenadeBlock — 일부러 틀림: Lyra 수류탄 능력의 입력 표식을 안 뗀다(Lyra 가 혼자 켜 lyraSelf 가 는다)
+	bool bAutoGrenadeOn = false;	// -MOBAutoGrenade — 자동 입력에 수류탄을 더한다
 	bool bBreakCrouchBlock = false;	// -MOBBreakCrouchBlock — 일부러 틀림: 앉기 막기 갈고리가 어긋남을 세기만 하고 안 되돌린다. Lyra 가 혼자 앉으며 캡슐을 옮겨 내 캐릭터 밀림(selfDriftOver1cm)이 늘어야 한다(D-5-c)
 	bool bAbilityOwnTimer = false;	// -MOBAbilityOwnTimer — 내 사격 능력을 Lyra 자기 타이머 · 원본 난수로 둔다(고치기 전 동작과 견줄 때만, D53)
 	bool bRayCheck = false;			// -MOBRayCheck — 같은 자세에 엔진 광선과 TraceBody 를 쏴 견준다(5단계)
@@ -484,6 +492,8 @@ private:
 	bool bAutoMelee = false;
 	bool bAutoDash = false;			// 다리가 읽는 대시 키 — 자동 입력이 누른 다음 프레임부터(bAutoDashKey 의 한 프레임 뒤)
 	bool bAutoDashKey = false;		// 자동 입력이 이 프레임에 누른 대시 키 — Lyra 입력 표식 누름 · 뗌은 이것으로
+	bool bAutoGrenade = false;		// 다리가 읽는 수류탄 키 — 대시 키와 같이 자동 입력이 누른 다음 프레임부터
+	bool bAutoGrenadeKey = false;	// 자동 입력이 이 프레임에 누른 수류탄 키 — Lyra 입력 표식 누름 · 뗌은 이것으로
 	uint8 AutoWeapon = 0;
 	int32 AutoWeaponFixed = -1;		// -MOBAutoWeapon=N — 자동 시험의 무기를 고정한다(-1 = 10초마다 바꿈). 무기별 대조에 쓴다
 
@@ -529,6 +539,25 @@ private:
 	uint8 DashMontCheckDir = 0;
 	uint32 DashMontCheckSeq = 0;
 	int32 DashMontLinesLeft = 20;
+	// 수류탄 다리(G-5-a) — 단추를 실은 입력 · 경기 끝 단계라 안 실은 누름 · 예측이 던진 입력(낼 차례로 둠) · 다리가 몽타주 · 메시지를 냄 · 앞 던짐을 아직 못 내고 버림 ·
+	// 몽타주 틀기 실패(자산 없음 · 튼 길이 0) · 낼 곳 없음(몸 · 애님 인스턴스 · 능력 시스템이 없다) · 다리가 안 켰는데 켜짐(Lyra 혼자 — 다리는 이 능력을 켜지 않는다) · 입력 표식을 뗀 칸 ·
+	// 던짐에 끊은 Lyra 능력(그중 재장전) · 받은 서버 던짐 소식(내 것 · 남의 것) · 터짐 소식 · 상태 패킷
+	int64 InputsGrenade = 0, GrenadePressPost = 0, GrenadeQueued = 0, GrenadeDriven = 0, GrenadeDropped = 0, GrenadeMontageFail = 0, GrenadeNoSpec = 0, LyraGrenadeSelf = 0, LyraGrenadeStripped = 0;
+	int64 GrenadeCancelled = 0, GrenadeCancelledReload = 0, GrenadeMine = 0, GrenadeOthers = 0, GrenadeBooms = 0, GrenadeStatePackets = 0;
+	// 실은 camBack(cm) 범위 · 서버가 자르는 범위(mo::kGrenadeCamBackMin ~ Max, G-0 20칸) 아래 · 위였던 누름
+	double GrenadeCamBackMin = 1e9, GrenadeCamBackMax = -1e9;
+	int64 GrenadeCamBackBelow = 0, GrenadeCamBackAbove = 0;
+	int32 GrenadePressLinesLeft = 40;	// 누름 하나씩 줄(MOB_GRENADE_PRESS) 남은 수
+	int64 GrenadeCancelLeft = 0;		// 끊은 뒤에도 켜져 있는 끊기 대상 능력(0 이어야 한다 — CancelAbilities 가 정말 껐나)
+	int64 GrenadeBadKind = 0;		// 모르는 종류의 수류탄 소식 — 0 이어야 한다
+	bool bGrenadePending = false;
+	bool bGrenadeWasDown = false;
+	// Lyra 수류탄 능력은 켜진 그 프레임에 끝나(grenade-plan 「막기 · 끊기」) 프레임마다 켜짐을 봐서는 못 잡는다 — 능력 시스템의 켬 알림을 듣는다
+	TWeakObjectPtr<UAbilitySystemComponent> GrenadeWatchAsc;
+	FDelegateHandle GrenadeWatchHandle;
+	uint32 GrenadePendingSeq = 0;
+	uint64 GrenadePendingFrame = 0;
+	int32 GrenadeLinesLeft = 40;	// 던짐 하나씩 줄(MOB_GRENADE_ONE) 남은 수
 	uint32 MeleePendingSeq = 0;
 	uint64 MeleePendingFrame = 0;
 	bool bLyraMeleeWasActive = false;
