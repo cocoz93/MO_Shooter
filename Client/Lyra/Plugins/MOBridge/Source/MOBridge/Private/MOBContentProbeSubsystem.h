@@ -48,7 +48,9 @@ public:
 		// G-0-b2 죽음 · 부활 길 — 상대 · 내가 다시 생길 때까지 기다림(생기면 칸을 바로 끝낸다, 칸 길이 = 한도) · 상대가 나를 죽임(상대 ASC 로 피해 효과)
 		FoeRespawnWait, MeRespawnWait, FoeKillsMe,
 		// G-0-b3 경기 끝 — 목표 점수를 지금 두 팀 점수 중 큰 쪽 + 1 로 낮춘다(다음 처치가 경기를 끝낸다)
-		LowerTarget };
+		LowerTarget,
+		// L-1-c 같은 프레임 누름(대시 판, -MOBCPDashSet=l1c) — Arg = DASH_ACTIONS 차례. ActDashSame = 그 능력 → 대시, DashActSame = 대시 → 그 능력을 한 프레임 안에 그 차례로 누른다
+		ActDashSame, DashActSame };
 
 private:
 	bool WaitReady(float DeltaTime);
@@ -67,7 +69,7 @@ private:
 	void GoHome() const;
 	void PlaceFoe(double Distance, bool bFacingMe, double Side = 0.0) const;
 	void LogScores(const TCHAR* When) const;
-	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? 5 : (bGrenade ? (bGrenL1B ? 8 : (bGrenL1A ? 7 : 6)) : 0))))); }
+	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? (bDashL1C ? 9 : 5) : (bGrenade ? (bGrenL1C ? 10 : (bGrenL1B ? 8 : (bGrenL1A ? 7 : 6))) : 0))))); }
 	// 수류탄 판(G-0, grenade-plan.md) — 생김 · 부딪힘 · 튕김 · 멈춤은 엔진 알림을 받은 그 자리에서 적고(MOB_CPROBE_GSPAWN · _GHIT · _GBOUNCE · _GSTOP),
 	// 터짐(메시 숨김)은 틱에서 보고 폭발 판정을 같은 식으로 다시 해 본다(MOB_CPROBE_GBOOM — 겹친 성분은 comps 칸 · _GTRACE). 칸 끝 요약 = MOB_CPROBE_GREN
 	void OnActorSpawned(AActor* A);
@@ -95,7 +97,8 @@ private:
 	void BlastPass(AActor* G, int32 Pass);
 	// 대시 판(D-0) — 칸 안에서 누르기 · 이동 입력 · 켜짐 가장자리를 맡고(DuringDash), 칸 끝에 요약 한 줄(EndDash, MOB_CPROBE_DASH)
 	static bool IsDashAct(EAct A) { return A == EAct::DashMove || A == EAct::DashNoInput || A == EAct::DashPitch || A == EAct::DashJumpApex || A == EAct::DashSpam
-		|| A == EAct::DashThen || A == EAct::HoldThenDash || A == EAct::ReloadDash || A == EAct::MeleeDash || A == EAct::DashWall || A == EAct::DashCrouchSame || A == EAct::DashTurn; }
+		|| A == EAct::DashThen || A == EAct::HoldThenDash || A == EAct::ReloadDash || A == EAct::MeleeDash || A == EAct::DashWall || A == EAct::DashCrouchSame || A == EAct::DashTurn
+		|| A == EAct::ActDashSame || A == EAct::DashActSame; }
 	void DuringDash();
 	void EndDash();
 	float DashCooldownLeft() const;		// 쿨다운 효과(GameplayCue.Character.Dash.Cooldown 을 주는 효과)의 남은 초, 없으면 0
@@ -136,6 +139,8 @@ private:
 	bool bGrenade = false;	// G-0 수류탄 각본(연습장, -MOBCPMode=grenade)
 	bool bGrenL1A = false;	// L-1-a 수류탄 장면 각본(-MOBCPMode=grenade -MOBCPGrenSet=l1a — 구석 · 높은 데서 아래로 · 벽 스침 · 턱 틈 + 옮겨 놓기 10칸. G-0 각본은 그대로)
 	bool bGrenL1B = false;	// L-1-b 수류탄 expanse 장면 각본(-MOBCPGrenSet=l1b, 맵 L_Expanse — 이동은 지나고 수류탄은 막는 창틀 띠 셋 + 무기 광선은 지나고 폭발 선은 막는 문틀 뒤 · 막힘 없는 대조 = 다섯 칸)
+	bool bGrenL1C = false;	// L-1-c 수류탄 같은 프레임 누름 각본(-MOBCPGrenSet=l1c — 근접 → Q · Q → 근접 · 재장전 → Q · Q → 재장전, 한 프레임 안)
+	bool bDashL1C = false;	// L-1-c 대시 같은 프레임 누름 각본(-MOBCPMode=dash -MOBCPDashSet=l1c — 근접 → 대시 · 대시 → 근접, 한 프레임 안)
 	bool bReady = false;
 	bool bDone = false;
 	TWeakObjectPtr<APawn> ClearPawn;

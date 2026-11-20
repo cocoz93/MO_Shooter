@@ -338,6 +338,10 @@ namespace
 		{ TEXT("ads_hold"),  TEXT("InputTag.Weapon.ADS"),    TEXT("GA_ADS"),         true  },
 	};
 	const FDashAction& DashActionAt(float Arg) { return DASH_ACTIONS[FMath::Clamp((int32)Arg, 0, (int32)UE_ARRAY_COUNT(DASH_ACTIONS) - 1)]; }
+	// 칸에 대시 중 누름 능력(DASH_ACTIONS[Arg])이 있나 — 대시 중 · 쥔 채 · L-1-c 같은 프레임 둘
+	bool HasDashAction(EAct A) { return A == EAct::DashThen || A == EAct::HoldThenDash || A == EAct::ActDashSame || A == EAct::DashActSame; }
+	// L-1-c 근접 칸 상대 거리 — 돌진 없이 맞는 거리(e1g3 melee_150 hit=1 · 피해 100 · lunge2d 0)
+	constexpr double L1C_MELEE_FOE = 150.0;
 	// 키보드 같은 이동 입력 — 각을 축마다 반올림(45도 = (1, 1), 길이 √2. Lyra 영웅 입력은 앞 · 옆을 따로 더한다)
 	FVector KeyInput(float AngleDeg)
 	{
@@ -357,7 +361,8 @@ namespace
 	// 마지막(G-0-b3) — 수류탄이 생기고 이 프레임 뒤 상대가 나를 죽임(−1 = 안 함)
 	// G-0-c 섞어 누름(묶음 13~16) — Spam = 칸 안 GREN_PRESS_AT ~ GREN_SPAM_UNTIL 동안 매 프레임 Q(떼지 않음) · QFire / FireQ = 한 프레임에 Q 와 사격 탭(앞이 먼저 누름) ·
 	// ReloadQ · DashQ · MeleeQ = 그 능력을 누르고, 켜진 뒤 GrenComboSpec 의 QAfter 프레임에 Q
-	enum class EGrenCombo : uint8 { None, Spam, QFire, FireQ, ReloadQ, DashQ, MeleeQ };
+	// L-1-c(미결 5 · 22) — …Same = 한 프레임 안에 두 누름(이름 차례 = 누르는 차례, 켜진 뒤 기다림 없음)
+	enum class EGrenCombo : uint8 { None, Spam, QFire, FireQ, ReloadQ, DashQ, MeleeQ, MeleeQSame, QMeleeSame, ReloadQSame, QReloadSame };
 	// G-0-c2(묶음 17 · 짐작 7) — Drop = 첫 수류탄이 멈추면 둘째를 던져 첫 수류탄 바로 위로 옮기고 아래로 · Walk = 멈춘 수류탄 뒤로 나를 옮겨 그 위로 걷기 ·
 	// WalkBare = 수류탄 없이 Walk 와 같은 자리 · 같은 걷기(대조군 — 같은 인덱스 내 자리 차가 수류탄 탓)
 	enum class EGrenTouch : uint8 { None, Drop, Walk, WalkBare };
@@ -465,6 +470,12 @@ namespace
 		{ TEXT("b_gonly647"),       EGrenPlace::Placed,      0.f,   12.f,  false, false },	// 77
 		{ TEXT("b_blast623"),       EGrenPlace::WallAt,      -60.f, 0.f,   false, false },	// 78
 		{ TEXT("b_blast_open"),     EGrenPlace::WallAt,      -60.f, 1.f,   false, false },	// 79
+		// L-1-c(미결 5 · 22) — 같은 프레임 두 누름, 이름 차례 = 누르는 차례. GRENADE_L1C_SCRIPT 만 쓴다. 근접 둘은 상대를 앞 L1C_MELEE_FOE 에 세우고(FoeAt — 200 안이라 겨누지 않고 피치만)
+		// 피치 45 로 상대 위로 던진다(근접 피해만 보려고). 재장전 둘은 상대를 숨긴 채 집에서 피치 0(p0 · c_q_fire 와 같은 세움)
+		{ TEXT("s_melee_q"),        EGrenPlace::FoeAt,       45.f,  150.f, false, false, 0.f,  0.f,  -1, -1, EGrenCombo::MeleeQSame },	// 80
+		{ TEXT("s_q_melee"),        EGrenPlace::FoeAt,       45.f,  150.f, false, false, 0.f,  0.f,  -1, -1, EGrenCombo::QMeleeSame },	// 81
+		{ TEXT("s_reload_q"),       EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::ReloadQSame },	// 82
+		{ TEXT("s_q_reload"),       EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::QReloadSame },	// 83
 	};
 	// L-1-a 옮겨 놓을 자리 · 속도 — 값은 Shared 탄체 걸음으로 골랐다(리포 밖 C:\tmp\mob\lm\l1a\search — 집 수평 던짐 회전 1.1957 · 1.5889 · 0 의 캡슐로
 	// 면까지 틈을 재고, 소수 여섯째 자리로 자른 값 그대로 걸어 그 갈래가 나고 이웃 값에서도 나는 자리). 정답지는 이 값의 Lyra 기록이다.
@@ -700,6 +711,27 @@ namespace
 		{ TEXT("b_blast623"),       5.1f, EAct::GrenThrow, 78.f, false },
 		{ TEXT("b_blast_open"),     5.1f, EAct::GrenThrow, 79.f, false },
 	};
+	// L-1-c 같은 프레임 누름 각본(-MOBCPGrenSet=l1c) — 칸 길이 · 누름 시각은 G-0 섞어 누름 칸과 같다(5.1초 · Q 는 칸 시작 0.5초 · 쿨다운 5초가 다음 누름 전에 끝남). 재장전 칸 앞엔 탄창을 4 로(c_ammo 와 같음)
+	const FStep GRENADE_L1C_SCRIPT[] = {
+		{ TEXT("settle"),     1.0f, EAct::Home,      0.f,  false },
+		{ TEXT("foe_setup"),  0.5f, EAct::FoeSetup,  0.f,  false },	// 다른 팀 · 체력 1000(숨긴 채)
+		{ TEXT("s_ammo1"),    0.3f, EAct::SetAmmo,   1.f,  false },	// 권총 4 · 48(재장전할 거리)
+		{ TEXT("s_reload_q"), 5.1f, EAct::GrenThrow, 82.f, false },
+		{ TEXT("s_ammo2"),    0.3f, EAct::SetAmmo,   1.f,  false },
+		{ TEXT("s_q_reload"), 5.1f, EAct::GrenThrow, 83.f, false },
+		{ TEXT("foe_show"),   0.3f, EAct::FoeShow,   0.f,  false },	// 근접 둘은 상대를 보이고(G-0 각본 foe_show 와 같음)
+		{ TEXT("s_melee_q"),  5.1f, EAct::GrenThrow, 80.f, false },
+		{ TEXT("s_q_melee"),  5.1f, EAct::GrenThrow, 81.f, false },
+	};
+	// L-1-c 대시 같은 프레임 누름 각본(-MOBCPMode=dash -MOBCPDashSet=l1c) — 칸 길이 · 누름 시각은 D-0 대시 중 누름 칸과 같다(2초 · 대시는 칸 시작 DASH_PRESS_AT). Arg 3 = 근접(DASH_ACTIONS)
+	const FStep DASH_L1C_SCRIPT[] = {
+		{ TEXT("settle"),       1.0f, EAct::Home,        0.f, false },
+		{ TEXT("foe_show"),     0.3f, EAct::FoeShow,     0.f, false },	// D-0 각본 melee_dash 앞과 같은 차례(보임 · 다른 팀 · 체력 1000)
+		{ TEXT("foe_setup"),    0.5f, EAct::FoeSetup,    0.f, false },
+		{ TEXT("s_melee_dash"), 2.0f, EAct::ActDashSame, 3.f, false },
+		{ TEXT("s_dash_melee"), 2.0f, EAct::DashActSame, 3.f, false },
+		{ TEXT("foe_away"),     1.0f, EAct::FoeAway,     0.f, false },
+	};
 	const TCHAR* const GREN_TAG = TEXT("InputTag.Weapon.Grenade");	// Q(IMC_ShooterGame) → GA_Grenade, 켜기 = OnInputTriggered
 	constexpr float GREN_PRESS_AT = 0.5f;		// 칸 시작에서 Q 까지 — 겨눔(AimAt)이 모이고 벽 거리 맞춤 두 번이 끝난 뒤(제안값)
 	constexpr float GREN_ADJUST_AT0 = 0.2f;		// 벽 카메라 칸 — 몸 앞뒤 맞춤 두 번(순간이동 뒤 카메라가 따라온 다음, 제안값)
@@ -730,6 +762,10 @@ namespace
 		case EGrenCombo::ReloadQ: return { TEXT("InputTag.Weapon.Reload"), TEXT("GA_Weapon_Reload_"), GREN_RELOAD_Q_AFTER };
 		case EGrenCombo::DashQ:   return { TEXT("InputTag.Ability.Dash"),  TEXT("GA_Hero_Dash"),      DASH_ACTION_AFTER };
 		case EGrenCombo::MeleeQ:  return { TEXT("InputTag.Ability.Melee"), TEXT("GA_Melee"),          DASH_ACTION_AFTER };
+		case EGrenCombo::MeleeQSame:
+		case EGrenCombo::QMeleeSame:  return { TEXT("InputTag.Ability.Melee"), TEXT("GA_Melee"),          -1 };
+		case EGrenCombo::ReloadQSame:
+		case EGrenCombo::QReloadSame: return { TEXT("InputTag.Weapon.Reload"), TEXT("GA_Weapon_Reload_"), -1 };
 		case EGrenCombo::None:    break;
 		}
 		return { nullptr, nullptr, -1 };
@@ -744,6 +780,10 @@ namespace
 		case EGrenCombo::ReloadQ: return TEXT("reload_q");
 		case EGrenCombo::DashQ:   return TEXT("dash_q");
 		case EGrenCombo::MeleeQ:  return TEXT("melee_q");
+		case EGrenCombo::MeleeQSame:  return TEXT("melee_q_same");
+		case EGrenCombo::QMeleeSame:  return TEXT("q_melee_same");
+		case EGrenCombo::ReloadQSame: return TEXT("reload_q_same");
+		case EGrenCombo::QReloadSame: return TEXT("q_reload_same");
 		case EGrenCombo::None:    break;
 		}
 		return TEXT("none");
@@ -827,7 +867,7 @@ namespace
 	constexpr float MELEE_SIDE_FORWARD = 250.f;	// 옆 거리 칸에서 상대를 세우는 앞 거리 — 맞는 앞 범위(150~520, gym1) 한가운데쯤
 	constexpr float WATCH_LOG_EVERY = 5.f;		// 다리 판 마지막 칸에서 점수를 적는 간격(초)
 
-	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장) · 6 = 수류탄(연습장) · 7 = 수류탄 L-1-a 장면(연습장) · 8 = 수류탄 L-1-b 장면(L_Expanse)
+	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장) · 6 = 수류탄(연습장) · 7 = 수류탄 L-1-a 장면(연습장) · 8 = 수류탄 L-1-b 장면(L_Expanse) · 9 = 대시 L-1-c 같은 프레임 누름(연습장) · 10 = 수류탄 L-1-c 같은 프레임 누름(연습장)
 	const FStep& StepAt(int32 Script, int32 I)
 	{
 		switch (Script)
@@ -840,6 +880,8 @@ namespace
 		case 6: return GRENADE_SCRIPT[I];
 		case 7: return GRENADE_L1A_SCRIPT[I];
 		case 8: return GRENADE_L1B_SCRIPT[I];
+		case 9: return DASH_L1C_SCRIPT[I];
+		case 10: return GRENADE_L1C_SCRIPT[I];
 		default: return GYM_SCRIPT[I];
 		}
 	}
@@ -855,6 +897,8 @@ namespace
 		case 6: return UE_ARRAY_COUNT(GRENADE_SCRIPT);
 		case 7: return UE_ARRAY_COUNT(GRENADE_L1A_SCRIPT);
 		case 8: return UE_ARRAY_COUNT(GRENADE_L1B_SCRIPT);
+		case 9: return UE_ARRAY_COUNT(DASH_L1C_SCRIPT);
+		case 10: return UE_ARRAY_COUNT(GRENADE_L1C_SCRIPT);
 		default: return UE_ARRAY_COUNT(GYM_SCRIPT);
 		}
 	}
@@ -963,6 +1007,12 @@ void UMOBContentProbeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	if (bGrenL1A) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l1a steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L1A_SCRIPT));
 	bGrenL1B = bGrenade && GrenSet == TEXT("l1b");
 	if (bGrenL1B) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l1b steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L1B_SCRIPT));
+	bGrenL1C = bGrenade && GrenSet == TEXT("l1c");
+	if (bGrenL1C) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l1c steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L1C_SCRIPT));
+	FString DashSet;
+	FParse::Value(Cmd, TEXT("MOBCPDashSet="), DashSet);
+	bDashL1C = bDash && DashSet == TEXT("l1c");
+	if (bDashL1C) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_DASHSET set=l1c steps=%d"), (int32)UE_ARRAY_COUNT(DASH_L1C_SCRIPT));
 	bForceQuinn = FParse::Param(Cmd, TEXT("MOBCPQuinn"));
 	StartRealAt = FPlatformTime::Seconds();
 	GAreScreenMessagesEnabled = false;
@@ -1581,6 +1631,15 @@ void UMOBContentProbeSubsystem::BeginStep()
 		GoHome();
 		DashIn = FVector::ForwardVector;
 		break;
+	case EAct::ActDashSame:
+	case EAct::DashActSame:	// L-1-c — 같은 프레임 두 누름의 켜짐 차례를 능력 알림(MOB_CPROBE_GABIL seq)으로 본다. 칸 끝 요약 MOB_CPROBE_DCOMBO(EndDash)
+		GoHome();
+		DashIn = FVector(0.0, 1.0, 0.0);	// 오른쪽(+Y) — 상대는 앞 X(누르는 프레임에 세움, DuringDash). melee_dash 와 같은 축 가름(근접은 앞 · 대시는 옆)
+		ComboOns.Reset();
+		ComboFails.Reset();
+		bComboWatch = true;
+		WatchAbilities();
+		break;
 	case EAct::ReloadDash:
 		GoHome();
 		DashIn = FVector::ForwardVector;
@@ -2077,7 +2136,7 @@ void UMOBContentProbeSubsystem::DuringDash()
 	ACharacter* Ch = Me();
 	if (!Ch) return;
 	const UCharacterMovementComponent* M = Ch->GetCharacterMovement();
-	const FDashAction* Act = (S.Act == EAct::DashThen || S.Act == EAct::HoldThenDash) ? &DashActionAt(S.Arg) : nullptr;
+	const FDashAction* Act = HasDashAction(S.Act) ? &DashActionAt(S.Arg) : nullptr;
 	const TCHAR* const DashTag = TEXT("InputTag.Ability.Dash");
 
 	// 켜짐 가장자리
@@ -2166,6 +2225,16 @@ void UMOBContentProbeSubsystem::DuringDash()
 		bPress = DashPressFrame < 0 && StepTime >= DASH_PRESS_AT;
 		break;
 	}
+	// L-1-c 그 능력 → 대시 — 같은 프레임 대시 누름 앞에 누른다(대시 → 그 능력은 아래 대시 중 누름 갈래가 같은 프레임에 뒤에 누른다). 떼기는 다음 프레임(아래 갈래)
+	if ((S.Act == EAct::ActDashSame || S.Act == EAct::DashActSame) && bPress && ActionPressFrame < 0)
+		PlaceFoe(L1C_MELEE_FOE, true);	// 누르기 전 오른쪽 걸음만큼 따라가 내 바로 앞에
+	if (S.Act == EAct::ActDashSame && bPress && Act && ActionPressFrame < 0)
+	{
+		PressTag(Act->InputTag, true);
+		ActionPressFrame = Frame;
+		bActionHeld = Act->bHold;
+		FrameEvents += TEXT("act_press;");
+	}
 	if (bPress)
 	{
 		PressTag(DashTag, true);
@@ -2196,6 +2265,7 @@ void UMOBContentProbeSubsystem::DuringDash()
 	if (Act)
 	{
 		const bool bPressAct = S.Act == EAct::HoldThenDash ? ActionPressFrame < 0
+			: S.Act == EAct::DashActSame ? (ActionPressFrame < 0 && DashPressFrame == Frame)	// L-1-c 대시 → 그 능력 — 대시를 누른 그 프레임, 대시 누름 뒤
 			: (ActionPressFrame < 0 && DashStartFrame >= 0 && Frame >= DashStartFrame + DASH_ACTION_AFTER);
 		if (bPressAct)
 		{
@@ -2240,7 +2310,7 @@ void UMOBContentProbeSubsystem::EndDash()
 {
 	const FStep& S = StepAt(ScriptIdx(), Step);
 	const ACharacter* Ch = Me();
-	const FDashAction* Act = (S.Act == EAct::DashThen || S.Act == EAct::HoldThenDash) ? &DashActionAt(S.Arg) : nullptr;
+	const FDashAction* Act = HasDashAction(S.Act) ? &DashActionAt(S.Arg) : nullptr;
 	if (S.Act == EAct::DashSpam) PressTag(TEXT("InputTag.Ability.Dash"), false);
 	if (Act && bActionHeld) PressTag(Act->InputTag, false);
 	FString Gaps;
@@ -2252,8 +2322,16 @@ void UMOBContentProbeSubsystem::EndDash()
 		S.Name, S.Arg, DashIn.X, DashIn.Y, DashPressFrame, DashStartFrame, DashEndFrame, (DashStartFrame >= 0 && DashEndFrame >= 0) ? DashEndFrame - DashStartFrame : -1,
 		DashStarts.Num(), *Gaps.TrimEnd(), DashCooldownAtPress, DashCrouchedAtPress, Ch && Ch->bIsCrouched ? 1 : 0, *DashMontageSeen.TrimEnd(),
 		DashMaxSpeed2d, DashMaxVz, DashMinVz, Moved.X, Moved.Y, Moved.Z, Act ? Act->Name : TEXT("-"), ActionPressFrame, ActionStartFrame, ActionEndFrame, ActionRestartFrame,
-		ActionDuringDash, ActionAfterDash, DashMeleePressFrame, DashMeleeStartFrame, S.Act == EAct::MeleeDash ? DashFoeHpAtStep - HealthOf(Foe.Get()) : 0.f, DashMagAtBegin, ActiveMagazine(),
+		ActionDuringDash, ActionAfterDash, DashMeleePressFrame, DashMeleeStartFrame, (S.Act == EAct::MeleeDash || S.Act == EAct::ActDashSame || S.Act == EAct::DashActSame) ? DashFoeHpAtStep - HealthOf(Foe.Get()) : 0.f, DashMagAtBegin, ActiveMagazine(),
 		M ? (int32)M->MovementMode.GetValue() : -1);
+	// L-1-c 같은 프레임 칸 — 켜짐(프레임:능력) · 못 켬 까닭별 (수, 첫, 끝). 줄마다의 차례는 MOB_CPROBE_GABIL seq
+	if (S.Act == EAct::ActDashSame || S.Act == EAct::DashActSame)
+	{
+		FString Fails;
+		for (const TPair<FString, FIntVector>& KV : ComboFails) Fails += FString::Printf(TEXT("%s:%d:%d-%d "), *KV.Key, KV.Value.X, KV.Value.Y, KV.Value.Z);
+		UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_DCOMBO step=%s act=%s ons=[%s] fails=[%s]"), S.Name, Act ? Act->Name : TEXT("-"), *ComboOns.TrimEnd(), *Fails.TrimEnd());
+		bComboWatch = false;
+	}
 }
 
 void UMOBContentProbeSubsystem::WriteRow()
@@ -3734,9 +3812,13 @@ void UMOBContentProbeSubsystem::DuringGrenCombo()
 		break;
 	case EGrenCombo::QFire:
 	case EGrenCombo::FireQ:
+	case EGrenCombo::MeleeQSame:	// L-1-c 같은 프레임 넷도 같은 길 — 이름 차례대로 누르고 다음 프레임에 둘 다 뗀다
+	case EGrenCombo::QMeleeSame:
+	case EGrenCombo::ReloadQSame:
+	case EGrenCombo::QReloadSame:
 		if (GrenPressFrame < 0 && StepTime >= GREN_PRESS_AT)
 		{
-			if (G.Combo == EGrenCombo::QFire) { PressQ(); PressOther(true); }
+			if (G.Combo == EGrenCombo::QFire || G.Combo == EGrenCombo::QMeleeSame || G.Combo == EGrenCombo::QReloadSame) { PressQ(); PressOther(true); }
 			else { PressOther(true); PressQ(); }
 		}
 		else if (GrenPressFrame >= 0 && Frame == GrenPressFrame + 1)
@@ -3813,7 +3895,7 @@ void UMOBContentProbeSubsystem::OnAbilEnd(const FAbilityEndedData& Data)
 {
 	if (!bComboWatch) return;
 	const FString Name = GetNameSafe(Data.AbilityThatEnded ? Data.AbilityThatEnded->GetClass() : nullptr);
-	const FGrenComboSpec C = GrenComboSpec(GrenShotAt(StepAt(ScriptIdx(), Step).Arg).Combo);
+	const FGrenComboSpec C = bGrenade ? GrenComboSpec(GrenShotAt(StepAt(ScriptIdx(), Step).Arg).Combo) : FGrenComboSpec{ nullptr, nullptr, -1 };	// 대시 판(L-1-c)의 Arg 는 수류탄 칸 표가 아니다
 	if (C.OtherAbility && ComboOtherCancelled < 0 && Name.Contains(C.OtherAbility)) ComboOtherCancelled = Data.bWasCancelled ? 1 : 0;
 	UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GABIL frame=%d seq=%d step=%s ev=end ability=%s cancelled=%d"), Frame, NextAbilSeq(), StepAt(ScriptIdx(), Step).Name, *Name,
 		Data.bWasCancelled ? 1 : 0);
