@@ -165,6 +165,7 @@ namespace mo
 			uint64_t startMismatches = 0;	// 서버는 켰는데 나는 안 켬 — 고침. 봇 판 기대 0
 			uint64_t forceFixes = 0;		// 둘 다 켰는데 방향 · 힘이 다름 — 고침. 봇 판 기대 0
 			uint64_t unconfirmed = 0;		// 내가 켰는데 서버 소식 없이 지나감(서버는 안 켬) — 고침. 봇 판 기대 0
+			uint64_t unconfirmedDead = 0;	// 죽은 줄 모르고 켰는데 부활이 확인 번호를 옮기며 버린 칸(서버는 죽은 갈래로 셈) — 고침 없음. 서버 켬 = respawnLost 줄의 식 − 이 몫
 			uint64_t replays = 0;			// 다시 고른 번
 			uint64_t replaysMissed = 0;		// 다시 고를 앞 칸이 없어 못 함 — 다음 Reconcile 이 서버 자리로 고친다
 			uint64_t meleeInReplay = 0;		// 다시 고르며 근접 끊음이 바뀐 칸 + 이제 대시가 막는데 근접이 켜진 칸 — 근접 능력은 다시 안 고른다(무기 쪽 근접 켜짐이 서버와 다를 수 있다).
@@ -187,7 +188,8 @@ namespace mo
 		{
 			uint64_t presses = 0;			// 수류탄 단추가 든 입력(부활 대기 포함 — 서버도 죽은 입력의 누름을 센다) — AddInput 에서만 센다
 			uint64_t thrown = 0;			// 그중 내가 던진 것(AddInput 때 판단, 다시 고르기로 바뀐 것은 안 셈)
-			uint64_t respawnThrown = 0;		// 부활 다시 돌리기(OnSpawn)에서 새 몸으로 던진 칸 — 대기 중엔 죽은 갈래라 안 던졌다
+			uint64_t respawnThrown = 0;		// 부활 다시 돌리기(OnSpawn)에서 새 몸으로 던짐이 된 칸 — 대기 중엔 죽은 갈래라 안 던졌다
+			uint64_t respawnLost = 0;		// 같은 다시 돌리기에서 던짐이 아니게 된 칸(대기 칸은 안 던졌으니 0 이 보통)
 			uint64_t results = 0;			// 받은 서버 던짐 소식(내 것)
 			uint64_t resultsNoSlot = 0;		// 받았지만 그 번호 칸이 없음(고리를 넘은 옛 번호) — 못 고친다. 0 이어야 한다
 			uint64_t startMismatches = 0;	// 서버는 던졌는데 나는 안 던짐 — 고침. 봇 판 기대 0
@@ -199,8 +201,15 @@ namespace mo
 			uint64_t replays = 0;			// 다시 고른 번(ReplayDash 끝의 다시 고르기 포함)
 			uint64_t replaysMissed = 0;		// 다시 고를 앞 칸이 없어 못 함. 0 이어야 한다
 			uint64_t meleeInReplay = 0;		// 다시 고르며 근접 끊음이 바뀐 칸 — 걸음은 다시 돌리고, 근접 능력(무기 쪽)은 다시 안 고른다. 고침이 0 이면 0
+			// 다시 고르기(ReplayGrenade)에서 던짐이 된 · 아니게 된 칸 — 소식 · 확인으로 고친 그 칸과 뒤 칸이 다 든다.
+			// 칸의 던짐은 StepAbilities 와 여기서만 바뀌므로 「thrown + respawnThrown − respawnLost + replayGained − replayLost」 = 칸마다 마지막으로 정한 던짐의 합
+			// (고리가 옛 칸을 덮어도 셈은 남는다, G-3-c 봇 판정)
+			uint64_t replayGained = 0;
+			uint64_t replayLost = 0;
 		};
 		const GrenadeCounters& GetGrenadeCounters() const { return _grenadeCounters; }
+		// 아직 확인 안 된 번호(AckGrenade 가 본 번호 뒤) 중 서버 소식 없이 내가 던진 칸 — 판이 끝날 때 서버가 돌렸는지 모르는 몫(봇 판정에서 뺀다)
+		uint64_t CountGrenadeThrownUnacked() const;
 		int GetGrenadeCooldownLeft() const { return _grenade.CooldownLeft(); }	// 남은 입력 수 — 다리가 던진 입력에 쿨다운 메시지를 낼 때 읽는다(grenade-plan 「예측」, G-5)
 
 		// 맞춰 보기만 하는 쪽(봇)이 쓰는 슬롯. 비교할 수 없으면 nullptr

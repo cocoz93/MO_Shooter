@@ -100,6 +100,13 @@ namespace mo
 		_spawnBase.dashAfter = _dash;
 		SaveWeapon(_spawnWeapon, lastSeq, false);
 		_meleeAckedSeq = lastSeq;
+		// 죽은 줄 모르고 켠 대시 — 서버는 죽은 몸 입력이라 안 켰고(소식 없음), 확인은 부활 대기 중이라 AckDash 가 안 봤다. 아래에서 확인 번호를 옮기며 버리므로
+		// 그 몫만 센다(행동은 그대로 — 새 몸이 다시 돈다). 수류탄 unconfirmedDead 와 같은 몫(G-3-c 봇 판에서 드러남)
+		for (uint32_t seq = _dashAckedSeq + 1; seq <= lastSeq && seq <= _seq; ++seq)
+		{
+			const Slot& slot = _ring[seq % kRingSize];
+			if (slot.seq == seq && slot.dashStarted && !slot.dashServer) ++_dashCounters.unconfirmedDead;
+		}
 		_dashAckedSeq = lastSeq;
 		// 수류탄은 부활이 안 지운다(서버 SpawnPlayer 도 안 건드림, G-0-b2) — 부활 번호까지는 서버가 (죽은 몸으로) 돌렸으니 소식으로 정하고,
 		// 그 칸 상태에서 뒤 입력을 새 몸으로 다시 돈다(아래 StepAbilities). 걸음은 아래 고리가 어차피 다시 돈다
@@ -122,9 +129,10 @@ namespace mo
 			slot.grenadeDead = false;		// 서버는 부활 번호 뒤 입력을 새 몸으로 쓴다 — 대기 중 죽은 갈래로 센 칸을 산 갈래로 다시 고른다
 			Equip(slot.input);
 			const bool dashStartedBefore = slot.dashStarted;
+			const bool grenadeThrownBefore = slot.grenadeThrown;
 			StepAbilities(slot, false);
 			if (slot.dashStarted != dashStartedBefore) ++(slot.dashStarted ? _dashCounters.respawnGained : _dashCounters.respawnLost);
-			if (slot.grenadeThrown) ++_grenadeCounters.respawnThrown;
+			if (slot.grenadeThrown != grenadeThrownBefore) ++(slot.grenadeThrown ? _grenadeCounters.respawnThrown : _grenadeCounters.respawnLost);
 			RememberDash(slot, ApplyMove(slot));
 			ApplyWeapon(slot, _melee.IsActive());
 			RememberMove(slot);
@@ -513,6 +521,17 @@ namespace mo
 		return replayFrom;
 	}
 
+	uint64_t CSelfPrediction::CountGrenadeThrownUnacked() const
+	{
+		uint64_t count = 0;
+		for (uint32_t seq = _grenadeAckedSeq + 1; seq <= _seq; ++seq)
+		{
+			const Slot& slot = _ring[seq % kRingSize];
+			if (slot.seq == seq && slot.grenadeThrown && !slot.grenadeServer) ++count;
+		}
+		return count;
+	}
+
 	// 서버 소식 · 확인으로 정해진 칸을 따라 seq 부터 수류탄을 다시 고른다 — 던짐 · 근접 끊음을 칸에 다시 쓰고, 지금 수류탄 상태(_grenade)도 바꾼다.
 	// 앞 칸 = 바로 앞 번호 칸(목숨을 넘어 잇는다 — 부활 대기 칸 · 자리 옮기기 칸도 grenadeAfter 를 남긴다). 서버가 던진 칸은 켜기 조건을 안 본다(StartFromServer).
 	// 그 밖의 누름은 칸의 대시 막기 · 죽은 갈래로 다시 본다. 근접 능력(무기 쪽)은 다시 안 고른다 — 끊음이 바뀐 칸은 meleeInReplay 로 센다
@@ -551,6 +570,7 @@ namespace mo
 				cutChanged = true;
 				++_grenadeCounters.meleeInReplay;
 			}
+			if (thrown != later.grenadeThrown) ++(thrown ? _grenadeCounters.replayGained : _grenadeCounters.replayLost);
 			later.grenadeThrown = thrown;
 			later.grenadeCutMelee = cut;
 			later.grenadeAfter = grenade;
