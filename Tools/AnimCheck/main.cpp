@@ -784,6 +784,7 @@ namespace
 		bool wireKeepNew = false;
 		const char* probePath = nullptr;
 		const char* montDumpPath = nullptr;
+		const char* plantDumpPath = nullptr;		// --plantDump=<csv> — 갱신마다 발 붙이기 장치 값(L-6-c-2). seq = 그 판 입력 번호(한 줄 앞 갱신이 여럿이면 같은 frame 에 여러 줄)
 		int montageTest = 0;
 		int poseTest = 0;							// 끼움 자리 후보 고르기(CAnimPoseEvaluator::kPoseTest*)
 		const char* slotProfileName = nullptr;		// 비중 표가 있는 끼움 자리(덮기 자리 빼고)를 이 표로
@@ -809,6 +810,7 @@ namespace
 			else if (std::strcmp(argv[i], "--wireKeepNew") == 0) useWire = wireKeepNew = true;
 			else if (std::strncmp(argv[i], "--probe=", 8) == 0) probePath = argv[i] + 8;
 			else if (std::strncmp(argv[i], "--montDump=", 11) == 0) montDumpPath = argv[i] + 11;
+			else if (std::strncmp(argv[i], "--plantDump=", 12) == 0) plantDumpPath = argv[i] + 12;
 			else if (std::strncmp(argv[i], "--montageTest=", 14) == 0) montageTest = std::atoi(argv[i] + 14);
 			else if (std::strncmp(argv[i], "--poseTest=", 11) == 0) poseTest = std::atoi(argv[i] + 11);
 			else if (std::strncmp(argv[i], "--slotProfile=", 14) == 0) slotProfileName = argv[i] + 14;
@@ -913,6 +915,8 @@ namespace
 		state.SetMontageTestFlags(montageTest);
 		if (stanceInFrames >= 0 && stanceOutFrames >= 0) state.SetStanceFadeForTest((float)stanceInFrames / 60.f, (float)stanceOutFrames / 60.f);		// 묶음을 다시 읽어도 안 바뀌는 값
 		CAnimPoseEvaluator& firstEvaluator = evaluators[(size_t)state.BundleIndex()];
+		std::vector<BoneTransform> plantLocal(firstEvaluator.BoneCount());		// 발 붙이기 장치가 갱신마다 셈하는 자세의 작업 칸(L-6-c-2)
+		size_t plantPoses = 0, plantTargetZeroRows = 0;
 
 		// 판별 입력을 번호 순으로 묶는다. 번호가 비면 어느 입력이 빠졌는지 모른 채 상태가 어긋나므로 거부한다
 		std::map<int, std::vector<const MoveRow*>> byReset;
@@ -987,6 +991,15 @@ namespace
 			return 1;
 		}
 		if (montDump) std::fprintf(montDump, "pass,frame,ref,got,sinceRef,sinceGot,ovrRef,ovrGot,aimRef,aimGot,handRef,handGot,curveRef,curveGot\n");
+		FILE* plantDump = nullptr;
+		if (plantDumpPath && (fopen_s(&plantDump, plantDumpPath, "wb") != 0 || !plantDump))
+		{
+			std::printf("STATE FAIL 발 붙이기 덤프를 못 씀: %s\n", plantDumpPath);
+			std::fclose(file);
+			if (montDump) std::fclose(montDump);
+			return 1;
+		}
+		if (plantDump) std::fprintf(plantDump, "pass,frame,seq,footL,footR,ground,target,current,alpha,stepped,offsetZ\n");
 		const auto bundleIndexOf = [&](const std::string& name)
 		{
 			for (size_t b = 0; b < bundles.size(); ++b)
@@ -1105,7 +1118,16 @@ namespace
 				input.groundDistance += groundAdd;
 				input.ads = adsIn;
 				input.crouched = crouchIn;
-				state.Update(input);
+				state.Update(input, evaluators[(size_t)state.BundleIndex()], plantLocal.data());
+				const CAnimState::PlantView plantView = state.Plant();
+				if (plantView.stepped) ++plantPoses;
+				if (plantDump)
+				{
+					AnimPoseInput after;
+					state.ToPoseInput(after);
+					std::fprintf(plantDump, "%d,%d,%d,%.4f,%.4f,%.4f,%.4f,%.5f,%.5f,%d,%.5f\n", row.pass, row.frame, nextSeq, plantView.feet[0], plantView.feet[1], plantView.ground,
+						plantView.target, plantView.current, plantView.alpha, plantView.stepped ? 1 : 0, after.plantOffset[2]);
+				}
 				++fed;
 			}
 			if (adsIn)
@@ -1299,6 +1321,10 @@ namespace
 
 			AnimPoseInput got;
 			state.ToPoseInput(got);
+			{
+				const CAnimState::PlantView plantView = state.Plant();
+				if (plantView.stepped && plantView.target == 0.f) ++plantTargetZeroRows;
+			}
 			if (row.pass == tracePass && row.frame >= traceFrom && row.frame <= traceTo)
 			{
 				std::printf("TRACE pass=%d frame=%d state=%s ads=%d moveAds=%d adsBlend=%.4f crouch=%d moveCrouch=%d crouchBlend=%.4f lyra=%s/%s layers=", row.pass, row.frame, state.MoveStateName(), adsIn ? 1 : 0, state.MoveAds() ? 1 : 0, state.AdsBlend(),
@@ -1386,6 +1412,7 @@ namespace
 		}
 		std::fclose(file);
 		if (montDump) std::fclose(montDump);
+		if (plantDump) std::fclose(plantDump);
 
 		const double count = (double)rows.size();
 		std::printf("STATEOUT rows=%zu moves=%zu fed=%zu lines=%zu resets=%zu brakeScale=%.3f groundAdd=%.1f overflows=%d\n", rows.size(), moves.size(), fed, lines, byReset.size(), brakeScale, groundAdd, state.StackOverflows());
@@ -1402,6 +1429,8 @@ namespace
 		double bound = 0;
 		for (CAnimPoseEvaluator& evaluator : evaluators) bound = std::max(bound, evaluator.ComputeBoundRadius(kCrouchMeshLiftZ));
 		std::printf("STATEBOUND reach=%.3f bound=%.3f wire=%d\n", maxReach, bound, useWire ? (wireKeepNew ? 2 : 1) : 0);
+		// 발 붙이기 장치(L-6-c-2) — poses = 발 높이를 읽으려 셈한 자세(땅 위 · 장치 켜짐 갱신) · targetZeroRows = 두 발 다 쓸기가 땅을 못 맞힌 줄 · bundleMisses 0 이어야 한다
+		std::printf("STATEPLANT poses=%zu fed=%zu targetZeroRows=%zu bundleMisses=%llu\n", plantPoses, fed, plantTargetZeroRows, (unsigned long long)state.PlantBundleMisses());
 		if (probePath)
 		{
 			std::printf("STATEMONT rows=%zu countDiff=%zu nameDiff=%zu births=%zu unknownBirths=%zu failedPlays=%zu lateBirths=%zu drops=%d profileStartMisses=%d bundleChanges=%zu multiUpdateRows=%zu test=%d",

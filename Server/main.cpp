@@ -792,6 +792,8 @@ int main(int argc, char** argv)
 		std::printf("SERVER animGrenade events=%llu dropped=%llu starts=%llu afterFire=%llu reloadCancels=%llu\n",
 			ev(EAnimEvent::Grenade), dropped(EAnimEvent::Grenade), starts(mo::MONTAGE_GRENADE), (unsigned long long)room.grenadeAnimAfterFire,
 			(unsigned long long)room.grenadeReloadMontageCancels);
+		// 발 붙이기 장치(L-6-c-2) — poses = 발 높이를 읽으려 셈한 자세(땅 위 · 장치 켜짐 갱신), bundleMisses = 0 이어야 한다
+		std::printf("SERVER animPlant poses=%llu bundleMisses=%llu\n", (unsigned long long)room.animPlantPoses, (unsigned long long)room.animPlantBundleMisses);
 	}
 	std::printf("SERVER pickups=%llu fromRecheck=%llu fullHealth=%llu padRespawns=%llu padRechecks=%llu\n", (unsigned long long)room.pickups, (unsigned long long)room.pickupsFromRecheck,
 		(unsigned long long)room.pickupsFullHealth, (unsigned long long)room.padRespawns, (unsigned long long)room.padRechecks);

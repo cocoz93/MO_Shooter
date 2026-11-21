@@ -1951,10 +1951,14 @@ namespace mo
 			const int startMissesBefore = player->anim.ProfileStartMisses();		// 사건 틀기(무리 끄기) · 갱신(자동 빼기) 둘 다 StopMontage 를 부른다
 			PlayAnimEvents(*player);
 			player->anim.SetFiring(player->weapons[player->weapon].IsFireActive());		// Lyra IsFiring 태그 = 쏘기 능력이 켜진 동안(소총 · 권총 8프레임이 기록과 같다)
+			const uint64_t plantMissesBefore = player->anim.PlantBundleMisses();
 			AnimMoveInput input;
 			MakeMoveInput(*player, input);
-			player->anim.Update(input);
+			// 발 붙이기 장치가 이번 자세의 발 높이를 읽는다(L-6-c-2) — 묶음은 위에서 바꾼 animWeapon 것. 작업 칸은 되감기 자세 셈과 같은 것(틱 안에서 겹쳐 쓰지 않는다)
+			player->anim.Update(input, _poseEvaluators[player->animWeapon], _localFrom.data());
 			_stats.animProfileStartMisses += (uint64_t)(player->anim.ProfileStartMisses() - startMissesBefore);
+			_stats.animPlantBundleMisses += player->anim.PlantBundleMisses() - plantMissesBefore;
+			if (player->anim.Plant().stepped) ++_stats.animPlantPoses;
 			++_stats.animUpdates;
 		}
 	}

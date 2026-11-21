@@ -25,6 +25,11 @@ namespace mo
 		constexpr float kPlantLandDelay = 0.1f;
 		constexpr float kPlantTimeSlack = 0.001f;
 		constexpr float kPlantAlphaSeconds = 0.2f;		// 발 붙이기 장치 켜고 끄기 — ABP 컨트롤 릭 노드 AlphaBoolBlend 넣기 · 빼기 0.2초 선형(weapons_l2a.txt:2989, 원본 기준)
+		// 장치 셈(L-6-c-2) — CR_Mannequin_FootPlant 그래프 값(원본 기준, 덤프 길은 진행 파일 L-2-a)
+		constexpr float kPlantAlphaRelevant = 0.00001f;	// 알파가 이 값 이하면 장치를 안 돌린다 — 스프링이 멈췄다 이어 간다(AnimNode_ControlRigBase.cpp:197 IsRelevant · ZERO_ANIMWEIGHT_THRESH)
+		constexpr float kPlantTraceReach = 55.f;		// 발마다 구 쓸기 발 +50 → 발 −50 · 반지름 5 — 평지면 발 높이 − 55 가 땅 이하일 때 맞는다(ProcessFootTrace)
+		constexpr float kPlantSpringHz = 2.5f;			// 골반 SpringInterpV2 세기(Hz) · 감쇠 1 · bUseCurrentInput
+		constexpr float kPlantSpringTargetRate = 0.2f;	// 같은 노드의 목표 속도 몫(TargetVelocityAmount)
 		constexpr int kLandTableHz = 120;
 		constexpr int kTransitionTableHz = 120;
 		constexpr float kCardinalDeadZone = 10.f;
@@ -800,6 +805,13 @@ namespace mo
 		_plantDrop = 0.f;
 		_plantAlpha = 1.f;
 		_disableLegIK = 0.f;
+		_plantCurrent = 0.f;
+		_plantVelocity = 0.f;
+		_plantPrevTarget = 0.f;
+		_plantPrevValid = false;
+		_plantFeet[0] = _plantFeet[1] = 0.0;
+		_plantTarget = 0.f;
+		_plantStepped = false;
 		_aimBlend = 1.f;
 		_count = 0;
 		_wasFalling = false;
@@ -1277,7 +1289,7 @@ namespace mo
 		}
 	}
 
-	void CAnimState::Update(const AnimMoveInput& input)
+	void CAnimState::Update(const AnimMoveInput& input, CAnimPoseEvaluator& evaluator, BoneTransform* scratch)
 	{
 		const float deltaSeconds = input.deltaSeconds;
 		const double* velocity = input.velocity;
@@ -1413,12 +1425,9 @@ namespace mo
 		const bool plant = falling ? _airTime < kPlantReleaseSeconds - kPlantTimeSlack : _groundTime >= kPlantLandDelay - kPlantTimeSlack;
 		// 발 붙이기 장치 켜짐(L-6-c-1) — Lyra ABP 컨트롤 릭 노드 알파 = ShouldEnableControlRig(곡선 DisableLegIK <= 0), 0.2초 선형(weapons_l2a.txt:4445-4465, 원본 기준).
 		// 곡선은 앞 자세 것(지난 갱신 끝 SnapshotMontages) — 한 프레임 늦게 읽어야 켬 ↔ 끔 기록 차와 맞는다(L-2-a sim_plant.py LAG=1, 실측). 곡선은 앞 대시 몽타주에만 있다.
-		// 장치 셈(발 목표 · 스프링 · 알파 0 이면 멈춤)은 아직 안 옮겨 지금 내림에 알파만 곱한다(L-6-c-2 몫)
+		// 장치 셈(발 목표 · 스프링)은 이번 자세가 나온 갱신 끝에서 한다(StepPlant)
 		const float plantStep = deltaSeconds / kPlantAlphaSeconds;
 		_plantAlpha = _disableLegIK <= 0.f ? std::min(1.f, _plantAlpha + plantStep) : std::max(0.f, _plantAlpha - plantStep);
-		_plantOffset[0] = 0.f;
-		_plantOffset[1] = 0.f;
-		_plantOffset[2] = plant && _plantAlpha > 0.f ? -_plantDrop * _plantAlpha : 0.f;
 
 		// 서기 상태에서 앉음이 바뀌면 앉기 · 일어서기 전환(D62 4). 서기였으면 이번 갱신의 출발 · 점프보다 아래에, 멈춤 · 공중에서 이번에 서기로 왔으면 그 위에 얹는다
 		// (멈춘 채 일어서기 기록 — 멈춤 클립이 그 프레임에 빠지고 일어서기 전환이 바로 섰다, 실측)
@@ -1440,6 +1449,67 @@ namespace mo
 		_handFresh = false;
 		UpdateMontages(deltaSeconds);
 		SnapshotMontages();
+		StepPlant(falling, plant, deltaSeconds, evaluator, scratch);
+	}
+
+	// 발 붙이기 장치 한 걸음(L-6-c-2) — L-2-a 규칙(Lyra 장치 켬 ↔ 끔 기록 차 2492프레임 최대 0.001cm, 기록 대조):
+	//   발마다 쓸기가 땅을 맞히면 목표 = 땅, 못 맞히면 0(RigUnit_WorldCollision.cpp:91 이 맞은 점을 비움) → 골반 목표 = min(왼, 오른) → 스프링 → × 알파
+	// 발 높이는 이번 갱신이 끝난 자세(발 디딤 앞)의 것이다. 땅은 평지 하나(-plantGap) — 발 자리마다 쓸기(비탈 · 계단)는 안 옮겼다(대조할 Lyra 비탈 기록이 없다).
+	// 뜬 프레임은 장치를 안 돌리고 옛 착지 문턱(plant)을 그대로 둔다 — 점프 · 착지는 L-6-c-3 이 점프 기록으로 대조한다
+	void CAnimState::StepPlant(bool falling, bool plant, float deltaSeconds, CAnimPoseEvaluator& evaluator, BoneTransform* scratch)
+	{
+		_plantStepped = false;
+		if (!falling && _plantAlpha > kPlantAlphaRelevant && deltaSeconds > kSmallNumber)
+		{
+			if (evaluator.Bundle() == &_clips->Bundles()[(size_t)_bundleIndex])
+			{
+				AnimPoseInput pose;
+				ToPoseInput(pose);
+				for (float& offset : pose.plantOffset) offset = 0.f;
+				evaluator.EvaluateLocal(pose, scratch);
+				evaluator.FootHeightsFromLocal(scratch, _plantFeet);
+			}
+			else
+			{
+				++_plantBundleMisses;		// 발 높이를 못 읽으면 앞 값으로 — 세어 두고 0 인지 본다
+			}
+			const float ground = -_plantDrop;
+			const float left = (float)_plantFeet[0] - kPlantTraceReach <= ground ? ground : 0.f;
+			const float right = (float)_plantFeet[1] - kPlantTraceReach <= ground ? ground : 0.f;
+			_plantTarget = std::min(left, right);
+			// 판 처음(Reset)은 스프링 값 · 속도 0 에서 시작한다 — 컨트롤 릭 변수 CurrentPelvisOffsetZ 기본값 0 이고 그 변수에 넣는 곳은 스프링 결과뿐이다
+			// (CR_Mannequin_FootPlant 그래프 덤프, 원본 기준). Lyra 대조 기록은 첫 프레임 앞 대기 갱신 동안 목표에 닿아 이 시작값을 못 가른다
+			// 엔진 GenericSpringInterp(KismetMathLibrary.cpp:427) → FMath::SpringDamper 임계 감쇠 갈래(UnrealMathUtility.h:1741)와 같은 식.
+			// 각진동수만 세기 × 2π 로 바로 셈한다 — 엔진은 강성(각진동수²)의 제곱근을 거쳐 float 끝자리가 다를 수 있다
+			const float targetRate = _plantPrevValid ? (_plantTarget - _plantPrevTarget) * (kPlantSpringTargetRate / deltaSeconds) : 0.f;
+			const float w = kPlantSpringHz * 2.f * kPi;
+			const float adjusted = _plantTarget + targetRate * (2.f / w);
+			const float c1 = _plantCurrent - adjusted;
+			const float c2 = _plantVelocity + c1 * w;
+			const float x = w * deltaSeconds;
+			const float e = 1.f / (1.f + 1.00746054f * x + 0.45053901f * x * x + 0.25724632f * x * x * x);		// InvExpApprox
+			_plantCurrent = adjusted + (c1 + c2 * deltaSeconds) * e;
+			_plantVelocity = (c2 - c1 * w - c2 * (w * deltaSeconds)) * e;
+			_plantPrevTarget = _plantTarget;
+			_plantPrevValid = true;
+			_plantStepped = true;
+		}
+		_plantOffset[0] = 0.f;
+		_plantOffset[1] = 0.f;
+		_plantOffset[2] = plant && _plantAlpha > 0.f ? _plantCurrent * _plantAlpha : 0.f;
+	}
+
+	CAnimState::PlantView CAnimState::Plant() const
+	{
+		PlantView view;
+		view.feet[0] = _plantFeet[0];
+		view.feet[1] = _plantFeet[1];
+		view.ground = -_plantDrop;
+		view.target = _plantTarget;
+		view.current = _plantCurrent;
+		view.alpha = _plantAlpha;
+		view.stepped = _plantStepped;
+		return view;
 	}
 
 	void CAnimState::ToWire(wire::AnimStateWire& out) const

@@ -51,7 +51,9 @@ namespace mo
 		// 무기를 바꾼 틱 — 묶음을 바꾸고 재생 상태를 Lyra 가 무기 층을 바꿀 때처럼 옮긴다(Update 앞에 부른다). false 면 상태는 그대로다
 		bool ChangeBundle(const CAnimClips& clips, const char* bundleName);
 		void Reset();
-		void Update(const AnimMoveInput& input);
+		// evaluator = 이 상태의 묶음(BundleIndex)으로 Init 한 자세 계산기, scratch = 그 계산기 뼈 수만큼의 작업 칸.
+		// 발 붙이기 장치(L-6-c-2)가 이번 갱신 끝 자세(발 디딤 앞)의 발 높이를 읽어야 해서 갱신마다 자세를 한 번 셈한다 — Lyra 장치도 그 프레임 자세를 읽는다
+		void Update(const AnimMoveInput& input, CAnimPoseEvaluator& evaluator, BoneTransform* scratch);
 		void ToPoseInput(AnimPoseInput& out) const;
 
 		// 패킷 · 되감기 기록에 싣는 형식. 서버 판정과 화면이 둘 다 이 값으로 자세를 만들어야 양쪽이 같은 수를 본다(D32 · D35)
@@ -109,6 +111,18 @@ namespace mo
 		// 서기로 돌아가며 빠지는 중인 칸(settled)은 안 센다 — Lyra 는 그 섞기가 시작되는 프레임에 상태 이름을 Idle 로 바꾼다
 		int StanceLayer() const;
 		float HandLeftAlpha() const { return _handLeftAlpha; }
+		// 발 붙이기 장치의 이번 갱신 값(대조 도구 기록용). stepped = 이번 갱신에 스프링을 넘겼나(뜬 프레임 · 알파 0 이면 멈춤)
+		struct PlantView
+		{
+			double feet[2] = {};		// 발 높이(FootHeightsFromLocal) — 넘기지 않은 갱신은 앞 값
+			float ground = 0.f;			// 부품 공간 땅 높이 = -plantGap
+			float target = 0.f;			// 골반 목표 = min(왼 목표, 오른 목표)
+			float current = 0.f;		// 스프링 값(알파 곱하기 전)
+			float alpha = 1.f;
+			bool stepped = false;
+		};
+		PlantView Plant() const;
+		uint64_t PlantBundleMisses() const { return _plantBundleMisses; }		// 다른 묶음 계산기를 받아 발 높이를 못 읽은 갱신 수(누적). 0 이어야 한다
 		float DisableLeftHand() const { return _disableLeftHand; }		// 이번 자세의 DisableLHandIK 곡선(사건 앞 목록으로)
 
 		// 대조 시험의 일부러 틀림용 — 제동 감속을 배율만큼 바꾼다
@@ -191,6 +205,7 @@ namespace mo
 		float PredictPivotDistance(const double acceleration[3], const double velocity[3]) const;
 		void UpdateFiring(bool accelerating, bool falling, bool ads, bool crouched, float deltaSeconds);
 		void UpdateMontages(float deltaSeconds);
+		void StepPlant(bool falling, bool plant, float deltaSeconds, CAnimPoseEvaluator& evaluator, BoneTransform* scratch);
 		bool AdvanceMontage(MontageInstance& instance, float deltaSeconds);		// false = 다 빠졌다(엔진 Terminate)
 		void StopMontage(MontageInstance& instance, uint8_t option, float blendSeconds, int16_t profile);
 		float ProfileMaxFactor(int profile) const;
@@ -271,6 +286,15 @@ namespace mo
 		float _plantOffset[3] = {};
 		float _plantAlpha = 1.f;			// 발 붙이기 장치 켜짐(엔진 컨트롤 릭 노드 알파, 0.2초 선형) — 앞 자세 곡선 DisableLegIK 가 0 보다 크면 0 쪽으로(L-6-c-1)
 		float _disableLegIK = 0.f;			// 이번 자세의 DisableLegIK 곡선 — 다음 갱신의 장치 켜짐을 정한다
+		// 장치 골반 스프링(L-6-c-2) — 엔진 FloatSpringInterp 의 상태(FFloatSpringState)와 컨트롤 릭 변수 CurrentPelvisOffsetZ
+		float _plantCurrent = 0.f;			// 부품 공간 골반 이동(cm, 음수 = 내림) — 알파를 곱하기 전
+		float _plantVelocity = 0.f;
+		float _plantPrevTarget = 0.f;
+		bool _plantPrevValid = false;		// false = 판 처음 — 첫 걸음은 목표 속도 0(엔진 FFloatSpringState::bPrevTargetValid)
+		double _plantFeet[2] = {};
+		float _plantTarget = 0.f;
+		bool _plantStepped = false;
+		uint64_t _plantBundleMisses = 0;
 		int _stackOverflows = 0;
 		bool _sourceFrozen = false;		// 앞 갱신에 통째 자리 몽타주가 몸을 다 덮어 걸음 쪽을 안 넘겼다
 

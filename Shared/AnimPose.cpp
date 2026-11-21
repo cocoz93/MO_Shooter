@@ -355,7 +355,9 @@ namespace mo
 		_lower = clips.FindBone("lowerarm_l");
 		_hand = clips.FindBone("hand_l");
 		_pelvis = clips.FindBone("pelvis");
-		if (_handR < 0 || _gun < 0 || _ikLeft < 0 || _upper < 0 || _lower < 0 || _hand < 0 || _pelvis < 0) return false;
+		_footLeft = clips.FindBone("foot_l");
+		_footRight = clips.FindBone("foot_r");
+		if (_handR < 0 || _gun < 0 || _ikLeft < 0 || _upper < 0 || _lower < 0 || _hand < 0 || _pelvis < 0 || _footLeft < 0 || _footRight < 0) return false;
 
 		static_assert(sizeof(kSlotOrder) / sizeof(kSlotOrder[0]) == kSlotOrderCount, "kSlotOrder 와 칸 수가 같아야 한다");
 		const std::vector<ClipSlot>& slots = clips.Slots();
@@ -1189,5 +1191,14 @@ namespace mo
 		BoneTransform world;
 		Multiply(cs[(size_t)_handR], mesh, world);
 		for (int c = 0; c < 3; ++c) outPosition[c] = world.p[c];
+	}
+
+	// Lyra 기록의 발 높이 = 발 뼈 세상 z − 뿌리 뼈 세상 z. 메시는 요만 돌므로 부품 공간 z 차와 같다
+	void CAnimPoseEvaluator::FootHeightsFromLocal(const BoneTransform* local, double outHeights[2])
+	{
+		BoneTransform* cs = _component.data();
+		ComponentFromLocal(local, cs);
+		outHeights[0] = cs[(size_t)_footLeft].p[2] - cs[0].p[2];
+		outHeights[1] = cs[(size_t)_footRight].p[2] - cs[0].p[2];
 	}
 }

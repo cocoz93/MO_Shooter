@@ -92,6 +92,11 @@ namespace mo
 		// 오른손 뼈(hand_r) 자리 — 몸 기준(캡슐 중심, 요 0). meshLiftZ 는 BodiesFromLocal 과 같은 뜻.
 		// 근접 쓸기 시작점이다 — GA_Melee 는 GetSocketLocation("hand_r") 인데 메시에 그 이름 소켓이 없어 뼈 자리다(e1g3, 소켓 없음 82번 · 뼈 자리와 차이 0)
 		void HandRightFromLocal(const BoneTransform* local, double outPosition[3], double meshLiftZ = 0.0);
+		// 두 발 높이 — 부품 공간(메시 기준)에서 발 뼈가 뿌리 뼈보다 얼마나 위인가(cm), [0] 왼발 · [1] 오른발. 발 붙이기 장치(CAnimState, L-6-c-2)가 읽는다.
+		// Lyra 장치는 IK 발 뼈(ik_foot_l · ik_foot_r) 자리에서 쓸기를 하는데 우리 클립엔 IK 발 뼈가 없다 — foot_l · foot_r 로 셈해도 장치 켬 ↔ 끔 기록 차가 같다(2492프레임 최대 0.001cm, 기록 대조)
+		void FootHeightsFromLocal(const BoneTransform* local, double outHeights[2]);
+		// 이 계산기가 고른 묶음 — 발 붙이기 장치가 상태의 묶음과 같은 계산기를 받았는지 본다
+		const ClipBundle* Bundle() const { return _bundle; }
 
 		// 두 자세를 뼈별로 섞는다 — 틱 사이 보간(D32). out 은 a · b 와 다른 곳이어야 한다
 		void BlendLocal(const BoneTransform* a, const BoneTransform* b, float alpha, BoneTransform* out) const;
@@ -150,6 +155,8 @@ namespace mo
 		int _lower = -1;
 		int _hand = -1;
 		int _pelvis = -1;
+		int _footLeft = -1;
+		int _footRight = -1;
 		static constexpr int kSlotOrderCount = 5;
 		int _slotOrder[kSlotOrderCount] = { -1, -1, -1, -1, -1 };		// 평가 차례의 끼움 자리 번호(Init 이 이름으로 찾는다, 없으면 -1)
 		uint64_t _montageMisses = 0;
