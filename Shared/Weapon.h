@@ -191,8 +191,9 @@ namespace mo
 	{
 		bool fireHeld = false;
 		bool reloadPressed = false;
-		bool meleeActive = false;	// 근접 능력이 켜져 있다 — 사격 · 재장전 입력 · 자동 재장전이 막힌다(TagRelationships_ShooterHero 의 근접 막기, E-3)
+		bool meleeActive = false;	// 근접 능력이 켜져 있다(이 입력에 켠 것 포함) — 재장전 입력 · 자동 재장전이 막힌다(TagRelationships_ShooterHero 의 근접 막기, E-3). 사격은 meleeBlocksFire
 		bool meleeStarted = false;	// 이 입력에 근접 능력이 켜졌다 — 도는 재장전을 끊는다(같은 표의 근접 끊기)
+		bool meleeBlocksFire = false;	// 이 입력 누름 전부터 근접이 켜져 있다 — 쥔 사격을 막는다. Lyra 는 쥔 사격을 누름 능력보다 먼저 켜 이 입력에 켠 근접은 그 발을 못 막는다(L-12-b)
 		bool dashActive = false;	// 대시가 앞 입력부터 켜져 있다(CDashAbility::BlocksHeldFire) — 사격 · 재장전 입력 · 자동 재장전이 막힌다(D-2)
 		bool dashStarted = false;	// 이 입력에 대시가 켜졌다 — 쥔 사격은 먼저 켜진 뒤 끊기고, 도는 재장전이 끊기고, 재장전 입력 · 자동 재장전은 막힌다
 		// 이 입력에 수류탄을 던졌다(G-2) — 도는 재장전을 끊는다(수류탄의 끊기 태그 · G-0-c 재장전 중 Q 탄창 4 → 4).
@@ -228,7 +229,8 @@ namespace mo
 	// 대시(D-2)는 발사 입력 바로 뒤에 끊는다 — 쥔 사격은 대시보다 먼저 켜지고(Dash.h BlocksHeldFire), 재장전 끊기는 타이머 앞이어야 그 입력에 탄이 안 들어간다.
 	//   대시가 켜진 입력 · 켜져 있는 입력의 재장전 입력과 자동 재장전은 막힌다(자동 재장전 검사는 입력 처리 뒤 월드 틱에서 돌아 이미 켜진 대시를 본다 — 원본 기준 차례)
 	// 근접(E-3)은 부르는 쪽이 이 순환 앞에서 켠다(CMeleeAbility) — 켜진 동안 발사 · 재장전 입력 · 자동 재장전이 막히고, 켜지는 입력에 도는 재장전이 끊긴다.
-	//   발사 능력은 근접을 막지도 끊지도 않는다(관계표에 없음). 같은 입력에 둘 다 누르면 근접이 먼저라 발사가 막힌다 — Lyra 의 같은 프레임 차례는 확인 못 했다(제 판단)
+	//   발사 능력은 근접을 막지도 끊지도 않는다(관계표에 없음). 같은 입력에 둘 다 누르면 쥔 사격이 먼저 켜져 한 발 쏘고 근접이 켜진다 — 막는 것은 앞 입력부터 켜진 근접뿐
+	//   (원본 ProcessAbilityInput 이 쥔 입력 능력을 누름 능력보다 먼저 켠다 · L-12-b 기록 s_mgf 탄창 4 → 3, 켠 차례 사격 → 근접 → 수류탄)
 	class CWeaponCycle;
 
 	// 무기를 바꾸면 Equip 이 발사 타이머를 지우므로, 번갈아 바꾸면 연사 제한을 건너뛸 수 있다 — 무기별로 다음에 쏠 수 있는 입력 번호를 따로 기억한다.

@@ -1642,9 +1642,10 @@ namespace
 		return fails == 0;
 	}
 
-	// ─── 같은 입력 두 누름 차례(--pressCells, L-5-a) ─────────────
-	// L-1-c Lyra 기록(cprobe_l1cd1 · l1c1 — lyra-match-progress L-1-c 표)의 칸 여섯을 연습장에서 같은 짝 · 차례로 보낸다(서버 --clips 필요 — 근접 손 자세 · 몽타주 꼬리).
-	// 마지막 칸 하나는 기록이 없는 판 13 규칙(근접 → Q + 쥔 사격 — 이 입력에 켠 근접이 쏘기를 막음, D127 ⑤)
+	// ─── 같은 입력 누름 차례(--pressCells, L-5-a · L-12-b) ─────────────
+	// L-1-c Lyra 기록(cprobe_l1cd1 · l1c1 — lyra-match-progress L-1-c 표)의 칸 여섯과 L-12-b 기록(cprobe_l12b1 — 같은 파일 L-12-b 표)의 칸 열을 연습장에서
+	// 같은 짝 · 차례로 보낸다(서버 --clips 필요 — 근접 손 자세 · 몽타주 꼬리). 쥔 사격 칸 셋은 같은 규칙의 대조 — 대시 + 쥔 사격(D-0 기록 dash6 · D102 ①) ·
+	// 근접 + 쥔 사격(원본 ProcessAbilityInput — 쥔 사격 먼저) · 앞 입력 근접 뒤 쥔 사격(앞 입력부터 켜진 근접만 쏘기를 막음 — MeleeCheck fireBlockedWhileMelee · D149)
 	// 나 = 기록 자리(−1656.4, −1706.4, 142.15) · 요 0(+X 를 봄). 근접 칸은 상대를 앞 150 에(기록 L1C_MELEE_FOE · foeX −1506.4), 재장전 칸은 멀리.
 	// 대시 칸은 누름 앞 입력부터 +Y 이동(기록 vy 360 · 대시 오른쪽), 수류탄 칸은 피치 45(기록이 상대 위로 던짐). 칸마다 보는 것 = 근접 맞음 · 피해(누른 입력의 S2C_MELEE) ·
 	// 대시 켬(S2C_DASH) · 던짐(S2C_GRENADE THROW) · 탄창(90틱 뒤, 재장전 칸은 권총 4/48 에서) · 25틱 뒤 내 몽타주 칸(종류 = 칸 번호 아래 4비트)
@@ -1653,28 +1654,45 @@ namespace
 		struct PressCell
 		{
 			const char* name;
-			wire::EPressKey first, second;
+			const char* keys;		// 누른 차례 글자(M 근접 · D 대시 · G 수류탄 · R 재장전) — 한 입력에 다 싣는다
 			bool foeFront;			// 상대를 앞 150 에(근접 칸)
 			bool moveRight;			// 누름 앞 입력부터 +Y 이동(대시 칸)
 			bool lowAmmo;			// 권총 4/48(재장전 칸)
-			// 기대 = L-1-c 표(Lyra)
+			// 기대 = Lyra 기록(L-1-c 표 · L-12-b l12b1 · D-0 dash6) — 칸 위 주석
 			bool hit;				// 근접 맞음 · 피해 100
 			bool dash;
 			bool thrown;
 			int magAfter;			// −1 = 안 봄
 			uint8_t montage;		// 25틱 뒤 남아 있어야 할 몽타주 종류
 			uint8_t gone;			// 25틱 뒤 없어야 할 몽타주 종류(짝의 다른 능력)
-			bool fireHeld = false;	// 누른 입력에 쏘기도 쥠 — 마지막 칸만(D127 ⑤ 「이 입력에 켠 근접은 뒤 차례가 끊어도 쏘기를 막음」, Lyra 기록 없음 · 판 13 규칙)
+			bool fireHeld = false;	// 누른 입력에 쏘기도 쥠 — Lyra 는 쥔 사격(누르고 있는 동안 정책)을 누름 능력보다 먼저 켠다(LyraAbilitySystemComponent.cpp:238-290, 원본 기준)
+			bool fireNext = false;	// 누른 다음 입력에 쏘기를 쥠 — 앞 입력부터 켜진 근접이 막는다(막기 갈래 대조)
 		};
 		const PressCell cells[] = {
-			{ "melee_dash", wire::PRESS_MELEE, wire::PRESS_DASH, true, true, false, true, true, false, -1, MONTAGE_DASH_RIGHT, MONTAGE_MELEE },
-			{ "dash_melee", wire::PRESS_DASH, wire::PRESS_MELEE, true, true, false, false, true, false, -1, MONTAGE_DASH_RIGHT, MONTAGE_MELEE },
-			{ "melee_q", wire::PRESS_MELEE, wire::PRESS_GRENADE, true, false, false, true, false, true, -1, MONTAGE_GRENADE, MONTAGE_MELEE },
-			{ "q_melee", wire::PRESS_GRENADE, wire::PRESS_MELEE, true, false, false, true, false, true, -1, MONTAGE_MELEE, MONTAGE_GRENADE },
-			{ "reload_q", wire::PRESS_RELOAD, wire::PRESS_GRENADE, false, false, true, false, false, true, 4, MONTAGE_GRENADE, MONTAGE_RELOAD },
-			{ "q_reload", wire::PRESS_GRENADE, wire::PRESS_RELOAD, false, false, true, false, false, true, 12, MONTAGE_RELOAD, MONTAGE_GRENADE },
-			// 근접 → Q + 쥔 사격 — 근접이 켜지고 던짐이 끊어도 그 입력의 쏘기는 막힌다(앞 칸에서 채운 탄창 12 그대로)
-			{ "melee_q_fire", wire::PRESS_MELEE, wire::PRESS_GRENADE, true, false, false, true, false, true, 12, MONTAGE_GRENADE, MONTAGE_MELEE, true },
+			// L-1-c 기록 여섯 칸 — 짝 셋의 두 차례
+			{ "melee_dash", "MD", true, true, false, true, true, false, -1, MONTAGE_DASH_RIGHT, MONTAGE_MELEE },
+			{ "dash_melee", "DM", true, true, false, false, true, false, -1, MONTAGE_DASH_RIGHT, MONTAGE_MELEE },
+			{ "melee_q", "MG", true, false, false, true, false, true, -1, MONTAGE_GRENADE, MONTAGE_MELEE },
+			{ "q_melee", "GM", true, false, false, true, false, true, -1, MONTAGE_MELEE, MONTAGE_GRENADE },
+			{ "reload_q", "RG", false, false, true, false, false, true, 4, MONTAGE_GRENADE, MONTAGE_RELOAD },
+			{ "q_reload", "GR", false, false, true, false, false, true, 12, MONTAGE_RELOAD, MONTAGE_GRENADE },
+			// L-12-b 기록(l12b1, 상대 앞 150) — 대시 · 수류탄 짝 둘 · 셋 누름 여섯 · 재장전 → 근접 → Q → 대시. 대시 뒤에 누른 것은 막히고 앞에 누른 것은 켜진다(근접 피해 100 · 던짐).
+			// 25프레임 뒤 몽타주는 아홉 다 대시(기록 AM_MM_Dash_Forward — 이동 입력이 없어 앞. 서버 칸은 대시 칸처럼 오른쪽 이동을 싣는다)
+			{ "dash_q", "DG", true, true, false, false, true, false, -1, MONTAGE_DASH_RIGHT, MONTAGE_GRENADE },
+			{ "q_dash", "GD", true, true, false, false, true, true, -1, MONTAGE_DASH_RIGHT, MONTAGE_GRENADE },
+			{ "mdg", "MDG", true, true, false, true, true, false, -1, MONTAGE_DASH_RIGHT, MONTAGE_MELEE },
+			{ "mgd", "MGD", true, true, false, true, true, true, -1, MONTAGE_DASH_RIGHT, MONTAGE_GRENADE },
+			{ "dmg", "DMG", true, true, false, false, true, false, -1, MONTAGE_DASH_RIGHT, MONTAGE_MELEE },
+			{ "dgm", "DGM", true, true, false, false, true, false, -1, MONTAGE_DASH_RIGHT, MONTAGE_GRENADE },
+			{ "gmd", "GMD", true, true, false, true, true, true, -1, MONTAGE_DASH_RIGHT, MONTAGE_MELEE },
+			{ "gdm", "GDM", true, true, false, false, true, true, -1, MONTAGE_DASH_RIGHT, MONTAGE_GRENADE },
+			{ "rmgd", "RMGD", true, true, true, true, true, true, 4, MONTAGE_DASH_RIGHT, MONTAGE_RELOAD },
+			// 쥔 사격(탄창 4) — 근접 → Q + 쥔 사격 = l12b1 s_mgf(탄창 4 → 3 · 켠 차례 사격 → 근접 → 수류탄 · 던짐 몽타주) · 대시 + 쥔 사격 = D-0 dash6 fire_then_dash 3751
+			// (탄창 10 → 9 · 그 프레임 몽타주 대시) · 근접 + 쥔 사격은 기록 없음 — 원본 차례와 s_mgf 켠 차례에서. 마지막은 앞 입력 근접이 다음 입력 쏘기를 막는 대조
+			{ "melee_q_fire", "MG", true, false, true, true, false, true, 3, MONTAGE_GRENADE, MONTAGE_MELEE, true },
+			{ "dash_fire", "D", false, true, true, false, true, false, 3, MONTAGE_DASH_RIGHT, MONTAGE_FIRE, true },
+			{ "melee_fire", "M", true, false, true, true, false, false, 3, MONTAGE_MELEE, MONTAGE_FIRE, true },
+			{ "melee_then_fire", "M", true, false, true, true, false, false, 4, MONTAGE_MELEE, MONTAGE_FIRE, false, true },
 		};
 		ShotClient clients[2];
 		ShotClient& a = clients[0];
@@ -1730,10 +1748,19 @@ namespace
 				send(a, 0, 0, 0.f, cell.moveRight && i == kCellSettleTicks - 1 ? 1.f : 0.f);
 				send(b, 0, 0, 0.f, 0.f);
 			}, [] { return false; });
-			const uint8_t keys[2] = { (uint8_t)cell.first, (uint8_t)cell.second };
-			const uint8_t buttons = (uint8_t)(wire::kPressKeyButtons[cell.first] | wire::kPressKeyButtons[cell.second] | (cell.fireHeld ? wire::BUTTON_FIRE : 0));
-			const bool grenadeCell = cell.first == wire::PRESS_GRENADE || cell.second == wire::PRESS_GRENADE;
-			send(a, buttons, wire::MakePressOrder(keys, 2), grenadeCell ? 45.f : 0.f, cell.moveRight ? 1.f : 0.f);
+			uint8_t keys[wire::kPressKeyCount] = {};
+			int keyCount = 0;
+			uint8_t buttons = cell.fireHeld ? (uint8_t)wire::BUTTON_FIRE : (uint8_t)0;
+			bool grenadeCell = false;
+			for (const char* k = cell.keys; *k && keyCount < wire::kPressKeyCount; ++k)
+			{
+				const wire::EPressKey key = *k == 'M' ? wire::PRESS_MELEE : *k == 'D' ? wire::PRESS_DASH : *k == 'G' ? wire::PRESS_GRENADE : wire::PRESS_RELOAD;
+				keys[keyCount++] = (uint8_t)key;
+				buttons = (uint8_t)(buttons | wire::kPressKeyButtons[key]);
+				grenadeCell = grenadeCell || key == wire::PRESS_GRENADE;
+			}
+			const uint8_t pressOrder = wire::MakePressOrder(keys, keyCount);
+			send(a, buttons, pressOrder, grenadeCell ? 45.f : 0.f, cell.moveRight ? 1.f : 0.f);
 			send(b, 0, 0, 0.f, 0.f);
 			const uint32_t pressSeq = a.seq;
 			char montageText[160] = "[]";
@@ -1742,7 +1769,7 @@ namespace
 			const int wait = grenadeCell ? 320 : 120;	// 수류탄 칸은 다음 칸 쿨다운(301 입력)까지 — 서기 40 과 합쳐 넘긴다
 			RunTicks(clients, 2, wait, [&](int i)
 			{
-				send(a, 0, 0, 0.f, 0.f);
+				send(a, cell.fireNext && i == 0 ? (uint8_t)wire::BUTTON_FIRE : (uint8_t)0, 0, 0.f, 0.f);
 				send(b, 0, 0, 0.f, 0.f);
 				if (i == 25)
 				{
@@ -1763,8 +1790,8 @@ namespace
 			const bool ok = hit == cell.hit && (dashes == 1) == cell.dash && (throws == 1) == cell.thrown && dashes <= 1 && throws <= 1
 				&& (cell.magAfter < 0 || mag == cell.magAfter) && montageSeen && (montageMask & (1u << cell.montage)) != 0 && (montageMask & (1u << cell.gone)) == 0;
 			if (!ok) ++fails;
-			std::printf("PRESSCELL %s %s order=%u 근접=%s(%s · 피해 %.1f) 대시=%d 던짐=%d 탄창=%d 몽타주25=%s | 기대 근접 %s · 대시 %d · 던짐 %d · 탄창 %d · 남음 %u · 없음 %u\n",
-				ok ? "통과" : "실패", cell.name, (unsigned)wire::MakePressOrder(keys, 2), hit ? "맞음" : "안 맞음", melee ? "소식 있음" : "소식 없음", melee ? (double)melee->damage : 0.0,
+			std::printf("PRESSCELL %s %s 누름=%s%s order=%u 근접=%s(%s · 피해 %.1f) 대시=%d 던짐=%d 탄창=%d 몽타주25=%s | 기대 근접 %s · 대시 %d · 던짐 %d · 탄창 %d · 남음 %u · 없음 %u\n",
+				ok ? "통과" : "실패", cell.name, cell.keys, cell.fireHeld ? "+쥔사격" : cell.fireNext ? "+다음쥔사격" : "", (unsigned)pressOrder, hit ? "맞음" : "안 맞음", melee ? "소식 있음" : "소식 없음", melee ? (double)melee->damage : 0.0,
 				dashes, throws, mag, montageText, cell.hit ? "맞음" : "안 맞음", cell.dash ? 1 : 0, cell.thrown ? 1 : 0, cell.magAfter, (unsigned)cell.montage, (unsigned)cell.gone);
 		}
 		timeEndPeriod(1);
@@ -3468,7 +3495,7 @@ int main(int argc, char** argv)
 	if (pressCellsOnly)
 	{
 		const bool cellsOk = RunPressCells(port);
-		std::printf("RESULT %s (같은 입력 두 누름 차례 — L-1-c 칸 여섯 + 판 13 규칙 칸 하나)\n", cellsOk ? "PASS" : "FAIL");
+		std::printf("RESULT %s (같은 입력 누름 차례 — L-1-c 칸 여섯 + L-12-b 기록 칸 열 + 쥔 사격 칸 셋)\n", cellsOk ? "PASS" : "FAIL");
 		return cellsOk ? 0 : 1;
 	}
 	if (failFullOnly)

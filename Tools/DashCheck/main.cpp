@@ -450,6 +450,7 @@ namespace
 			const float viewPitch = (float)Cell(prev, c.ctlPitch);
 			const float viewYaw = (float)Cell(prev, c.ctlYaw);
 			melee.NextInput();
+			const bool meleeBlocksFire = melee.IsActive();		// 누름 앞 — 서버 ApplyInput 과 같은 자리(L-12-b)
 			dash.NextInput();
 			bool started = false;
 			if (HasEvent(evPrev, "dash_press")) started = dash.TryActivate(viewPitch, viewYaw, false).result == EDashResult::Started;
@@ -475,9 +476,10 @@ namespace
 			wi.reloadPressed = reloadPressed;
 			wi.meleeActive = melee.IsActive();
 			wi.meleeStarted = meleeStarted;
+			wi.meleeBlocksFire = meleeBlocksFire;
 			wi.dashActive = dash.BlocksHeldFire();
 			wi.dashStarted = dash.JustStarted();
-			if (wi.fireHeld && wi.meleeActive) wi.fireHeld = false;
+			if (wi.fireHeld && wi.meleeBlocksFire) wi.fireHeld = false;
 			if (wi.fireHeld && wi.dashActive)
 			{
 				++out.firesBlocked;

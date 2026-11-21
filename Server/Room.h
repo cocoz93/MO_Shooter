@@ -161,7 +161,7 @@ namespace mo
 		uint64_t meleePoses = 0;			// 그중 애니 자세로 판정한 몸 — 사격 자세 통계(poseTargets 등)와 따로 센다
 		uint64_t meleePoseSkipped = 0;		// 그중 쓸기 근처에도 없어 자세를 안 구한 몸(캡슐은 그대로 본다)
 		uint64_t meleeHandFallback = 0;		// 앞 틱 자세가 없어(애니 없음 · 그 틱 기록 없음) 권총 기본 자세 손으로 — 애니를 켠 판에서는 부활 첫 입력 말고 0 이어야 한다
-		uint64_t meleeFiresBlocked = 0;		// 근접이 켜져 있어 막은 발사 누름
+		uint64_t meleeFiresBlocked = 0;		// 근접이 이 입력 누름 전부터 켜져 있어 막은 발사 누름(같은 입력에 켠 근접은 안 막는다 — L-12-b)
 		uint64_t meleeReloadCancels = 0;	// 근접이 켜지며 끊은 재장전(탄이 안 들어감)
 		uint64_t meleeReloadMontageCancels = 0;	// 근접 몽타주가 먼저 끈 재장전 칸(쏘기의 reloadCancels 와 같은 길)
 		uint64_t meleeRewindNoView = 0;
@@ -208,7 +208,8 @@ namespace mo
 		uint64_t grenadeMeleePushRemoved = 0;	// 그중 밀기 힘 번호가 있어 지움(대시 끊기와 같은 길)
 		uint64_t grenadeReloadCancels = 0;	// 던진 입력에 끊은 재장전(탄이 안 들어감)
 		uint64_t grenadeReloadPressCuts = 0;	// 같은 입력에 수류탄보다 먼저 누른 재장전을 켜자마자 끊음(L-5-a · L-1-c reload_q 탄창 4 → 4)
-		uint64_t grenadeAnimAfterFire = 0;	// 같은 입력에 쏘기가 있어 쏘기 사건을 던짐 사건 앞에 끼운 수(G-4-b)
+		uint64_t grenadeAnimAfterFire = 0;	// 같은 입력에 쏘기가 있어 쏘기 사건을 던짐 사건 앞에 끼운 수(G-4-b) — 아래 fireAnimBeforeAbility 중 던짐이 있던 입력
+		uint64_t fireAnimBeforeAbility = 0;	// 같은 입력에 켠 능력(근접 · 대시 · 수류탄) 사건 앞에 쏘기 사건을 끼운 수(L-12-b)
 		uint64_t grenadeReloadMontageCancels = 0;	// 던짐 몽타주가 먼저 끈 재장전 칸(근접의 meleeReloadMontageCancels 와 같은 길, G-4-b)
 		uint64_t grenadeBounces = 0;		// 날아감이 튕김 셈을 한 맞음
 		uint64_t grenadeStops = 0;			// 멈춘 수류탄(튕긴 뒤 느려 멈춤)

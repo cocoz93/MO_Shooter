@@ -793,11 +793,23 @@ int main(int argc, char** argv)
 			WeaponInput in;
 			in.fireHeld = true;
 			in.meleeActive = true;
+			in.meleeBlocksFire = true;
 			const int32_t before = cycle.GetMagazine();
 			const WeaponEvents blocked = cycle.Tick(kFrameSeconds, in, still);
 			rule("fireBlockedWhileMelee", !blocked.fired && cycle.GetMagazine() == before);
 			in.meleeActive = false;
+			in.meleeBlocksFire = false;
 			rule("fireControl", cycle.Tick(kFrameSeconds, in, still).fired);
+		}
+		{
+			// 근접이 켜지는 입력의 쥔 사격 — Lyra 는 쥔 사격을 누름 능력보다 먼저 켜 한 발 쏜다(L-12-b). 켜진 셈(meleeActive)이어도 누름 전 근접이 없으면 쏜다
+			CWeaponCycle cycle;
+			cycle.Init(EWeapon::Pistol);
+			WeaponInput in;
+			in.fireHeld = true;
+			in.meleeStarted = true;
+			in.meleeActive = true;
+			rule("fireFirstWhenMeleeStarts", cycle.Tick(kFrameSeconds, in, still).fired);
 		}
 		{
 			CWeaponCycle cycle;

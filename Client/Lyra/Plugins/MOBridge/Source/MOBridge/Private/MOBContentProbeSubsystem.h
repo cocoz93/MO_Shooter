@@ -76,7 +76,7 @@ private:
 	void GoHome() const;
 	void PlaceFoe(double Distance, bool bFacingMe, double Side = 0.0) const;
 	void LogScores(const TCHAR* When) const;
-	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? (bDashL1C ? 9 : 5) : (bGrenade ? (bGrenL12A ? 14 : (bGrenL3D ? 13 : (bGrenL2C ? 12 : (bGrenL1D ? 11 : (bGrenL1C ? 10 : (bGrenL1B ? 8 : (bGrenL1A ? 7 : 6))))))) : 0))))); }
+	int32 ScriptIdx() const { return bBridge ? 2 : (bPads ? 1 : (bBump ? 3 : (bWeapons ? 4 : (bDash ? (bDashL1C ? 9 : 5) : (bGrenade ? (bGrenL12B ? 15 : (bGrenL12A ? 14 : (bGrenL3D ? 13 : (bGrenL2C ? 12 : (bGrenL1D ? 11 : (bGrenL1C ? 10 : (bGrenL1B ? 8 : (bGrenL1A ? 7 : 6)))))))) : 0))))); }
 	// 수류탄 판(G-0, grenade-plan.md) — 생김 · 부딪힘 · 튕김 · 멈춤은 엔진 알림을 받은 그 자리에서 적고(MOB_CPROBE_GSPAWN · _GHIT · _GBOUNCE · _GSTOP),
 	// 터짐(메시 숨김)은 틱에서 보고 폭발 판정을 같은 식으로 다시 해 본다(MOB_CPROBE_GBOOM — 겹친 성분은 comps 칸 · _GTRACE). 칸 끝 요약 = MOB_CPROBE_GREN
 	void OnActorSpawned(AActor* A);
@@ -149,6 +149,7 @@ private:
 	bool bGrenL1D = false;	// L-1-d 상대가 던진 뒤 나감 각본(-MOBCPGrenSet=l1d — 나가지 않는 대조 칸 · 나가는 칸)
 	bool bGrenL3D = false;	// L-3-d 상대가 던진 뒤 나가고 수류탄이 내 몸에 닿음 각본(-MOBCPGrenSet=l3d — 안 나가는 대조 칸 · 나가는 칸)
 	bool bGrenL12A = false;	// L-12-a camBack 위 끝 각본(-MOBCPGrenSet=l12a — 집에서 피치 −60 대조 · −75 · −89 던짐)
+	bool bGrenL12B = false;	// L-12-b 기록 없는 짝 각본(-MOBCPGrenSet=l12b — 대시 · Q 두 차례 · 근접 · 대시 · Q 셋 누름 여섯 차례 · 재장전 앞 넷 · 근접 → Q + 쥔 사격)
 	bool bGrenL2C = false;	// L-2-c 가까운 상대 메시 몸 각본(-MOBCPGrenSet=l2c — foe_close 던짐 여섯 번. 메시 맞음마다 MESHBODY 줄은 각본과 상관없이 나온다)
 	bool bGrenL1C = false;	// L-1-c 수류탄 같은 프레임 누름 각본(-MOBCPGrenSet=l1c — 근접 → Q · Q → 근접 · 재장전 → Q · Q → 재장전, 한 프레임 안)
 	bool bDashL1C = false;	// L-1-c 대시 같은 프레임 누름 각본(-MOBCPMode=dash -MOBCPDashSet=l1c — 근접 → 대시 · 대시 → 근접, 한 프레임 안)

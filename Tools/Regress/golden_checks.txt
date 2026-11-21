@@ -132,13 +132,14 @@ melee SPAM ok weapon=shotgun inputs=46 frames=179 starts lyra=4 mine=4 diffs=0 f
 melee MELEE abilitySpam weapons=3 fails=0 starts=16 frames=537
 melee RULE ok fireBlockedWhileMelee
 melee RULE ok fireControl
+melee RULE ok fireFirstWhenMeleeStarts
 melee RULE ok reloadInputBlockedWhileMelee
 melee RULE ok reloadInputControl
 melee RULE ok reloadCancelledByMeleeStart
 melee RULE ok reloadControl
 melee RULE ok autoReloadBlockedWhileMelee
 melee RULE ok autoReloadControl
-melee MELEE rules compared=8 fails=0
+melee MELEE rules compared=9 fails=0
 melee MELEE ability compared=41 fails=0 (damage 17 · sameTeam 1 · none 23, first touch capsule 6 · mesh 12) maxDistDiff=0.0006 walkCells=0
 melee MELEE tracePrev compared=41 fails=0 maxDistDiff=0.0014 maxImpactDiff=0.0066
 melee MELEE traceNow compared=41 fails=0 maxDistDiff=0.0024 maxImpactDiff=0.0087
@@ -198,13 +199,14 @@ melee_q SPAM ok weapon=shotgun inputs=46 frames=179 starts lyra=4 mine=4 diffs=0
 melee_q MELEE abilitySpam weapons=3 fails=0 starts=16 frames=537
 melee_q RULE ok fireBlockedWhileMelee
 melee_q RULE ok fireControl
+melee_q RULE ok fireFirstWhenMeleeStarts
 melee_q RULE ok reloadInputBlockedWhileMelee
 melee_q RULE ok reloadInputControl
 melee_q RULE ok reloadCancelledByMeleeStart
 melee_q RULE ok reloadControl
 melee_q RULE ok autoReloadBlockedWhileMelee
 melee_q RULE ok autoReloadControl
-melee_q MELEE rules compared=8 fails=0
+melee_q MELEE rules compared=9 fails=0
 melee_q MELEE ability compared=45 fails=0 (damage 21 · sameTeam 1 · none 23, first touch capsule 8 · mesh 14) maxDistDiff=0.0011 walkCells=2
 melee_q MELEE tracePrev compared=45 fails=0 maxDistDiff=0.0008 maxImpactDiff=0.0144
 melee_q MELEE traceNow compared=45 fails=0 maxDistDiff=0.0009 maxImpactDiff=0.0261
@@ -487,19 +489,29 @@ grenade_walk GWALK tag=g0t2 step=c2_walk mode=noGrenade rows=51 bodies=0 maxPosD
 grenade_walk GWALK tag=g0t2 step=c2_walk_bare mode=real rows=51 bodies=0 maxPosDiff=0.00000 maxVelDiff=0.00000 firstBadIdx=-1 lifted=0 lyraLifted=0 both=0 maxLift=0.0000 lyraMaxLift=0.0000 onStandable=0 lyraOnGren=0 hitFrames=- lyraHitFrames=- standableHits=0 rampSecond=0 stepUpOk=0 floorLine=0
 grenade_walk GWALK tag=g0t2 step=c2_walk_bare mode=inject rows=51 bodies=50 maxPosDiff=13.58457 maxVelDiff=0.00000 firstBadIdx=38 lifted=6 lyraLifted=0 both=0 maxLift=13.5846 lyraMaxLift=0.0000 onStandable=6 lyraOnGren=0 hitFrames=16841 lyraHitFrames=- standableHits=1 rampSecond=2 stepUpOk=0 floorLine=0
 grenade_walk GRENADEWALK cells=4 pass=4 controlsDiffer=4 PASS
-press PRESSCHECK tag=l1c1 step=s_melee_q ok order=M>G inputs=305 presses=2 multi=1 ours=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] lyra=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] fixed=diff [melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12]
-press PRESSCHECK tag=l1c1 step=s_q_melee ok order=G>M inputs=305 presses=2 multi=1 ours=[melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] lyra=[melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] fixed=same
-press PRESSCHECK tag=l1c1 step=s_q_reload ok order=G>R inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 mag=12] lyra=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 mag=12] fixed=same
-press PRESSCHECK tag=l1c1 step=s_reload_q ok order=R>G inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=1 mag=4] lyra=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=1 mag=4] fixed=diff [melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 mag=12]
-press PRESSCHECK tag=l1c2 step=s_melee_q ok order=M>G inputs=305 presses=2 multi=1 ours=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] lyra=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] fixed=diff [melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12]
-press PRESSCHECK tag=l1c2 step=s_q_melee ok order=G>M inputs=305 presses=2 multi=1 ours=[melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] lyra=[melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] fixed=same
-press PRESSCHECK tag=l1c2 step=s_q_reload ok order=G>R inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 mag=12] lyra=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 mag=12] fixed=same
-press PRESSCHECK tag=l1c2 step=s_reload_q ok order=R>G inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=1 mag=4] lyra=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=1 mag=4] fixed=diff [melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 mag=12]
-press PRESSCHECK tag=l1cd1 step=s_dash_melee ok order=D>M inputs=119 presses=2 multi=1 ours=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 mag=-1] lyra=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 mag=-1] fixed=same
-press PRESSCHECK tag=l1cd1 step=s_melee_dash ok order=M>D inputs=119 presses=2 multi=1 ours=[melee=1 cut=1 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 mag=-1] lyra=[melee=1 cut=1 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 mag=-1] fixed=diff [melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 mag=-1]
-press PRESSCHECK tag=l1cd2 step=s_dash_melee ok order=D>M inputs=119 presses=2 multi=1 ours=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 mag=-1] lyra=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 mag=-1] fixed=same
-press PRESSCHECK tag=l1cd2 step=s_melee_dash ok order=M>D inputs=119 presses=2 multi=1 ours=[melee=1 cut=1 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 mag=-1] lyra=[melee=1 cut=1 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 mag=-1] fixed=diff [melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 mag=-1]
-press PRESSCHECK steps=12 fails=0 fixedOrderDiff=6 inputs=2916 multi=12 noMulti=0 skipped=4
+press PRESSCHECK tag=l1c1 step=s_melee_q ok order=M>G inputs=305 presses=2 multi=1 ours=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] fixed=diff [melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=0 mag=12]
+press PRESSCHECK tag=l1c1 step=s_q_melee ok order=G>M inputs=305 presses=2 multi=1 ours=[melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] fixed=same
+press PRESSCHECK tag=l1c1 step=s_q_reload ok order=G>R inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 fire=0 mag=12] lyra=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 fire=0 mag=12] fixed=same
+press PRESSCHECK tag=l1c1 step=s_reload_q ok order=R>G inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=1 fire=0 mag=4] lyra=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=1 fire=0 mag=4] fixed=diff [melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 fire=0 mag=12]
+press PRESSCHECK tag=l1c2 step=s_melee_q ok order=M>G inputs=305 presses=2 multi=1 ours=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] fixed=diff [melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=0 mag=12]
+press PRESSCHECK tag=l1c2 step=s_q_melee ok order=G>M inputs=305 presses=2 multi=1 ours=[melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] fixed=same
+press PRESSCHECK tag=l1c2 step=s_q_reload ok order=G>R inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 fire=0 mag=12] lyra=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 fire=0 mag=12] fixed=same
+press PRESSCHECK tag=l1c2 step=s_reload_q ok order=R>G inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=1 fire=0 mag=4] lyra=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=1 fire=0 mag=4] fixed=diff [melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 fire=0 mag=12]
+press PRESSCHECK tag=l1cd1 step=s_dash_melee ok order=D>M inputs=119 presses=2 multi=1 ours=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=-1] lyra=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=-1] fixed=same
+press PRESSCHECK tag=l1cd1 step=s_melee_dash ok order=M>D inputs=119 presses=2 multi=1 ours=[melee=1 cut=1 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=-1] lyra=[melee=1 cut=1 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=-1] fixed=diff [melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=-1]
+press PRESSCHECK tag=l1cd2 step=s_dash_melee ok order=D>M inputs=119 presses=2 multi=1 ours=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=-1] lyra=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=-1] fixed=same
+press PRESSCHECK tag=l1cd2 step=s_melee_dash ok order=M>D inputs=119 presses=2 multi=1 ours=[melee=1 cut=1 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=-1] lyra=[melee=1 cut=1 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=-1] fixed=diff [melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=-1]
+press PRESSCHECK tag=l12b1 step=s_dash_q ok order=D>G inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=0 cut=0 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12] fixed=same
+press PRESSCHECK tag=l12b1 step=s_dgm ok order=D>G>M inputs=305 presses=3 multi=1 ours=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12] fixed=same
+press PRESSCHECK tag=l12b1 step=s_dmg ok order=D>M>G inputs=305 presses=3 multi=1 ours=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12] fixed=same
+press PRESSCHECK tag=l12b1 step=s_gdm ok order=G>D>M inputs=305 presses=3 multi=1 ours=[melee=0 cut=0 blocked=1 dash=1 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=0 cut=0 blocked=1 dash=1 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] fixed=diff [melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12]
+press PRESSCHECK tag=l12b1 step=s_gmd ok order=G>M>D inputs=305 presses=3 multi=1 ours=[melee=1 cut=1 blocked=0 dash=1 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=1 cut=1 blocked=0 dash=1 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] fixed=diff [melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12]
+press PRESSCHECK tag=l12b1 step=s_mdg ok order=M>D>G inputs=305 presses=3 multi=1 ours=[melee=1 cut=1 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=1 cut=1 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12] fixed=diff [melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12]
+press PRESSCHECK tag=l12b1 step=s_mgd ok order=M>G>D inputs=305 presses=3 multi=1 ours=[melee=1 cut=1 blocked=0 dash=1 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=1 cut=1 blocked=0 dash=1 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] fixed=diff [melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12]
+press PRESSCHECK tag=l12b1 step=s_mgf ok order=M>G inputs=305 presses=2 multi=1 ours=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=1 mag=3] lyra=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=1 mag=3] fixed=diff [melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 fire=1 mag=3]
+press PRESSCHECK tag=l12b1 step=s_q_dash ok order=G>D inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=1 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] lyra=[melee=0 cut=0 blocked=0 dash=1 grenade=1 reload=0 reloadCut=0 fire=0 mag=12] fixed=diff [melee=0 cut=0 blocked=0 dash=1 grenade=0 reload=0 reloadCut=0 fire=0 mag=12]
+press PRESSCHECK tag=l12b1 step=s_rmgd ok order=R>M>G>D inputs=305 presses=4 multi=1 ours=[melee=1 cut=1 blocked=0 dash=1 grenade=1 reload=0 reloadCut=1 fire=0 mag=4] lyra=[melee=1 cut=1 blocked=0 dash=1 grenade=1 reload=0 reloadCut=1 fire=0 mag=4] fixed=diff [melee=0 cut=0 blocked=1 dash=1 grenade=0 reload=0 reloadCut=1 fire=0 mag=4]
+press PRESSCHECK steps=22 fails=0 fixedOrderDiff=13 inputs=5966 multi=22 noMulti=0 skipped=6 reloadCutByOrder=1
 press PRESSCHECK PASS
 map_expanse CHECK kind=A total=15000 bothHit=9225 bothMiss=5775 onlyLyra=0 onlyMine=0 lyraPen=4351 penMismatch=0 maxDiff=0.0910 p99Diff=0.00074 over0.1=0 over1=0
 map_expanse NORMAL kind=A compared=4874 over0.01=91 over0.1=90 max=1.4142 | startPen compared=4351 over0.1=663

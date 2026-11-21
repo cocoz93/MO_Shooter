@@ -660,8 +660,8 @@ namespace mo
 			ev.reloadCancelledByMelee = true;
 		}
 
-		// 입력 처리 — 발사. 재장전보다 먼저다(Weapon.h 주석). 근접이 켜져 있으면 막힌다(근접의 막기 태그)
-		if (input.fireHeld && !input.meleeActive && !input.dashActive && !_fireActive && _magazine >= 1)
+		// 입력 처리 — 발사. 재장전보다 먼저다(Weapon.h 주석). 이 입력 누름 전부터 근접이 켜져 있으면 막힌다(근접의 막기 태그 — 쥔 사격이 누름 능력보다 먼저라, L-12-b)
+		if (input.fireHeld && !input.meleeBlocksFire && !input.dashActive && !_fireActive && _magazine >= 1)
 		{
 			--_magazine;
 			ev.spreadAngle = _spread.GetSpreadAngle();

@@ -903,7 +903,9 @@ namespace mo
 			break;
 		}
 
-		int grenadeEventSlot = -1;	// 이번 입력의 던짐 사건 자리 — 아래 무기 순환이 같은 입력의 쏘기 사건을 그 앞에 끼운다(사건을 버렸으면 -1)
+		int grenadeEventSlot = -1;	// 이번 입력의 던짐 사건 자리(사건을 버렸으면 -1) — 쏘기를 던짐 앞에 끼운 수를 따로 센다
+		const int abilityEventSlot = player.animEventCount;	// 이번 입력 능력 사건의 첫 자리 — 아래 무기 순환이 같은 입력의 쏘기 사건을 그 앞에 끼운다(L-12-b)
+		bool meleeBlocksFire = player.melee.IsActive();	// 이 입력 누름 전부터 근접이 켜져 있다 — 쥔 사격만 막는다(아래 무기 순환 · L-12-b)
 		bool meleeStarted = false;
 		bool reloadBeforeGrenade = false;	// 같은 입력 재장전 누름이 수류탄보다 먼저 — 던지면 무기 순환이 그 누름을 켜자마자 끊는다(L-5-a)
 		// 능력 자리 — 무기 바꾸기 뒤(켜는 무기의 간격 · 몽타주) · 점프 앞. 근접 · 대시 · 수류탄을 실린 누름 차례대로 하나씩 켠다(L-5-a · D127).
@@ -917,6 +919,7 @@ namespace mo
 			player.melee.NextInput();
 			player.dash.NextInput();
 			player.grenade.NextInput();
+			meleeBlocksFire = player.melee.IsActive();		// NextInput 뒤 · 누름 앞 — 예측 StepAbilities 의 meleeWasActive 와 같은 자리
 			uint8_t order[3];
 			const int abilities = wire::AbilityOrder(input.buttons, input.pressOrder, order, reloadBeforeGrenade);
 			if (abilities >= 2)
@@ -1124,10 +1127,12 @@ namespace mo
 		// 경기 끝 단계에도 쏘기 · 재장전을 막지 않는다 — Lyra 는 능력 입력 막음(GE_BlockAbilityInput)을 맵을 다시 열기 한 틱 전에야 건다(L-3-b · Dash.h EDashResult).
 		// 피해는 끝 단계 무적이 막는다(IsImmune)
 		// 근접이 켜져 있으면 발사 · 재장전 입력 · 자동 재장전이 막힌다(근접의 막기 태그). 발사는 간격 검사 · 빈 탄 집계 앞에서 뺀다 — 정직한 누름이 거절로 안 세지게.
-		// 이 입력에 켠 근접은 뒤 차례 대시 · 수류탄이 끊었어도 켜진 셈이다 — 판 13 의 「근접이 켜진 입력은 쏘기가 막힌다」를 그대로 둔다(L-5-a · 차례 없는 입력은 같은 값)
+		// 재장전 쪽은 이 입력에 켠 근접도 켜진 셈이다(뒤 차례 대시 · 수류탄이 끊었어도 — L-5-a). 발사는 이 입력 누름 전부터 켜진 근접만 막는다 — Lyra 는 쥔 사격(누르고
+		// 있는 동안 정책)을 누름 능력보다 먼저 켠다(LyraAbilitySystemComponent.cpp:238-290, 원본 기준) — L-12-b 기록 s_mgf 탄창 4 → 3 · 켠 차례 사격 → 근접 → 수류탄
 		weaponInput.meleeActive = player.melee.IsActive() || meleeStarted;
+		weaponInput.meleeBlocksFire = meleeBlocksFire;
 		weaponInput.reloadBeforeGrenade = reloadBeforeGrenade;
-		if (weaponInput.fireHeld && weaponInput.meleeActive)
+		if (weaponInput.fireHeld && weaponInput.meleeBlocksFire)
 		{
 			++_stats.meleeFiresBlocked;
 			weaponInput.fireHeld = false;
@@ -1164,11 +1169,16 @@ namespace mo
 		{
 			if (motion.aimingAlpha > 0.f) ++_stats.shotsAimed;
 			if (motion.crouching) ++_stats.shotsCrouched;
-			// 같은 입력에 던진 수류탄이 있으면 쏘기를 던짐 앞에 끼운다 — Lyra 는 누른 차례와 상관없이 쥔 사격(「누르고 있는 동안」 정책)을 먼저 켜고 이어 수류탄을 켜
-			// 던짐 몽타주가 쏘기 몽타주를 끈다(G-0-c 실측, grenade-plan.md 「막기 · 끊기」). 그대로 쌓으면 쏘기(넣기 0)가 던짐을 그 자리에서 끈다. 근접이 켜진 입력은 쏘기가 막혀 둘이 같이 안 온다
-			if (grenadeEventSlot >= 0 && grenadeEventSlot < player.animEventCount)
+			// 같은 입력에 켠 능력(근접 · 대시 · 수류탄)이 있으면 쏘기를 그 첫 사건 앞에 끼운다 — Lyra 는 누른 차례와 상관없이 쥔 사격(「누르고 있는 동안」 정책)을 먼저 켜고
+			// 이어 누름 능력을 켜, 뒤 몽타주가 쏘기 몽타주를 끈다(같은 무리 DefaultGroup — G-0-c 던짐 실측, grenade-plan.md 「막기 · 끊기」 · D-0 dash6 fire_then_dash 3751 은
+			// 쏜 프레임 몽타주가 대시). 그대로 쌓으면 쏘기(넣기 0)가 능력 몽타주를 그 자리에서 끈다(L-12-b 서버 시험 dash_fire — 고치기 전 25틱 뒤 쏘기만 남음, 실측)
+			if (abilityEventSlot < player.animEventCount)
 			{
-				if (InsertAnimEvent(player, grenadeEventSlot, EAnimEvent::Fire, player.weapon)) ++_stats.grenadeAnimAfterFire;
+				if (InsertAnimEvent(player, abilityEventSlot, EAnimEvent::Fire, player.weapon))
+				{
+					++_stats.fireAnimBeforeAbility;
+					if (grenadeEventSlot >= 0) ++_stats.grenadeAnimAfterFire;
+				}
 			}
 			else PushAnimEvent(player, EAnimEvent::Fire, player.weapon);
 			player.fireGate.OnFired((EWeapon)player.weapon, cycle.GetDef(), kTickSeconds);

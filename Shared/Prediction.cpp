@@ -875,6 +875,7 @@ namespace mo
 		weaponInput.reloadPressed = (input.buttons & wire::BUTTON_RELOAD) != 0;
 		weaponInput.meleeActive = meleeActive || slot.meleeStarted;		// 서버와 같다 — 이 입력에 켠 근접은 뒤 차례가 끊었어도 켜진 셈(L-5-a)
 		weaponInput.meleeStarted = slot.meleeStarted;
+		weaponInput.meleeBlocksFire = slot.meleeWasActive;		// 서버와 같다 — 쥔 사격은 이 입력 누름 전부터 켜진 근접만 막는다(L-12-b)
 		weaponInput.reloadBeforeGrenade = slot.reloadBeforeGrenade;
 		weaponInput.dashActive = slot.dashBlocksFire;
 		weaponInput.dashStarted = slot.dashStarted;

@@ -105,8 +105,9 @@ run_checks() {
 	sed 's/^/grenade_walk /' "$OUT/grenade_walk.log" >> "$g"
 	# 같은 입력 두 누름(L-5-b) — L-1-c 기록 넷(수류탄 l1c1 · l1c2 · 대시 l1cd1 · l1cd2)의 누름 차례를 예측(CSelfPrediction)에 넣어 Lyra 근접 켬 · 끊김 · 막힘 · 대시 · 던짐 ·
 	# 재장전 · 칸 끝 탄창과 대조. 차례 없이 넣은 대조군이 Lyra 와 다른 칸 수(fixedOrderDiff)까지 기준선에 든다. --break 이면 l1cd2 를 빼 합계 줄이 어긋나야 한다
-	local ptags="l1c1 l1c2 l1cd1 l1cd2"
-	[ "$BREAK" = 1 ] && ptags="l1c1 l1c2 l1cd1"
+	# L-12-b 기록 l12b1 = 대시 · 수류탄 짝 둘 · 셋 누름 여섯 · 넷 누름 · 근접 → Q + 쥔 사격(사격 켬 · 탄창까지 대조)
+	local ptags="l1c1 l1c2 l1cd1 l1cd2 l12b1"
+	[ "$BREAK" = 1 ] && ptags="l1c1 l1c2 l1cd1 l12b1"
 	"$tools/PressCheck/Release/PressCheck.exe" "$DATA/map_gym.mocl" "$DATA" $ptags > "$OUT/press.log" 2>&1
 	sed 's/^/press /' "$OUT/press.log" >> "$g"
 	for t in expanse gym; do
@@ -533,8 +534,10 @@ run_fail_full() {
 	verdict 가득실패 $ok "프로브 rc=$prc 서버 rc=$src$(echo "$wp" | grep -oE ' (ammo|full|failMsgs)=[0-9]+' | tr -d '\n') $(grep -a '^FAILFULL ② ' "$OUT/failfull_probe.log" | sed -E 's/^FAILFULL //')"
 }
 
-# 같은 입력 두 누름 차례(L-5-a · D127) — 연습장 칸 일곱(L-1-c 와 같은 짝 · 차례 여섯 + 근접→Q 에 쥔 사격 하나). 서버가 실린 차례대로 켜는지 근접 맞음 · 대시 · 던짐 · 탄창 · 몽타주로 본다.
-# 서버 셈 = 능력 둘 다섯(근접·대시 둘 · 근접·Q 셋) · 고정 차례와 다르게 켬 셋(근접→대시 · 근접→Q 둘) · 재장전 앞 하나 · 그 누름 끊음 하나 · 근접이 막은 쏘기 하나(마지막 칸)
+# 같은 입력 누름 차례(L-5-a · D127 · L-12-b) — 연습장 칸 열아홉 = L-1-c 짝 셋의 두 차례 여섯 · L-12-b 기록 아홉(대시 · 수류탄 짝 둘 · 셋 누름 여섯 · 넷 누름) · 쥔 사격 넷
+# (근접 → Q · 대시 · 근접 + 쥔 사격, 앞 입력 근접 뒤 쥔 사격). 서버가 실린 차례대로 켜는지 근접 맞음 · 대시 · 던짐 · 탄창 · 25틱 뒤 몽타주로 본다.
+# 서버 셈 = 능력 둘 이상 열넷 · 고정 차례와 다르게 켬 열(근접→대시 · 근접→Q 둘 · Q→대시 · 셋 누름 다섯 · 넷 누름) · 재장전 앞 둘 · 그 누름을 던짐이 끊음 하나(넷 누름은 근접이 먼저 막는다 — D127 ④)
+# · 능력 사건 앞에 끼운 쏘기 셋(쥔 사격 칸 — L-12-b) · 근접이 막은 쏘기 하나(앞 입력 근접 칸)
 run_press_cells() {
 	"$SRV" "--map=$DATA/map_gym.mocl" --port=7975 --debug --warmup=0 --exitWhenEmpty "--clips=$DATA/clips.bin" > "$OUT/presscell_srv.log" 2>&1 &
 	local spid=$!
@@ -545,12 +548,12 @@ run_press_cells() {
 	[ $prc = 0 ] && [ $src = 0 ] || ok=0
 	grep -q '^RESULT PASS' "$OUT/presscell_probe.log" || ok=0
 	pc="$(grep -a '^PRESSCELLS ' "$OUT/presscell_probe.log")"
-	[ "$(num "$pc" cells)" = 7 ] && [ "$(num "$pc" fails)" = 0 ] && [ "$(num "$pc" noAnim)" = 0 ] || ok=0
+	[ "$(num "$pc" cells)" = 19 ] && [ "$(num "$pc" fails)" = 0 ] && [ "$(num "$pc" noAnim)" = 0 ] || ok=0
 	sp="$(grep -a '^SERVER pressOrder ' "$OUT/presscell_srv.log")"
-	[ "$(num "$sp" abilityMulti)" = 5 ] && [ "$(num "$sp" reordered)" = 3 ] && [ "$(num "$sp" reloadFirst)" = 1 ] && [ "$(num "$sp" reloadPressCut)" = 1 ] || ok=0
+	[ "$(num "$sp" abilityMulti)" = 14 ] && [ "$(num "$sp" reordered)" = 10 ] && [ "$(num "$sp" reloadFirst)" = 2 ] && [ "$(num "$sp" reloadPressCut)" = 1 ] && [ "$(num "$sp" fireAnimFirst)" = 3 ] || ok=0
 	sm="$(grep -a '^SERVER melee ' "$OUT/presscell_srv.log")"
 	[ "$(num "$sm" firesBlocked)" = 1 ] || ok=0
-	verdict 누름칸 $ok "프로브 rc=$prc 서버 rc=$src $(echo "$pc" | sed -E 's/^PRESSCELLS //')$(echo "$sp" | grep -oE ' (abilityMulti|reordered|reloadFirst|reloadPressCut)=[0-9]+' | tr -d '\n') 근접막은쏘기=$(num "$sm" firesBlocked)"
+	verdict 누름칸 $ok "프로브 rc=$prc 서버 rc=$src $(echo "$pc" | sed -E 's/^PRESSCELLS //')$(echo "$sp" | grep -oE ' (abilityMulti|reordered|reloadFirst|reloadPressCut|fireAnimFirst)=[0-9]+' | tr -d '\n') 근접막은쏘기=$(num "$sm" firesBlocked)"
 }
 
 run_replay() {

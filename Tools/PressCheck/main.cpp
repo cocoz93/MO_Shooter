@@ -1,17 +1,19 @@
 ﻿// 같은 입력 누름 대조 도구 — L-1-c 기록(같은 프레임 두 누름)을 예측(CSelfPrediction)에 넣어 Lyra 결과와 견준다(L-5-b).
 //
-//   PressCheck <map_gym.mocl> <기록 폴더> <태그>...		(태그 = cprobe_<태그>.log · .csv — L-1-c 수류탄 l1c1 · l1c2 · 대시 l1cd1 · l1cd2)
+//   PressCheck <map_gym.mocl> <기록 폴더> <태그>...		(태그 = cprobe_<태그>.log · .csv — L-1-c 수류탄 l1c1 · l1c2 · 대시 l1cd1 · l1cd2 · L-12-b 여럿 누름 l12b1)
 //
 // 기록 = 기록 도구 L-1-c 각본(Client/Lyra/Plugins/MOBridge MOBContentProbeSubsystem — 수류탄 GRENADE_L1C_SCRIPT · 대시 l1c 칸). 칸(step) 이름이 s_ 로 시작하고
 // 로그에 칸 결과 줄(DCOMBO · GCOMBO)이 있는 칸마다(탄 준비 칸 s_ammo1 · 2 는 건너뛰고 skipped 로 센다):
 //   입력 r = 표 r−1 줄 사건의 누름(기록 도구 틱이 누른 것은 다음 프레임이 먹는다 — DashCheck · GrenadeCheck 와 같다). 한 줄에 누름이 여럿이면 사건 칸의 차례가
 //     누른 차례다(기록 도구가 PressTag 를 부른 차례 = Lyra InputPressedSpecHandles 차례, lyra-match-progress L-1-c) → buttons · pressOrder(wire::MakePressOrder)
-//     누름 이름 = dash_press(대시) · g_press(수류탄) · act_press(대시 칸 act= 단추, 로그 DCOMBO) · other_press(수류탄 칸 other= 능력, 로그 GCOMBO)
+//     누름 이름 = dash_press(대시) · g_press(수류탄) · act_press(대시 칸 act= 단추, 로그 DCOMBO) · other_press(수류탄 칸 other= 능력, 로그 GCOMBO) ·
+//     m_press(근접) · r_press(재장전 — L-12-b 여럿 누름 칸). 쥔 사격 = fire_press 줄 다음 입력부터 fire_release 줄 입력까지 사격 단추(누름 차례에는 안 든다)
 //   이동 입력 = 앞 줄 inX · inY(월드 축 — 대시 기록만 칸이 있고 없으면 0) · 요 · 피치 = 앞 줄 ctlYaw · ctlPitch · 무기 = 권총
 //   칸 시작 = 칸 첫 줄 자리에서 OnSpawn(능력 · 쿨다운이 꺼진 새 몸, 부활 막음 0) · 탄창 = GCOMBO magBegin(없으면 권총 가득)
 // 견주는 것(칸마다 — 칸 안 입력 전부와 칸 끝):
 //   근접 켬(Lyra GABIL on GA_Melee) · 같은 입력에 끊김(on 과 end 가 같은 프레임) · 막힘(fail) / 대시 켬 / 던짐 / 재장전 켬(on 이고 그 프레임에 안 끝남) ·
-//   재장전 누름 끊김(on 과 end 가 같은 프레임 — 예측은 reloadPressCutByGrenade) / 칸 끝 탄창(GCOMBO magEnd, 있을 때만)
+//   재장전 누름 끊김(on 과 end 가 같은 프레임 — 예측은 reloadPressCutByGrenade, 또는 재장전이 같은 입력에 켠 근접 · 대시보다 먼저 눌려 켤 수 있었는데 안 켜짐:
+//   예측은 그 차례를 막음으로 다루고(D127 ④ — 탄 · 재장전 사건이 없어 결과 같음, L-12-b s_rmgd 탄창 4 → 4) 이 도구가 끊김으로 읽는다 · 칸 수 reloadCutByOrder) / 사격 켬(GA_Weapon_Fire on — 예측은 무기 순환 fired) / 칸 끝 탄창(GCOMBO magEnd, 있을 때만)
 //   몽타주는 예측에 없어 안 본다(서버 몽타주는 ServerProbe --pressCells, L-5-a)
 // 대조군 = 같은 입력을 차례 없이(pressOrder 0 → 판 13 고정 차례 대시 → 수류탄 → 근접) 한 번 더 — Lyra 와 다른 칸이 0 이면 이 대조가 차례를 못 본다(FAIL)
 // 끝 코드: 0 = 전부 통과, 1 = 불일치, 2 = 입력 오류
@@ -89,7 +91,7 @@ namespace
 
 	struct LyraStep
 	{
-		AbilityTimes melee, dash, grenade, reload;
+		AbilityTimes melee, dash, grenade, reload, fire;
 		std::string act, other;		// DCOMBO act= · GCOMBO other=
 		int magBegin = -1, magEnd = -1;
 		bool combo = false;			// 칸 결과 줄(DCOMBO · GCOMBO)이 있다 = 두 누름 칸. 없는 s_ 칸(탄 준비 s_ammo1 · 2)은 안 본다
@@ -101,25 +103,26 @@ namespace
 		if (StartsWith(ability, "GA_Hero_Dash")) return &s.dash;
 		if (StartsWith(ability, "GA_Grenade")) return &s.grenade;
 		if (StartsWith(ability, "GA_Weapon_Reload")) return &s.reload;
+		if (StartsWith(ability, "GA_Weapon_Fire")) return &s.fire;
 		return nullptr;
 	}
 
 	struct Outcome
 	{
 		bool meleeOn = false, meleeCut = false, meleeBlocked = false;
-		bool dashOn = false, grenadeOn = false, reloadOn = false, reloadCut = false;
+		bool dashOn = false, grenadeOn = false, reloadOn = false, reloadCut = false, fireOn = false;
 		int mag = -1;		// −1 = 안 견줌
 
 		bool operator==(const Outcome& o) const
 		{
 			return meleeOn == o.meleeOn && meleeCut == o.meleeCut && meleeBlocked == o.meleeBlocked && dashOn == o.dashOn &&
-				grenadeOn == o.grenadeOn && reloadOn == o.reloadOn && reloadCut == o.reloadCut && mag == o.mag;
+				grenadeOn == o.grenadeOn && reloadOn == o.reloadOn && reloadCut == o.reloadCut && fireOn == o.fireOn && mag == o.mag;
 		}
 		std::string Text() const
 		{
 			char buf[160];
-			std::snprintf(buf, sizeof(buf), "melee=%d cut=%d blocked=%d dash=%d grenade=%d reload=%d reloadCut=%d mag=%d",
-				meleeOn, meleeCut, meleeBlocked, dashOn, grenadeOn, reloadOn, reloadCut, mag);
+			std::snprintf(buf, sizeof(buf), "melee=%d cut=%d blocked=%d dash=%d grenade=%d reload=%d reloadCut=%d fire=%d mag=%d",
+				meleeOn, meleeCut, meleeBlocked, dashOn, grenadeOn, reloadOn, reloadCut, fireOn, mag);
 			return buf;
 		}
 	};
@@ -134,6 +137,7 @@ namespace
 		o.grenadeOn = s.grenade.on >= 0;
 		o.reloadOn = s.reload.on >= 0 && s.reload.end != s.reload.on;
 		o.reloadCut = s.reload.on >= 0 && s.reload.end == s.reload.on;
+		o.fireOn = s.fire.on >= 0;
 		o.mag = s.magEnd;
 		return o;
 	}
@@ -151,6 +155,8 @@ namespace
 		{
 			if (name == "dash_press") add(wire::PRESS_DASH);
 			else if (name == "g_press") add(wire::PRESS_GRENADE);
+			else if (name == "m_press") add(wire::PRESS_MELEE);
+			else if (name == "r_press") add(wire::PRESS_RELOAD);
 			else if (name == "act_press")
 			{
 				if (s.act == "melee") add(wire::PRESS_MELEE);
@@ -179,7 +185,7 @@ namespace
 
 	struct RunCounts
 	{
-		int inputs = 0, presses = 0, multi = 0;
+		int inputs = 0, presses = 0, multi = 0, reloadCutByOrder = 0;
 		std::string order;		// 누름이 둘 이상인 입력의 누른 차례(M>D …)
 	};
 
@@ -192,9 +198,15 @@ namespace
 		pred->OnSpawn(first.pos.x, first.pos.y, first.pos.z, 0, first.yaw);
 		if (lyra.magBegin >= 0) (void)pred->OnPlace(first.pos.x, first.pos.y, first.pos.z, (uint8_t)EWeapon::Pistol, (int16_t)lyra.magBegin, kPistolSpare);
 		Outcome out;
+		bool fireHeld = false;		// 쥔 사격 — 앞 줄 사건 fire_press 로 쥐고 fire_release 로 뗀다(누름과 같은 한 프레임 늦음)
 		for (size_t i = 1; i < frames.size(); ++i)
 		{
 			const Row& prev = rows.at(frames[i - 1]);
+			for (const std::string& name : Split(prev.ev, ';'))
+			{
+				if (name == "fire_press") fireHeld = true;
+				else if (name == "fire_release") fireHeld = false;
+			}
 			uint8_t keys[wire::kPressKeyCount] = {};
 			const int n = PressKeys(prev.ev, lyra, keys);
 			wire::Input input = wire::Input();
@@ -204,6 +216,7 @@ namespace
 			input.pitch = prev.ctlPitch;
 			input.weapon = (uint8_t)EWeapon::Pistol;
 			for (int k = 0; k < n; ++k) input.buttons = (uint8_t)(input.buttons | wire::kPressKeyButtons[keys[k]]);
+			if (fireHeld) input.buttons = (uint8_t)(input.buttons | wire::BUTTON_FIRE);
 			input.pressOrder = ordered && n >= 2 ? wire::MakePressOrder(keys, n) : 0;
 			++counts.inputs;
 			counts.presses += n;
@@ -213,6 +226,9 @@ namespace
 				for (int k = 0; k < n; ++k) counts.order += std::string(k ? ">" : "") + KeyLetter(keys[k]);
 			}
 			const bool meleePressed = (input.buttons & wire::BUTTON_MELEE) != 0;
+			const bool reloadPressed = (input.buttons & wire::BUTTON_RELOAD) != 0;
+			const CWeaponCycle& before = pred->GetWeapon();
+			const bool reloadCould = before.GetMagazine() < before.GetDef().magazineSize && before.GetSpare() > 0 && !before.IsReloading() && !before.IsFireActive();
 			pred->AddInput(input);
 			wire::PlayerState probe = wire::PlayerState();
 			probe.lastSeq = input.seq;
@@ -229,6 +245,21 @@ namespace
 			const WeaponEvents& ev = pred->GetLastWeaponEvents();
 			if (ev.reloadStarted) out.reloadOn = true;
 			if (ev.reloadPressCutByGrenade) out.reloadCut = true;
+			else if (reloadPressed && reloadCould && !ev.reloadStarted)
+			{
+				bool afterReload = false, cutter = false;
+				for (int k = 0; k < n; ++k)
+				{
+					if (keys[k] == wire::PRESS_RELOAD) afterReload = true;
+					else if (afterReload && ((keys[k] == wire::PRESS_MELEE && slot->meleeStarted) || (keys[k] == wire::PRESS_DASH && slot->dashStarted))) cutter = true;
+				}
+				if (cutter)
+				{
+					out.reloadCut = true;
+					++counts.reloadCutByOrder;
+				}
+			}
+			if (ev.fired) out.fireOn = true;
 		}
 		if (lyra.magEnd >= 0) out.mag = pred->GetWeapon().GetMagazine();
 		return out;
@@ -236,7 +267,7 @@ namespace
 
 	struct Totals
 	{
-		int steps = 0, fails = 0, fixedDiff = 0, inputs = 0, multi = 0, noMulti = 0, skipped = 0;
+		int steps = 0, fails = 0, fixedDiff = 0, inputs = 0, multi = 0, noMulti = 0, skipped = 0, reloadCutByOrder = 0;
 	};
 
 	bool RunTag(CMoveSim& sim, const MatchRules& rules, float maxWalk, const std::string& dir, const std::string& tag, Totals& total)
@@ -358,6 +389,7 @@ namespace
 			++total.steps;
 			total.inputs += counts.inputs;
 			total.multi += counts.multi;
+			total.reloadCutByOrder += counts.reloadCutByOrder;
 			if (counts.multi == 0) ++total.noMulti;
 			if (!ok) ++tagFails;
 			if (!fixedSame) ++total.fixedDiff;
@@ -397,8 +429,8 @@ int main(int argc, char** argv)
 	for (int i = 3; i < argc; ++i)
 		if (!RunTag(sim, rules, (float)params.maxWalkSpeed, argv[2], argv[i], total)) return 2;
 	const bool pass = total.steps > 0 && total.fails == 0 && total.noMulti == 0 && total.fixedDiff > 0;
-	std::printf("PRESSCHECK steps=%d fails=%d fixedOrderDiff=%d inputs=%d multi=%d noMulti=%d skipped=%d\n",
-		total.steps, total.fails, total.fixedDiff, total.inputs, total.multi, total.noMulti, total.skipped);
+	std::printf("PRESSCHECK steps=%d fails=%d fixedOrderDiff=%d inputs=%d multi=%d noMulti=%d skipped=%d reloadCutByOrder=%d\n",
+		total.steps, total.fails, total.fixedDiff, total.inputs, total.multi, total.noMulti, total.skipped, total.reloadCutByOrder);
 	std::printf("PRESSCHECK %s\n", pass ? "PASS" : "FAIL");
 	return pass ? 0 : 1;
 }
