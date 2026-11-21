@@ -95,11 +95,11 @@ namespace mo
 		uint32_t shape = 0;		// 맞은 부위(BodyHit::shape)
 	};
 
-	// 맵(무기 깃발) + 사람 부위 몸 중 가장 가까운 것. bodies 중 id == ignoreId 는 뺀다(던진 사람, bIgnoreSelf).
+	// 맵(겨눔 선 깃발) + 사람 부위 몸 중 가장 가까운 것. bodies 중 id == ignoreId 는 뺀다(던진 사람, bIgnoreSelf).
 	// Lyra 는 사람 메시 물리 몸에 맞는다(G-0 기록 comp=CharacterMesh0) — 우리 쪽은 총알과 같은 부위 몸(TraceBody)
-	// 맵 몫은 Lyra 와 모양이 다르다 — Lyra 겨눔 선은 단순 충돌(bTraceComplex 기본 false)인데 맵 파일엔 「단순 모양 + 무기 채널」 깃발이 없어
-	// 무기 깃발(복잡 모양)로 쏜다. 선 시작(카메라 앞 450)이 상자 안이면 Lyra 는 거리 0(→ 조종 회전), 우리는 반대쪽 면에 맞는다
-	// (gym 기록 겨눔 490 중 28) — content-impl-progress.md 미결 21
+	// 맵 몫은 겨눔 선 깃발(MAP_BLOCK_AIM — 단순 모양 + 무기 채널, 맵 파일 판 4)로 쏜다. Lyra 겨눔 선은 단순 충돌이다(bTraceComplex 기본 false).
+	// 선 시작(카메라 앞 450)이 상자 안이면 Lyra 처럼 거리 0(→ 조종 회전). 판 3 까지는 무기 깃발(복잡 모양)로 쏘아 반대쪽 면에 맞았다
+	// (gym 기록 겨눔 490 중 28 — content-impl-progress.md 미결 21, L-7)
 	GrenadeAimHit TraceGrenadeAim(const CMapCollision& map, const Vec3& start, const Vec3& end,
 		const BodyPlacement* bodies, size_t bodyCount, uint32_t ignoreId);
 

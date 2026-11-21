@@ -70,8 +70,8 @@ namespace mo
 		const Vec3 seg = end - start;
 		const double len = std::sqrt(seg.x * seg.x + seg.y * seg.y + seg.z * seg.z);
 		RayHit rh;
-		// 플랜 그대로 무기 채널 깃발 — 단순 모양 깃발이 생기면 그쪽으로 바꾼다(미결 21, 헤더 주석)
-		if (map.Raycast(start, end, MAP_BLOCK_WEAPON, rh))
+		// 겨눔 선 깃발 — 단순 모양 + 무기 채널(맵 파일 판 4, L-7 · 헤더 주석)
+		if (map.Raycast(start, end, MAP_BLOCK_AIM, rh))
 		{
 			out.hit = true;
 			out.distance = rh.distance;

@@ -1195,11 +1195,11 @@ namespace
 			{
 				if (!la.hit) ++t.aimNone; else ++t.aimMap;
 				// 진단 — 같은 선을 단순 나무(수류탄 깃발 · 속 찬 상자는 안에서 거리 0)로 쏘면 Lyra 와 같나. 겨눔 선은 단순 충돌이다(GA_Grenade 의 LineTraceSingle 에
-				// bTraceComplex 핀이 없음 = 기본 false, 폭발 선은 true 가 찍힘 — gren0/ga_flow.txt:107-116 · b_flow.txt:53-60). 맵 파일엔 「단순 모양 + 무기 채널」 깃발이 없다(미결 21)
+				// bTraceComplex 핀이 없음 = 기본 false, 폭발 선은 true 가 찍힘 — gren0/ga_flow.txt:107-116 · b_flow.txt:53-60). 우리 겨눔은 판 4 부터 겨눔 선 깃발(MAP_BLOCK_AIM)로 쏜다(L-7) — 이 줄은 수류탄 깃발 대조군
 				RayHit simpleHit;
 				const bool simpleHitAny = map.Raycast(traceStart, traceEnd, MAP_BLOCK_GRENADE, simpleHit);
 				if (simpleHitAny == la.hit && (!la.hit || std::fabs(simpleHit.distance - la.distance) <= kAimDistTolerance)) ++t.simpleSame;
-				// Lyra 가 상자 안에서 시작(거리 0 · 맞은 점 = 선 시작) — 우리 무기 깃발은 복잡 모양(면)이라 안에서 시작해도 거리 0 이 안 된다. 따로 센다
+				// Lyra 가 상자 안에서 시작(거리 0 · 맞은 점 = 선 시작) — 판 3 까지 우리 겨눔은 무기 깃발(복잡 모양 · 면)이라 안에서 시작해도 거리 0 이 안 됐다. 따로 센다(L-7 부터 PASS 에 듦)
 				const bool lyraInside = la.hit && la.distance == 0.0 && Dist(la.location, traceStart) <= kAimDistTolerance;
 				if (lyraInside) ++t.startInside;
 				const double dDist = std::fabs(ours.distance - la.distance);
@@ -1550,6 +1550,7 @@ int main(int argc, char** argv)
 		// 능력 · 던짐(G-2-a) — 경기 끝 갈래 다름(postGameDiff)은 throwDiff 에 든다(L-3-b). 사람 메시 겨눔(bodyMiss · 거리 차)은 부위 몸 몫이라 넣지 않는다
 		&& ab.lyraThrown > 0 && ab.throwDiff == 0 && ab.cooldownDiff == 0 && ab.gabilDiff == 0 && ab.gapNotDead == 0
 		&& ab.throwCompared == ab.lyraThrown && ab.throwFails == 0 && ab.branchDiff == 0 && ab.traceDiff == 0 && ab.endFails == 0
+		&& ab.startInsideDiff == 0	// 선 시작이 상자 안 — 겨눔 선 깃발(맵 파일 판 4)로 닫힘(L-7)
 		// 폭발 · 피해(G-2-b)
 		&& bl.damageCompared > 0 && bl.lineCompared > 0 && bl.lineFails == 0 && bl.notTracedHurt == 0 && bl.tracedNotAlive == 0
 		&& bl.deadAfterNotKilled == 0 && bl.hhDiff == 0 && bl.rowMissing == 0 && bl.sameFrameBooms == 0 && bl.msgOtherInst == 0

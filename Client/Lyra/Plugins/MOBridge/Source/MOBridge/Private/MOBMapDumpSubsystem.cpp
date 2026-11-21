@@ -50,12 +50,13 @@ namespace
 	constexpr uint32 FLAG_SOLID = 16;
 	constexpr uint32 FLAG_BLOCK_GRENADE = 32;	// 수류탄 몸 — 단순 충돌(G-0-d 셈: 사람만 막는 벽 · 수류탄만 막는 물체가 있다)
 	constexpr uint32 FLAG_BLOCK_BLAST = 64;		// 폭발 선(Weapon_Capsule 채널) — 복잡 충돌
+	constexpr uint32 FLAG_BLOCK_AIM = 128;		// 수류탄 겨눔 선(무기 채널 · bTraceComplex 기본 false) — 단순 충돌(판 4, L-7)
 
 	// 세는 자리를 한곳에 모은다 — 물체 수만 보면 「못 읽었다」와 「없었다」를 못 가른다
 	struct FDumpStats
 	{
 		int32 Actors = 0, Components = 0, Bodies = 0, Shapes = 0, Leaves = 0;
-		int32 Objects = 0, Triangles = 0, MoveObjects = 0, WeaponObjects = 0, MovableObjects = 0, GrenadeObjects = 0, BlastObjects = 0;
+		int32 Objects = 0, Triangles = 0, MoveObjects = 0, WeaponObjects = 0, MovableObjects = 0, GrenadeObjects = 0, BlastObjects = 0, AimObjects = 0;
 		int32 SkipPawn = 0, SkipNoQuery = 0, SkipNoBody = 0, SkipNotBlocking = 0;
 		TMap<FName, int32> LeafByType, SkippedLeafByType;
 		TMap<FName, int32> TrianglesByClass;
@@ -473,6 +474,7 @@ void UMOBMapDumpSubsystem::DumpAndQuit()
 					if (bBlocksWeapon && bComplex) Flags |= FLAG_BLOCK_WEAPON;
 					if (bBlocksGrenade && bSimple) Flags |= FLAG_BLOCK_GRENADE;
 					if (bBlocksBlast && bComplex) Flags |= FLAG_BLOCK_BLAST;
+					if (bBlocksWeapon && bSimple) Flags |= FLAG_BLOCK_AIM;		// 겨눔 선 = 무기 채널을 단순 모양으로(GA_Grenade LineTraceSingle 에 bTraceComplex 핀 없음, L-7)
 					if (Flags == 0) continue;
 					if (Comp->Mobility == EComponentMobility::Movable) Flags |= FLAG_MOVABLE;
 
@@ -507,6 +509,7 @@ void UMOBMapDumpSubsystem::DumpAndQuit()
 						if (Flags & FLAG_MOVABLE) ++W.Stats.MovableObjects;
 						if (Flags & FLAG_BLOCK_GRENADE) ++W.Stats.GrenadeObjects;
 						if (Flags & FLAG_BLOCK_BLAST) ++W.Stats.BlastObjects;
+						if (Flags & FLAG_BLOCK_AIM) ++W.Stats.AimObjects;
 					});
 				}
 			}
@@ -523,7 +526,7 @@ void UMOBMapDumpSubsystem::DumpAndQuit()
 
 	TArray<uint8> File;
 	File.Append(reinterpret_cast<const uint8*>("MOCL"), 4);
-	AppendU32(File, 3);	// 판 3 = 수류탄 · 폭발 선 깃발(G-1-a)
+	AppendU32(File, 4);	// 판 4 = 겨눔 선 깃발(L-7) · 판 3 = 수류탄 · 폭발 선 깃발(G-1-a)
 	AppendU32(File, (uint32)W.Stats.Objects);
 	AppendU32(File, (uint32)W.Stats.Triangles);
 	AppendVec(File, W.Bounds.IsValid ? W.Bounds.Min : FVector::ZeroVector);
@@ -534,8 +537,8 @@ void UMOBMapDumpSubsystem::DumpAndQuit()
 	const bool bCsvSaved = FFileHelper::SaveStringToFile(Csv, *(OutPath + TEXT(".csv")), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 
 	const FDumpStats& S = W.Stats;
-	UE_LOG(LogMOBMap, Log, TEXT("MOB_MAP_COUNT actors=%d components=%d bodies=%d shapes=%d leaves=%d objects=%d triangles=%d move=%d weapon=%d movable=%d grenade=%d blast=%d"),
-		S.Actors, S.Components, S.Bodies, S.Shapes, S.Leaves, S.Objects, S.Triangles, S.MoveObjects, S.WeaponObjects, S.MovableObjects, S.GrenadeObjects, S.BlastObjects);
+	UE_LOG(LogMOBMap, Log, TEXT("MOB_MAP_COUNT actors=%d components=%d bodies=%d shapes=%d leaves=%d objects=%d triangles=%d move=%d weapon=%d movable=%d grenade=%d blast=%d aim=%d"),
+		S.Actors, S.Components, S.Bodies, S.Shapes, S.Leaves, S.Objects, S.Triangles, S.MoveObjects, S.WeaponObjects, S.MovableObjects, S.GrenadeObjects, S.BlastObjects, S.AimObjects);
 	UE_LOG(LogMOBMap, Log, TEXT("MOB_MAP_SKIP pawn=%d noQuery=%d notBlocking=%d noBody=%d"), S.SkipPawn, S.SkipNoQuery, S.SkipNotBlocking, S.SkipNoBody);
 	for (const auto& Pair : S.LeafByType) UE_LOG(LogMOBMap, Log, TEXT("MOB_MAP_LEAF type=%s count=%d"), *Pair.Key.ToString(), Pair.Value);
 	for (const auto& Pair : S.SkippedLeafByType) UE_LOG(LogMOBMap, Warning, TEXT("MOB_MAP_LEAF_UNREAD type=%s count=%d"), *Pair.Key.ToString(), Pair.Value);

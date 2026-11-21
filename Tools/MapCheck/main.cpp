@@ -230,13 +230,14 @@ namespace
 	void FlagProbe(const std::vector<uint8_t>& file, const mo::CMapCollision& map)
 	{
 		const std::vector<FileObject> objects = ReadObjects(file);
-		const uint32_t flagList[4] = { mo::MAP_BLOCK_MOVE, mo::MAP_BLOCK_WEAPON, mo::MAP_BLOCK_GRENADE, mo::MAP_BLOCK_BLAST };
-		const char* flagName[4] = { "move", "weapon", "grenade", "blast" };
-		const uint32_t partner[4] = { mo::MAP_BLOCK_GRENADE, mo::MAP_BLOCK_BLAST, mo::MAP_BLOCK_MOVE, mo::MAP_BLOCK_WEAPON };
+		// 겨눔 선(판 4, L-7)의 짝 = 같은 단순 나무의 이동
+		const uint32_t flagList[5] = { mo::MAP_BLOCK_MOVE, mo::MAP_BLOCK_WEAPON, mo::MAP_BLOCK_GRENADE, mo::MAP_BLOCK_BLAST, mo::MAP_BLOCK_AIM };
+		const char* flagName[5] = { "move", "weapon", "grenade", "blast", "aim" };
+		const uint32_t partner[5] = { mo::MAP_BLOCK_GRENADE, mo::MAP_BLOCK_BLAST, mo::MAP_BLOCK_MOVE, mo::MAP_BLOCK_WEAPON, mo::MAP_BLOCK_MOVE };
 		size_t solids = 0;
 		for (const FileObject& obj : objects) solids += (obj.flags & mo::MAP_SOLID) ? 1 : 0;
 		std::printf("FLAGPROBE objects=%zu solid=%zu\n", objects.size(), solids);
-		for (int f = 0; f < 4; ++f)
+		for (int f = 0; f < 5; ++f)
 		{
 			const uint32_t flag = flagList[f];
 			size_t has = 0, lacks = 0, oneSided = 0;

@@ -29,6 +29,7 @@ namespace mo
 		MAP_SOLID = 16,				// 속이 찬 볼록 물체 — 안에서 쏜 광선은 거리 0 에 맞는다
 		MAP_BLOCK_GRENADE = 32,		// 수류탄 몸(WorldDynamic)을 막는다 — 단순 충돌. 이동과 거의 같지만 사람만 막는 벽 · 수류탄만 막는 물체가 있다(G-0-d)
 		MAP_BLOCK_BLAST = 64,		// 폭발 선(Weapon_Capsule 채널, 복잡 충돌)을 막는다. 무기 광선과 거의 같다(G-0-d)
+		MAP_BLOCK_AIM = 128,		// 수류탄 겨눔 선(무기 채널, 단순 충돌 — bTraceComplex 기본 false)을 막는다. 무기 깃발과 채널 응답은 같고 모양 갈래가 단순 — 단순 모양만 있는 물체는 이 깃발만 얻는다(판 4, L-7)
 	};
 
 	enum class EMapLoad
@@ -155,9 +156,9 @@ namespace mo
 		};
 
 		void Clear();
-		// 나무는 모양 갈래로 둘 — 단순 충돌(이동 · 수류탄) · 복잡 충돌(무기 · 폭발 선). 한 나무에 깃발이 다른 물체가 섞이므로 질의는 깃발로 거른다
+		// 나무는 모양 갈래로 둘 — 단순 충돌(이동 · 수류탄 · 겨눔 선) · 복잡 충돌(무기 · 폭발 선). 한 나무에 깃발이 다른 물체가 섞이므로 질의는 깃발로 거른다
 		// - 왜 깃발마다 나무를 두지 않나: expanse 는 둘이 거의 같아(다른 물체 53 · 1개) 120만 삼각형 나무가 둘 더 생긴다
-		static constexpr uint32_t kSimpleFlags = MAP_BLOCK_MOVE | MAP_BLOCK_GRENADE;
+		static constexpr uint32_t kSimpleFlags = MAP_BLOCK_MOVE | MAP_BLOCK_GRENADE | MAP_BLOCK_AIM;
 		static constexpr uint32_t kComplexFlags = MAP_BLOCK_WEAPON | MAP_BLOCK_BLAST;
 		const Tree& TreeFor(uint32_t blockFlag) const { return (blockFlag & kSimpleFlags) ? _simple : _complex; }
 		static void Build(Tree& tree);

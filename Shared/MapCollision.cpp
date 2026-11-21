@@ -496,7 +496,7 @@ namespace mo
 		if (std::memcmp(cursor, "MOCL", 4) != 0) return EMapLoad::BadMagic;
 		cursor += 4;
 		const uint32_t version = readU32();
-		if (version != 3) return EMapLoad::BadVersion;	// 1 은 뒷면·속 찬 물체 표시가, 2 는 수류탄 · 폭발 선 깃발이 없어 판정이 조용히 달라진다
+		if (version != 4) return EMapLoad::BadVersion;	// 1 은 뒷면·속 찬 물체 표시가, 2 는 수류탄 · 폭발 선 깃발이, 3 은 겨눔 선 깃발이 없어 판정이 조용히 달라진다
 		const uint32_t objectCount = readU32();
 		const uint32_t triangleCount = readU32();
 		cursor += 24;	// 범위는 쓰지 않는다
