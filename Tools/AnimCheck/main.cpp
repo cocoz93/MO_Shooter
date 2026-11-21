@@ -18,6 +18,7 @@
 #include "AnimClips.h"
 #include "AnimPose.h"
 #include "AnimState.h"
+#include "Movement.h"
 
 #include <algorithm>
 #include <chrono>
@@ -118,6 +119,12 @@ namespace
 				{
 					std::fprintf(file, "CURVE,%zu,%u,%zu", c, clip.curveHz, clip.curve.size());
 					for (const float value : clip.curve) std::fprintf(file, ",%.9g", value);
+					std::fprintf(file, "\n");
+				}
+				if (clip.hasLegCurve)
+				{
+					std::fprintf(file, "LCURVE,%zu,%u,%zu", c, clip.legCurveHz, clip.legCurve.size());
+					for (const float value : clip.legCurve) std::fprintf(file, ",%.9g", value);
 					std::fprintf(file, "\n");
 				}
 				for (uint32_t s = 0; s < clip.samples; ++s)
@@ -850,6 +857,8 @@ namespace
 			std::printf("STATE FAIL 줄 0 rows=%zu moves=%zu\n", rows.size(), moves.size());
 			return 1;
 		}
+		// 뜬 동안 발 디딤 장치의 땅 — 서버(Room.cpp FillAnimInput)와 같게 메시 자리 z + 캡슐 반높이(L-6-c-3). 기록 이동 csv 에 칸이 없어 여기서 채운다
+		for (MoveRow& move : moves) move.input.airGap = clips.MeshPlacement().p[2] + MoveParams{}.capsuleHalfHeight;
 
 		// Lyra 기록을 주면 그 기록의 무기 · 사격 · 몽타주 사건으로 상태를 몰고, 몽타주 칸 · 쏜 뒤 변수를 기록과 비교한다(9단계 3-b)
 		std::map<std::pair<int, int>, ProbeRow> probe;

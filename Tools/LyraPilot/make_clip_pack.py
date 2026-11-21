@@ -19,7 +19,7 @@ import struct
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
-VERSION = 8                                     # 8 = 곡선 DisableLegIK 를 넣음(L-6-c-1 — 형식 칸은 그대로). 7 = 몽타주 종류 13(수류탄 던짐, G-4 — 형식 칸은 그대로). 6 = 몽타주 종류 12(대시 넷, D-4) · 몽타주마다 빼기 비중 표 칸 i16(형식이 바뀐 판). 5 = 몽타주 종류 8(근접 · 반응 둘, E-2). 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3). 3 = 묶음 클립 30개 뒤에 조준 클립 17개(C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
+VERSION = 9                                     # 9 = 클립마다 DisableLegIK 곡선 칸(점프 클립 다섯, L-6-c-3 — csv BCURVE 줄). 8 = 곡선 DisableLegIK 를 넣음(L-6-c-1 — 형식 칸은 그대로). 7 = 몽타주 종류 13(수류탄 던짐, G-4 — 형식 칸은 그대로). 6 = 몽타주 종류 12(대시 넷, D-4) · 몽타주마다 빼기 비중 표 칸 i16(형식이 바뀐 판). 5 = 몽타주 종류 8(근접 · 반응 둘, E-2). 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3). 3 = 묶음 클립 30개 뒤에 조준 클립 17개(C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
 KINDS = {'sphere': 0, 'sphyl': 1, 'box': 2}     # Shared/Weapon.h EBodyShape 값
 SCALE_LIMIT = 1e-4
 CLIPS_PER_BUNDLE = 67                           # Shared/AnimClips.h ACLIP_COUNT — 앞 67개(조준 17개 · 앉기 20개 포함). 그 뒤는 몽타주 · 덮기 자세 클립
@@ -68,7 +68,7 @@ if len({name for name, _ in pairs}) != len(pairs):
 
 def parse(name, src):
     d = dict(name=name, src=src, bones={}, keyed=set(), clips={}, marks={}, curves={}, keys={}, aim=None, move=None, info={}, mesh=None, bodies=[], fails=[], weapon=None,
-             montages={}, tracks={}, mcurves={}, scurves={}, override=None, mfails=[])
+             montages={}, tracks={}, mcurves={}, scurves={}, bcurves={}, override=None, mfails=[])
     for line in open(src, encoding='utf-8-sig', errors='replace'):
         c = line.rstrip('\r\n').split(',')
         h = c[0]
@@ -106,6 +106,10 @@ def parse(name, src):
             d['tracks'].setdefault(int(c[1]), []).append(dict(slot=c[2], clip=int(c[3]), startPos=float(c[4]), clipStart=float(c[5]), clipEnd=float(c[6]), rate=float(c[7]), loops=int(c[8])))
         elif h == 'MCURVE':
             d['mcurves'].setdefault(int(c[1]), []).append(dict(name=c[2], hz=int(c[3]), n=int(c[4]), v=[float(x) for x in c[5:]]))
+        elif h == 'BCURVE':
+            if c[2] != 'DisableLegIK':
+                fail(f'BCURVE name={c[2]} — 앞 67개 클립 곡선은 DisableLegIK 만 낸다')
+            d['bcurves'][int(c[1])] = dict(name=c[2], hz=int(c[3]), n=int(c[4]), v=[float(x) for x in c[5:]])
         elif h == 'SCURVE':
             d['scurves'].setdefault(int(c[1]), []).append(dict(name=c[2], hz=int(c[3]), n=int(c[4]), v=[float(x) for x in c[5:]]))
         elif h == 'OVERRIDE':
@@ -252,6 +256,14 @@ for d in bundles:
                 fail(f'curve bundle={d["name"]} clip={c["name"]} n={cv["n"]} got={len(cv["v"])}')
             out += struct.pack('<II', cv['hz'], cv['n'])
             out += struct.pack(f'<{cv["n"]}f', *cv['v'])
+        # 판 9 — DisableLegIK 곡선(점프 클립 다섯, L-6-c-3). 뜨면 발 붙이기 장치를 끈다(ABP ShouldEnableControlRig)
+        lc = d['bcurves'].get(i)
+        out += struct.pack('<B', 0 if lc is None else 1)
+        if lc is not None:
+            if lc['n'] != len(lc['v']):
+                fail(f'leg curve bundle={d["name"]} clip={c["name"]} n={lc["n"]} got={len(lc["v"])}')
+            out += struct.pack('<II', lc['hz'], lc['n'])
+            out += struct.pack(f'<{lc["n"]}f', *lc['v'])
         want_scale = 0.0 if c['additive'] != 0 else 1.0
         k = d['keys'][i]
         if len(k) != c['samples'] * len(order):

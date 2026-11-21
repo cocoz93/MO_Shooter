@@ -1491,6 +1491,23 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 			Out += TEXT("\n");
 		}
 	}
+	// 앞 67개 클립의 DisableLegIK 곡선(L-6-c-3) — 점프 클립 다섯이 싣고 있어 뜨면 발 붙이기 장치가 꺼진다(animcmp_fp3_probe.csv curves 3574~3640, 실측).
+	// 몽타주 줄 클립 곡선(SCURVE)과 줄 머리를 갈라 둔다 — 몽타주 줄이 앞 67개 클립을 다시 쓰면(같은 자산) SCURVE 로 내면 그 몽타주 곡선에 섞인다
+	for (int32 I = 0; I < BaseClipCount; ++I)
+	{
+		const UAnimSequence* Clip = All[I].Clip;
+		if (!Clip) continue;
+		for (const FFloatCurve& Curve : Clip->GetCurveData().FloatCurves)
+		{
+			if (Curve.GetName() != FName(TEXT("DisableLegIK"))) continue;
+			TArray<float> Values;
+			const int32 N = FMath::CeilToInt32(All[I].Length * MONTAGE_CURVE_HZ) + 1;
+			for (int32 S = 0; S < N; ++S) Values.Add(Clip->EvaluateCurveData(Curve.GetName(), FAnimExtractContext(FMath::Min((double)S / MONTAGE_CURVE_HZ, (double)All[I].Length))));
+			Out += FString::Printf(TEXT("BCURVE,%d,%s,%d,%d"), I, *Curve.GetName().ToString(), MONTAGE_CURVE_HZ, Values.Num());
+			for (const float V : Values) Out += FString::Printf(TEXT(",%.6f"), V);
+			Out += TEXT("\n");
+		}
+	}
 }
 
 // 읽은 한 벌을 재생 멤버에 묶는다. 서버 구동이면 무기마다 한 번씩 불러 사본을 뜬다(로그도 한 벌마다 한 번)

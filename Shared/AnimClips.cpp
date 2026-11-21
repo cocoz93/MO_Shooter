@@ -200,6 +200,15 @@ namespace mo
 					clip.curve.resize(curveCount);
 					reader.Bytes(clip.curve.data(), curveCount * sizeof(float));
 				}
+				clip.hasLegCurve = reader.Read<uint8_t>() != 0;
+				if (clip.hasLegCurve)
+				{
+					clip.legCurveHz = reader.Read<uint32_t>();
+					const uint32_t legCount = reader.Read<uint32_t>();
+					if (!reader.Ok() || legCount > reader.Left() / sizeof(float)) return EClipLoad::Truncated;
+					clip.legCurve.resize(legCount);
+					reader.Bytes(clip.legCurve.data(), legCount * sizeof(float));
+				}
 				if (!reader.Ok()) return EClipLoad::Truncated;
 
 				// 표본 수는 뽑는 쪽과 같은 float 곱으로 다시 계산해 맞춘다(언리얼 CeilToInt32(float × int) + 1)

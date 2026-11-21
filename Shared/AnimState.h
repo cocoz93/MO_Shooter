@@ -39,6 +39,7 @@ namespace mo
 		float groundDistance = 0.f;			// 떨어지는 중일 때 땅까지 거리(cm)
 		bool hasFloorGap = false;			// 땅에서 바닥을 찾았나
 		float plantGap = 0.f;				// 메시 뿌리가 바닥보다 얼마나 위인가(cm)
+		float airGap = 0.f;					// 떠 있을 때 메시 뿌리가 캡슐 바닥보다 얼마나 위인가(메시 자리 z + 캡슐 반높이, cm) — 뜬 동안 땅 = −(airGap + groundDistance)(L-6-c-3)
 		bool ads = false;					// 조준 중인가 — 이 갱신 앞에 정해진 조준 능력 상태(서버 = 이 틱 입력을 적용한 뒤 값, D61). Lyra 는 능력이 바뀐 뒤 첫 갱신이 본다(실측 — 기록 도구가 프레임 끝에 켜서 기록에선 한 줄 앞 값)
 		bool crouched = false;				// 앉았나 — 이 갱신 앞 이동이 끝낸 앉음(언리얼 bIsCrouched, D62 8). Lyra 기록은 앉음이 바뀐 프레임에 애니도 바뀐다(animcmp_crouch_rifle_probe.csv c_on · c_off, 실측)
 	};
@@ -205,7 +206,7 @@ namespace mo
 		float PredictPivotDistance(const double acceleration[3], const double velocity[3]) const;
 		void UpdateFiring(bool accelerating, bool falling, bool ads, bool crouched, float deltaSeconds);
 		void UpdateMontages(float deltaSeconds);
-		void StepPlant(bool falling, bool plant, float deltaSeconds, CAnimPoseEvaluator& evaluator, BoneTransform* scratch);
+		void StepPlant(float ground, float deltaSeconds, CAnimPoseEvaluator& evaluator, BoneTransform* scratch);
 		bool AdvanceMontage(MontageInstance& instance, float deltaSeconds);		// false = 다 빠졌다(엔진 Terminate)
 		void StopMontage(MontageInstance& instance, uint8_t option, float blendSeconds, int16_t profile);
 		float ProfileMaxFactor(int profile) const;
@@ -214,6 +215,7 @@ namespace mo
 		bool FullBodyCoversSource(float deltaSeconds);		// 이번 갱신에 통째(FullBody) 자리 몽타주가 몸을 다 덮나 — 그러면 걸음 쪽 그래프를 안 넘긴다
 		void ReinitLocomotion();							// 덮였던 걸음 쪽이 다시 갱신되는 첫 프레임 — 엔진 상태 기계 다시 초기화
 		float PoseCurve(const char* name) const;			// 이번 자세 목록의 몽타주 곡선 × 비중의 합 — DisableLHandIK(왼손) · DisableLegIK(발 붙이기 장치, L-6-c-1)
+		float StackLegCurve() const;						// 쌓기 칸(점프 클립) DisableLegIK × 칸 비중 × 통째 자리 몽타주가 안 덮은 몫(L-6-c-3)
 
 		// 클립에서 읽어 둔 값
 		const CAnimClips* _clips = nullptr;
@@ -281,8 +283,7 @@ namespace mo
 		float _pivotDistance = 0.f;
 		bool _accelerating = false;		// 이번 프레임 가속 입력 — 빠지는 멈춤 클립의 거리 맞추기 조건(ShouldDistanceMatchStop)
 		float _plantDrop = 0.f;
-		float _groundTime = 0.f;
-		float _airTime = 0.f;
+		float _plantGround = 0.f;			// 이번 갱신 장치가 쓴 땅(부품 공간 cm) — 땅 = −발 디딤 거리 · 뜬 동안 = −(airGap + 땅까지 거리)
 		float _plantOffset[3] = {};
 		float _plantAlpha = 1.f;			// 발 붙이기 장치 켜짐(엔진 컨트롤 릭 노드 알파, 0.2초 선형) — 앞 자세 곡선 DisableLegIK 가 0 보다 크면 0 쪽으로(L-6-c-1)
 		float _disableLegIK = 0.f;			// 이번 자세의 DisableLegIK 곡선 — 다음 갱신의 장치 켜짐을 정한다

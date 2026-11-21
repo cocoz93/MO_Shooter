@@ -44,7 +44,7 @@ for line in open(profile_src, encoding='utf-8-sig', errors='replace'):
 
 def parse(src_path):
     s = dict(names={}, parent={}, ref={}, clips={}, marks={}, curves={}, keys={}, aim=None, move=None, mesh=None, bodies={}, hz=None,
-             montages={}, mprofile={}, tracks={}, mcurves={}, override=None)
+             montages={}, mprofile={}, tracks={}, mcurves={}, bcurves={}, override=None)
     for line in open(src_path, encoding='utf-8-sig', errors='replace'):
         c = line.rstrip('\r\n').split(',')
         if c[0] == 'INFO':
@@ -63,6 +63,8 @@ def parse(src_path):
             s['marks'].setdefault(int(c[1]), []).append((c[2], c[3]))
         elif c[0] == 'CURVE':
             s['curves'][int(c[1])] = (c[3], c[4], c[5:])
+        elif c[0] == 'BCURVE':
+            s['bcurves'][int(c[1])] = (c[3], c[4], c[5:])
         elif c[0] == 'AIMPITCH':
             s['aim'] = c[1:7]
         elif c[0] == 'MOVE':
@@ -102,7 +104,7 @@ index_of_name = {n: b for b, n in name_of_key.items()}
 
 diff = missing = extra = 0
 values = 0
-counts = dict(bones=0, bodies=0, clips=0, marks=0, curves=0, curveValues=0, keys=0)
+counts = dict(bones=0, bodies=0, clips=0, marks=0, curves=0, curveValues=0, legCurves=0, keys=0)
 first = []
 
 
@@ -112,7 +114,7 @@ def note(kind, where):
 
 
 # 묶음마다 본 것
-seen = {name: dict(clips=set(), keys=set(), curves=set(), marks={}, aim=False, move=False, keyCount=0, montages=set(), tracks={}, packed=set(), override=False) for name in order}
+seen = {name: dict(clips=set(), keys=set(), curves=set(), legCurves=set(), marks={}, aim=False, move=False, keyCount=0, montages=set(), tracks={}, packed=set(), override=False) for name in order}
 seen_profiles = []
 slot_names = []
 slot_profiles = []
@@ -362,6 +364,25 @@ for line in open(dump_path, encoding='utf-8', errors='replace'):
             if not same(a, b):
                 diff += 1
                 note('curve', (cur, i))
+    elif h == 'LCURVE':
+        i = int(c[1])
+        seen[cur]['legCurves'].add(i)
+        counts['legCurves'] += 1
+        if i not in srcs[cur]['bcurves']:
+            extra += 1
+            note('extra leg curve', (cur, i))
+            continue
+        hz, cnt, v = srcs[cur]['bcurves'][i]
+        if hz != c[2] or cnt != c[3] or len(v) != len(c[4:]):
+            diff += 1
+            note('leg curve shape', (cur, i))
+            continue
+        counts['curveValues'] += len(v)
+        for a, b in zip(v, c[4:]):
+            values += 1
+            if not same(a, b):
+                diff += 1
+                note('leg curve', (cur, i))
     elif h == 'KEY':
         k = (int(c[1]), int(c[2]), c[3])
         seen[cur]['keys'].add(k)
@@ -398,6 +419,9 @@ for name in order:
     for i in set(src['curves']) - got['curves']:
         missing += 1
         note('missing curve', (name, i))
+    for i in set(src['bcurves']) - got['legCurves']:
+        missing += 1
+        note('missing leg curve', (name, i))
     for i, want in src['marks'].items():
         if got['marks'].get(i, 0) < len(want):
             missing += len(want) - got['marks'].get(i, 0)

@@ -23,6 +23,7 @@
 //       u8 이름 길이, 이름, f 길이(초), u8 덧붙임 종류(0 = 일반), u8 반복, f rootSpeed, u32 표본 수,
 //       u16 발 표시 수, 표시마다 { f 시각, u8 왼발 },
 //       u8 곡선 유무, 있으면 { u32 hz, u32 값 수, f[값 수] },
+//       u8 DisableLegIK 곡선 유무(버전 9), 있으면 { u32 hz, u32 값 수, f[값 수] },
 //       키 = 표본 수 × 뼈 수 × 7f (px py pz qx qy qz qw) },
 //     u32 몽타주 수(버전 2), 몽타주마다 {
 //       u8 이름 길이, 이름, u8 종류(EMontageKind), u8 무리 이름 길이, 무리 이름, f 길이(초), f 재생 속도,
@@ -35,7 +36,8 @@
 // 크기 칸은 넣지 않는다. 일반 클립은 1, 덧붙임 클립은 0 으로 항상 같고, 다르면 도구가 파일을 만들지 않는다.
 namespace mo
 {
-	inline constexpr uint32_t kClipPackVersion = 8;	// 8 = 몽타주 곡선에 DisableLegIK(앞 대시가 발 붙이기 장치를 끔, L-6-c-1). 칸 꼴은 그대로다. 7 은 거부한다(곡선이 없어 앞 대시 중에도 골반을 내린다).
+	inline constexpr uint32_t kClipPackVersion = 9;	// 9 = 클립마다 DisableLegIK 곡선 칸(점프 클립 다섯 — 뜨면 발 붙이기 장치를 끈다, L-6-c-3). 8 은 거부한다(점프 중에도 장치가 돈다).
+															// 8 = 몽타주 곡선에 DisableLegIK(앞 대시가 발 붙이기 장치를 끔, L-6-c-1). 칸 꼴은 그대로다. 7 은 거부한다(곡선이 없어 앞 대시 중에도 골반을 내린다).
 														// 7 = 몽타주 종류 12 → 13(수류탄 던짐, 컨텐츠 G-4). 칸 꼴은 그대로다. 6 은 거부한다(수류탄 몽타주가 없다).
 														// 6 = 몽타주 종류 8 → 12(대시 앞 · 뒤 · 왼 · 오른, 컨텐츠 D-4) · 몽타주마다 빼기 비중 표 칸(대시 넷 = FastFeet). 5 는 거부한다(대시 몽타주가 없다).
 														// 5 = 몽타주 종류 5 → 8(근접 · 맞은 쪽 반응 뒤 · 앞, 컨텐츠 E-2). 칸 꼴은 그대로다. 4 는 거부한다(근접 몽타주가 없다).
@@ -196,6 +198,9 @@ namespace mo
 		bool hasCurve = false;
 		uint32_t curveHz = 0;
 		std::vector<float> curve;
+		bool hasLegCurve = false;		// DisableLegIK(버전 9) — 클립 시각 기준
+		uint32_t legCurveHz = 0;
+		std::vector<float> legCurve;
 		std::vector<BoneKey> keys;		// 표본 수 × 뼈 수
 
 		const BoneKey* Keys(uint32_t sample, uint32_t boneCount) const { return keys.data() + (size_t)sample * boneCount; }

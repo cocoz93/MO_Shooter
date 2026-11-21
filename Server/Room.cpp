@@ -1916,6 +1916,8 @@ namespace mo
 			end.z -= kGroundTraceDistance + halfHeight;
 			RayHit hit;
 			if (_map.Raycast(move.location, end, MAP_BLOCK_MOVE, hit)) out.groundDistance = std::max((float)hit.distance - halfHeight, 0.f);
+			// 메시 뿌리 ↔ 캡슐 바닥 — 앉아도 같다(앉으면 캡슐이 줄어든 만큼 메시도 올린다 · CrouchMeshLiftZ). 뜬 동안 발 디딤 장치의 땅을 이 값 + 땅까지 거리로 낸다(L-6-c-3)
+			out.airGap = _anim.clips->MeshPlacement().p[2] + _params.capsuleHalfHeight;
 		}
 		else if (move.floor.blockingHit)
 		{

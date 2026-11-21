@@ -21,9 +21,6 @@ namespace mo
 		constexpr float kLandedStandSeconds = 0.15f;
 		constexpr float kLandedMoveSeconds = 0.2f;
 		constexpr float kIdleBreakDelay = 6.f;
-		constexpr float kPlantReleaseSeconds = 0.2f;
-		constexpr float kPlantLandDelay = 0.1f;
-		constexpr float kPlantTimeSlack = 0.001f;
 		constexpr float kPlantAlphaSeconds = 0.2f;		// 발 붙이기 장치 켜고 끄기 — ABP 컨트롤 릭 노드 AlphaBoolBlend 넣기 · 빼기 0.2초 선형(weapons_l2a.txt:2989, 원본 기준)
 		// 장치 셈(L-6-c-2) — CR_Mannequin_FootPlant 그래프 값(원본 기준, 덤프 길은 진행 파일 L-2-a)
 		constexpr float kPlantAlphaRelevant = 0.00001f;	// 알파가 이 값 이하면 장치를 안 돌린다 — 스프링이 멈췄다 이어 간다(AnimNode_ControlRigBase.cpp:197 IsRelevant · ZERO_ANIMWEIGHT_THRESH)
@@ -545,7 +542,50 @@ namespace mo
 			slot.blendOut = instance.profile >= 0 ? instance.blend.alpha : -1.f;
 		}
 		_disableLeftHand = PoseCurve("DisableLHandIK");
-		_disableLegIK = PoseCurve("DisableLegIK");
+		_disableLegIK = PoseCurve("DisableLegIK") + StackLegCurve();
+	}
+
+	// 쌓기 칸 점프 클립의 DisableLegIK(클립 파일 판 9) — 칸 비중은 자세 계산(ApplyJump)과 같게: 위 칸부터 남은 몫 × 부드럽게 한 덮음, 문턱 아래 칸은 뺀다 · 합으로 나눈다.
+	// 통째 자리 몽타주가 덮은 몫만큼 줄인다(엔진 끼움 자리 노드는 아래 자세 곡선과 몽타주 곡선을 몽타주 비중으로 섞는다 — 제 판단, 공중 대시 기록이 없어 대조 안 함).
+	// 장치는 곡선이 0 보다 큰지만 본다 — 켜지는 프레임은 기록과 같다(점프 시작 비중 0.07 인 첫 뜬 프레임에 0.001, animcmp_fp3_probe.csv 3576, 실측).
+	// 착지 쪽 크기는 칸 비중 × 클립 곡선 합과 같다(Fall_Loop 비중 0.18 · 0.11 · 0.05 · 0.02 에 0.182 · 0.110 · 0.055 · 0.020, Fall_Land 는 끝 표본 0 — 같은 기록 3637~3640).
+	// 뜰 때 크기는 기록이 칸 비중보다 작다(점프 시작 비중 0.26 · 0.50 · 0.74 에 0.191 · 0.441 · 0.696 · 클립 곡선은 첫 표본부터 1 — clips9 BCURVE) — 까닭 미상, 장치 켜짐엔 안 닿는다(미결)
+	float CAnimState::StackLegCurve() const
+	{
+		if (_count == 0) return 0.f;
+		float weights[kAnimLayerMax] = {};
+		JumpWeights(weights);
+		float sum = 0.f;
+		float value = 0.f;
+		for (int i = 0; i < _count; ++i)
+		{
+			if (weights[i] <= kZeroWeight) continue;
+			sum += weights[i];
+			if (_stack[i].clip < 0) continue;
+			const AnimClip& clip = _clips->Bundles()[(size_t)_bundleIndex].clips[StackClipIndex(_stack[i].clip)];
+			if (!clip.hasLegCurve || clip.legCurve.empty()) continue;
+			const float length = std::max(clip.length, 0.01f);
+			const float time = clip.loop ? std::fmod(_stack[i].time, length) : std::min(_stack[i].time, length);
+			const float x = std::max(time, 0.f) * (float)clip.legCurveHz;
+			const size_t index = (size_t)x;
+			const float sample = index + 1 >= clip.legCurve.size() ? clip.legCurve.back() : clip.legCurve[index] + (clip.legCurve[index + 1] - clip.legCurve[index]) * (x - (float)index);
+			value += weights[i] * sample;
+		}
+		if (sum <= kSmallNumber) return 0.f;
+		float replace = 0.f;
+		if (_fullBodySlot >= 0 && _clips->Slots()[(size_t)_fullBodySlot].mode != ESlotMode::Additive)
+		{
+			for (int i = 0; i < _poseMontageCount; ++i)
+			{
+				const AnimMontageSlot& slot = _poseMontages[i];
+				const ClipMontage* montage = _clips->Bundles()[(size_t)slot.bundle].FindMontage(slot.kind);
+				if (!montage) continue;
+				bool onSlot = false;
+				for (const MontageTrack& track : montage->tracks) onSlot = onSlot || track.slot == _fullBodySlot;
+				if (onSlot) replace += slot.weight;
+			}
+		}
+		return value / sum * (1.f - Clamp(replace, 0.f, 1.f));
 	}
 
 	// 몽타주 곡선 name × 비중의 합(DisableLHandIK · DisableLegIK). 몽타주 자체 곡선과, 덧붙임이 아닌 자리에 든 줄의 클립 곡선만 더한다 —
@@ -800,9 +840,8 @@ namespace mo
 		// 판 시작(순간이동 + 멈춤)도 「방금 멈췄다」로 본다 — 대기 몸짓 시계와 같은 기준
 		_idleTime = _lengths[kClipIdle] > _stopClipSeconds ? _lengths[kClipIdle] - _stopClipSeconds : 0.f;
 		_timesIdle = _idleTime;
-		_groundTime = kPlantLandDelay;
-		_airTime = kPlantReleaseSeconds;
 		_plantDrop = 0.f;
+		_plantGround = 0.f;
 		_plantAlpha = 1.f;
 		_disableLegIK = 0.f;
 		_plantCurrent = 0.f;
@@ -1421,20 +1460,13 @@ namespace mo
 		const float timeToApex = velocity[2] > 0.0 && _gravity > kSmallNumber ? (float)velocity[2] / _gravity : 0.f;
 		const float groundDistance = input.groundDistance;
 
-		// 발 디딤 내림 — 땅에선 잰 거리만큼, 뜬 직후엔 마지막으로 잰 거리만큼 내린다
-		if (falling)
-		{
-			_airTime = _wasFalling ? _airTime + deltaSeconds : 0.f;
-			_groundTime = 0.f;
-		}
-		else
-		{
-			_groundTime = _wasFalling ? 0.f : _groundTime + deltaSeconds;
-			if (input.hasFloorGap) _plantDrop = input.plantGap;
-		}
-		const bool plant = falling ? _airTime < kPlantReleaseSeconds - kPlantTimeSlack : _groundTime >= kPlantLandDelay - kPlantTimeSlack;
+		// 발 디딤 장치의 땅(부품 공간) — 땅에선 잰 발 디딤 거리, 뜬 동안은 캡슐 바닥에서 땅까지 거리를 더한다(L-6-c-3).
+		// 뜬 동안 땅 = −(메시 자리 z + 캡슐 반높이 + 땅까지 거리) — 땅에 선 발 디딤 거리에 든 캡슐 뜸(약 2cm)이 빠진다. 장치 켬 ↔ 끔 기록(animcmp_fp3 · fp4 점프 둘)에
+		// 규칙을 얹으면 이 땅으로 점프 앞뒤 40프레임 골반 차 최대 0.15cm · 땅을 −4 − 땅까지 거리로 두면 0.70 · 땅까지 거리를 안 쓰면 10.8(l6\c3\sim_air3.py, 기록 대조)
+		if (!falling && input.hasFloorGap) _plantDrop = input.plantGap;
+		const float plantGround = falling ? -(input.airGap + input.groundDistance) : -_plantDrop;
 		// 발 붙이기 장치 켜짐(L-6-c-1) — Lyra ABP 컨트롤 릭 노드 알파 = ShouldEnableControlRig(곡선 DisableLegIK <= 0), 0.2초 선형(weapons_l2a.txt:4445-4465, 원본 기준).
-		// 곡선은 앞 자세 것(지난 갱신 끝 SnapshotMontages) — 한 프레임 늦게 읽어야 켬 ↔ 끔 기록 차와 맞는다(L-2-a sim_plant.py LAG=1, 실측). 곡선은 앞 대시 몽타주에만 있다.
+		// 곡선은 앞 자세 것(지난 갱신 끝 SnapshotMontages) — 한 프레임 늦게 읽어야 켬 ↔ 끔 기록 차와 맞는다(L-2-a sim_plant.py LAG=1, 실측). 곡선은 앞 대시 몽타주 · 점프 클립 다섯에 있다(L-6-c-3).
 		// 장치 셈(발 목표 · 스프링)은 이번 자세가 나온 갱신 끝에서 한다(StepPlant)
 		const float plantStep = deltaSeconds / kPlantAlphaSeconds;
 		_plantAlpha = _disableLegIK <= 0.f ? std::min(1.f, _plantAlpha + plantStep) : std::max(0.f, _plantAlpha - plantStep);
@@ -1459,17 +1491,20 @@ namespace mo
 		_handFresh = false;
 		UpdateMontages(deltaSeconds);
 		SnapshotMontages();
-		StepPlant(falling, plant, deltaSeconds, evaluator, scratch);
+		StepPlant(plantGround, deltaSeconds, evaluator, scratch);
 	}
 
 	// 발 붙이기 장치 한 걸음(L-6-c-2) — L-2-a 규칙(Lyra 장치 켬 ↔ 끔 기록 차 2492프레임 최대 0.001cm, 기록 대조):
 	//   발마다 쓸기가 땅을 맞히면 목표 = 땅, 못 맞히면 0(RigUnit_WorldCollision.cpp:91 이 맞은 점을 비움) → 골반 목표 = min(왼, 오른) → 스프링 → × 알파
-	// 발 높이는 이번 갱신이 끝난 자세(발 디딤 앞)의 것이다. 땅은 평지 하나(-plantGap) — 발 자리마다 쓸기(비탈 · 계단)는 안 옮겼다(대조할 Lyra 비탈 기록이 없다).
-	// 뜬 프레임은 장치를 안 돌리고 옛 착지 문턱(plant)을 그대로 둔다 — 점프 · 착지는 L-6-c-3 이 점프 기록으로 대조한다
-	void CAnimState::StepPlant(bool falling, bool plant, float deltaSeconds, CAnimPoseEvaluator& evaluator, BoneTransform* scratch)
+	// 발 높이는 이번 갱신이 끝난 자세(발 디딤 앞)의 것이다. 땅은 평지 하나 — 발 자리마다 쓸기(비탈 · 계단)는 안 옮겼다(대조할 Lyra 비탈 기록이 없다).
+	// 뜬 동안도 같은 장치를 돈다 — Lyra 는 따로 끄는 갈래가 없고, 점프 클립 다섯의 DisableLegIK 곡선이 알파를 내린다. 곡선은 뜬 첫 프레임부터 0 보다 크고
+	// 착지 뒤 Fall_Land 가 끝에 닿고 Fall_Loop 가 빠진 프레임에 0 이다(animcmp_fp3_probe.csv 3576 · 3642, 실측). 알파는 한 프레임 늦은 곡선으로 0.2초 선형.
+	// 알파가 0 인 동안 스프링이 멈췄다 착지 뒤 그 값에서 이어 간다(L-2-a 와 같은 멈춤)
+	void CAnimState::StepPlant(float ground, float deltaSeconds, CAnimPoseEvaluator& evaluator, BoneTransform* scratch)
 	{
 		_plantStepped = false;
-		if (!falling && _plantAlpha > kPlantAlphaRelevant && deltaSeconds > kSmallNumber)
+		_plantGround = ground;
+		if (_plantAlpha > kPlantAlphaRelevant && deltaSeconds > kSmallNumber)
 		{
 			if (evaluator.Bundle() == &_clips->Bundles()[(size_t)_bundleIndex])
 			{
@@ -1483,7 +1518,6 @@ namespace mo
 			{
 				++_plantBundleMisses;		// 발 높이를 못 읽으면 앞 값으로 — 세어 두고 0 인지 본다
 			}
-			const float ground = -_plantDrop;
 			const float left = (float)_plantFeet[0] - kPlantTraceReach <= ground ? ground : 0.f;
 			const float right = (float)_plantFeet[1] - kPlantTraceReach <= ground ? ground : 0.f;
 			_plantTarget = std::min(left, right);
@@ -1506,7 +1540,7 @@ namespace mo
 		}
 		_plantOffset[0] = 0.f;
 		_plantOffset[1] = 0.f;
-		_plantOffset[2] = plant && _plantAlpha > 0.f ? _plantCurrent * _plantAlpha : 0.f;
+		_plantOffset[2] = _plantAlpha > 0.f ? _plantCurrent * _plantAlpha : 0.f;
 	}
 
 	CAnimState::PlantView CAnimState::Plant() const
@@ -1514,7 +1548,7 @@ namespace mo
 		PlantView view;
 		view.feet[0] = _plantFeet[0];
 		view.feet[1] = _plantFeet[1];
-		view.ground = -_plantDrop;
+		view.ground = _plantGround;
 		view.target = _plantTarget;
 		view.current = _plantCurrent;
 		view.alpha = _plantAlpha;
