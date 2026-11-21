@@ -410,6 +410,7 @@ namespace
 		uint64_t presses = 0;			// 대시 단추를 누른 입력(봇이 센 것 — 예측 presses 와 같아야 한다)
 		uint64_t kinds[6] = {};			// 그중 고른 방향 종류 — 앞 · 뒤 · 왼 · 오른 · 위 보고 앞 · 아래 보고 앞(누르기 한 입력 앞 이동 · 누른 입력 피치)
 		uint64_t extraJump = 0, extraReload = 0, extraMelee = 0;	// 켜져 있는 동안(예측 기준) 같이 누른 단추 — 막기 갈래를 지나가게
+		uint64_t pairMelee = 0;		// 대시 누른 입력에 같이 실은 근접 단추(누름 넷 중 하나, L-11-b) — 같은 입력 누름 차례 짝(MD)이 판마다 돌게
 		uint64_t msgs = 0;				// 받은 대시 소식 전부(남의 것 포함)
 		uint64_t mine = 0;				// 그중 내 것 — 합 = 서버 SERVER dash started(봇만 든 판)
 		uint64_t mineDir[4] = {};		// 내 것의 방향(EDashDir)
@@ -426,6 +427,7 @@ namespace
 		to.extraJump += from.extraJump;
 		to.extraReload += from.extraReload;
 		to.extraMelee += from.extraMelee;
+		to.pairMelee += from.pairMelee;
 		to.msgs += from.msgs;
 		to.mine += from.mine;
 		for (int i = 0; i < 4; ++i) to.mineDir[i] += from.mineDir[i];
@@ -2137,6 +2139,14 @@ namespace
 					else if (_dashKind == 5) input.pitch = -30.f;
 					++_dashCounts.presses;
 					++_dashCounts.kinds[_dashKind];
+					// 대시 누름 넷 중 하나는 같은 입력에 근접 단추를 같이 싣는다(L-11-b) — 같은 입력 누름 차례 짝(근접 · 대시, 회귀 press_check 의 MD)이 판마다 두 방향 다 돌게.
+					// 전엔 적이 4m 안일 때 누르는 근접(--melee)과 우연히 겹친 입력뿐이라 같은 빌드로도 판마다 짝이 MD=0/0 ~ 18/11 로 흔들려 FAIL 이 섞였다(lyra-match L-6-b 미결).
+					// 앉기 키와 같은 입력엔 안 싣는다(위 --melee 와 같은 까닭). 근접이 실제로 켜지는지(쿨다운 · 대시 중 막힘)는 서버 · 예측이 같은 코드로 가른다
+					if ((_dashCounts.presses % 4) == 0 && (input.buttons & wire::BUTTON_CROUCH) == 0)
+					{
+						input.buttons |= wire::BUTTON_MELEE;
+						++_dashCounts.pairMelee;
+					}
 					_dashWait = 12 + (int)(_dashRng.NextFloat() * 138.f);
 				}
 				else if (_self.IsDashActive() && _dashRng.NextFloat() < 0.125f)
@@ -2973,9 +2983,9 @@ int main(int argc, char** argv)
 		// 대시(D-3) — mine 합 = 서버 SERVER dash started(봇만 든 판). dashDiff = 서버 소식으로 고친 대시(켬 어긋남 + 방향 · 힘 + 소식 없이 지나감), 봇 판 기대 0. unconfirmedPost = 그중 경기 끝 단계 몫(기대 0 — L-3-b).
 		// pressed = 봇이 누른 입력, predPresses = 예측이 센 누름(같아야 한다). kinds = 앞 · 뒤 · 왼 · 오른 · 위 보고 앞 · 아래 보고 앞, dir = 서버가 고른 방향(앞 · 뒤 · 왼 · 오른)
 		// respawn = 부활 다시 돌리기에서 켜짐이 바뀐 칸(늘어남/줄어듦). 서버 켬 = mine = predStarted + 늘어남 − 줄어듦 + startMismatches − unconfirmed − unconfirmedDead(죽은 줄 모르고 켠 몫)
-		std::printf("BOT dash pressed=%llu predPresses=%llu predStarted=%llu respawn=+%llu/-%llu kinds=%llu/%llu/%llu/%llu/%llu/%llu extra jump=%llu reload=%llu melee=%llu | mine=%llu dir=%llu/%llu/%llu/%llu results=%llu noSlot=%llu | dashDiff=%llu startMismatches=%llu forceFixes=%llu unconfirmed=%llu unconfirmedPost=%llu unconfirmedDead=%llu replays=%llu replaysMissed=%llu meleeInReplay=%llu\n",
+		std::printf("BOT dash pressed=%llu predPresses=%llu predStarted=%llu respawn=+%llu/-%llu kinds=%llu/%llu/%llu/%llu/%llu/%llu extra jump=%llu reload=%llu melee=%llu pairMelee=%llu | mine=%llu dir=%llu/%llu/%llu/%llu results=%llu noSlot=%llu | dashDiff=%llu startMismatches=%llu forceFixes=%llu unconfirmed=%llu unconfirmedPost=%llu unconfirmedDead=%llu replays=%llu replaysMissed=%llu meleeInReplay=%llu\n",
 			u(dash.presses), u(dashFixes.presses), u(dashFixes.started), u(dashFixes.respawnGained), u(dashFixes.respawnLost), u(dash.kinds[0]), u(dash.kinds[1]), u(dash.kinds[2]), u(dash.kinds[3]), u(dash.kinds[4]), u(dash.kinds[5]),
-			u(dash.extraJump), u(dash.extraReload), u(dash.extraMelee), u(dash.mine), u(dash.mineDir[0]), u(dash.mineDir[1]), u(dash.mineDir[2]), u(dash.mineDir[3]), u(dashFixes.results), u(dashFixes.resultsNoSlot),
+			u(dash.extraJump), u(dash.extraReload), u(dash.extraMelee), u(dash.pairMelee), u(dash.mine), u(dash.mineDir[0]), u(dash.mineDir[1]), u(dash.mineDir[2]), u(dash.mineDir[3]), u(dashFixes.results), u(dashFixes.resultsNoSlot),
 			u(dashFixes.startMismatches + dashFixes.forceFixes + dashFixes.unconfirmed), u(dashFixes.startMismatches), u(dashFixes.forceFixes), u(dashFixes.unconfirmed), u(dashUnconfirmedPost), u(dashFixes.unconfirmedDead), u(dashFixes.replays), u(dashFixes.replaysMissed), u(dashFixes.meleeInReplay));
 		std::printf("BOT dashRules msgs=%llu post=%llu | bad shape=%llu dead=%llu\n", u(dash.msgs), u(dash.post), u(dash.badShape), u(dash.badDead));
 		// 수류탄(G-3) — mine 합 = 서버 SERVER grenade thrown(봇만 든 판). 소식 · 상태 · 피해 받은 수(msgs)는 봇마다 같은 소식을 따로 받으므로 봇 수 배.
