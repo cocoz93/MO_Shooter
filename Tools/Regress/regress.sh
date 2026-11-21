@@ -114,6 +114,21 @@ run_checks() {
 		"$tools/MapCheck/Release/MapCheck.exe" "$DATA/$m" "$DATA/trace_$t.csv" > "$OUT/map_$t.log" 2>&1
 		grep -E '^(CHECK|NORMAL) ' "$OUT/map_$t.log" | sed "s/^/map_$t /" >> "$g"
 	done
+	# 애니 자세(L-11-a) — Lyra 애니 대조 기록 중 수류탄(쏜 뒤 덮기 자리, L-6-a) · 대시(빠지는 몽타주 뼈 비중, L-6-b) 세 무기를 AnimCheck state 로 다시 세운다.
+	# 요약 줄(시각 줄 STATETIME · STATEPOSETIME 은 뺀다) · 몽타주 종류별 22부위 차(pose_kind.py) · 자세 출력 해시가 기준선에 든다. 이 단계 전엔 쏜 뒤 덮기를
+	# 옛 자리로 되돌린 빌드도 기준선이 같았다(L-6-a). 옛 길 둘(--poseTest=128 덮기 자리 · 256 빼기 비중)은 이 단계 해시가 어긋난다(L-11-a 확인).
+	# 기록 하나 약 11초. --break 이면 대시 샷건을 빼 줄이 어긋나야 한다
+	local atags="gren_rifle gren_pistol gren_shotgun dash_rifle dash_pistol dash_shotgun"
+	[ "$BREAK" = 1 ] && atags="${atags% dash_shotgun}"
+	for a in $atags; do
+		local at="${a%_*}" aw="${a#*_}"
+		"$tools/AnimCheck/Release/AnimCheck.exe" state "$DATA/clips.bin" "$DATA/animcmp_${at}s_$aw.csv" "$DATA/animcmp_${at}s_${aw}_moves.csv" "$OUT_W/anim_$a.csv" \
+			"--probe=$DATA/animcmp_${a}_probe.csv" > "$OUT/anim_$a.log" 2>&1
+		echo "rc=$?" >> "$OUT/anim_$a.log"
+		grep -vE '^STATE(POSE)?TIME ' "$OUT/anim_$a.log" | sed "s/^/anim_$a /" >> "$g"
+		python "$REPO/Tools/LyraPilot/pose_kind.py" "$a" "$OUT_W/anim_$a.csv" "$DATA" 2>&1 | sed "s/^/anim_$a kind /" >> "$g"
+		echo "anim_$a sha $(sha1sum < "$OUT/anim_$a.csv" | cut -c1-40)" >> "$g"
+	done
 	if cmp -s "$g" "$HERE/golden_checks.txt"; then
 		verdict 대조도구 1 "$(wc -l < "$g")줄 기준선과 같음"
 	else
