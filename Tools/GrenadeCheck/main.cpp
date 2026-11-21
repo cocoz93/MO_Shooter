@@ -1620,7 +1620,8 @@ namespace
 	// ① SweepCapsuleBox ↔ 무차별 기준 — 선분 위 점을 황금 분할로 훑어 점 ↔ 상자 정확 거리의 가장 작은 값을 잡고, 시각을 촘촘히 훑어 처음 닿는 칸을 이분법으로.
 	//    Shared 는 선분 ↔ 상자를 조각마다 2차식으로 바로 풀고 시각은 황금 분할 + 이분법 — 셈 길이 다르다
 	// ② BodyObstacles + 쓸기 ↔ TraceBody(자세 판정 — 구 쓸기 = 둥근 상자 · 캡슐) — 요 · 축 · 모양 칸 옮김과 상자 쓸기를 다른 구현과 맞춘다.
-	//    Sphere 는 뺀다 — TraceBody 의 SegmentCapsuleZ 가 축 반길이 0 이면 아래 반구만 센다(outerPart, L-8-a-1 에서 찾음 · 미결). Lyra 몸 22 에 Sphere 는 없다
+	//    부위 0 은 여섯 판에 하나를 Sphere 로 둔다(L-12-e2) — TraceBody 의 SegmentCapsuleZ 가 축 반길이 0 일 때 위 반구를 버리던 갈래(L-8-a-1 에서 찾음)를 본다.
+	//    난수 차례는 그대로(Sphere 도 b 를 뽑고 안 쓴다). Lyra 몸 22 에 Sphere 는 없다
 	struct CTestRandom
 	{
 		uint64_t state;
@@ -1818,13 +1819,14 @@ namespace
 
 		// ②
 		constexpr int kBodyCases = 3000;
-		int bodyCases = 0, bodyParts[3] = {}, bodyMiss = 0, bodyPen = 0, bodyDiff = 0;
+		int bodyCases = 0, bodyParts[3] = {}, bodyMiss = 0, bodyPen = 0, bodyDiff = 0, bodySphere = 0, bodySphereTop = 0;
 		double maxBodyTime = 0, maxBodyPoint = 0;
 		for (int i = 0; i < kBodyCases; ++i)
 		{
 			ClipBody shapes[3];
 			BodyPose poses[3];
-			shapes[0].kind = (uint8_t)EBodyShape::Sphyl;
+			const bool sphere = i % 6 == 0;	// 부위 0 을 겨누는 판(i % 3 == 0)의 절반
+			shapes[0].kind = (uint8_t)(sphere ? EBodyShape::Sphere : EBodyShape::Sphyl);
 			shapes[0].a = (float)r.Range(2, 15);
 			shapes[0].b = (float)r.Range(0.5, 10);
 			shapes[1].kind = (uint8_t)EBodyShape::Sphyl;
@@ -1883,7 +1885,13 @@ namespace
 			bool bad = tracedHit != got;
 			if (!bad && got)
 			{
-				++bodyParts[bestPart];
+				if (bestPart == 0 && sphere)
+				{
+					++bodySphere;
+					const Vec3 up = bestPoint - obs[0].center;
+					if (up.x * obs[0].axis.x + up.y * obs[0].axis.y + up.z * obs[0].axis.z > 0) ++bodySphereTop;	// 위 반구 — 옛 판이 버린 갈래
+				}
+				else ++bodyParts[bestPart];
 				const double dt = std::fabs(traced.time - best), dp = Dist(traced.point, bestPoint);
 				maxBodyTime = std::max(maxBodyTime, dt);
 				maxBodyPoint = std::max(maxBodyPoint, dp);
@@ -1899,11 +1907,11 @@ namespace
 		}
 
 		const bool pass = diff == 0 && hits >= kCases / 5 && misses > 0 && startPen > 0 && spheres > 0
-			&& bodyDiff == 0 && bodyParts[0] > 0 && bodyParts[1] > 0 && bodyParts[2] > 0 && bodyMiss > 0;
+			&& bodyDiff == 0 && bodyParts[0] > 0 && bodyParts[1] > 0 && bodyParts[2] > 0 && bodySphere > 0 && bodySphereTop > 0 && bodyMiss > 0;
 		std::printf("GRENADECHECK sweep cases=%d hits=%d misses=%d startPen=%d coreInside=%d spheres=%d fineRetries=%d diff=%d maxTimeDiff=%.9f maxNormalDiff=%.9f maxDepthDiff=%.9f maxImpactDiff=%.9f\n",
 			kCases, hits, misses, startPen, coreInside, spheres, fineRetries, diff, maxTime, maxNormal, maxDepth, maxImpact);
-		std::printf("GRENADECHECK sweep body cases=%d sphylShort=%d sphylLong=%d box=%d miss=%d startPen=%d diff=%d maxTimeDiff=%.9f maxPointDiff=%.9f\n",
-			bodyCases, bodyParts[0], bodyParts[1], bodyParts[2], bodyMiss, bodyPen, bodyDiff, maxBodyTime, maxBodyPoint);
+		std::printf("GRENADECHECK sweep body cases=%d sphylShort=%d sphylLong=%d box=%d sphere=%d sphereTop=%d miss=%d startPen=%d diff=%d maxTimeDiff=%.9f maxPointDiff=%.9f\n",
+			bodyCases, bodyParts[0], bodyParts[1], bodyParts[2], bodySphere, bodySphereTop, bodyMiss, bodyPen, bodyDiff, maxBodyTime, maxBodyPoint);
 		std::printf("GRENADECHECK sweep %s\n", pass ? "PASS" : "FAIL");
 		return pass;
 	}

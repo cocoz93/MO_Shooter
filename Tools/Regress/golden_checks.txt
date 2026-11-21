@@ -457,7 +457,7 @@ grenade_l1b GRENADECHECK blast booms=10 targets=20 alive=14 dead=6 foeHidden=6 t
 grenade_l1b GRENADECHECK damage compared=20 fails=0 maxDamageDiff=0.000096 msgCompared=2 msgFails=0 maxMsgDiff=0.000004 msgMissing=0 msgExtra=0 msgOtherInst=0 hurt=2 kills=0 killDiff=0 sameTeam=0 immune=0
 grenade_l1b GRENADECHECK FAIL
 grenade_sweep GRENADECHECK sweep cases=3000 hits=787 misses=1443 startPen=770 coreInside=511 spheres=600 fineRetries=0 diff=0 maxTimeDiff=0.000000000 maxNormalDiff=0.000000153 maxDepthDiff=0.000000000 maxImpactDiff=0.000000000
-grenade_sweep GRENADECHECK sweep body cases=2971 sphylShort=676 sphylLong=715 box=667 miss=913 startPen=29 diff=0 maxTimeDiff=0.000000000 maxPointDiff=0.000000000
+grenade_sweep GRENADECHECK sweep body cases=2971 sphylShort=365 sphylLong=715 box=668 sphere=285 sphereTop=140 miss=938 startPen=29 diff=0 maxTimeDiff=0.000000000 maxPointDiff=0.000000000
 grenade_sweep GRENADECHECK sweep PASS
 grenade_l2c GRENADECHECK tag=l2c2 grenades=6 frames=0 fails=0 maxPosDiff=0.000000 maxVelDiff=0.000000 maxRotDiff=0.000000 firstHit same=6 early=0 late=0 kindDiff=0 none=0 (rows=1081 spawns=6 hits=6)
 grenade_l2c GRENADECHECK tag=l2c2 bounce grenades=0 frames=0 fails=0 maxPosDiff=0.000000 maxVelDiff=0.000000 bounceFrameDiff=0 stopFrameDiff=0 hitFails=0 detonateDiff=0

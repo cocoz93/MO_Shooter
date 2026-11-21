@@ -232,13 +232,14 @@ namespace mo
 			}
 
 			// 양 끝 반구 — 옆면과 맞닿는 바깥쪽 절반만
+			// 축 반길이 0(구)이면 두 반구가 한 구라 다 센다(L-12-e2 · D152 — 옛 판은 h = 0 에서 두 번 다 z <= 0 쪽만 남겨 위 반구 맞음을 버렸다)
 			for (const double cz : { h, -h })
 			{
 				double t;
 				Vec3 n;
 				if (!spherePart(cz, t, n)) continue;
 				const double z = p.z + d.z * t;
-				const bool outerPart = cz > 0 ? z >= h : z <= -h;
+				const bool outerPart = h <= 0.0 || (cz > 0 ? z >= h : z <= -h);
 				if (outerPart && t < best)
 				{
 					best = t;
