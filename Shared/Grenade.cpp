@@ -179,6 +179,13 @@ namespace mo
 		return capsule;
 	}
 
+	bool GrenadeIgnoresThrower(uint32_t stateTick, uint32_t throwTick, float tickSeconds, const ProjectileParams& params)
+	{
+		if (stateTick < throwTick) return true;		// 아직 안 걸음(생긴 자리)
+		const int frames = (int)(stateTick - throwTick);	// stateTick 걸음 앞의 걸은 수 = 그 걸음이 본 ProjectileState::frames
+		return !(frames * (double)tickSeconds >= params.launchCleanupSeconds);
+	}
+
 	size_t BodyObstacles(const BodyPlacement& body, const ProjectileObstacle& base, ProjectileObstacle* out, size_t maxCount)
 	{
 		if (body.skip || !body.pose || !body.shapes) return 0;

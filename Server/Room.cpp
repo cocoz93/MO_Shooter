@@ -1043,9 +1043,51 @@ namespace mo
 			++_stats.pawnBlockMoves;
 			_stats.pawnBlockOthers += _pawnScratch.size();
 		}
+		// 산 수류탄 몸(L-8-b-2 · D138) — 사람 걸음은 수류탄을 올라설 수 있는 맵 몸으로 본다(L-2-b). 이 입력을 굴리는 순간의 산 수류탄 = 지난 틱 끝 걸음 뒤 자리
+		// (수류탄은 사람 걸음 뒤에 걷는다 — Tick 차례) · 이 틱에 먼저 던진 것은 생긴 자리. 자리 · 회전은 와이어 폭(float)으로 줄인다 — 봇 · 다리 예측이 받는 값과 같은 몸(D139).
+		// 던진 사람은 launchCleanedUp 전이면 제 수류탄을 안 본다(B_Grenade PostLaunchCleanup 0.16초 서로 무시 — 수류탄 쪽 Projectile.cpp 와 짝). 던진 사람이 나갔으면 몸이 없다
+		_standableScratch.clear();
+		bool freshBody = false;
+		for (const LiveGrenade& g : _grenades)
+		{
+			if (g.owner == player.id && !g.ownerGone)
+			{
+				// 봇 · 다리는 받은 상태 틱 · 던진 틱으로 같은 판정을 셈한다 — 걸은 수(frames)로 던진 틱을 되짚어 서버 판정과 대조(다르면 센다)
+				const uint32_t throwTick = _tick - (uint32_t)g.state.frames;
+				if (GrenadeIgnoresThrower(_tick - 1, throwTick, kTickSeconds, kGrenadeParams) != !g.state.launchCleanedUp) ++_stats.grenadeWalkIgnoreMismatch;
+				if (!g.state.launchCleanedUp)
+				{
+					++_stats.grenadeWalkOwnIgnored;
+					continue;
+				}
+			}
+			const Vec3 location((double)(float)g.state.location.x, (double)(float)g.state.location.y, (double)(float)g.state.location.z);
+			Rotator rotation;
+			rotation.pitch = (double)(float)g.state.rotation.pitch;
+			rotation.yaw = (double)(float)g.state.rotation.yaw;
+			rotation.roll = (double)(float)g.state.rotation.roll;
+			if (g.state.frames == 0)
+			{
+				++_stats.grenadeWalkFresh;
+				freshBody = true;
+			}
+			_standableScratch.push_back(GrenadeStandable(location, rotation, kGrenadeParams, g.id));
+		}
+		if (!_standableScratch.empty())
+		{
+			++_stats.grenadeWalkMoves;
+			_stats.grenadeWalkBodies += _standableScratch.size();
+		}
+		_moveSim.SetStandables(_standableScratch.data(), _standableScratch.size());
+		const uint64_t standableHitsBefore = _moveSim.GetCounters().standableHits;
 		const uint64_t liftoffsBefore = _moveSim.GetCounters().rootForceLiftoffs;
 		_moveSim.Tick(player.move, moveInput, kTickSeconds);
 		_stats.dashLiftoffs += _moveSim.GetCounters().rootForceLiftoffs - liftoffsBefore;	// 위아래를 더하는 힘은 대시뿐이다(근접 밀기는 위아래 무시)
+		_moveSim.SetStandables(nullptr, 0);
+		_stats.grenadeWalkHits += _moveSim.GetCounters().standableHits - standableHitsBefore;
+		const bool standOnGrenade = player.move.floor.IsWalkableFloor() && player.move.floor.hit.standable;
+		if (standOnGrenade) ++_stats.grenadeWalkFloors;
+		if (freshBody && (standOnGrenade || _moveSim.GetCounters().standableHits != standableHitsBefore)) ++_stats.grenadeWalkFreshTouches;
 		player.dash.RememberInput(moveInput, input.yaw);	// 다음 입력의 「앞 입력」 — 이 걸음이 가져간 이동(막음 뒤) · 이 입력의 요. 빈 입력도 걸음을 굴렸으니 넣는다(Dash.h)
 		if (_rules.pawnBlock)
 		{

@@ -757,6 +757,11 @@ int main(int argc, char** argv)
 		(unsigned long long)room.grenadeBodyChecks, (unsigned long long)room.grenadeBodyNoAnim, (unsigned long long)room.grenadeBodyFar,
 		(unsigned long long)room.grenadeBodyNoPose, (unsigned long long)room.grenadeBodyPoses, (unsigned long long)room.grenadeBodyParts,
 		(unsigned long long)room.grenadeBodyHits, (unsigned long long)room.grenadeCapsuleHits);
+	// 사람 걸음의 산 수류탄 몸(L-8-b-2) — ignoreMismatch 0 이어야(봇 · 다리의 던진 사람 무시 셈 = 서버 판정)
+	std::printf("SERVER grenadeWalk moves=%llu bodies=%llu ownIgnored=%llu ignoreMismatch=%llu hits=%llu floors=%llu fresh=%llu freshTouches=%llu\n",
+		(unsigned long long)room.grenadeWalkMoves, (unsigned long long)room.grenadeWalkBodies, (unsigned long long)room.grenadeWalkOwnIgnored,
+		(unsigned long long)room.grenadeWalkIgnoreMismatch, (unsigned long long)room.grenadeWalkHits, (unsigned long long)room.grenadeWalkFloors,
+		(unsigned long long)room.grenadeWalkFresh, (unsigned long long)room.grenadeWalkFreshTouches);
 	std::printf("REJECT badValue=%llu moveOver=%llu weaponId=%llu debugPlace=%llu aimFar=%llu swap=%llu aimWall=%llu droppedFull=%llu oldSeq=%llu badPackets=%llu | aimStale=%llu fireTooSoon=%llu fireEmpty=%llu seqGapFire=%llu\n",
 		(unsigned long long)room.inputsRejectedBadValue, (unsigned long long)room.movesOverLength, (unsigned long long)room.weaponIdRejected, (unsigned long long)room.debugPlacesRejected, (unsigned long long)room.shotsAimReplaced,
 		(unsigned long long)room.firesRejectedSwap, (unsigned long long)room.shotsAimPulledBack, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq, (unsigned long long)badPackets,

@@ -377,9 +377,20 @@ run_grenade() {
 	else
 		ok=0
 	fi
+	# 걸음 몸(L-8-b-2) — 서버 사람 걸음이 산 수류탄 몸을 넣었나(moves · bodies > 0) · 봇 · 다리의 던진 사람 무시 셈 = 서버 판정(ignoreMismatch 0) ·
+	# 판이 수류탄 몸을 실제로 밟았나(hits + floors > 0 — 0 이면 봇이 몸을 안 넣어도 위치 차가 안 나 이 판이 그 빠뜨림을 못 본다). 봇 예측이 서버와 같은지는 위 RESULT PASS(posDiff 0)가 본다
+	local swk bwk wmv wbd wim whit wfl
+	swk="$(grep -a '^SERVER grenadeWalk ' "$OUT/grenade_srv.log")"
+	bwk="$(grep -a '^BOT grenadeWalk ' "$OUT/grenade_bot.log")"
+	wmv="$(num "$swk" moves)"; wbd="$(num "$swk" bodies)"; wim="$(num "$swk" ignoreMismatch)"; whit="$(num "$swk" hits)"; wfl="$(num "$swk" floors)"
+	if [ -n "$wmv" ] && [ -n "$wbd" ] && [ -n "$wim" ] && [ -n "$whit" ] && [ -n "$wfl" ] && [ -n "$bwk" ]; then
+		[ "$wmv" -gt 0 ] && [ "$wbd" -gt 0 ] && [ "$wim" = 0 ] && [ $((whit + wfl)) -gt 0 ] || ok=0
+	else
+		ok=0
+	fi
 	press_check "$OUT/grenade_srv.log" "$OUT/grenade_bot.log" 0
 	[ $press_ok = 1 ] || ok=0
-	verdict 봇수류탄 $ok "봇 rc=$brc 서버 rc=$src 봇 $nb 던짐=$thrown 신관=$timer 맞음=$hit 피해·자기·처치=${hurt[*]} 봇=${bhit[*]} 사건=$ev 버림=$dr 튼수=$st$(echo "$sg" | grep -oE ' (noHit|whileDash|melee|reload|wall|alive|ownerLeft)=[0-9]+' | tr -d '\n')$(echo "$bg" | grep -oE ' (grenadeDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n') 몸부위$(echo "$sb" | grep -oE ' (poses|parts|bodyHits|capsuleHits)=[0-9]+' | tr -d '\n')$press_note"
+	verdict 봇수류탄 $ok "봇 rc=$brc 서버 rc=$src 봇 $nb 던짐=$thrown 신관=$timer 맞음=$hit 피해·자기·처치=${hurt[*]} 봇=${bhit[*]} 사건=$ev 버림=$dr 튼수=$st$(echo "$sg" | grep -oE ' (noHit|whileDash|melee|reload|wall|alive|ownerLeft)=[0-9]+' | tr -d '\n')$(echo "$bg" | grep -oE ' (grenadeDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n') 몸부위$(echo "$sb" | grep -oE ' (poses|parts|bodyHits|capsuleHits)=[0-9]+' | tr -d '\n') 걸음몸$(echo "$swk" | grep -oE ' (moves|ownIgnored|ignoreMismatch|hits|floors)=[0-9]+' | tr -d '\n') 봇$(echo "$bwk" | grep -oE ' (stale|standableHits)=[0-9]+' | tr -d '\n')$press_note"
 }
 
 # 사람끼리 막기 대조(컨텐츠 F-1) — Lyra 연습장에서 두 사람이 부딪힌 기록을 Shared 이동으로 다시 돌려 위치 · 속도가 0.01 안이어야 한다.

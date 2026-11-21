@@ -106,6 +106,10 @@ namespace mo
 		// 서버 상태와 같은 번호의 슬롯을 맞춰 본다. tolerance 를 넘으면 서버 값에서 다시 돌린다(위치·낙하 여부만, 탄은 서버 값을 그대로 보여 주면 된다)
 		ReconcileResult Reconcile(const wire::PlayerState& server, double tolerance);
 
+		// 서버가 아직 안 돌렸다고 본 입력(confirmedSeq 뒤 · 부활 뒤)을 그 앞 칸 상태에서 걸음만 다시 돌린다 — 걸음이 보는 바깥 몸(산 수류탄, L-8-b-2)이 바뀌었을 때.
+		// 부르는 쪽이 새 몸을 걸고 부른다. 부활을 기다리는 중 · 돌릴 입력이 없음 · 앞 칸이 없으면 false
+		bool RerunUnconfirmed(uint32_t confirmedSeq);
+
 		// 다음 AddInput 에서 이 입력이 근접 능력을 켜나 — 켜질 입력에만 화면 근접 판정을 해 밀기를 넘기려고 넣기 전에 본다(E-3).
 		// 대시가 켜져 있거나 이 입력에 켜지면 근접은 막힌다(D-2) — 대시 능력 사본을 한 입력 돌려 본다.
 		// 이 입력에 수류탄을 던지면 도는 근접이 끊겨 같은 입력의 근접 누름이 켜진다(서버 TryMelee 가 ThrowGrenade 뒤, G-3) — 수류탄 사본도 돌려 본다

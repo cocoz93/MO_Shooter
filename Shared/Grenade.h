@@ -166,4 +166,9 @@ namespace mo
 	// 가운데 = 자리 + 회전 × capsuleOffset · 축 = 회전 × Z · 반지름 · 반높이 = params(5 · 9 — 축 선분은 반높이 − 반지름 = 4 씩).
 	// 사람 걸음은 이것을 맵 몸으로 본다(올라서기 · 바닥 허용 — 사람 캡슐과 다름, L-2-b). object = kMapExtraObjectBit | grenadeId · 깃발 = 이동만
 	MapCapsule GrenadeStandable(const Vec3& location, const Rotator& rotation, const ProjectileParams& params, uint32_t grenadeId);
+
+	// 던진 사람 걸음이 제 수류탄을 아직 안 보나(B_Grenade PostLaunchCleanup 0.16초 「서로 무시」 — 수류탄 쪽은 TickProjectile 의 launchCleanedUp).
+	// stateTick 틱 걸음까지 걸은 수류탄(던진 틱 걸음 = 나이 0)의 launchCleanedUp 이 아직 꺼져 있으면 true — TickProjectile 과 같은 식(그 걸음 앞 걸은 수 × 틱 시간 ≥ launchCleanupSeconds).
+	// 서버는 ProjectileState::launchCleanedUp 을 그대로 쓰고(이 함수와 다르면 센다), 봇 · 다리는 받은 상태 틱 · 던진 틱으로 이것을 쓴다
+	bool GrenadeIgnoresThrower(uint32_t stateTick, uint32_t throwTick, float tickSeconds, const ProjectileParams& params);
 }

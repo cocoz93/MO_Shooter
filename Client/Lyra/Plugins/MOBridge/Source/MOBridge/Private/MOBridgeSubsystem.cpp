@@ -1,6 +1,7 @@
 ﻿#include "MOBridgeSubsystem.h"
 
 #include "GameProtocol.h"
+#include "Grenade.h"
 #include "MapCollision.h"
 #include "MatchRules.h"
 #include "Movement.h"
@@ -11,6 +12,7 @@
 #include "AnimPose.h"
 #include "AnimState.h"
 
+#include <algorithm>
 #include <vector>
 
 #include "AIController.h"
@@ -339,13 +341,35 @@ struct FMOBCore
 	// 사람끼리 막기(D83) — 내 예측이 볼 남 캡슐. 마지막으로 받은 상태의 산 사람만(서버 · 봇 SetPawnsForPrediction 과 같은 식).
 	// 남 자리는 받은 최신 상태라 서버가 내 입력을 굴린 순간의 자리와 다르다 — 그 차이는 Reconcile 보정으로 나온다
 	std::vector<mo::PawnCapsule> Pawns;
+	// 산 수류탄 몸(L-8-b-2 · D138 · D139) — 마지막 수류탄 상태 소식의 칸으로 만든 걸음 몸(봇 SetGrenadeBodiesForPrediction 과 같은 규칙 — 와이어 값 그대로 ·
+	// 제 수류탄은 그 소식 틱 걸음 뒤 launchCleanedUp 전이면 뺌 · 터짐 소식이면 뺌 · 다음 틱 목록이 안 오면 닫고 비움). 사람끼리 막기 규칙과 따로 늘 건다(수류탄은 맵 몸, L-2-b)
+	std::vector<mo::MapCapsule> GrenadeBodies;
+	uint32_t GrenadeListTick = 0;
+	bool bGrenadeListOpen = false;
+	uint32_t ConfirmedSeq = 0;		// 마지막 내 상태의 lastSeq — 몸이 바뀌어 다시 돌릴 입력의 앞
+
 	// 예측이 걸음을 돌리는 동안만 넘긴다 — Sim 을 쓰는 다른 곳(근접 화면 판정 등)에 남지 않게
 	struct FPawnScope
 	{
 		FMOBCore& C;
-		explicit FPawnScope(FMOBCore& InC) : C(InC) { if (C.Rules.pawnBlock) C.Sim.SetPawns(C.Pawns.data(), C.Pawns.size()); }
-		~FPawnScope() { C.Sim.SetPawns(nullptr, 0); }
+		explicit FPawnScope(FMOBCore& InC) : C(InC)
+		{
+			if (C.Rules.pawnBlock) C.Sim.SetPawns(C.Pawns.data(), C.Pawns.size());
+			C.Sim.SetStandables(C.GrenadeBodies.data(), C.GrenadeBodies.size());
+		}
+		~FPawnScope()
+		{
+			C.Sim.SetPawns(nullptr, 0);
+			C.Sim.SetStandables(nullptr, 0);
+		}
 	};
+
+	// 몸이 바뀌었다 — 서버가 아직 안 돌린 입력을 새 몸으로 다시 돌린다(봇 RerunForGrenadeBodies 와 같다 — 마지막으로 돌린 몸 = 서버가 그 입력에 쓴 몸)
+	bool RerunForGrenadeBodies()
+	{
+		const FPawnScope Scope(*this);
+		return Prediction.RerunUnconfirmed(ConfirmedSeq);
+	}
 
 	// 서버 애니(-MOBServerAnim) — 게임 스레드에서만 쓴다
 	mo::CAnimClips AnimClips;
@@ -894,6 +918,17 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 		bool bFoundMe = false;
 		const double TickSample = (double)M.tick - FPlatformTime::Seconds() * wire::kTickRate;
 		LastStateTick = FMath::Max(LastStateTick, M.tick);
+		// 산 수류탄 몸(L-8-b-2) — 지난 틱 목록이 안 왔으면 그 틱 끝 산 수류탄이 없었다 → 이 틱 입력은 몸 없이 돌았다. 닫고 비운 뒤 다시 돌린다(봇 OnState 와 같다).
+		// 터짐 소식이 마지막 몸을 이미 뺐어도 돈다(그 전 다시 돌리기는 터진 몸을 넣었다)
+		if (Core && Core->bGrenadeListOpen && Core->GrenadeListTick + 1 < M.tick)
+		{
+			Core->bGrenadeListOpen = false;
+			if (Core->GrenadeBodies.empty()) ++GrenadeWalkEnded;
+			else ++GrenadeWalkStale;
+			Core->GrenadeBodies.clear();
+			if (Core->RerunForGrenadeBodies()) ++GrenadeWalkReruns;
+			else ++GrenadeWalkRerunsNone;
+		}
 		if (!bHasTickClock || FMath::Abs(TickSample - TickClockOffset) > 30.0)
 		{
 			TickClockOffset = TickSample;
@@ -929,6 +964,7 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 				continue;
 			}
 			MineAt = i;
+			if (Core) Core->ConfirmedSeq = P.lastSeq;	// 몸 다시 돌리기(L-8-b-2)의 시작 앞 번호
 		}
 		// 내 줄은 남 자리를 이 상태로 다 갱신한 뒤에 고친다 — 다시 돌리는 걸음도 남 캡슐을 본다(봇 OnState 와 같은 차례)
 		if (MineAt >= 0)
@@ -2438,6 +2474,12 @@ void UMOBridgeSubsystem::HandleGrenade(const wire::Grenade& M)
 			return;
 		}
 		G->bBoomKnown = true;
+		if (Core)
+		{
+			// 걸음 몸(L-8-b-2) — 새 입력부터 안 본다. 다시 돌리지 않는다: 터진 틱의 입력은 터지기 전 몸을 봤다(Room::Tick 차례: 입력 → 수류탄)
+			const uint32_t Object = mo::kMapExtraObjectBit | M.id;
+			Core->GrenadeBodies.erase(std::remove_if(Core->GrenadeBodies.begin(), Core->GrenadeBodies.end(), [Object](const mo::MapCapsule& C) { return C.object == Object; }), Core->GrenadeBodies.end());
+		}
 		G->BoomTick = M.tick;
 		G->BoomKind = M.kind;
 		// 터진 틱 걸음 뒤 자리 — 그 틱 상태 칸에는 안 든다(서버가 목록에서 뺐다, GameProtocol.h GrenadeStateHead)
@@ -2501,6 +2543,35 @@ void UMOBridgeSubsystem::HandleGrenadeState(const uint8* Data, int32 Size)
 	{
 		++GrenadeStateBadSize;
 		return;
+	}
+	// 걸음 몸(L-8-b-2) — 이 소식이 그 틱 끝 산 수류탄 전부. 칸 값 그대로(서버도 와이어 폭으로 줄여 만든다) · 제 수류탄은 던진 틱으로 0.16초 서로 무시를 셈
+	if (Core)
+	{
+		Core->GrenadeBodies.clear();
+		Core->GrenadeListTick = H.tick;
+		Core->bGrenadeListOpen = true;
+		++GrenadeWalkLists;
+		const mo::ProjectileParams Params{};
+		const float TickSeconds = 1.f / (float)wire::kTickRate;	// 서버 kTickSeconds 와 같은 식
+		for (int32 i = 0; i < (int32)H.count; ++i)
+		{
+			wire::GrenadeStateEntry E = wire::GrenadeStateEntry();
+			FMemory::Memcpy(&E, Data + sizeof(H) + sizeof(E) * i, sizeof(E));
+			const FMOBGrenadeVisual* Thrown = GrenadeVisuals.Find(E.id);
+			if (Thrown && Thrown->Thrower == PlayerId && mo::GrenadeIgnoresThrower(H.tick, Thrown->ThrowTick, TickSeconds, Params))
+			{
+				++GrenadeWalkOwnIgnored;
+				continue;
+			}
+			mo::Rotator Rotation;
+			Rotation.pitch = E.pitch;
+			Rotation.yaw = E.yaw;
+			Rotation.roll = E.roll;
+			Core->GrenadeBodies.push_back(mo::GrenadeStandable(mo::Vec3(E.x, E.y, E.z), Rotation, Params, E.id));
+		}
+		GrenadeWalkBodies += (int64)Core->GrenadeBodies.size();
+		if (Core->RerunForGrenadeBodies()) ++GrenadeWalkReruns;
+		else ++GrenadeWalkRerunsNone;
 	}
 	for (int32 i = 0; i < (int32)H.count; ++i)
 	{
@@ -4431,6 +4502,9 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 			GrenadeVisBounceSounds, GrenadeVisHitSounds, LocalGrenadeDetonate, GrenadeVisGone, GrenadeVisLost, GrenadeVisUnderrun,
 			GrenadeVisGone ? GrenadeGoneFramesMin : 0, GrenadeGoneFramesMax, GrenadeVisGone ? GrenadeGoneSecMin : 0.0, GrenadeGoneSecMax,
 			GrenadeShowDelayN, GrenadeShowDelayN ? GrenadeShowDelayMin : 0, GrenadeShowDelayMax, GrenadeShowDelayN ? (double)GrenadeShowDelaySum / (double)GrenadeShowDelayN : 0.0, GrenadeShowNoPress);
+		// 걸음 몸(L-8-b-2) — 받은 목록마다 넣은 산 수류탄 몸 · 다시 돌림 · 예측 걸음이 수류탄에 막힌 수(Sim 합 — 다시 돌림 포함)
+		UE_LOG(LogMOB, Log, TEXT("MOB_GRENADEWALK lists=%lld bodies=%lld ownIgnored=%lld ended=%lld stale=%lld reruns=%lld rerunsNone=%lld standableHits=%llu"),
+			GrenadeWalkLists, GrenadeWalkBodies, GrenadeWalkOwnIgnored, GrenadeWalkEnded, GrenadeWalkStale, GrenadeWalkReruns, GrenadeWalkRerunsNone, Core ? (unsigned long long)Core->Sim.GetCounters().standableHits : 0ull);
 		// 터짐 신호 — 길에 들어간 수(다리 · 그 밖) · 표식 없음 · 신호 묶음에 그 표식 칸이 있나 · 그 칸의 신호 클래스가 올라와 있나(-1 = 신호 관리자 · 묶음을 못 찾음).
 		// 판정 = 다리 길 = 낸 터짐(visBooms) · 그 밖 0 · 칸 1 · 올라옴 1. 클래스가 덜 올라온 채 온 신호는 엔진이 올린 뒤 다시 낸다(GameplayCueManager.cpp HandleMissingGameplayCue)
 		int32 CueInSet = -1, CueLoaded = -1;

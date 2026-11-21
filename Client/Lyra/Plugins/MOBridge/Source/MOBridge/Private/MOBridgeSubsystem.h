@@ -634,6 +634,9 @@ private:
 	// 받은 던짐 소식(번호 있음 · 번호 0 = 목록이 차 못 만듦) · 같은 번호 다시 · 칸 없는(또는 두 번째) 터짐 · 상태 칸(받음 · 칸 없음 · 옛 틱 — 터짐 소식의 옛 틱도 · 튕김) · 크기가 모자란 상태 패킷
 	int64 GrenadeThrowsWithId = 0, GrenadeThrowsNoId = 0, GrenadeDupId = 0, GrenadeBoomUnknown = 0;
 	int64 GrenadeStateEntries = 0, GrenadeStateUnknown = 0, GrenadeStateOld = 0, GrenadeStateBounced = 0, GrenadeStateBadSize = 0;
+	// 걸음이 본 산 수류탄 몸(L-8-b-2) — 받은 목록 · 넣은 몸 · 제 수류탄 뺌(0.16초 서로 무시) · 다음 틱 목록이 안 와 닫음(몸이 다 터져 빈 채 · 터짐 소식 없이 몸이 남은 채) ·
+	// 몸이 바뀌어 확인 안 된 입력을 다시 돌림(돌릴 것 없음)
+	int64 GrenadeWalkLists = 0, GrenadeWalkBodies = 0, GrenadeWalkOwnIgnored = 0, GrenadeWalkEnded = 0, GrenadeWalkStale = 0, GrenadeWalkReruns = 0, GrenadeWalkRerunsNone = 0;
 	// 만듦 · 만들기 실패(클래스 · 생성) · 던진 몸 없음 · 만들 때 켜져 있던 블루프린트 터짐 타이머 · 지운 뒤에도 켜진 타이머 · 날아감 성분 없음
 	int64 GrenadeVisSpawned = 0, GrenadeVisSpawnFail = 0, GrenadeVisNoInstigator = 0, GrenadeVisTimersActive = 0, GrenadeVisTimersLeft = 0, GrenadeVisNoMovement = 0;
 	// 낸 터짐 신호 · 부딪힘 소리(상태 튕김 · 직접 맞음 터짐) · 블루프린트 혼자 터짐 · 꼬리가 끝나 지움 · 다리가 안 지웠는데 사라짐 · 화면 시점이 쌓인 틱보다 앞선 프레임

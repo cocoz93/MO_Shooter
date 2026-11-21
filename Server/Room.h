@@ -242,6 +242,17 @@ namespace mo
 		uint64_t grenadeBodyParts = 0;		// 넣은 몸 부위 수 — poses × 몸 수(22)여야 한다(막는 것 목록이 실제로 는 수)
 		uint64_t grenadeBodyHits = 0;		// 걸음 맞음 중 몸 부위(part ≥ 0)
 		uint64_t grenadeCapsuleHits = 0;	// 걸음 맞음 중 사람 캡슐(몸 부위 맞음과 견줄 대조)
+		// 사람 걸음의 산 수류탄 몸(L-8-b-2) — moves = 몸을 하나라도 넣은 걸음 · bodies = 넣은 몸 합 · ownIgnored = 던진 사람이 제 수류탄을 뺀 수(0.16초 서로 무시)
+		// ignoreMismatch = 그 판정이 봇 · 다리 셈(GrenadeIgnoresThrower)과 다름(0 이어야) · hits = 걸음 쓸기가 수류탄에 막힘 · floors = 걸음 끝 바닥이 수류탄
+		uint64_t grenadeWalkMoves = 0;
+		uint64_t grenadeWalkBodies = 0;
+		uint64_t grenadeWalkOwnIgnored = 0;
+		uint64_t grenadeWalkIgnoreMismatch = 0;
+		uint64_t grenadeWalkHits = 0;
+		uint64_t grenadeWalkFloors = 0;
+		// fresh = 넣은 몸 중 같은 틱에 앞 사람이 갓 던진 것(아직 안 걸음 — 봇 · 다리는 다음 목록에야 안다) · freshTouches = 그런 몸을 넣은 걸음이 수류탄에 막힘 · 섬(위 한도)
+		uint64_t grenadeWalkFresh = 0;
+		uint64_t grenadeWalkFreshTouches = 0;
 
 		// 권위 확인 — 일부러 보낸 나쁜 입력을 사유별로 센다. 정직한 클라는 여기 일곱이 전부 0 이어야 한다
 		uint64_t inputsRejectedBadValue = 0;	// NaN·무한대 — 통째로 버림
@@ -561,6 +572,7 @@ namespace mo
 		std::vector<BodyPlacement> _bodiesNow;	// --rewindShadow 일 때만 — 같은 탄을 현재 자리로 계산
 		std::vector<Player*> _bodyOwners;
 		std::vector<MeleeTarget> _meleeTargets;	// 근접 판정 때마다 다시 채운다
+		std::vector<MapCapsule> _standableScratch;	// 사람 걸음이 볼 산 수류탄 몸(L-8-b-2) — 입력마다 다시 채운다(할당을 안 하려고 멤버)
 		std::vector<PawnCapsule> _pawnScratch;	// 사람끼리 막기 — 입력마다 남의 캡슐을 다시 채운다(할당을 안 하려고 멤버)
 		std::vector<Player*> _meleeOwners;
 		std::vector<LiveGrenade> _grenades;				// 산 수류탄 — 방 크기(kMaxPlayersInRoom)까지. 사람당 하나(쿨다운 301 입력 > 수명 121 틱)

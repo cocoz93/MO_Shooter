@@ -245,6 +245,14 @@ namespace mo
 		return &slot;
 	}
 
+	bool CSelfPrediction::RerunUnconfirmed(uint32_t confirmedSeq)
+	{
+		if (_waitingSpawn) return false;
+		const uint32_t from = std::max(confirmedSeq, _compareFromSeq) + 1;	// 부활 앞 입력은 옛 몸이라 안 돌린다(부활 칸이 앞 칸)
+		if (from > _seq) return false;
+		return RerunMovesFrom(from);
+	}
+
 	CSelfPrediction::ReconcileResult CSelfPrediction::Reconcile(const wire::PlayerState& server, double tolerance)
 	{
 		ReconcileResult result;
