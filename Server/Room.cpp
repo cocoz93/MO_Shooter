@@ -2391,7 +2391,9 @@ namespace mo
 			if (_rewind.bulletLog)
 			{
 				const bool hitBody = result.kind == EBulletHit::Body;
-				std::printf("BULLET seq=%u shooter=%u i=%d kind=%d target=%u weak=%d rewind=%d\n", shot.seq, shot.shooter, i, (int)result.kind, hitBody ? _bodies[result.bodyIndex].id : 0u, hitBody && result.weakSpot ? 1 : 0, (int)rewindKind);
+				// spread · mult = 서버 무기 상태가 낸 퍼짐 각 · 배수 — 봇 BOTSHOT 같은 칸과 견준다(L-10-a)
+				std::printf("BULLET seq=%u shooter=%u i=%d kind=%d target=%u weak=%d rewind=%d spread=%.6f mult=%.6f\n", shot.seq, shot.shooter, i, (int)result.kind, hitBody ? _bodies[result.bodyIndex].id : 0u, hitBody && result.weakSpot ? 1 : 0, (int)rewindKind,
+					shot.spreadAngle, shot.spreadMultiplier);
 			}
 
 			++_stats.bullets;

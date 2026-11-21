@@ -1733,10 +1733,11 @@ namespace
 				// targetWeapon · montages = 맞힌 상대의 자세 묶음 · 몽타주 칸 수(못 맞히면 0). check_bot_hits.py 가 무기별 · 몽타주 중을 따로 센다
 				// targetAds = 맞힌 상대 자세의 조준 묶음 비중(C-5, 못 맞히면 0) — 조준 중인 상대를 맞힌 탄을 따로 센다. targetCrouch = 같은 식의 앉기 묶음 비중(D-5)
 				// targetDash = 맞힌 상대 자세에 대시 몽타주가 들었나(컨텐츠 D-6, 못 맞히면 0)
-				std::fprintf(js.log, "BOTSHOT seq=%u shooter=%u i=%d weapon=%u kind=%d target=%u weak=%d viewTick=%u alpha=%.4f speed=%.1f targetWeapon=%u montages=%u targetAds=%.3f targetCrouch=%.3f targetReact=%u targetDash=%u\n", input.seq, _welcome.playerId, i, (unsigned)weapon, (int)result.kind,
+				// spread · mult = 이 쏨이 쓴 퍼짐 각 · 배수(예측 무기 상태) — 서버 BULLET 줄 같은 칸과 견줘 퍼짐이 갈린 쏨을 센다(L-10-a)
+				std::fprintf(js.log, "BOTSHOT seq=%u shooter=%u i=%d weapon=%u kind=%d target=%u weak=%d viewTick=%u alpha=%.4f speed=%.1f targetWeapon=%u montages=%u targetAds=%.3f targetCrouch=%.3f targetReact=%u targetDash=%u spread=%.6f mult=%.6f\n", input.seq, _welcome.playerId, i, (unsigned)weapon, (int)result.kind,
 					hitBody ? _judgeBodies[result.bodyIndex].id : 0u, hitBody && result.weakSpot ? 1 : 0, input.viewTick, input.viewAlpha, hitBody ? _judgeSpeeds[result.bodyIndex] : 0.f,
 					hitBody ? (unsigned)_judgeTargetWeapons[result.bodyIndex] : 0u, hitBody ? (unsigned)_judgeMontages[result.bodyIndex] : 0u, hitBody ? _judgeAds[result.bodyIndex] : 0.f, hitBody ? _judgeCrouch[result.bodyIndex] : 0.f, hitBody ? (unsigned)_judgeReact[result.bodyIndex] : 0u,
-					hitBody ? (unsigned)_judgeDash[result.bodyIndex] : 0u);
+					hitBody ? (unsigned)_judgeDash[result.bodyIndex] : 0u, fired.spreadAngle, fired.spreadMultiplier);
 			}
 		}
 
