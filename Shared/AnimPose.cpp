@@ -14,6 +14,14 @@ namespace mo
 		constexpr float kIdleBreakBlend = 0.4f;			// IDLE_BREAK_BLEND
 		constexpr double kSmallNumber = 1.e-8;			// 엔진 UE_SMALL_NUMBER
 		constexpr double kKindaSmall = 1.e-4;			// 엔진 UE_KINDA_SMALL_NUMBER / DOUBLE_KINDA_SMALL_NUMBER
+		// 발 붙이기 장치 Basic IK(L-12-e — CR_Mannequin_FootPlant 그래프 덤프 C:\tmp\mob\lm\l2a\cr_footplant.txt, 원본 기준). [0] 왼 · [1] 오른
+		constexpr double kPlantLegPrimary[2][3] = { { -1, 0, 0 }, { 1, 0, 0 } };		// PrimaryAxis — 뼈가 자식을 보는 축
+		constexpr double kPlantLegSecondary[2][3] = { { 0, 1, 0 }, { 0, -1, 0 } };		// SecondaryAxis(비중 1) — 굽힘 쪽을 보는 축
+		constexpr double kPlantStretchStart = (double)1.0f;		// StretchStartRatio — 닿는 비율이 이 값을 넘으면 늘린다(엔진 인자가 float)
+		constexpr double kPlantStretchMax = (double)1.1f;		// StretchMaximumRatio
+		// 무릎 조절점(LeftKneePVCtrl · RightKneePVCtrl) 처음 자리를 IK 발(ik_foot_l · ik_foot_r) 처음 변환 기준으로 나타낸 것 — ParentConstraint 간격 유지가 쓰는 값
+		// (장치 계층 덤프 C:\tmp\mob\lm\l12\e\hier.txt 의 처음 부품 공간 변환에서 셈, 원본 기준)
+		constexpr double kPlantPole[2][3] = { { 38.29420321487403, 43.89078227008319, 1.909323917877689 }, { -38.254784026576026, -44.1646476481476, -1.9339750953914088 } };
 		constexpr uint8_t kAdditiveNone = 0;			// AAT_None
 		constexpr uint8_t kAdditiveMeshRotation = 2;	// AAT_RotationOffsetMeshSpace
 		constexpr uint8_t kProfileTimeFactor = 0;		// 엔진 EBlendProfileMode::TimeFactor
@@ -136,6 +144,8 @@ namespace mo
 		}
 
 		bool IsZero3(const double v[3]) { return v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0; }
+		// 엔진 FVector::IsNearlyZero(UE_KINDA_SMALL_NUMBER) — 성분마다 문턱 이하
+		bool NearlyZero3(const double v[3]) { return std::abs(v[0]) <= kKindaSmall && std::abs(v[1]) <= kKindaSmall && std::abs(v[2]) <= kKindaSmall; }
 
 		// 엔진 FVector::Equals — 칸마다 |차| ≤ tolerance
 		bool Equals3(const double a[3], const double b[3], double tolerance)
@@ -299,19 +309,14 @@ namespace mo
 			return RotateLegByQuat(delta, leg);
 		}
 
-		// 엔진 AnimationCore::SolveTwoBoneIK (늘리기 없음) — 위치만 구한다
-		void SolveTwoBonePositions(const double root[3], const double joint[3], const double end[3], const double jointTarget[3], const double effector[3], double outJoint[3], double outEnd[3])
+		// 엔진 AnimationCore::SolveTwoBoneIK(TwoBoneIK.cpp:70) — 마디 길이를 받고 늘리기(bAllowStretching)를 고른다. 위치만 구한다
+		void SolveTwoBoneLimb(const double root[3], const double joint[3], const double jointTarget[3], const double effector[3], double upperLength, double lowerLength,
+			bool stretch, double startStretchRatio, double maxStretchScale, double outJoint[3], double outEnd[3])
 		{
-			double temp[3];
-			Sub(end, joint, temp);
-			const double lowerLength = std::sqrt(Dot3(temp, temp));
-			Sub(joint, root, temp);
-			const double upperLength = std::sqrt(Dot3(temp, temp));
-
 			double desiredDelta[3];
 			Sub(effector, root, desiredDelta);
 			double desiredLength = std::sqrt(Dot3(desiredDelta, desiredDelta));
-			const double maxLength = lowerLength + upperLength;
+			double maxLength = lowerLength + upperLength;
 
 			double desiredDir[3];
 			if (desiredLength < kKindaSmall)
@@ -366,6 +371,24 @@ namespace mo
 				}
 			}
 
+			// 늘리기(TwoBoneIK.cpp:127-141) — 닿는 비율이 시작 비율을 넘으면 두 마디를 같은 배율로 최대 배율까지 늘린다
+			if (stretch)
+			{
+				const double scaleRange = maxStretchScale - startStretchRatio;
+				if (scaleRange > kKindaSmall && maxLength > kKindaSmall)
+				{
+					const double reachRatio = desiredLength / maxLength;
+					const double ramp = (reachRatio - startStretchRatio) / scaleRange;
+					const double scaling = (maxStretchScale - 1.0) * (ramp < 0.0 ? 0.0 : (ramp > 1.0 ? 1.0 : ramp));
+					if (scaling > kKindaSmall)
+					{
+						lowerLength *= 1.0 + scaling;
+						upperLength *= 1.0 + scaling;
+						maxLength *= 1.0 + scaling;
+					}
+				}
+			}
+
 			std::memcpy(outEnd, effector, sizeof(double) * 3);
 			std::memcpy(outJoint, joint, sizeof(double) * 3);
 			if (desiredLength >= maxLength)
@@ -387,6 +410,17 @@ namespace mo
 			double projDist = projSqr > 0.0 ? std::sqrt(projSqr) : 0.0;
 			if (reverseUpper) projDist = -projDist;
 			for (int c = 0; c < 3; ++c) outJoint[c] = root[c] + projDist * desiredDir[c] + jointLineDist * bendDir[c];
+		}
+
+		// 엔진 AnimationCore::SolveTwoBoneIK(TwoBoneIK.cpp:62, 늘리기 없음) — 마디 길이 = 지금 자리 거리. 위치만 구한다
+		void SolveTwoBonePositions(const double root[3], const double joint[3], const double end[3], const double jointTarget[3], const double effector[3], double outJoint[3], double outEnd[3])
+		{
+			double temp[3];
+			Sub(end, joint, temp);
+			const double lowerLength = std::sqrt(Dot3(temp, temp));
+			Sub(joint, root, temp);
+			const double upperLength = std::sqrt(Dot3(temp, temp));
+			SolveTwoBoneLimb(root, joint, jointTarget, effector, upperLength, lowerLength, false, 0.0, 0.0, outJoint, outEnd);
 		}
 	}
 
@@ -416,6 +450,14 @@ namespace mo
 			_legs[leg][2] = _legs[leg][1] >= 0 ? clips.Bones()[(size_t)_legs[leg][1]].parent : -1;
 			_legs[leg][3] = clips.FindBone(ikFeet[leg]);
 			if (_legs[leg][2] < 0 || _legs[leg][3] < 0) return false;
+		}
+		// 장치 Basic IK 마디 길이(L-12-e) — 장치 초기화(Construction Event)가 왼다리 처음 자세에서 잰 ThighLength = |calf_l − thigh_l| · CalfLength = |foot_l − calf_l| 를
+		// 두 다리가 같이 쓴다(그래프 덤프, 원본 기준). 부모 기준 이동 길이와 같다. 변수 · 노드 인자가 float 라 float 로 자른다(RigUnit_TwoBoneIKSimple ItemALength · ItemBLength)
+		for (int i = 0; i < 2; ++i)
+		{
+			BoneTransform ref;
+			FromKey(clips.Bones()[(size_t)_legs[0][1 - i]].ref, ref);
+			_plantLegLength[i] = (double)(float)std::sqrt(Dot3(ref.p, ref.p));
 		}
 
 		static_assert(sizeof(kSlotOrder) / sizeof(kSlotOrder[0]) == kSlotOrderCount, "kSlotOrder 와 칸 수가 같아야 한다");
@@ -1126,6 +1168,151 @@ namespace mo
 		}
 	}
 
+	// 발 붙이기 장치의 다리 몫(L-12-e) — Lyra CR_Mannequin_FootPlant 한 프레임(그래프 덤프 C:\tmp\mob\lm\l2a\cr_footplant.txt · 계층 덤프 C:\tmp\mob\lm\l12\e\hier.txt, 원본 기준):
+	//   ① IK 발 = 들어온 발(SetTransform ik_foot_l ← foot_l) · 무릎 조절점 = 그 IK 발 × 처음 자세 간격(ParentConstraint 간격 유지, RigUnit_TransformConstraint.cpp:252-261)
+	//   ② 골반 · IK 발 뿌리를 골반 내림만큼(부품 공간, 자식이 따라감) → IK 발을 발 높이 스프링만큼 뿌리 기준 z 로 더(ProcessFootOffset)
+	//   ③ Basic IK(TwoBoneIKSimplePerItem — RigUnit_TwoBoneIKSimple.cpp:111 → ControlRigMathLibrary.cpp:6 SolveBasicTwoBoneIK) — 허벅지 · 종아리 · 발, 굽힘 = 무릎 조절점 자리,
+	//      늘리기 1.0 ~ 1.1배, 마디 길이 = 장치 처음 자세. 발 회전 = IK 발 회전
+	//   ④ 장치 노드 알파가 1 보다 작으면 장치 결과 − 들어온 자세를 부모 기준 덧붙임으로 알파만큼 얹는다(AnimNode_ControlRigBase.cpp:204-221)
+	// 무릎 조절점은 뒤의 골반 · 발 몫을 안 따라간다(계층 부모가 옮겨지는 뼈 · 조절점 밖).
+	// 땅이 평지 하나라 땅 기울기 몫(IK 발 회전을 땅 법선에 맞춤 — AimBoneMath)은 IK 발 회전을 안 바꾼다고 본다(제 판단 — 법선 = 위 · IK 발 뿌리 Z 축 = 위).
+	// 골반 몫은 ApplyPlant 가 한다 — 장치는 골반을 옮기기만 해 다리의 부모 기준 변환이 골반 이동과 상관없다
+	void CAnimPoseEvaluator::ApplyPlantLegs(const AnimPoseInput& input, BoneTransform* pose)
+	{
+		const float alpha = input.plantAlpha;
+		if (alpha <= kZeroWeight) return;		// 장치를 안 돌린 프레임(AnimNode_ControlRigBase.cpp:197 IsRelevant)
+		BoneTransform* cs = _component.data();
+		ComponentFromLocal(pose, cs);
+		const std::vector<ClipBone>& bones = _clips->Bones();
+		// 골반 내림(부품 공간, 알파를 곱하기 전) — 입력 칸은 알파를 곱한 값이라 나눠 되돌린다
+		double pelvis[3];
+		for (int k = 0; k < 3; ++k) pelvis[k] = (double)input.plantOffset[k] / alpha;
+		const bool full = alpha >= 1.f - kZeroWeight;
+		const double upperLength = _plantLegLength[0];
+		const double lowerLength = _plantLegLength[1];
+		for (int leg = 0; leg < 2; ++leg)
+		{
+			const int foot = _legs[leg][0];
+			const int calf = _legs[leg][1];
+			const int thigh = _legs[leg][2];
+			const double* primary = kPlantLegPrimary[leg];
+			const double* secondary = kPlantLegSecondary[leg];
+			// ② 허벅지(A) · 종아리 자리 · IK 발(C) — 골반을 옮기면 아래 뼈가 다 따라간다. 발 높이는 뿌리 기준 z(그래프 주석 「Put the offset in ik foot space」)
+			BoneTransform parent = cs[(size_t)bones[(size_t)thigh].parent];
+			BoneTransform a = cs[thigh];
+			BoneTransform c = cs[foot];
+			double joint[3];
+			double lift[3];
+			const double up[3] = { 0, 0, (double)input.footOffset[leg] };
+			Rotate(cs[0].q, up, lift);
+			// ① 무릎 조절점
+			double pole[3];
+			Rotate(cs[foot].q, kPlantPole[leg], pole);
+			for (int k = 0; k < 3; ++k) pole[k] += cs[foot].p[k];
+			for (int k = 0; k < 3; ++k)
+			{
+				parent.p[k] += pelvis[k];
+				a.p[k] += pelvis[k];
+				joint[k] = cs[calf].p[k] + pelvis[k];
+				c.p[k] += pelvis[k] + lift[k];
+			}
+			// ③ 두 뼈 풀이 — B 는 A 의 회전에 종아리 자리를 넣고 시작한다(RigUnit_TwoBoneIKSimple.cpp:148-150)
+			double root[3];
+			std::memcpy(root, a.p, sizeof(root));
+			double temp[3];
+			Sub(c.p, root, temp);
+			if (std::sqrt(Dot3(temp, temp)) > (upperLength + lowerLength) * kPlantStretchStart) ++_plantLegStretched;
+			double elbow[3];
+			double end[3];
+			SolveTwoBoneLimb(root, joint, pole, c.p, upperLength, lowerLength, true, kPlantStretchStart, kPlantStretchMax, elbow, end);
+			++_plantLegSolves;
+			BoneTransform b = a;
+			std::memcpy(b.p, elbow, sizeof(elbow));
+			std::memcpy(c.p, end, sizeof(end));
+			// 허벅지 — 주 축을 무릎 쪽으로, 둘째 축을 굽힘 쪽으로(ControlRigMathLibrary.cpp:17-58). 다리가 곧으면 굽힘 쪽 = 무릎 조절점
+			double axis[3];
+			double target1[3];
+			double target2[3];
+			double delta[4];
+			bool extended = false;
+			Rotate(a.q, primary, axis);
+			Sub(elbow, root, target1);
+			if (!NearlyZero3(target1) && !NearlyZero3(axis))
+			{
+				SafeNormal(target1, target1);
+				double baseDir[3];
+				Sub(end, root, temp);
+				SafeNormal(temp, baseDir);
+				extended = std::abs(Dot3(baseDir, target1) - 1.0) < kKindaSmall;
+				FindBetweenNormals(axis, target1, delta);
+				QuatMul(delta, a.q, a.q);
+				QuatNormalize(a.q);
+				Rotate(a.q, secondary, axis);
+				if (extended) Sub(pole, root, target2);
+				else for (int k = 0; k < 3; ++k) target2[k] = elbow[k] - (end[k] + root[k]) * 0.5;
+				if (!NearlyZero3(target2) && !NearlyZero3(axis))
+				{
+					const double along = Dot3(target2, target1);
+					for (int k = 0; k < 3; ++k) target2[k] -= along * target1[k];
+					SafeNormal(target2, target2);
+					FindBetweenNormals(axis, target2, delta);
+					QuatMul(delta, a.q, a.q);
+					QuatNormalize(a.q);
+				}
+			}
+			// 종아리 — 주 축을 발 쪽으로, 둘째 축을 굽힘 쪽으로(ControlRigMathLibrary.cpp:60-87). 굽힘 쪽 식은 허벅지와 같다(무릎 − 엉덩이 · 발 가운데)
+			Rotate(b.q, primary, axis);
+			Sub(end, elbow, target1);
+			if (!NearlyZero3(target1) && !NearlyZero3(axis))
+			{
+				SafeNormal(target1, target1);
+				FindBetweenNormals(axis, target1, delta);
+				QuatMul(delta, b.q, b.q);
+				QuatNormalize(b.q);
+				Rotate(b.q, secondary, axis);
+				if (extended) Sub(pole, elbow, target2);
+				else for (int k = 0; k < 3; ++k) target2[k] = elbow[k] - (end[k] + root[k]) * 0.5;
+				if (!NearlyZero3(target2) && !NearlyZero3(axis))
+				{
+					const double along = Dot3(target2, target1);
+					for (int k = 0; k < 3; ++k) target2[k] -= along * target1[k];
+					SafeNormal(target2, target2);
+					FindBetweenNormals(axis, target2, delta);
+					QuatMul(delta, b.q, b.q);
+					QuatNormalize(b.q);
+				}
+			}
+			if (extended) ++_plantLegExtended;
+			// 부모 기준으로 되돌린다 — 허벅지 · 종아리 · 발을 차례로 부품 공간에 둔 것(SetGlobalTransform, 자식은 따라감)과 같다
+			BoneTransform local[3];
+			RelativeTo(a, parent, local[0]);
+			RelativeTo(b, a, local[1]);
+			RelativeTo(c, b, local[2]);
+			const int changed[3] = { thigh, calf, foot };
+			for (int i = 0; i < 3; ++i)
+			{
+				BoneTransform& out = pose[changed[i]];
+				if (full)
+				{
+					out = local[i];
+					continue;
+				}
+				// ④ 덧붙임 = 장치 결과 − 들어온 자세(ConvertTransformToAdditive, 회전 정규화) → 항등에서 알파만큼(BlendFromIdentityAndAccumulate · FQuat::FastLerp) → 회전 정규화(AnimationRuntime.cpp:1280)
+				double inverse[4];
+				QuatInverse(out.q, inverse);
+				double add[4];
+				QuatMul(local[i].q, inverse, add);
+				QuatNormalize(add);
+				const double bias = add[3] >= 0 ? 1.0 : -1.0;
+				double step[4] = { add[0] * alpha, add[1] * alpha, add[2] * alpha, add[3] * alpha + bias * (1.f - alpha) };
+				QuatNormalize(step);
+				for (int k = 0; k < 3; ++k) out.p[k] += (local[i].p[k] - out.p[k]) * alpha;
+				QuatMul(step, out.q, out.q);
+				QuatNormalize(out.q);
+			}
+		}
+	}
+
 	void CAnimPoseEvaluator::ApplyPlant(const AnimPoseInput& input, BoneTransform* pose) const
 	{
 		const bool zero = std::abs(input.plantOffset[0]) <= kKindaSmall && std::abs(input.plantOffset[1]) <= kKindaSmall && std::abs(input.plantOffset[2]) <= kKindaSmall;
@@ -1202,6 +1389,8 @@ namespace mo
 		FromKey(_clips->Bones()[0].ref, outLocal[0]);
 		// 다리 IK — Lyra 차례 = 뿌리 돌림(RotateRootBone) 뒤 무기 층(FullBody_SkeletalControls) 안 손 IK 들 뒤 · 발 붙이기 장치(ControlRig_1) 앞(L-12-c, 원본 기준)
 		if ((_poseTest & kPoseTestNoLegIK) == 0) ApplyLegIK(outLocal, (_poseTest & kPoseTestNoLegAlpha) != 0 ? 1.f : input.legIKAlpha);
+		// 발 붙이기 장치(ControlRig_1) — 다리 몫(L-12-e) 다음 골반 몫. 다리 몫은 들어온 자세의 골반 자리에 골반 내림을 얹어 셈한다(장치가 골반을 옮기기만 해 차례와 상관없다)
+		if ((_poseTest & kPoseTestNoPlantLegs) == 0) ApplyPlantLegs(input, outLocal);
 		ApplyPlant(input, outLocal);
 	}
 

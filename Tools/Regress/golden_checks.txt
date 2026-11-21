@@ -534,6 +534,7 @@ map_gym CHECK kind=R total=50000 bothHit=23295 bothMiss=26705 onlyLyra=0 onlyMin
 anim_gren_rifle STATEOUT rows=4350 moves=4685 fed=4682 lines=95700 resets=3 brakeScale=1.000 groundAdd=0.0 overflows=0
 anim_gren_rifle STATEPOSE poseTest=0 slotProfile=- overrideProfile=- rows=4350 montageRows=744 overrideRows=2340 handRows=24 montageMisses=0 trackOutside=0
 anim_gren_rifle STATELEGIK rows=4350 partialRows=0 solves=13280 straight=0 unreachable=0
+anim_gren_rifle STATEPLANTLEG rows=4350 plantRows=4350 partialRows=0 solves=8700 stretched=0 extended=0 length=45.752041/41.705421
 anim_gren_rifle STATEBOUND reach=126.506 bound=168.233 wire=0
 anim_gren_rifle STATEPLANT poses=4682 fed=4682 targetZeroRows=0 bundleMisses=0
 anim_gren_rifle STATEMONT rows=4350 countDiff=0 nameDiff=0 births=20 unknownBirths=0 failedPlays=0 lateBirths=0 drops=0 profileStartMisses=0 bundleChanges=0 multiUpdateRows=0 test=0
@@ -570,19 +571,20 @@ anim_gren_rifle STATEDIFF layerClip max=0.000000 over=0
 anim_gren_rifle STATEDIFF layerTime max=0.155821 over=250 first=(pass=0 frame=1495 part=6 seq=1736 ref=0.016667 got=0.033333)
 anim_gren_rifle STATEDIFF layerFade max=0.045045 over=168 first=(pass=0 frame=1495 part=6 seq=1736 ref=0.016835 got=0.033670)
 anim_gren_rifle rc=0
-anim_gren_rifle kind ALL rows=4350 mean=0.893 max=24.1 | OVR>0 parts=39248 mean=1.041 max=24.1
-anim_gren_rifle kind   none                                     rows= 3592 mean=0.864 max=9.4
-anim_gren_rifle kind   GrenadeToss                              rows=  566 mean=1.020 max=8.6
-anim_gren_rifle kind   Fire                                     rows=   76 mean=0.908 max=3.9
-anim_gren_rifle kind   Reload                                   rows=   46 mean=0.974 max=3.5
-anim_gren_rifle kind   Fire+GrenadeToss                         rows=   20 mean=1.364 max=4.8
-anim_gren_rifle kind   GrenadeToss+Melee                        rows=   20 mean=1.587 max=24.1
-anim_gren_rifle kind   GrenadeToss+Reload                       rows=   18 mean=1.227 max=7.7
-anim_gren_rifle kind   Melee                                    rows=   12 mean=0.730 max=3.1
-anim_gren_rifle sha e1c1c906d538dea13972f139c1814d7d43bb3768
+anim_gren_rifle kind ALL rows=4350 mean=0.743 max=24.1 | OVR>0 parts=39248 mean=0.919 max=24.1
+anim_gren_rifle kind   none                                     rows= 3592 mean=0.722 max=9.4
+anim_gren_rifle kind   GrenadeToss                              rows=  566 mean=0.821 max=8.6
+anim_gren_rifle kind   Fire                                     rows=   76 mean=0.806 max=3.9
+anim_gren_rifle kind   Reload                                   rows=   46 mean=0.836 max=3.5
+anim_gren_rifle kind   Fire+GrenadeToss                         rows=   20 mean=1.212 max=4.8
+anim_gren_rifle kind   GrenadeToss+Melee                        rows=   20 mean=1.305 max=24.1
+anim_gren_rifle kind   GrenadeToss+Reload                       rows=   18 mean=1.036 max=7.7
+anim_gren_rifle kind   Melee                                    rows=   12 mean=0.518 max=3.1
+anim_gren_rifle sha 6b4e2bb3c75f1c9324f0d516f0644749a9886da7
 anim_gren_pistol STATEOUT rows=4350 moves=4685 fed=4682 lines=95700 resets=3 brakeScale=1.000 groundAdd=0.0 overflows=0
 anim_gren_pistol STATEPOSE poseTest=0 slotProfile=- overrideProfile=- rows=4350 montageRows=754 overrideRows=2340 handRows=28 montageMisses=0 trackOutside=0
 anim_gren_pistol STATELEGIK rows=4350 partialRows=0 solves=16046 straight=206 unreachable=0
+anim_gren_pistol STATEPLANTLEG rows=4350 plantRows=4350 partialRows=0 solves=8700 stretched=0 extended=0 length=45.752041/41.705421
 anim_gren_pistol STATEBOUND reach=132.256 bound=168.233 wire=0
 anim_gren_pistol STATEPLANT poses=4682 fed=4682 targetZeroRows=0 bundleMisses=0
 anim_gren_pistol STATEMONT rows=4350 countDiff=0 nameDiff=0 births=20 unknownBirths=0 failedPlays=0 lateBirths=0 drops=0 profileStartMisses=0 bundleChanges=0 multiUpdateRows=0 test=0
@@ -619,20 +621,21 @@ anim_gren_pistol STATEDIFF layerClip max=0.000000 over=0
 anim_gren_pistol STATEDIFF layerTime max=0.283334 over=114 first=(pass=0 frame=1496 part=6 seq=1737 ref=0.016667 got=0.300000)
 anim_gren_pistol STATEDIFF layerFade max=0.286196 over=82 first=(pass=0 frame=1496 part=6 seq=1737 ref=0.016835 got=0.303030)
 anim_gren_pistol rc=0
-anim_gren_pistol kind ALL rows=4350 mean=0.735 max=16.5 | OVR>0 parts=39248 mean=0.963 max=16.5
-anim_gren_pistol kind   none                                     rows= 3584 mean=0.637 max=15.4
-anim_gren_pistol kind   GrenadeToss                              rows=  566 mean=0.904 max=11.0
-anim_gren_pistol kind   Fire                                     rows=   84 mean=3.416 max=16.5
-anim_gren_pistol kind   Reload                                   rows=   32 mean=0.562 max=2.6
-anim_gren_pistol kind   Fire+GrenadeToss                         rows=   20 mean=1.927 max=14.8
-anim_gren_pistol kind   GrenadeToss+Melee                        rows=   20 mean=0.531 max=2.8
-anim_gren_pistol kind   GrenadeToss+Reload                       rows=   18 mean=0.799 max=3.4
-anim_gren_pistol kind   Fire+Reload                              rows=   14 mean=1.949 max=16.1
-anim_gren_pistol kind   Melee                                    rows=   12 mean=0.733 max=4.3
-anim_gren_pistol sha 2f73c2df687cdd52ee38e39567e53771581681e1
+anim_gren_pistol kind ALL rows=4350 mean=0.555 max=16.5 | OVR>0 parts=39248 mean=0.866 max=16.5
+anim_gren_pistol kind   none                                     rows= 3584 mean=0.460 max=15.4
+anim_gren_pistol kind   GrenadeToss                              rows=  566 mean=0.668 max=11.0
+anim_gren_pistol kind   Fire                                     rows=   84 mean=3.378 max=16.5
+anim_gren_pistol kind   Reload                                   rows=   32 mean=0.492 max=2.6
+anim_gren_pistol kind   Fire+GrenadeToss                         rows=   20 mean=1.836 max=14.8
+anim_gren_pistol kind   GrenadeToss+Melee                        rows=   20 mean=0.399 max=2.8
+anim_gren_pistol kind   GrenadeToss+Reload                       rows=   18 mean=0.734 max=3.4
+anim_gren_pistol kind   Fire+Reload                              rows=   14 mean=1.886 max=16.1
+anim_gren_pistol kind   Melee                                    rows=   12 mean=0.546 max=4.3
+anim_gren_pistol sha 0fdacdc8b1a3393cbe7d0ae28a26034959848db5
 anim_gren_shotgun STATEOUT rows=4350 moves=4685 fed=4682 lines=95700 resets=3 brakeScale=1.000 groundAdd=0.0 overflows=0
 anim_gren_shotgun STATEPOSE poseTest=0 slotProfile=- overrideProfile=- rows=4350 montageRows=718 overrideRows=2410 handRows=0 montageMisses=0 trackOutside=0
 anim_gren_shotgun STATELEGIK rows=4350 partialRows=0 solves=13254 straight=26 unreachable=0
+anim_gren_shotgun STATEPLANTLEG rows=4350 plantRows=4350 partialRows=0 solves=8700 stretched=0 extended=0 length=45.752041/41.705421
 anim_gren_shotgun STATEBOUND reach=126.506 bound=168.233 wire=0
 anim_gren_shotgun STATEPLANT poses=4682 fed=4682 targetZeroRows=0 bundleMisses=0
 anim_gren_shotgun STATEMONT rows=4350 countDiff=0 nameDiff=0 births=20 unknownBirths=0 failedPlays=0 lateBirths=0 drops=0 profileStartMisses=0 bundleChanges=0 multiUpdateRows=0 test=0
@@ -669,19 +672,20 @@ anim_gren_shotgun STATEDIFF layerClip max=0.000000 over=0
 anim_gren_shotgun STATEDIFF layerTime max=0.155821 over=250 first=(pass=0 frame=1495 part=6 seq=1736 ref=0.016667 got=0.033333)
 anim_gren_shotgun STATEDIFF layerFade max=0.045045 over=168 first=(pass=0 frame=1495 part=6 seq=1736 ref=0.016835 got=0.033670)
 anim_gren_shotgun rc=0
-anim_gren_shotgun kind ALL rows=4350 mean=0.888 max=9.4 | OVR>0 parts=40788 mean=1.015 max=8.6
-anim_gren_shotgun kind   none                                     rows= 3618 mean=0.864 max=9.4
-anim_gren_shotgun kind   GrenadeToss                              rows=  566 mean=1.020 max=8.6
-anim_gren_shotgun kind   Fire                                     rows=   50 mean=0.922 max=4.0
-anim_gren_shotgun kind   Reload                                   rows=   46 mean=0.908 max=3.5
-anim_gren_shotgun kind   Fire+GrenadeToss                         rows=   20 mean=1.359 max=4.5
-anim_gren_shotgun kind   GrenadeToss+Melee                        rows=   20 mean=0.796 max=8.0
-anim_gren_shotgun kind   GrenadeToss+Reload                       rows=   18 mean=1.275 max=6.6
-anim_gren_shotgun kind   Melee                                    rows=   12 mean=0.607 max=2.5
-anim_gren_shotgun sha d84598416852c4ebd9cfcf1d3cf26cfd354baa12
+anim_gren_shotgun kind ALL rows=4350 mean=0.739 max=9.4 | OVR>0 parts=40788 mean=0.895 max=8.6
+anim_gren_shotgun kind   none                                     rows= 3618 mean=0.722 max=9.4
+anim_gren_shotgun kind   GrenadeToss                              rows=  566 mean=0.822 max=8.6
+anim_gren_shotgun kind   Fire                                     rows=   50 mean=0.803 max=4.0
+anim_gren_shotgun kind   Reload                                   rows=   46 mean=0.812 max=3.5
+anim_gren_shotgun kind   Fire+GrenadeToss                         rows=   20 mean=1.208 max=4.5
+anim_gren_shotgun kind   GrenadeToss+Melee                        rows=   20 mean=0.582 max=8.0
+anim_gren_shotgun kind   GrenadeToss+Reload                       rows=   18 mean=1.088 max=6.6
+anim_gren_shotgun kind   Melee                                    rows=   12 mean=0.455 max=2.5
+anim_gren_shotgun sha 06bd7e7889fb4f9119f505c8a8f6e4f0aac77b81
 anim_dash_rifle STATEOUT rows=4984 moves=5319 fed=5316 lines=109648 resets=3 brakeScale=1.000 groundAdd=0.0 overflows=0
 anim_dash_rifle STATEPOSE poseTest=0 slotProfile=- overrideProfile=- rows=4984 montageRows=1688 overrideRows=1110 handRows=28 montageMisses=0 trackOutside=0
 anim_dash_rifle STATELEGIK rows=4984 partialRows=344 solves=15216 straight=164 unreachable=228
+anim_dash_rifle STATEPLANTLEG rows=4984 plantRows=4728 partialRows=192 solves=9440 stretched=126 extended=126 length=45.752041/41.705421
 anim_dash_rifle STATEBOUND reach=147.176 bound=168.233 wire=0
 anim_dash_rifle STATEPLANT poses=5052 fed=5316 targetZeroRows=316 bundleMisses=0
 anim_dash_rifle STATEMONT rows=4984 countDiff=0 nameDiff=0 births=34 unknownBirths=0 failedPlays=0 lateBirths=0 drops=0 profileStartMisses=0 bundleChanges=0 multiUpdateRows=0 test=0
@@ -721,20 +725,21 @@ anim_dash_rifle STATEDIFF layerClip max=31.000000 over=1536 first=(pass=0 frame=
 anim_dash_rifle STATEDIFF layerTime max=2.461330 over=1826 first=(pass=0 frame=142 part=1 seq=383 ref=0.590217 got=0.523232)
 anim_dash_rifle STATEDIFF layerFade max=0.773810 over=530 first=(pass=0 frame=274 part=3 seq=515 ref=0.427928 got=0.079365)
 anim_dash_rifle rc=0
-anim_dash_rifle kind ALL rows=4984 mean=0.577 max=19.8 | OVR>0 parts=19668 mean=0.572 max=12.6
-anim_dash_rifle kind   none                                     rows= 3266 mean=0.559 max=10.2
-anim_dash_rifle kind   AM_MM_Dash_Forward                       rows=  438 mean=0.358 max=5.9
-anim_dash_rifle kind   AM_MM_Dash_Backward                      rows=  430 mean=0.746 max=12.6
-anim_dash_rifle kind   AM_MM_Dash_Left                          rows=  360 mean=0.651 max=19.8
-anim_dash_rifle kind   AM_MM_Dash_Right                         rows=  336 mean=0.670 max=17.0
-anim_dash_rifle kind   Fire                                     rows=   64 mean=0.451 max=2.5
-anim_dash_rifle kind   Reload                                   rows=   60 mean=0.670 max=5.8
-anim_dash_rifle kind   Melee                                    rows=   18 mean=1.348 max=6.0
-anim_dash_rifle kind   AM_MM_Dash_Forward+Reload                rows=   10 mean=1.371 max=5.9
-anim_dash_rifle sha 630775d044a7740214cbf282416ba56bd29a2c9c
+anim_dash_rifle kind ALL rows=4984 mean=0.351 max=19.8 | OVR>0 parts=19668 mean=0.341 max=7.3
+anim_dash_rifle kind   none                                     rows= 3266 mean=0.403 max=9.3
+anim_dash_rifle kind   AM_MM_Dash_Forward                       rows=  438 mean=0.251 max=4.9
+anim_dash_rifle kind   AM_MM_Dash_Backward                      rows=  430 mean=0.181 max=4.7
+anim_dash_rifle kind   AM_MM_Dash_Left                          rows=  360 mean=0.279 max=19.8
+anim_dash_rifle kind   AM_MM_Dash_Right                         rows=  336 mean=0.192 max=16.6
+anim_dash_rifle kind   Fire                                     rows=   64 mean=0.306 max=2.5
+anim_dash_rifle kind   Reload                                   rows=   60 mean=0.464 max=5.8
+anim_dash_rifle kind   Melee                                    rows=   18 mean=1.084 max=6.0
+anim_dash_rifle kind   AM_MM_Dash_Forward+Reload                rows=   10 mean=0.991 max=4.7
+anim_dash_rifle sha 956c0161bc8fc40427a8bb9f43c0bcc3a80323c5
 anim_dash_pistol STATEOUT rows=4984 moves=5319 fed=5316 lines=109648 resets=3 brakeScale=1.000 groundAdd=0.0 overflows=0
 anim_dash_pistol STATEPOSE poseTest=0 slotProfile=- overrideProfile=- rows=4984 montageRows=1698 overrideRows=718 handRows=18 montageMisses=0 trackOutside=0
 anim_dash_pistol STATELEGIK rows=4984 partialRows=344 solves=17838 straight=236 unreachable=228
+anim_dash_pistol STATEPLANTLEG rows=4984 plantRows=4728 partialRows=192 solves=9440 stretched=198 extended=198 length=45.752041/41.705421
 anim_dash_pistol STATEBOUND reach=147.176 bound=168.233 wire=0
 anim_dash_pistol STATEPLANT poses=5052 fed=5316 targetZeroRows=316 bundleMisses=0
 anim_dash_pistol STATEMONT rows=4984 countDiff=0 nameDiff=0 births=34 unknownBirths=0 failedPlays=0 lateBirths=0 drops=0 profileStartMisses=0 bundleChanges=0 multiUpdateRows=0 test=0
@@ -774,21 +779,22 @@ anim_dash_pistol STATEDIFF layerClip max=31.000000 over=1516 first=(pass=0 frame
 anim_dash_pistol STATEDIFF layerTime max=2.496230 over=1798 first=(pass=0 frame=142 part=1 seq=383 ref=0.577286 got=0.514475)
 anim_dash_pistol STATEDIFF layerFade max=0.799013 over=506 first=(pass=0 frame=274 part=3 seq=515 ref=0.472973 got=0.079365)
 anim_dash_pistol rc=0
-anim_dash_pistol kind ALL rows=4984 mean=0.488 max=21.1 | OVR>0 parts=15796 mean=0.803 max=15.0
-anim_dash_pistol kind   none                                     rows= 3258 mean=0.357 max=15.3
-anim_dash_pistol kind   AM_MM_Dash_Forward                       rows=  438 mean=0.371 max=5.9
-anim_dash_pistol kind   AM_MM_Dash_Backward                      rows=  430 mean=0.746 max=12.7
-anim_dash_pistol kind   AM_MM_Dash_Left                          rows=  360 mean=0.643 max=21.1
-anim_dash_pistol kind   AM_MM_Dash_Right                         rows=  336 mean=0.668 max=18.9
-anim_dash_pistol kind   Fire                                     rows=   72 mean=2.965 max=15.0
-anim_dash_pistol kind   Reload                                   rows=   46 mean=0.878 max=8.7
-anim_dash_pistol kind   Melee                                    rows=   18 mean=1.663 max=10.1
-anim_dash_pistol kind   Fire+Reload                              rows=   14 mean=1.779 max=15.0
-anim_dash_pistol kind   AM_MM_Dash_Forward+Reload                rows=   10 mean=1.557 max=7.7
-anim_dash_pistol sha 4d7c2a1ebebe5d8dc4495f35aeb3f96df673bf9f
+anim_dash_pistol kind ALL rows=4984 mean=0.271 max=21.1 | OVR>0 parts=15796 mean=0.601 max=15.0
+anim_dash_pistol kind   none                                     rows= 3258 mean=0.209 max=15.3
+anim_dash_pistol kind   AM_MM_Dash_Forward                       rows=  438 mean=0.264 max=4.5
+anim_dash_pistol kind   AM_MM_Dash_Backward                      rows=  430 mean=0.173 max=7.0
+anim_dash_pistol kind   AM_MM_Dash_Left                          rows=  360 mean=0.296 max=21.1
+anim_dash_pistol kind   AM_MM_Dash_Right                         rows=  336 mean=0.202 max=18.9
+anim_dash_pistol kind   Fire                                     rows=   72 mean=2.854 max=15.0
+anim_dash_pistol kind   Reload                                   rows=   46 mean=0.750 max=8.7
+anim_dash_pistol kind   Melee                                    rows=   18 mean=1.453 max=10.1
+anim_dash_pistol kind   Fire+Reload                              rows=   14 mean=1.666 max=15.0
+anim_dash_pistol kind   AM_MM_Dash_Forward+Reload                rows=   10 mean=1.224 max=7.7
+anim_dash_pistol sha 56d1a4c6296cd804aefe46c270240e94d20bdb2a
 anim_dash_shotgun STATEOUT rows=4984 moves=5319 fed=5316 lines=109648 resets=3 brakeScale=1.000 groundAdd=0.0 overflows=0
 anim_dash_shotgun STATEPOSE poseTest=0 slotProfile=- overrideProfile=- rows=4984 montageRows=1662 overrideRows=1110 handRows=0 montageMisses=0 trackOutside=0
 anim_dash_shotgun STATELEGIK rows=4984 partialRows=344 solves=15180 straight=188 unreachable=228
+anim_dash_shotgun STATEPLANTLEG rows=4984 plantRows=4728 partialRows=192 solves=9440 stretched=126 extended=126 length=45.752041/41.705421
 anim_dash_shotgun STATEBOUND reach=147.176 bound=168.233 wire=0
 anim_dash_shotgun STATEPLANT poses=5052 fed=5316 targetZeroRows=316 bundleMisses=0
 anim_dash_shotgun STATEMONT rows=4984 countDiff=0 nameDiff=0 births=34 unknownBirths=0 failedPlays=0 lateBirths=0 drops=0 profileStartMisses=0 bundleChanges=0 multiUpdateRows=0 test=0
@@ -828,14 +834,14 @@ anim_dash_shotgun STATEDIFF layerClip max=31.000000 over=1536 first=(pass=0 fram
 anim_dash_shotgun STATEDIFF layerTime max=2.461330 over=1826 first=(pass=0 frame=142 part=1 seq=383 ref=0.590217 got=0.523232)
 anim_dash_shotgun STATEDIFF layerFade max=0.773810 over=530 first=(pass=0 frame=274 part=3 seq=515 ref=0.427928 got=0.079365)
 anim_dash_shotgun rc=0
-anim_dash_shotgun kind ALL rows=4984 mean=0.575 max=19.8 | OVR>0 parts=20152 mean=0.555 max=12.6
-anim_dash_shotgun kind   none                                     rows= 3292 mean=0.559 max=10.2
-anim_dash_shotgun kind   AM_MM_Dash_Forward                       rows=  438 mean=0.358 max=5.9
-anim_dash_shotgun kind   AM_MM_Dash_Backward                      rows=  430 mean=0.746 max=12.6
-anim_dash_shotgun kind   AM_MM_Dash_Left                          rows=  360 mean=0.651 max=19.8
-anim_dash_shotgun kind   AM_MM_Dash_Right                         rows=  336 mean=0.670 max=17.0
-anim_dash_shotgun kind   Reload                                   rows=   60 mean=0.602 max=5.8
-anim_dash_shotgun kind   Fire                                     rows=   38 mean=0.462 max=2.7
-anim_dash_shotgun kind   Melee                                    rows=   18 mean=1.234 max=6.5
-anim_dash_shotgun kind   AM_MM_Dash_Forward+Reload                rows=   10 mean=1.295 max=5.9
-anim_dash_shotgun sha 447cdacb76075ea604cacd26f3beea6bb0a66814
+anim_dash_shotgun kind ALL rows=4984 mean=0.350 max=19.8 | OVR>0 parts=20152 mean=0.333 max=7.3
+anim_dash_shotgun kind   none                                     rows= 3292 mean=0.402 max=9.3
+anim_dash_shotgun kind   AM_MM_Dash_Forward                       rows=  438 mean=0.251 max=5.0
+anim_dash_shotgun kind   AM_MM_Dash_Backward                      rows=  430 mean=0.181 max=4.7
+anim_dash_shotgun kind   AM_MM_Dash_Left                          rows=  360 mean=0.279 max=19.8
+anim_dash_shotgun kind   AM_MM_Dash_Right                         rows=  336 mean=0.192 max=16.6
+anim_dash_shotgun kind   Reload                                   rows=   60 mean=0.431 max=5.8
+anim_dash_shotgun kind   Fire                                     rows=   38 mean=0.309 max=2.7
+anim_dash_shotgun kind   Melee                                    rows=   18 mean=1.023 max=6.0
+anim_dash_shotgun kind   AM_MM_Dash_Forward+Reload                rows=   10 mean=0.926 max=4.7
+anim_dash_shotgun sha 77fdaf5fbea8888735979948a505127077c71adf

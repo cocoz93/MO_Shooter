@@ -121,6 +121,7 @@ namespace mo
 			float target = 0.f;			// 골반 목표 = min(왼 목표, 오른 목표)
 			float current = 0.f;		// 스프링 값(알파 곱하기 전)
 			float alpha = 1.f;
+			float foot[2] = {};		// 발 높이 스프링 값(왼 · 오른, 알파 곱하기 전, L-12-e)
 			bool stepped = false;
 		};
 		PlantView Plant() const;
@@ -293,6 +294,10 @@ namespace mo
 		float _plantVelocity = 0.f;
 		float _plantPrevTarget = 0.f;
 		bool _plantPrevValid = false;		// false = 판 처음 — 첫 걸음은 목표 속도 0(엔진 FFloatSpringState::bPrevTargetValid)
+		// 장치 발 높이 스프링(L-12-e) — 컨트롤 릭 변수 CurrentLeftFootOffsetZ · CurrentRightFootOffsetZ 와 그 스프링 상태. 골반과 같은 갱신에 넘겨 첫 걸음 표시(_plantPrevValid)를 같이 쓴다
+		float _plantFoot[2] = {};
+		float _plantFootVelocity[2] = {};
+		float _plantFootPrevTarget[2] = {};
 		double _plantFeet[2] = {};
 		float _plantTarget = 0.f;
 		bool _plantStepped = false;

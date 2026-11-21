@@ -16,6 +16,7 @@
 // - 컨텐츠 E-2-b 에서 그래프(ABP_Mannequin_Base AnimGraph 핀 연결)를 읽어 차례 · 윗몸 짜임 · 윗몸 비중 표를 그래프대로 바꿨다(D72, 원본 기준).
 //   옛 차례는 시험 깃발 kPoseTestD50Order 로 다시 만든다
 // - L-12-c 에서 무기 층(FullBody_SkeletalControls)의 다리 IK(LegIK_0 — 엔진 AnimNode_LegIK)를 뿌리 뒤 · 발 디딤 앞에 더했다(원본 기준, D150)
+// - L-12-e 에서 발 붙이기 장치(CR_Mannequin_FootPlant)의 다리 몫(Basic IK · 무릎 조절점 · 발 높이 스프링)을 골반 옮김 앞에 더했다(원본 기준, D153)
 // - 언리얼 안에서도 컴파일돼야 하므로 예외·RTTI 를 쓰지 않는다. 한 객체는 한 스레드에서만 쓴다(작업 공간을 들고 있다).
 namespace mo
 {
@@ -61,6 +62,8 @@ namespace mo
 		float aimBlend = 1.f;			// 1 = 허리 사격 조준만, 0 = 느슨한 조준만
 		float pitch = 0.f;
 		float plantOffset[3] = {};		// 메시 기준 골반 이동량(cm). 0 = 안 내림
+		float plantAlpha = 0.f;			// 발 붙이기 장치 켜짐(엔진 컨트롤 릭 노드 알파, L-12-e) — 0 이면 장치 다리 몫을 안 돌린다. plantOffset 은 이 값을 곱한 것
+		float footOffset[2] = {};		// 장치 발 높이 스프링(왼 · 오른, 뿌리 기준 z cm, 알파 곱하기 전 — ProcessFootOffset, L-12-e)
 		int montageCount = 0;			// 비중이 엔진 문턱(1e-5)보다 큰 몽타주만 — 엔진도 그 아래는 자세 계산에 안 넣는다
 		AnimMontageSlot montages[kAnimMontageMax];
 		float overrideWeight = 0.f;		// 쏜 뒤 윗몸 덮기 비중(D45). 0 = 안 덮음
@@ -126,6 +129,7 @@ namespace mo
 		static constexpr uint32_t kPoseTestUniformBlendOut = 256;	// 빼기 비중 표를 안 쓴다 — 빠지는 몽타주도 모든 뼈를 몽타주 비중으로(L-6-b 전 실제 경로). L-6-b 앞에 잰 판은 256 을 더한다
 		static constexpr uint32_t kPoseTestNoLegIK = 512;			// 다리 IK 를 끈다(L-12-c 전 실제 경로). L-12-c 앞에 잰 판은 512 를 더한다
 		static constexpr uint32_t kPoseTestNoLegAlpha = 1024;		// 다리 IK 비중을 늘 1 로(곡선 DisableLegIK 를 안 봄)
+		static constexpr uint32_t kPoseTestNoPlantLegs = 2048;		// 발 붙이기 장치의 다리 몫을 끈다(L-12-e 전 실제 경로). L-12-e 앞에 잰 판은 2048 을 더한다
 		void SetPoseTestFlags(uint32_t flags) { _poseTest = flags; }
 		void SetSlotProfileForTest(int profile) { _slotProfileTest = profile; }			// 비중 표가 있는 끼움 자리(덮기 자리 빼고)를 이 표로(-1 = 파일 그대로)
 		void SetOverrideProfileForTest(int profile) { _overrideProfileTest = profile; }	// 쏜 뒤 덮기 자리를 이 표로(-1 = 파일 그대로)
@@ -138,6 +142,11 @@ namespace mo
 		uint64_t LegIKSolves() const { return _legIKSolves; }
 		uint64_t LegIKStraight() const { return _legIKStraight; }
 		uint64_t LegIKUnreachable() const { return _legIKUnreachable; }
+		// 장치 다리 몫(L-12-e) 셈 — 다리를 고친 수(셈 한 번에 다리 하나씩) · 닿는 비율이 늘리기 시작(1.0)을 넘은 수 · 다리가 곧아 굽힘 쪽을 무릎 조절점으로 잡은 수
+		uint64_t PlantLegSolves() const { return _plantLegSolves; }
+		uint64_t PlantLegStretched() const { return _plantLegStretched; }
+		uint64_t PlantLegExtended() const { return _plantLegExtended; }
+		double PlantLegLength(int i) const { return _plantLegLength[i]; }	// 장치 마디 길이(0 허벅지 → 종아리 · 1 종아리 → 발)
 
 	private:
 		void BlendWalk(const AnimPoseInput& input, BoneTransform* pose);
@@ -150,6 +159,7 @@ namespace mo
 		void AccumulateAim(BoneTransform* pose, uint32_t firstClip, const float pitches[3], float pitch, float weight);
 		void ApplyHandIK(BoneTransform* pose, float leftAlpha);
 		void ApplyLegIK(BoneTransform* pose, float alpha);
+		void ApplyPlantLegs(const AnimPoseInput& input, BoneTransform* pose);
 		void ApplyPlant(const AnimPoseInput& input, BoneTransform* pose) const;
 		void AccumulateAdditive(BoneTransform* pose, const BoneTransform* additive, float weight, uint8_t additiveType);
 		void AccumulateAdditivePerBone(BoneTransform* pose, const BoneTransform* additive, const float* weights, uint8_t additiveType);
@@ -169,6 +179,7 @@ namespace mo
 		int _footLeft = -1;
 		int _footRight = -1;
 		int _legs[2][4] = { { -1, -1, -1, -1 }, { -1, -1, -1, -1 } };	// 다리 IK 다리 둘(Lyra 정의 차례 — 왼 · 오른) × 발 · 종아리 · 허벅지 · IK 발
+		double _plantLegLength[2] = {};		// 장치 Basic IK 마디 길이(허벅지 → 종아리 · 종아리 → 발) — 장치 초기화가 왼다리 처음 자세에서 잰 ThighLength · CalfLength(두 다리 같이)
 		static constexpr int kSlotOrderCount = 5;
 		int _slotOrder[kSlotOrderCount] = { -1, -1, -1, -1, -1 };		// 평가 차례의 끼움 자리 번호(Init 이 이름으로 찾는다, 없으면 -1)
 		uint64_t _montageMisses = 0;
@@ -176,6 +187,9 @@ namespace mo
 		uint64_t _legIKSolves = 0;
 		uint64_t _legIKStraight = 0;
 		uint64_t _legIKUnreachable = 0;
+		uint64_t _plantLegSolves = 0;
+		uint64_t _plantLegStretched = 0;
+		uint64_t _plantLegExtended = 0;
 		uint32_t _poseTest = 0;
 		int _slotProfileTest = -1;
 		int _overrideProfileTest = -1;

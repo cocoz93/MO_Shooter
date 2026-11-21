@@ -851,6 +851,12 @@ namespace mo
 		_plantVelocity = 0.f;
 		_plantPrevTarget = 0.f;
 		_plantPrevValid = false;
+		for (int i = 0; i < 2; ++i)
+		{
+			_plantFoot[i] = 0.f;
+			_plantFootVelocity[i] = 0.f;
+			_plantFootPrevTarget[i] = 0.f;
+		}
 		_plantFeet[0] = _plantFeet[1] = 0.0;
 		_plantTarget = 0.f;
 		_plantStepped = false;
@@ -1518,6 +1524,7 @@ namespace mo
 				AnimPoseInput pose;
 				ToPoseInput(pose);
 				for (float& offset : pose.plantOffset) offset = 0.f;
+				pose.plantAlpha = 0.f;		// 장치 다리 몫도 뺀다 — 장치는 들어온 자세의 발 높이로 쓸기를 한다(L-12-e)
 				evaluator.EvaluateLocal(pose, scratch);
 				evaluator.FootHeightsFromLocal(scratch, _plantFeet);
 			}
@@ -1525,23 +1532,31 @@ namespace mo
 			{
 				++_plantBundleMisses;		// 발 높이를 못 읽으면 앞 값으로 — 세어 두고 0 인지 본다
 			}
-			const float left = (float)_plantFeet[0] - kPlantTraceReach <= ground ? ground : 0.f;
-			const float right = (float)_plantFeet[1] - kPlantTraceReach <= ground ? ground : 0.f;
+			const bool hits[2] = { (float)_plantFeet[0] - kPlantTraceReach <= ground, (float)_plantFeet[1] - kPlantTraceReach <= ground };
+			const float left = hits[0] ? ground : 0.f;
+			const float right = hits[1] ? ground : 0.f;
 			_plantTarget = std::min(left, right);
 			// 판 처음(Reset)은 스프링 값 · 속도 0 에서 시작한다 — 컨트롤 릭 변수 CurrentPelvisOffsetZ 기본값 0 이고 그 변수에 넣는 곳은 스프링 결과뿐이다
 			// (CR_Mannequin_FootPlant 그래프 덤프, 원본 기준). Lyra 대조 기록은 첫 프레임 앞 대기 갱신 동안 목표에 닿아 이 시작값을 못 가른다
 			// 엔진 GenericSpringInterp(KismetMathLibrary.cpp:427) → FMath::SpringDamper 임계 감쇠 갈래(UnrealMathUtility.h:1741)와 같은 식.
 			// 각진동수만 세기 × 2π 로 바로 셈한다 — 엔진은 강성(각진동수²)의 제곱근을 거쳐 float 끝자리가 다를 수 있다
-			const float targetRate = _plantPrevValid ? (_plantTarget - _plantPrevTarget) * (kPlantSpringTargetRate / deltaSeconds) : 0.f;
 			const float w = kPlantSpringHz * 2.f * kPi;
-			const float adjusted = _plantTarget + targetRate * (2.f / w);
-			const float c1 = _plantCurrent - adjusted;
-			const float c2 = _plantVelocity + c1 * w;
-			const float x = w * deltaSeconds;
-			const float e = 1.f / (1.f + 1.00746054f * x + 0.45053901f * x * x + 0.25724632f * x * x * x);		// InvExpApprox
-			_plantCurrent = adjusted + (c1 + c2 * deltaSeconds) * e;
-			_plantVelocity = (c2 - c1 * w - c2 * (w * deltaSeconds)) * e;
-			_plantPrevTarget = _plantTarget;
+			const auto spring = [&](float target, float& current, float& velocity, float& prevTarget)
+			{
+				const float targetRate = _plantPrevValid ? (target - prevTarget) * (kPlantSpringTargetRate / deltaSeconds) : 0.f;
+				const float adjusted = target + targetRate * (2.f / w);
+				const float c1 = current - adjusted;
+				const float c2 = velocity + c1 * w;
+				const float x = w * deltaSeconds;
+				const float e = 1.f / (1.f + 1.00746054f * x + 0.45053901f * x * x + 0.25724632f * x * x * x);		// InvExpApprox
+				current = adjusted + (c1 + c2 * deltaSeconds) * e;
+				velocity = (c2 - c1 * w - c2 * (w * deltaSeconds)) * e;
+				prevTarget = target;
+			};
+			spring(_plantTarget, _plantCurrent, _plantVelocity, _plantPrevTarget);
+			// 발마다 높이 스프링(L-12-e, ProcessFootOffset — 원본 기준) — 쓸기가 맞으면 목표 = 땅 − 방금 넘긴 골반 값(골반을 내린 만큼 발을 되올림), 못 맞으면 0.
+			// 골반과 같은 스프링(SpringInterpV2 세기 2.5 · 감쇠 1 · 목표 속도 0.2 · bUseCurrentInput). 차례 = 골반 → 왼발 → 오른발(SequenceExecution_1 A · B · C)
+			for (int i = 0; i < 2; ++i) spring(hits[i] ? ground - _plantCurrent : 0.f, _plantFoot[i], _plantFootVelocity[i], _plantFootPrevTarget[i]);
 			_plantPrevValid = true;
 			_plantStepped = true;
 		}
@@ -1559,6 +1574,8 @@ namespace mo
 		view.target = _plantTarget;
 		view.current = _plantCurrent;
 		view.alpha = _plantAlpha;
+		view.foot[0] = _plantFoot[0];
+		view.foot[1] = _plantFoot[1];
 		view.stepped = _plantStepped;
 		return view;
 	}
@@ -1575,6 +1592,8 @@ namespace mo
 		out.fidgetTime = _fidgetTime < 0.f ? wire::kAnimTimeNone : ToWireFidget(_fidgetTime);
 		out.recoveryTime = _recoveryTime < 0.f ? wire::kAnimTimeNone : ToWireTime(_recoveryTime);
 		out.plantDrop = (int16_t)std::lround(Clamp(-_plantOffset[2], -300.f, 300.f) * kWirePlantScale);
+		for (int i = 0; i < 2; ++i) out.footLift[i] = (int16_t)std::lround(Clamp(_plantFoot[i], -300.f, 300.f) * kWirePlantScale);
+		out.plantAlpha = ToWireByte(_plantAlpha);
 		out.layerCount = (uint8_t)_count;
 		for (int i = 0; i < _count; ++i)
 		{
@@ -1644,6 +1663,8 @@ namespace mo
 		out.plantOffset[0] = 0.f;
 		out.plantOffset[1] = 0.f;
 		out.plantOffset[2] = -(float)in.plantDrop / kWirePlantScale;
+		for (int i = 0; i < 2; ++i) out.footOffset[i] = (float)in.footLift[i] / kWirePlantScale;
+		out.plantAlpha = (float)in.plantAlpha / 255.f;
 		out.layerCount = std::min((int)in.layerCount, kAnimLayerMax);
 		for (int i = 0; i < out.layerCount; ++i)
 		{
@@ -1692,6 +1713,8 @@ namespace mo
 		out.aimBlend = _aimBlend;
 		out.pitch = _pitch;
 		for (int c = 0; c < 3; ++c) out.plantOffset[c] = _plantOffset[c];
+		out.plantAlpha = _plantAlpha;
+		for (int i = 0; i < 2; ++i) out.footOffset[i] = _plantFoot[i];
 		out.montageCount = _poseMontageCount;
 		for (int i = 0; i < kAnimMontageMax; ++i) out.montages[i] = i < _poseMontageCount ? _poseMontages[i] : AnimMontageSlot{};
 		out.overrideWeight = _overrideWeight;

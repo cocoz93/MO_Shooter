@@ -11,7 +11,7 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 15;		// 15 = 상태 꼬리 다리 IK 비중 legIKAlpha(L-12-c) · 14 = 몽타주 칸 빼기 진행 blendOut · 입력 끝 누름 차례 pressOrder · 받침 까닭 PICKUP_FAIL_FULL(L-4)
+		constexpr uint32_t kProtocolVersion = 16;		// 16 = 상태 꼬리 장치 발 높이 footLift · 장치 알파 plantAlpha(L-12-e) · 15 = 상태 꼬리 다리 IK 비중 legIKAlpha(L-12-c) · 14 = 몽타주 칸 빼기 진행 blendOut · 입력 끝 누름 차례 pressOrder · 받침 까닭 PICKUP_FAIL_FULL(L-4)
 														// 13 = 수류탄 단추 BUTTON_GRENADE 를 보냄 · 입력 끝 카메라 거리 camBack · 수류탄 소식 S2C_GRENADE · 수류탄 상태 S2C_GRENADE_STATE(컨텐츠 G-3)
 														// 12 = 대시 단추 BUTTON_DASH 를 보냄 · 대시 소식 S2C_DASH(컨텐츠 D-3)
 														// 11 = 상태의 빠른 칸 quickSlots · 받침 소식의 종류 · 줍기 결과 · 무기 · 칸 · 탄 · 입력 번호 · 시험 입력의 탄 정하기 · 죽음(컨텐츠 W-2 · W-3)
@@ -180,7 +180,7 @@ namespace mo
 		};
 
 		// 애니 상태 한 사람치. S2C_STATE 의 players[count] 바로 뒤에 같은 차례로 붙는다(꼬리, 클립 파일을 준 서버만).
-		// - 머리 뒤에 겹침 칸 layerCount 개, 그 뒤에 몽타주 칸 montageCount 개만 싣는다 — 사람마다 24 + 4 × layerCount + 5 × montageCount 바이트, 최대 55(D35 · D51 · D60 · D62 · 몽타주 칸 빼기 진행 L-4 · 다리 IK 비중 L-12-c).
+		// - 머리 뒤에 겹침 칸 layerCount 개, 그 뒤에 몽타주 칸 montageCount 개만 싣는다 — 사람마다 29 + 4 × layerCount + 5 × montageCount 바이트, 최대 60(D35 · D51 · D60 · D62 · 몽타주 칸 빼기 진행 L-4 · 다리 IK 비중 L-12-c · 장치 발 높이 · 알파 L-12-e).
 		//   쓰고 읽는 식은 아래 WriteAnimTail · ReadAnimTail 한 벌이다(서버가 쓰고 봇 · 다리가 읽는다)
 		// - 앞부분(State)만 읽는 쪽은 count 로 끝을 정하므로 꼬리를 무시해도 깨지지 않는다
 		inline constexpr int kAnimLayersOnWire = 4;
@@ -218,6 +218,8 @@ namespace mo
 			uint16_t fidgetTime;	// 대기 몸짓 시각, 1/3000초 칸(권총 몸짓 13.8초가 1/6000초 칸 최대 10.92초를 넘어서 — D47). kAnimTimeNone = 안 함
 			uint16_t recoveryTime;	// 착지 충격 시각. kAnimTimeNone = 안 함
 			int16_t plantDrop;		// 발 디딤 내림 0.01cm 칸
+			int16_t footLift[2];	// 발 붙이기 장치 발 높이 스프링(왼 · 오른, 알파 곱하기 전) 0.01cm 칸(L-12-e) — 장치 상태라 받는 쪽이 셀 수 없다
+			uint8_t plantAlpha;		// 발 붙이기 장치 켜짐 0~255(L-12-e) — 받는 쪽이 장치 다리 몫을 이 비중으로 덧붙이고, plantDrop 을 나눠 알파 곱하기 전 골반 내림을 얻는다
 			uint8_t overrideWeight;	// 쏜 뒤 윗몸 덮기 비중 0~255(D45). 받는 쪽은 쏜 뒤 시간을 세지 않고 이 값을 쓴다(D51)
 			uint8_t handLeftAlpha;	// 왼손 붙이기 비중 0~255 — 앞 자세의 몽타주 곡선에서 나와 받는 쪽이 셀 수 없다(D51)
 			uint8_t legIKAlpha;		// 다리 IK 비중 0~255 = 1 − 앞 자세의 DisableLegIK 곡선(L-12-c · D150) — 왼손 비중과 같은 까닭으로 싣는다
@@ -428,9 +430,9 @@ namespace mo
 
 		static_assert(sizeof(Header) == 4, "ServerCore MsgHeader 와 같아야 한다");
 		static_assert(sizeof(State) <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
-		static_assert(sizeof(AnimStateWire) == 55, "패킷 크기 어림(D35 · D51 · D60 · D62 · L-4 · L-12-c)과 같아야 한다");
+		static_assert(sizeof(AnimStateWire) == 60, "패킷 크기 어림(D35 · D51 · D60 · D62 · L-4 · L-12-c · L-12-e)과 같아야 한다");
 		inline constexpr size_t kAnimStateHeadSize = offsetof(AnimStateWire, layers);
-		static_assert(kAnimStateHeadSize == 24, "머리 = 18 + 덮기 · 왼손 · 몽타주 칸 수(D51) + 조준 묶음 비중(D60) + 앉기 묶음 비중(D62) + 다리 IK 비중(L-12-c)");
+		static_assert(kAnimStateHeadSize == 29, "머리 = 18 + 덮기 · 왼손 · 몽타주 칸 수(D51) + 조준 묶음 비중(D60) + 앉기 묶음 비중(D62) + 다리 IK 비중(L-12-c) + 장치 발 높이 둘 · 알파(L-12-e)");
 		inline constexpr size_t kMaxStatePacketSize = sizeof(State) + sizeof(AnimStateWire) * kMaxPlayersInRoom;		// 꼬리까지 넣은 최대
 		static_assert(kMaxStatePacketSize <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 
