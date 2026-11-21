@@ -10,7 +10,7 @@ import struct
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
-PACK_CURVES = ('DisableLHandIK',)               # make_clip_pack.py 와 같게 — 이 이름의 곡선만 파일에 들어간다
+PACK_CURVES = ('DisableLHandIK', 'DisableLegIK')    # make_clip_pack.py 와 같게 — 이 이름의 곡선만 파일에 들어간다
 
 
 def bits(x):

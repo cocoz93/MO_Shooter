@@ -198,7 +198,7 @@ namespace mo
 		void SnapshotMontages();
 		bool FullBodyCoversSource(float deltaSeconds);		// 이번 갱신에 통째(FullBody) 자리 몽타주가 몸을 다 덮나 — 그러면 걸음 쪽 그래프를 안 넘긴다
 		void ReinitLocomotion();							// 덮였던 걸음 쪽이 다시 갱신되는 첫 프레임 — 엔진 상태 기계 다시 초기화
-		float LeftHandCurve() const;
+		float PoseCurve(const char* name) const;			// 이번 자세 목록의 몽타주 곡선 × 비중의 합 — DisableLHandIK(왼손) · DisableLegIK(발 붙이기 장치, L-6-c-1)
 
 		// 클립에서 읽어 둔 값
 		const CAnimClips* _clips = nullptr;
@@ -269,6 +269,8 @@ namespace mo
 		float _groundTime = 0.f;
 		float _airTime = 0.f;
 		float _plantOffset[3] = {};
+		float _plantAlpha = 1.f;			// 발 붙이기 장치 켜짐(엔진 컨트롤 릭 노드 알파, 0.2초 선형) — 앞 자세 곡선 DisableLegIK 가 0 보다 크면 0 쪽으로(L-6-c-1)
+		float _disableLegIK = 0.f;			// 이번 자세의 DisableLegIK 곡선 — 다음 갱신의 장치 켜짐을 정한다
 		int _stackOverflows = 0;
 		bool _sourceFrozen = false;		// 앞 갱신에 통째 자리 몽타주가 몸을 다 덮어 걸음 쪽을 안 넘겼다
 

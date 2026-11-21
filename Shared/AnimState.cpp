@@ -24,6 +24,7 @@ namespace mo
 		constexpr float kPlantReleaseSeconds = 0.2f;
 		constexpr float kPlantLandDelay = 0.1f;
 		constexpr float kPlantTimeSlack = 0.001f;
+		constexpr float kPlantAlphaSeconds = 0.2f;		// 발 붙이기 장치 켜고 끄기 — ABP 컨트롤 릭 노드 AlphaBoolBlend 넣기 · 빼기 0.2초 선형(weapons_l2a.txt:2989, 원본 기준)
 		constexpr int kLandTableHz = 120;
 		constexpr int kTransitionTableHz = 120;
 		constexpr float kCardinalDeadZone = 10.f;
@@ -538,12 +539,14 @@ namespace mo
 			// 걸린 표 = 제 빼기로 빠질 때만(StopMontage 의 profile, L-6-b) — 무리 끄기로 빠지는 대시는 표 없이 몽타주 비중대로 빠진다
 			slot.blendOut = instance.profile >= 0 ? instance.blend.alpha : -1.f;
 		}
-		_disableLeftHand = LeftHandCurve();
+		_disableLeftHand = PoseCurve("DisableLHandIK");
+		_disableLegIK = PoseCurve("DisableLegIK");
 	}
 
-	// 몽타주 곡선 DisableLHandIK × 비중의 합. 몽타주 자체 곡선과, 덧붙임이 아닌 자리에 든 줄의 클립 곡선만 더한다 —
+	// 몽타주 곡선 name × 비중의 합(DisableLHandIK · DisableLegIK). 몽타주 자체 곡선과, 덧붙임이 아닌 자리에 든 줄의 클립 곡선만 더한다 —
 	// 소총 재장전은 윗몸 · 윗몸 덧붙임 두 줄에 같은 곡선이 있는데, 둘 다 더하면 Lyra 기록과 1.0 까지 어긋나고 앞 줄만 더하면 0.02 안이다(3-b curve_hyp, 실측)
-	float CAnimState::LeftHandCurve() const
+	// DisableLegIK 는 앞 대시 몽타주 자체 곡선 하나다(animcmp_clips8_<무기>_clips120.csv 의 MCURVE 한 줄 · 시퀀스 SCURVE 엔 없음, 원본 기준 — 줄 클립 갈래를 안 탄다)
+	float CAnimState::PoseCurve(const char* name) const
 	{
 		float sum = 0.f;
 		const std::vector<ClipSlot>& slots = _clips->Slots();
@@ -553,7 +556,7 @@ namespace mo
 			const ClipMontage& montage = *_clips->Bundles()[(size_t)slot.bundle].FindMontage(slot.kind);
 			for (const MontageCurve& curve : montage.curves)
 			{
-				if (curve.name != "DisableLHandIK") continue;
+				if (curve.name != name) continue;
 				if (curve.owner < 0)
 				{
 					sum += slot.weight * SampleCurve(curve, slot.position);
@@ -795,6 +798,8 @@ namespace mo
 		_groundTime = kPlantLandDelay;
 		_airTime = kPlantReleaseSeconds;
 		_plantDrop = 0.f;
+		_plantAlpha = 1.f;
+		_disableLegIK = 0.f;
 		_aimBlend = 1.f;
 		_count = 0;
 		_wasFalling = false;
@@ -1406,9 +1411,14 @@ namespace mo
 			if (input.hasFloorGap) _plantDrop = input.plantGap;
 		}
 		const bool plant = falling ? _airTime < kPlantReleaseSeconds - kPlantTimeSlack : _groundTime >= kPlantLandDelay - kPlantTimeSlack;
+		// 발 붙이기 장치 켜짐(L-6-c-1) — Lyra ABP 컨트롤 릭 노드 알파 = ShouldEnableControlRig(곡선 DisableLegIK <= 0), 0.2초 선형(weapons_l2a.txt:4445-4465, 원본 기준).
+		// 곡선은 앞 자세 것(지난 갱신 끝 SnapshotMontages) — 한 프레임 늦게 읽어야 켬 ↔ 끔 기록 차와 맞는다(L-2-a sim_plant.py LAG=1, 실측). 곡선은 앞 대시 몽타주에만 있다.
+		// 장치 셈(발 목표 · 스프링 · 알파 0 이면 멈춤)은 아직 안 옮겨 지금 내림에 알파만 곱한다(L-6-c-2 몫)
+		const float plantStep = deltaSeconds / kPlantAlphaSeconds;
+		_plantAlpha = _disableLegIK <= 0.f ? std::min(1.f, _plantAlpha + plantStep) : std::max(0.f, _plantAlpha - plantStep);
 		_plantOffset[0] = 0.f;
 		_plantOffset[1] = 0.f;
-		_plantOffset[2] = plant ? -_plantDrop : 0.f;
+		_plantOffset[2] = plant && _plantAlpha > 0.f ? -_plantDrop * _plantAlpha : 0.f;
 
 		// 서기 상태에서 앉음이 바뀌면 앉기 · 일어서기 전환(D62 4). 서기였으면 이번 갱신의 출발 · 점프보다 아래에, 멈춤 · 공중에서 이번에 서기로 왔으면 그 위에 얹는다
 		// (멈춘 채 일어서기 기록 — 멈춤 클립이 그 프레임에 빠지고 일어서기 전환이 바로 섰다, 실측)

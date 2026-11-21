@@ -19,7 +19,7 @@ import struct
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
-VERSION = 7                                     # 7 = 몽타주 종류 13(수류탄 던짐, G-4 — 형식 칸은 그대로). 6 = 몽타주 종류 12(대시 넷, D-4) · 몽타주마다 빼기 비중 표 칸 i16(형식이 바뀐 판). 5 = 몽타주 종류 8(근접 · 반응 둘, E-2). 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3). 3 = 묶음 클립 30개 뒤에 조준 클립 17개(C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
+VERSION = 8                                     # 8 = 곡선 DisableLegIK 를 넣음(L-6-c-1 — 형식 칸은 그대로). 7 = 몽타주 종류 13(수류탄 던짐, G-4 — 형식 칸은 그대로). 6 = 몽타주 종류 12(대시 넷, D-4) · 몽타주마다 빼기 비중 표 칸 i16(형식이 바뀐 판). 5 = 몽타주 종류 8(근접 · 반응 둘, E-2). 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3). 3 = 묶음 클립 30개 뒤에 조준 클립 17개(C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
 KINDS = {'sphere': 0, 'sphyl': 1, 'box': 2}     # Shared/Weapon.h EBodyShape 값
 SCALE_LIMIT = 1e-4
 CLIPS_PER_BUNDLE = 67                           # Shared/AnimClips.h ACLIP_COUNT — 앞 67개(조준 17개 · 앉기 20개 포함). 그 뒤는 몽타주 · 덮기 자세 클립
@@ -44,7 +44,7 @@ SLOTS = (
     ('AdditiveHitReact', 'additive', None),     # 맞은 쪽 반응(E-2). 그래프의 그냥 끼움 노드라 비중 표가 없다(ABP_Mannequin_Base 덤프, 원본 기준)
 )
 OVERRIDE_SLOT = 'MOB_HipfireOverride'
-PACK_CURVES = ('DisableLHandIK',)               # 판정 몸에 닿는 곡선 = 손 붙이기 끄기(1-c). ScaleDownWeaponR 은 무기 메시 크기라 화면 몫(이름 짐작)
+PACK_CURVES = ('DisableLHandIK', 'DisableLegIK')    # 판정 몸에 닿는 곡선 = 손 붙이기 끄기(1-c) · 발 붙이기 장치 끄기(앞 대시, L-6-c-1 — ABP ShouldEnableControlRig 가 읽음, 원본 기준). ScaleDownWeaponR 은 무기 메시 크기라 화면 몫(이름 짐작)
 
 
 def fail(text):
