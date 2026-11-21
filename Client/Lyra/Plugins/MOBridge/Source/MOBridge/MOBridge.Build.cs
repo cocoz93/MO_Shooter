@@ -21,6 +21,8 @@ public class MOBridge : ModuleRules
 			"Engine",
 			"AnimationCore",	// two-bone IK for the simple anim hands (MOBSimpleAnimInstance)
 			"InputCore",
+			"EnhancedInput",	// reads the order of the action bindings — Lyra calls same-frame presses in that order (press order L-5-c)
+			"ApplicationCore",	// the key test sends its keys from my user's input device (IPlatformInputDeviceMapper) — Lyra filters input by platform user
 			"Chaos",
 			"PhysicsCore",
 			"Sockets",

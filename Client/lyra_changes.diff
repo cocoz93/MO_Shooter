@@ -59,6 +59,39 @@ index 41f11e3..31a43b9 100644
  	const FGameplayEffectSpec& Spec = ExecutionParams.GetOwningSpec();
  	FLyraGameplayEffectContext* TypedContext = FLyraGameplayEffectContext::ExtractEffectContext(Spec.GetContext());
  	check(TypedContext);
+diff --git a/Source/LyraGame/AbilitySystem/LyraAbilitySystemComponent.cpp b/Source/LyraGame/AbilitySystem/LyraAbilitySystemComponent.cpp
+index f27cef4..93305b9 100644
+--- a/Source/LyraGame/AbilitySystem/LyraAbilitySystemComponent.cpp	
++++ b/Source/LyraGame/AbilitySystem/LyraAbilitySystemComponent.cpp
+@@ -183,8 +183,14 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
+ 	}
+ }
+ 
++void (*ULyraAbilitySystemComponent::MOBInputTagPressedHook)(const ULyraAbilitySystemComponent& Self, const FGameplayTag& InputTag) = nullptr;
++
+ void ULyraAbilitySystemComponent::AbilityInputTagPressed(const FGameplayTag& InputTag)
+ {
++	if (MOBInputTagPressedHook)
++	{
++		MOBInputTagPressedHook(*this, InputTag);
++	}
+ 	if (InputTag.IsValid())
+ 	{
+ 		for (const FGameplayAbilitySpec& AbilitySpec : ActivatableAbilities.Items)
+diff --git a/Source/LyraGame/AbilitySystem/LyraAbilitySystemComponent.h b/Source/LyraGame/AbilitySystem/LyraAbilitySystemComponent.h
+index b3e8c78..6a00ca3 100644
+--- a/Source/LyraGame/AbilitySystem/LyraAbilitySystemComponent.h	
++++ b/Source/LyraGame/AbilitySystem/LyraAbilitySystemComponent.h
+@@ -47,6 +47,9 @@ public:
+ 	UE_API void AbilityInputTagPressed(const FGameplayTag& InputTag);
+ 	UE_API void AbilityInputTagReleased(const FGameplayTag& InputTag);
+ 
++	// MOBridge: called first in AbilityInputTagPressed so the bridge can read the press order of one frame. Null = original behavior.
++	UE_API static void (*MOBInputTagPressedHook)(const ULyraAbilitySystemComponent& Self, const FGameplayTag& InputTag);
++
+ 	UE_API void ProcessAbilityInput(float DeltaTime, bool bGamePaused);
+ 	UE_API void ClearAbilityInput();
+ 
 diff --git a/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h b/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h
 index fd082c0..ec3447d 100644
 --- a/Source/LyraGame/AbilitySystem/LyraGameplayEffectContext.h	

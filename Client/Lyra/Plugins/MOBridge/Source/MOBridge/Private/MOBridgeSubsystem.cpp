@@ -34,6 +34,10 @@
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "InputCoreTypes.h"
+#include "EnhancedInputComponent.h"
+#include "InputAction.h"
+#include "InputKeyEventArgs.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
@@ -183,6 +187,19 @@ namespace
 	{
 		return GBulletBridge && GBulletBridge->ComputeBulletDirection(StartTrace, AimDir, SpreadAngle, SpreadMultiplier, SpreadExponent, BulletIndex, OutDir);
 	}
+
+	// 누름 표식 갈고리(L-5-c) — Lyra 는 다리를 모른다. 사격 갈고리(GBulletBridge)는 -MOBAbilityOwnTimer 면 안 거므로 따로 둔다
+	UMOBridgeSubsystem* GPressBridge = nullptr;
+
+	void InputTagPressedHook(const ULyraAbilitySystemComponent& Self, const FGameplayTag& InputTag)
+	{
+		if (GPressBridge) GPressBridge->OnLyraInputTagPressed(Self, InputTag);
+	}
+
+	// wire::EPressKey 차례(근접 · 대시 · 수류탄 · 재장전)의 Lyra 입력 표식 · 묶음 이름 · 글자. 표식은 다리 다른 곳(자동 각본 · 상대 대조)과 같은 이름이다
+	const TCHAR* const kPressKeyTags[wire::kPressKeyCount] = { TEXT("InputTag.Ability.Melee"), TEXT("InputTag.Ability.Dash"), TEXT("InputTag.Weapon.Grenade"), TEXT("InputTag.Weapon.Reload") };
+	const TCHAR* const kPressKeyActions[wire::kPressKeyCount] = { TEXT("IA_Melee"), TEXT("IA_Ability_Dash"), TEXT("IA_Grenade"), TEXT("IA_Weapon_Reload") };
+	const TCHAR kPressKeyLetters[wire::kPressKeyCount] = { 'M', 'D', 'G', 'R' };
 
 	// 문지기 — 내 사격 능력은 다리가 켤 때만 켜진다. Lyra 입력은 누르고 있는 동안 프레임마다 켜 보는데(WhileInputActive) 그것을 여기서 막는다
 	bool AbilityGateHook(const ULyraGameplayAbility_RangedWeapon&, const FGameplayAbilityActorInfo*)
@@ -445,6 +462,8 @@ void UMOBridgeSubsystem::Deinitialize()
 		ULyraGameplayAbility_RangedWeapon::MOBBulletDirectionHook = nullptr;
 		ULyraGameplayAbility_RangedWeapon::MOBCanActivateHook = nullptr;
 		GBulletBridge = nullptr;
+		if (ULyraAbilitySystemComponent::MOBInputTagPressedHook == &InputTagPressedHook) ULyraAbilitySystemComponent::MOBInputTagPressedHook = nullptr;
+		GPressBridge = nullptr;
 		delete Core;
 		Core = nullptr;
 	}
@@ -516,6 +535,8 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bAutoDashOn = FParse::Param(Cmd, TEXT("MOBAutoDash"));
 	bBreakGrenadeBlock = FParse::Param(Cmd, TEXT("MOBBreakGrenadeBlock"));
 	bAutoGrenadeOn = FParse::Param(Cmd, TEXT("MOBAutoGrenade"));
+	FParse::Value(Cmd, TEXT("MOBBreakPressOrder="), BreakPressOrder);
+	bPressKeyTest = FParse::Param(Cmd, TEXT("MOBPressKeyTest"));
 	bBreakGrenadeVisual = FParse::Param(Cmd, TEXT("MOBBreakGrenadeVisual"));
 	FParse::Value(Cmd, TEXT("MOBRayBreak="), RayBreak);
 	bViewClamp = !FParse::Param(Cmd, TEXT("MOBNoViewClamp"));
@@ -567,12 +588,21 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 
 	PumpSocket();
 	if (bQuitting) return;
+	// 누름 차례(L-5-c) — 이 틱 앞(사람 키 입력 처리 · 지난 틱 자동 각본)에 Lyra 가 부른 표식을 이번 입력 몫으로 넘긴다. Lyra 도 그것을 이 프레임 능력 입력 처리에서 본다
+	FramePressKeys.Append(PendingPressKeys);
+	PendingPressKeys.Reset();
+	if (FramePressKeys.Num() > 64)
+	{
+		PressTagsDropped += FramePressKeys.Num() - 64;
+		FramePressKeys.RemoveAt(0, FramePressKeys.Num() - 64);
+	}
 	if (bAutoInput && !(bHumanCheck && TickHumanScript(T)))
 	{
 		if (bWeaponScript) TickWeaponScript(T);
 		else TickAutoInput(T);
 	}
 	TickInput(Now);
+	if (bPressKeyTest) TickPressKeyTest(T);	// 입력을 만든 뒤 — 넣은 키 사건은 다음 프레임 앞 입력 처리가 받는다(사람 키가 들어오는 자리)
 	TickAbilityFire();
 	TickAbilityMelee();
 	TickAbilityDash();
@@ -706,6 +736,9 @@ void UMOBridgeSubsystem::Connect()
 		ULyraGameplayAbility_RangedWeapon::MOBBulletDirectionHook = &BulletDirectionHook;
 		ULyraGameplayAbility_RangedWeapon::MOBCanActivateHook = &AbilityGateHook;
 	}
+	GPressBridge = this;
+	ULyraAbilitySystemComponent::MOBInputTagPressedHook = &InputTagPressedHook;
+	if (BreakPressOrder != 0) UE_LOG(LogMOB, Warning, TEXT("MOB_PRESS_BREAK mode=%d"), BreakPressOrder);
 
 	if (bServerAnim)
 	{
@@ -2015,6 +2048,13 @@ void UMOBridgeSubsystem::TickInput(double Now)
 			else if (CamBack > mo::kGrenadeCamBackMax) ++GrenadeCamBackAbove;
 		}
 		bGrenadeWasDown = bGrenadeDown;
+		// 같은 입력 누름 차례(L-5-c) — 근접 · 대시 · 수류탄 · 재장전 중 둘 이상이면 Lyra 가 그 누름 표식을 부른 차례로 싣는다(근접 판정 WillMeleeStart 도 이 차례를 본다).
+		// 부른 것은 이 입력 몫(FramePressKeys)으로 쓰고 비운다. 같은 프레임 두 번째 입력부터는 새 누름이 없다(키 가장자리는 첫 입력이 가져간다)
+		FString PressText;
+		In.pressOrder = MakeLyraPressOrder(In.buttons, PressText);
+		FramePressKeys.Reset();
+		const uint64 PressSpan = GFrameCounter - PressLastInputFrame;
+		PressLastInputFrame = GFrameCounter;
 
 		// 번호를 붙이고 여기서도 돌린다 — 서버 답을 기다리지 않고 바로 움직이려고
 		// 근접(E-3) — 이 입력이 근접을 켜면 넣기 전에 화면 판정을 해, 맞음이면 밀기를 같이 넣는다(봇과 같은 길, D75). Lyra 근접 능력은 TickAbilityMelee 가 켠다
@@ -2030,6 +2070,11 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		}
 		Seq = In.seq;
 		MeleeYaw = In.yaw;
+		if (!PressText.IsEmpty() && PressLinesLeft > 0)
+		{
+			--PressLinesLeft;
+			UE_LOG(LogMOB, Log, TEXT("MOB_PRESS_ORDER seq=%u frame=%llu span=%llu %s"), In.seq, (unsigned long long)GFrameCounter, (unsigned long long)PressSpan, *PressText);
+		}
 		if ((In.buttons & wire::BUTTON_GRENADE) != 0)
 		{
 			// 겉모습 수류탄이 보이기까지(G-5-b SpawnGrenadeVisual)를 재려고 단추를 실은 입력 번호 · 프레임을 둔다
@@ -3325,6 +3370,173 @@ void UMOBridgeSubsystem::CheckEngineRays(uint32 InSeq, uint32 Target, const ACha
 	}
 }
 
+// ─────────────────────────────────────────────────────────────
+// 같은 입력 누름 차례(L-5-c)
+
+void UMOBridgeSubsystem::OnLyraInputTagPressed(const ULyraAbilitySystemComponent& Self, const FGameplayTag& InputTag)
+{
+	const APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	if (!Pawn || FindASC(Pawn) != &Self) return;		// 남의 몸(상대 대조 · 기록 도구가 부르는 것)은 안 본다
+	static FGameplayTag Tags[wire::kPressKeyCount];
+	static bool bTagsReady = false;
+	if (!bTagsReady)
+	{
+		for (int32 K = 0; K < wire::kPressKeyCount; ++K) Tags[K] = FGameplayTag::RequestGameplayTag(FName(kPressKeyTags[K]), false);
+		bTagsReady = true;
+	}
+	for (uint8 K = 0; K < wire::kPressKeyCount; ++K)
+	{
+		if (Tags[K].IsValid() && InputTag == Tags[K])
+		{
+			PendingPressKeys.Add(K);
+			++PressTags;
+			return;
+		}
+	}
+}
+
+// 켜진 넷(근접 · 대시 · 수류탄 · 재장전)이 둘 이상이면 Lyra 가 부른 차례로 wire::MakePressOrder 값을 돌려준다(하나 이하면 0 — 서버가 안 본다).
+// 차례 = 이 입력 몫(FramePressKeys) 다음 이번 틱 몫(PendingPressKeys)에서 켜진 단추의 첫 부름 차례. Lyra 는 한 프레임 안 누름을 Enhanced Input 묶음 차례로 부른다
+// (EnhancedPlayerInput.cpp:739 — 누른 물리 차례가 아니다, 원본 기준). 켜졌는데 부름에 없는 단추(앞 프레임부터 누르고 있어 다시 안 부른 키)는 그 앞 프레임에 눌린 것이라 맨 앞에 둔다.
+// OutText = 기록 줄 몫(둘 이상일 때만)
+uint8 UMOBridgeSubsystem::MakeLyraPressOrder(uint8 Buttons, FString& OutText)
+{
+	int32 Count = 0;
+	for (uint8 K = 0; K < wire::kPressKeyCount; ++K)
+	{
+		if ((Buttons & wire::kPressKeyButtons[K]) != 0) ++Count;
+	}
+	if (Count < 2) return 0;
+	++PressMulti;
+	uint8 Listed[wire::kPressKeyCount];
+	int32 NumListed = 0;
+	uint8 Seen = 0;
+	for (const TArray<uint8>* List : { &FramePressKeys, &PendingPressKeys })
+	{
+		for (const uint8 K : *List)
+		{
+			if ((Buttons & wire::kPressKeyButtons[K]) == 0 || (Seen & (1u << K)) != 0) continue;
+			Seen = (uint8)(Seen | (1u << K));
+			Listed[NumListed++] = K;
+		}
+	}
+	uint8 Keys[wire::kPressKeyCount];
+	int32 N = 0;
+	for (uint8 K = 0; K < wire::kPressKeyCount; ++K)
+	{
+		if ((Buttons & wire::kPressKeyButtons[K]) != 0 && (Seen & (1u << K)) == 0) Keys[N++] = K;
+	}
+	const int32 Unlisted = N;
+	if (Unlisted > 0) ++PressUnlisted;
+	for (int32 I = 0; I < NumListed; ++I) Keys[N++] = Listed[I];
+	if (BreakPressOrder == 2)
+	{
+		for (int32 I = 0; I < N / 2; ++I) Swap(Keys[I], Keys[N - 1 - I]);
+	}
+	FString Order;
+	for (int32 I = 0; I < N; ++I)
+	{
+		if (I > 0) Order.AppendChar(TEXT('>'));
+		Order.AppendChar(kPressKeyLetters[Keys[I]]);
+	}
+	OutText = FString::Printf(TEXT("order=%s unlisted=%d tags=%d+%d"), *Order, Unlisted, FramePressKeys.Num(), PendingPressKeys.Num());
+	if (BreakPressOrder == 1) return 0;
+	++PressSent;
+	return wire::MakePressOrder(Keys, N);
+}
+
+// 내 몸 입력 칸의 Triggered 묶음 중 넷(근접 · 대시 · 수류탄 · 재장전)의 차례 — Lyra 가 같은 프레임 누름을 부르는 차례(키 시험 판정의 정답지)
+FString UMOBridgeSubsystem::ReadPressBindings() const
+{
+	const APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	const UEnhancedInputComponent* EIC = Pawn ? Cast<UEnhancedInputComponent>(Pawn->InputComponent) : nullptr;
+	if (!EIC) return TEXT("none");
+	FString Order;
+	uint8 Seen = 0;
+	for (const TUniquePtr<FEnhancedInputActionEventBinding>& Binding : EIC->GetActionEventBindings())
+	{
+		if (!Binding || Binding->GetTriggerEvent() != ETriggerEvent::Triggered || !Binding->GetAction()) continue;
+		const FString Name = Binding->GetAction()->GetName();
+		for (uint8 K = 0; K < wire::kPressKeyCount; ++K)
+		{
+			if (Name != kPressKeyActions[K] || (Seen & (1u << K)) != 0) continue;
+			Seen = (uint8)(Seen | (1u << K));
+			Order.AppendChar(kPressKeyLetters[K]);
+		}
+	}
+	return Order.IsEmpty() ? FString(TEXT("empty")) : Order;
+}
+
+// 키 시험(-MOBPressKeyTest) — 사람 키 길(키 사건 → Enhanced Input → Lyra 영웅 입력 → AbilityInputTagPressed 갈고리 → 이 다리)을 기계로 탄다.
+// 칸마다 3초(8초부터): 첫 키 누름 · 둘째 키는 같은 프레임(둘이 넣는 차례만 바꾼 짝 — 묶음 차례가 이기면 같은 차례가 나와야 한다) 또는 첫 키를 누른 채 3프레임 뒤 ·
+// 둘째 키 6프레임 뒤 둘 다 뗌. 키 = 다리가 읽는 사람 키(C 근접 · 왼 Shift 대시 · Q 수류탄 · R 재장전)
+void UMOBridgeSubsystem::TickPressKeyTest(double T)
+{
+	struct FCell
+	{
+		const TCHAR* Name;
+		const FKey* First;
+		const FKey* Second;
+		int32 Delay;
+	};
+	static const FCell Cells[] = {
+		{ TEXT("melee_dash"), &EKeys::C, &EKeys::LeftShift, 0 },
+		{ TEXT("dash_melee"), &EKeys::LeftShift, &EKeys::C, 0 },
+		{ TEXT("melee_q"), &EKeys::C, &EKeys::Q, 0 },
+		{ TEXT("q_melee"), &EKeys::Q, &EKeys::C, 0 },
+		{ TEXT("reload_q"), &EKeys::R, &EKeys::Q, 0 },
+		{ TEXT("q_reload"), &EKeys::Q, &EKeys::R, 0 },
+		{ TEXT("melee_hold_dash"), &EKeys::C, &EKeys::LeftShift, 3 },
+	};
+	constexpr double StartAt = 8.0, CellSeconds = 3.0;
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	if (!PC || !bHasSpawn || T < StartAt || bPressKeyDone) return;
+	const int32 Want = (int32)((T - StartAt) / CellSeconds);
+	if (Want != PressKeyCell)
+	{
+		if (PressKeyCell >= 0 && PressKeyPhase < 3) UE_LOG(LogMOB, Warning, TEXT("MOB_PRESSKEY_CUT cell=%d phase=%d"), PressKeyCell, PressKeyPhase);
+		if (Want >= (int32)UE_ARRAY_COUNT(Cells))
+		{
+			bPressKeyDone = true;
+			UE_LOG(LogMOB, Log, TEXT("MOB_PRESSKEY_DONE cells=%d"), (int32)UE_ARRAY_COUNT(Cells));
+			return;
+		}
+		PressKeyCell = Want;
+		PressKeyPhase = 0;
+		PressKeyFrame = GFrameCounter;
+	}
+	const FCell& C = Cells[PressKeyCell];
+	// 장치 = 내 사용자의 주 장치 — Lyra 는 bFilterInputByPlatformUser=True(DefaultInput.ini)라 장치 없음(INPUTDEVICEID_NONE)으로 넣으면 엔진이 남의 입력으로 보고 버린다(PlayerController.cpp:2412, 첫 판 l5c_keys 누름 표식 0)
+	const FInputDeviceId Device = IPlatformInputDeviceMapper::Get().GetPrimaryInputDeviceForUser(PC->GetPlatformUserId());
+	auto Send = [PC, Device](const FKey& Key, EInputEvent Event)
+	{
+		PC->InputKey(FInputKeyEventArgs::CreateSimulated(Key, Event, Event == IE_Pressed ? 1.f : 0.f, -1, Device));
+	};
+	const uint64 Age = GFrameCounter - PressKeyFrame;
+	if (PressKeyPhase == 0)
+	{
+		Send(*C.First, IE_Pressed);
+		if (C.Delay == 0) Send(*C.Second, IE_Pressed);
+		UE_LOG(LogMOB, Log, TEXT("MOB_PRESSKEY cell=%d name=%s frame=%llu delay=%d"), PressKeyCell, C.Name, (unsigned long long)GFrameCounter, C.Delay);
+		PressKeyPhase = C.Delay == 0 ? 2 : 1;
+	}
+	else if (PressKeyPhase == 1 && Age >= (uint64)C.Delay)
+	{
+		Send(*C.Second, IE_Pressed);
+		// 둘째 키를 넣은 프레임 — Lyra 는 다음 프레임에 부른다. 판정이 「그 입력이 그보다 앞 프레임부터 걸쳤나(누른 근접 부름이 먼저 드나)」를 이 값으로 가른다
+		UE_LOG(LogMOB, Log, TEXT("MOB_PRESSKEY_SECOND cell=%d frame=%llu"), PressKeyCell, (unsigned long long)GFrameCounter);
+		PressKeyPhase = 2;
+	}
+	else if (PressKeyPhase == 2 && Age >= (uint64)C.Delay + 6)
+	{
+		Send(*C.First, IE_Released);
+		Send(*C.Second, IE_Released);
+		PressKeyPhase = 3;
+	}
+}
+
 void UMOBridgeSubsystem::TickAutoInput(double T)
 {
 	APlayerController* PC = GetWorld()->GetFirstPlayerController();
@@ -4234,6 +4446,9 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 		UE_LOG(LogMOB, Log, TEXT("MOB_GRENADE4 cueRoutedMine=%lld cueRoutedOther=%lld cueNoTag=%lld cueInSet=%d cueLoaded=%d routeHooked=%d"),
 			GrenadeCueRoutedMine, GrenadeCueRoutedOther, GrenadeVisCueNoTag, CueInSet, CueLoaded, GrenadeCueRouteHandle.IsValid() ? 1 : 0);
 	}
+	// 같은 입력 누름 차례(L-5-c) — 둘 이상 누른 입력 · 차례를 실음 · 부름에 없던 단추가 있던 입력 · 받은 내 누름 표식 · 버린 표식 · 일부러 틀림 · Lyra 묶음 차례(키 넷의 Triggered 묶음)
+	UE_LOG(LogMOB, Log, TEXT("MOB_PRESS multi=%lld sent=%lld unlisted=%lld tags=%lld tagsDropped=%lld break=%d keyTestCells=%d bind=%s"),
+		PressMulti, PressSent, PressUnlisted, PressTags, PressTagsDropped, BreakPressOrder, bPressKeyTest ? PressKeyCell + 1 : 0, *ReadPressBindings());
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY4 remotes=%d remoteFail=%d frames=%lld underrun=%lld teleports=%lld driftMax=%.3f driftOver1cm=%lld yawDiffMax=%.3f lagAvg=%.1f behindTicksAvg=%.2f"),
 		RemoteSpawned, RemoteSpawnFail, RemoteFrames, RemoteUnderrun, RemoteTeleports, RemoteDriftMax, RemoteDriftOver1cm, RemoteYawDiffMax, RemoteFrames ? RemoteLagSum / RemoteFrames : 0.0, RemoteFrames ? RemoteBehindSum / RemoteFrames : 0.0);
 

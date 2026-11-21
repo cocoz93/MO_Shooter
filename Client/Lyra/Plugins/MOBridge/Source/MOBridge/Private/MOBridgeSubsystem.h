@@ -17,6 +17,8 @@ class UActorComponent;
 class UPrimitiveComponent;
 struct FMOBCore;
 struct FGameplayAbilityActorInfo;
+class ULyraAbilitySystemComponent;
+struct FGameplayTag;
 
 namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; struct Grenade; } struct Vec3; }
 
@@ -178,6 +180,8 @@ public:
 	bool ComputeBulletDirection(const FVector& StartTrace, const FVector& AimDir, float SpreadAngle, float SpreadMultiplier, float SpreadExponent, int32 BulletIndex, FVector& OutDir);
 	// 내 사격 능력의 문지기 — 다리가 켜는 중일 때만 연다(D53). 탄창이 비었으면 원래 검사로 넘긴다(빈총 동작)
 	bool AllowAbilityActivation();
+	// Lyra 가 누름 표식을 부를 때(AbilityInputTagPressed 첫머리 갈고리, L-5-c) — 내 몸 능력 시스템에 들어온 근접 · 대시 · 수류탄 · 재장전만 부른 차례로 쌓는다
+	void OnLyraInputTagPressed(const ULyraAbilitySystemComponent& Self, const FGameplayTag& InputTag);
 
 private:
 	void ParseCommandLine();
@@ -219,6 +223,9 @@ private:
 	void OnLyraAbilityActivated(class UGameplayAbility* Ability);	// 내 능력 시스템이 능력을 켤 때마다 — 수류탄 능력이면 Lyra 혼자 켠 것(LyraGrenadeSelf)
 	FMOBMeleeGuess JudgeMelee(mo::Vec3& OutPush);
 	void TickAutoInput(double T);
+	uint8 MakeLyraPressOrder(uint8 Buttons, FString& OutText);
+	void TickPressKeyTest(double T);
+	FString ReadPressBindings() const;
 	bool TickHumanScript(double T);		// -MOBHumanCheck 각본 — 이 프레임 입력을 맡았으면 true(끝났으면 false = 자동 입력으로)
 	void SampleHumanCheck(double T);	// 매 프레임 — 각본 재는 칸의 카메라 · 발 높이, 앉은 채 점프 차례, 근접 뒤 내 몽타주, 끝 점수판
 	void LogHumanCheck();				// 요약 — MOB_HC_* 줄
@@ -298,6 +305,8 @@ private:
 	bool bBreakGrenadeBlock = false;	// -MOBBreakGrenadeBlock — 일부러 틀림: Lyra 수류탄 능력의 입력 표식을 안 뗀다(Lyra 가 혼자 켜 lyraSelf 가 는다)
 	bool bBreakGrenadeVisual = false;	// -MOBBreakGrenadeVisual — 일부러 틀림: 겉모습 수류탄 블루프린트를 그대로 둔다(스스로 터져 localDetonate 가 는다)
 	bool bAutoGrenadeOn = false;	// -MOBAutoGrenade — 자동 입력에 수류탄을 더한다
+	int32 BreakPressOrder = 0;		// -MOBBreakPressOrder= — 일부러 틀림: 1 = 둘 이상 누른 입력에 0 을 싣는다(서버 unordered 가 는다) · 2 = 읽은 차례를 거꾸로 싣는다
+	bool bPressKeyTest = false;		// -MOBPressKeyTest — 사람 키 길 시험: 다리가 키 사건을 넣어 같은 프레임 두 누름 칸을 돈다(TickPressKeyTest)
 	bool bBreakCrouchBlock = false;	// -MOBBreakCrouchBlock — 일부러 틀림: 앉기 막기 갈고리가 어긋남을 세기만 하고 안 되돌린다. Lyra 가 혼자 앉으며 캡슐을 옮겨 내 캐릭터 밀림(selfDriftOver1cm)이 늘어야 한다(D-5-c)
 	bool bAbilityOwnTimer = false;	// -MOBAbilityOwnTimer — 내 사격 능력을 Lyra 자기 타이머 · 원본 난수로 둔다(고치기 전 동작과 견줄 때만, D53)
 	bool bRayCheck = false;			// -MOBRayCheck — 같은 자세에 엔진 광선과 TraceBody 를 쏴 견준다(5단계)
@@ -596,6 +605,19 @@ private:
 	// 실은 camBack(cm) 범위 · 서버가 자르는 범위(mo::kGrenadeCamBackMin ~ Max — 아래 끝 원본 기준 · 위 끝 G-0 20칸) 아래 · 위였던 누름
 	double GrenadeCamBackMin = 1e9, GrenadeCamBackMax = -1e9;
 	int64 GrenadeCamBackBelow = 0, GrenadeCamBackAbove = 0;
+	// 같은 입력 누름 차례(L-5-c) — Lyra 가 부른 내 누름 표식(wire::EPressKey 번호). FramePressKeys = 지난 입력 뒤 틱 첫머리까지 쌓인 것(사람 키는 프레임 앞
+	// 입력 처리에서 부른다) · PendingPressKeys = 이번 틱 안에 들어온 것(자동 각본 TickAutoInput 이 틱 안에서 부른다 — 다음 틱 첫머리에 Frame 으로 넘긴다)
+	TArray<uint8> FramePressKeys, PendingPressKeys;
+	// 넷 중 둘 이상 누른 입력 · 그중 차례를 실은 입력 · 켜진 단추가 부름에 없던 입력(앞 프레임부터 누르고 있던 키 — 맨 앞에 둔다) · 받은 내 누름 표식 · 버린 표식(64 넘게 쌓임)
+	int64 PressMulti = 0, PressSent = 0, PressUnlisted = 0, PressTags = 0, PressTagsDropped = 0;
+	int32 PressLinesLeft = 40;
+	// 지난 입력을 만든 프레임 — 이 입력이 걸친 프레임 수(span)를 기록 줄에 적는다. 입력(60Hz)보다 프레임이 잦으면 한 입력이 두 프레임 넘게 걸치고,
+	// 누르고 있는 키(근접 — 프레임마다 부름)는 앞 프레임 부름이 먼저 든다(키 시험 누른 채 대시 칸 — 걸친 프레임이 대시를 부른 프레임 앞부터면 M>D(l5c_keys5) · 그 프레임부터면 D>M(l5c_keys4))
+	uint64 PressLastInputFrame = 0;
+	// 키 시험 — 지금 칸 번호(-1 = 시작 전) · 칸 첫 프레임 · 칸 안 단계(0 누름 · 1 둘째 키 기다림 · 2 뗌 기다림 · 3 끝) · 다 돌았나
+	int32 PressKeyCell = -1, PressKeyPhase = 0;
+	uint64 PressKeyFrame = 0;
+	bool bPressKeyDone = false;
 	int32 GrenadePressLinesLeft = 40;	// 누름 하나씩 줄(MOB_GRENADE_PRESS) 남은 수
 	int64 GrenadeCancelLeft = 0;		// 끊은 뒤에도 켜져 있는 끊기 대상 능력(0 이어야 한다 — CancelAbilities 가 정말 껐나)
 	int64 GrenadeBadKind = 0;		// 모르는 종류의 수류탄 소식 — 0 이어야 한다
