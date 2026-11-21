@@ -297,6 +297,7 @@ namespace mo
 		uint64_t _plantBundleMisses = 0;
 		int _stackOverflows = 0;
 		bool _sourceFrozen = false;		// 앞 갱신에 통째 자리 몽타주가 몸을 다 덮어 걸음 쪽을 안 넘겼다
+		bool _reinitIdle = false;		// 걸음 쪽을 다시 초기화한 뒤 아직 서기 상태 — 걸음 목표를 서기 클립만으로(L-6-b-2)
 
 		// 몽타주 · 쏜 뒤 덮기(9단계 3-b)
 		MontageInstance _montages[kAnimMontageMax];

@@ -825,6 +825,7 @@ namespace mo
 		_beforePivot = false;
 		_followClip = -1;
 		_sourceFrozen = false;
+		_reinitIdle = false;
 		// 판 시작 = 새 몸 — 몽타주 없음 · 아직 안 쏨(제 판단. Lyra 의 새 폰은 쏜 뒤 시간이 0 에서 셀 수 있는데 기록에서 보지 않았다 — 미확인)
 		_montageCount = 0;
 		_poseMontageCount = 0;
@@ -1301,6 +1302,8 @@ namespace mo
 		const bool reinit = !frozen && _sourceFrozen;
 		_sourceFrozen = frozen;
 		if (reinit) ReinitLocomotion();
+		if (reinit) _reinitIdle = true;
+		else if (_moveState != EMoveState::Idle) _reinitIdle = false;		// 앞 갱신 전환이 서기를 떠났으면 속도 비중으로 돌아간다
 
 		float targets[kAnimWalkClips] = {};
 		const float moveAlpha = Clamp(speed / kMoveFullSpeed, 0.f, 1.f);
@@ -1321,6 +1324,13 @@ namespace mo
 				targets[side] = (1.f - (value - 90.f) / 90.f) * moveAlpha;
 				targets[kClipBwd] = ((value - 90.f) / 90.f) * moveAlpha;
 			}
+		}
+		// 다시 초기화한 서기 상태는 서기 클립만 — 다시 초기화하면 Lyra 는 서기로 가서 서기 클립만 돈다. 기록: 대시가 몸을 다 덮었다 풀린 첫 프레임부터
+		// 진짜 Lyra 재생기는 서기(MF_Rifle_Idle_Hipfire) 하나다(속도 278 → 0 인 동안 · animcmp_dash_rifle_probe.csv players 판 0 177~, 실측) — 속도로 낸 목표는 앞 클립 0.99 를 남겼다.
+		// 서기 상태면 늘 서기만으로 하지는 않는다 — 다시 초기화 없이 서기인 줄은 Lyra 도 움직이는 줄이 있다(권총 기록들 368줄, L-6-b-2 idlescan.py)
+		if (_reinitIdle)
+		{
+			for (int i = 0; i < kAnimWalkClips; ++i) targets[i] = i == kClipIdle ? 1.f : 0.f;
 		}
 
 		const float follow = 1.f - std::exp(-deltaSeconds / kBlendSeconds);
