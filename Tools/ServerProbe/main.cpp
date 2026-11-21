@@ -1209,6 +1209,8 @@ namespace
 
 		// ⑥-1 수류탄 카메라 거리(L-3-c) — 선 시작 = 입력 시작점 + 시선 × (450 − camBack), 선 시작에서 45 안에 맞으면 조종 회전 그대로(Grenade.cpp ComputeGrenadeThrow).
 		// 바닥까지 471 이면 17.25 → 38.25(조종) · 30 → 51(맞은 곳 바라봄 — 대조군), 515 면 −40 → 25(조종) · 0 으로 잘리면 65. 아래 끝이 30 이면 첫째 · 셋째가, 0 이면 셋째만 갈린다.
+		// 위 끝 두 칸(L-12-a) — 입력 시작점을 바닥 위 aimHeight 로 내려 바닥까지를 짧게 한다(피치 = −asin(높이 ÷ 바닥까지)). 478.9(앉기 첫 프레임 Lyra 값 안) · 바닥까지 50 →
+		// 78.9(바라봄), 옛 끝 417.3 으로 잘리면 17.3(조종) / 600 · 바닥까지 8 → 479 로 잘려 37(조종), 안 자르면 158(바라봄). 위 끝이 작으면 넷째가, 없으면 다섯째가 갈린다.
 		// 조종 회전이면 던짐 소식 회전 = 입력 회전(Room.cpp ThrowGrenade → SendGrenadeEvent). 던짐 소식을 받으면 C 를 먼 자리로 옮겨 폭발을 피하고,
 		// 다음 던짐까지 쿨다운(301 입력)을 C 입력으로 채운다 — 경기 끝 단계(10초)엔 세 번을 못 기다려 경기 중에 던진다
 		if (!found || !foundFar)
@@ -1217,8 +1219,8 @@ namespace
 		}
 		else
 		{
-			struct CamCase { float camBack; double floorAt; bool control; };
-			const CamCase cases[] = { { 17.25f, 471.0, true }, { 30.f, 471.0, false }, { -40.f, 515.0, true } };
+			struct CamCase { float camBack; double floorAt; bool control; double aimHeight = 0.0; };	// aimHeight 0 = 입력 시작점이 눈(eyeC)
+			const CamCase cases[] = { { 17.25f, 471.0, true }, { 30.f, 471.0, false }, { -40.f, 515.0, true }, { 478.9f, 50.0, false, 43.3 }, { 600.f, 8.0, true, 6.93 } };
 			const auto angleDiff = [](double x, double y) { return std::fmod(x - y + 540.0, 360.0) - 180.0; };
 			const Vec3 eyeC = spotC + Vec3(0, 0, 60);
 			const Vec3 eyeFar = spotFar + Vec3(0, 0, 60);
@@ -1227,7 +1229,9 @@ namespace
 			for (const CamCase& cc : cases)
 			{
 				// 피치는 눈높이로 정하고, 요는 16 방향 중 눈에서 그 시선으로 무기 채널 맞은 거리가 floorAt ± 4 인 첫 방향(45 까지 여유 2.75 이상)
-				const float pitch = floorFound ? (float)(-std::asin(down.distance / cc.floorAt) * 180.0 / kPi) : 0.f;
+				const Vec3 aimAt = cc.aimHeight > 0.0 ? Vec3(eyeC.x, eyeC.y, eyeC.z - down.distance + cc.aimHeight) : eyeC;
+				const double height = cc.aimHeight > 0.0 ? cc.aimHeight : down.distance;
+				const float pitch = floorFound ? (float)(-std::asin(height / cc.floorAt) * 180.0 / kPi) : 0.f;
 				float yaw = 0.f;
 				double seen = 0.0;
 				bool aimed = false;
@@ -1235,7 +1239,7 @@ namespace
 				{
 					const float tryYaw = (float)(d * 22.5);
 					RayHit ray;
-					if (!map.Raycast(eyeC, eyeC + AimDirection(tryYaw, pitch) * kGrenadeTraceRange, MAP_BLOCK_WEAPON, ray)) continue;
+					if (!map.Raycast(aimAt, aimAt + AimDirection(tryYaw, pitch) * kGrenadeTraceRange, MAP_BLOCK_WEAPON, ray)) continue;
 					if (std::fabs(ray.distance - cc.floorAt) > 4.0) continue;
 					yaw = tryYaw;
 					seen = ray.distance;
@@ -1264,7 +1268,7 @@ namespace
 					input.seq = ++c.seq;
 					input.yaw = yaw;
 					input.pitch = pitch;
-					input.aimX = (float)eyeC.x; input.aimY = (float)eyeC.y; input.aimZ = (float)eyeC.z;
+					input.aimX = (float)aimAt.x; input.aimY = (float)aimAt.y; input.aimZ = (float)aimAt.z;
 					input.camBack = cc.camBack;
 					if (i == 0)
 					{
@@ -1282,8 +1286,11 @@ namespace
 					cc.camBack, seen, cc.floorAt, yaw, pitch, thrown ? 1 : 0, thrown ? thrown->seq : 0, throwSeq, pitchDiff, yawDiff);
 				const bool control = thrown && std::fabs(pitchDiff) < 0.01 && std::fabs(yawDiff) < 0.01;
 				const bool lookAt = thrown && std::fabs(pitchDiff) > 0.5;
+				const bool overMax = cc.camBack > kGrenadeCamBackMax;
+				const bool nearMax = !overMax && cc.aimHeight > 0.0;
 				Expect(thrown && thrown->seq == throwSeq && (cc.control ? control : lookAt), fails,
-					cc.control ? "수류탄 카메라 거리 — 선 시작에서 45 안 → 조종 회전(자르지 않음)" : "수류탄 카메라 거리 — 45 밖 → 맞은 곳 바라봄(대조군)");
+					cc.control ? (overMax ? "수류탄 카메라 거리 — 위 끝으로 잘려 선 시작에서 45 안 → 조종 회전" : "수류탄 카메라 거리 — 선 시작에서 45 안 → 조종 회전(자르지 않음)")
+						: (nearMax ? "수류탄 카메라 거리 — 위 끝 안이라 안 잘려 45 밖 → 맞은 곳 바라봄" : "수류탄 카메라 거리 — 45 밖 → 맞은 곳 바라봄(대조군)"));
 				RunTicks(clients, 3, 310, [&](int) { SendAim(c, eyeFar, eyeFar + Vec3(100, 0, 0), 0, 0, 0, 0); }, [] { return false; });	// 쿨다운 301 입력 + 여유
 			}
 		}

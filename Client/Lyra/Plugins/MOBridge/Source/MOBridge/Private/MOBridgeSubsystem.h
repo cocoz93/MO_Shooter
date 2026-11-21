@@ -613,7 +613,7 @@ private:
 	// 던짐에 끊은 Lyra 능력(그중 재장전) · 받은 서버 던짐 소식(내 것 · 남의 것) · 터짐 소식 · 상태 패킷
 	int64 InputsGrenade = 0, GrenadePressPost = 0, GrenadeQueued = 0, GrenadeDriven = 0, GrenadeDropped = 0, GrenadeMontageFail = 0, GrenadeNoSpec = 0, LyraGrenadeSelf = 0, LyraGrenadeStripped = 0;
 	int64 GrenadeCancelled = 0, GrenadeCancelledReload = 0, GrenadeMine = 0, GrenadeOthers = 0, GrenadeBooms = 0, GrenadeStatePackets = 0;
-	// 실은 camBack(cm) 범위 · 서버가 자르는 범위(mo::kGrenadeCamBackMin ~ Max — 아래 끝 원본 기준 · 위 끝 G-0 20칸) 아래 · 위였던 누름
+	// 실은 camBack(cm) 범위 · 서버가 자르는 범위(mo::kGrenadeCamBackMin ~ Max — 아래 끝 원본 기준 · 위 끝 L-12-a 기록 + 원본) 아래 · 위였던 누름
 	double GrenadeCamBackMin = 1e9, GrenadeCamBackMax = -1e9;
 	int64 GrenadeCamBackBelow = 0, GrenadeCamBackAbove = 0;
 	// 같은 입력 누름 차례(L-5-c) — Lyra 가 부른 내 누름 표식(wire::EPressKey 번호). FramePressKeys = 지난 입력 뒤 틱 첫머리까지 쌓인 것(사람 키는 프레임 앞

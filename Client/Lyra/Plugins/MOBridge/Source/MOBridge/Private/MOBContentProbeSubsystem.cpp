@@ -363,7 +363,8 @@ namespace
 	// G-0-c 섞어 누름(묶음 13~16) — Spam = 칸 안 GREN_PRESS_AT ~ GREN_SPAM_UNTIL 동안 매 프레임 Q(떼지 않음) · QFire / FireQ = 한 프레임에 Q 와 사격 탭(앞이 먼저 누름) ·
 	// ReloadQ · DashQ · MeleeQ = 그 능력을 누르고, 켜진 뒤 GrenComboSpec 의 QAfter 프레임에 Q
 	// L-1-c(미결 5 · 22) — …Same = 한 프레임 안에 두 누름(이름 차례 = 누르는 차례, 켜진 뒤 기다림 없음)
-	enum class EGrenCombo : uint8 { None, Spam, QFire, FireQ, ReloadQ, DashQ, MeleeQ, MeleeQSame, QMeleeSame, ReloadQSame, QReloadSame };
+	enum class EGrenCombo : uint8 { None, Spam, QFire, FireQ, ReloadQ, DashQ, MeleeQ, MeleeQSame, QMeleeSame, ReloadQSame, QReloadSame, CrouchQ };
+	// CrouchQ(L-12-a) = 앉기 키(ToggleCrouch) 뒤 칸 Arg 프레임에 Q — 앉기 시작 때 camBack 을 본다
 	// G-0-c2(묶음 17 · 짐작 7) — Drop = 첫 수류탄이 멈추면 둘째를 던져 첫 수류탄 바로 위로 옮기고 아래로 · Walk = 멈춘 수류탄 뒤로 나를 옮겨 그 위로 걷기 ·
 	// WalkBare = 수류탄 없이 Walk 와 같은 자리 · 같은 걷기(대조군 — 같은 인덱스 내 자리 차가 수류탄 탓)
 	enum class EGrenTouch : uint8 { None, Drop, Walk, WalkBare };
@@ -477,6 +478,17 @@ namespace
 		{ TEXT("s_q_melee"),        EGrenPlace::FoeAt,       45.f,  150.f, false, false, 0.f,  0.f,  -1, -1, EGrenCombo::QMeleeSame },	// 81
 		{ TEXT("s_reload_q"),       EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::ReloadQSame },	// 82
 		{ TEXT("s_q_reload"),       EGrenPlace::Open,        0.f,   0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::QReloadSame },	// 83
+		// L-12-a(미결 25 의 남은 몫 · camBack 위 끝) — 집에서 feet_m60 보다 더 아래로. Lyra 기본 피치 범위 ±89(LyraPlayerCameraManager.h:15-16, 원본 기준)
+		{ TEXT("feet_m75"),          EGrenPlace::Open,        -75.f, 0.f,   false, false },	// 84
+		{ TEXT("feet_m89"),          EGrenPlace::Open,        -89.f, 0.f,   false, false },	// 85
+		// 앉기 시작 — 앉은 몸은 그 프레임에 25 내려가고(캡슐 반높이 90 → 65) 카메라 기준점은 그대로, 앉기 덧셈은 섞여 내려온다
+		// (LyraCameraMode.cpp:103-105 · LyraCameraMode_ThirdPerson.cpp:38-40 · 82-84 · 360-370, 원본 기준) → 섞이는 동안 camBack 이 서기보다 클 수 있다. Arg = 앉기 키 뒤 Q 프레임
+		{ TEXT("feet_m89_cq0"),    EGrenPlace::Open,        -89.f, 0.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::CrouchQ },	// 86
+		{ TEXT("feet_m89_cq1"),    EGrenPlace::Open,        -89.f, 1.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::CrouchQ },	// 87
+		{ TEXT("feet_m89_cq2"),    EGrenPlace::Open,        -89.f, 2.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::CrouchQ },	// 88
+		{ TEXT("feet_m89_cq3"),    EGrenPlace::Open,        -89.f, 3.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::CrouchQ },	// 89
+		{ TEXT("feet_m89_cq5"),    EGrenPlace::Open,        -89.f, 5.f,   false, false, 0.f,  0.f,  -1, -1, EGrenCombo::CrouchQ },	// 90
+		{ TEXT("feet_m89_crouched"), EGrenPlace::Open,        -89.f, 0.f,   false, false },	// 91 다 앉은 채(앞 칸 crouch 가 앉힘 — G-0 crouch_p0 와 같은 길)
 	};
 	// L-1-a 옮겨 놓을 자리 · 속도 — 값은 Shared 탄체 걸음으로 골랐다(리포 밖 C:\tmp\mob\lm\l1a\search — 집 수평 던짐 회전 1.1957 · 1.5889 · 0 의 캡슐로
 	// 면까지 틈을 재고, 소수 여섯째 자리로 자른 값 그대로 걸어 그 갈래가 나고 이웃 값에서도 나는 자리). 정답지는 이 값의 Lyra 기록이다.
@@ -762,6 +774,27 @@ namespace
 	};
 	// L-2-c 가까운 상대 메시 몸 각본(-MOBCPGrenSet=l2c) — G-0 각본 foe_close(자리 18)만 여섯 번. 칸마다 BeginGrenade 가 두 체력을 1000 으로 되돌린다.
 	// 상대 서기 자세는 칸마다 애니 시각이 달라 맞은 점이 판마다 다르다(옛 기록 16판 최대 약 8cm) — 여섯 번이 서로 다른 자세 여섯
+	// L-12-a camBack 위 끝 각본(-MOBCPGrenSet=l12a) — 칸 길이 · 누름 시각은 G-0 던짐 칸과 같다. feet_m60 은 G-0 값(417.3)과 견줄 대조 칸 · 앉기 시작 칸 뒤엔 세움(stand)
+	const FStep GRENADE_L12A_SCRIPT[] = {
+		{ TEXT("settle"),     1.0f, EAct::Home,      0.f,  false },
+		{ TEXT("foe_setup"),  0.5f, EAct::FoeSetup,  0.f,  false },	// G-0 각본과 같은 차례(숨긴 채)
+		{ TEXT("feet_m60"),   5.1f, EAct::GrenThrow, 5.f,  false },
+		{ TEXT("feet_m75"),   5.1f, EAct::GrenThrow, 84.f, false },
+		{ TEXT("feet_m89"),   5.1f, EAct::GrenThrow, 85.f, false },
+		{ TEXT("feet_m89_cq0"), 5.1f, EAct::GrenThrow, 86.f, false },
+		{ TEXT("stand"),      0.8f, EAct::StandUp,   0.f,  false },
+		{ TEXT("feet_m89_cq1"), 5.1f, EAct::GrenThrow, 87.f, false },
+		{ TEXT("stand"),      0.8f, EAct::StandUp,   0.f,  false },
+		{ TEXT("feet_m89_cq2"), 5.1f, EAct::GrenThrow, 88.f, false },
+		{ TEXT("stand"),      0.8f, EAct::StandUp,   0.f,  false },
+		{ TEXT("feet_m89_cq3"), 5.1f, EAct::GrenThrow, 89.f, false },
+		{ TEXT("stand"),      0.8f, EAct::StandUp,   0.f,  false },
+		{ TEXT("feet_m89_cq5"), 5.1f, EAct::GrenThrow, 90.f, false },
+		{ TEXT("stand"),      0.8f, EAct::StandUp,   0.f,  false },
+		{ TEXT("crouch"),     0.8f, EAct::CrouchToggle, 0.f, false },
+		{ TEXT("feet_m89_crouched"), 5.1f, EAct::GrenThrow, 91.f, false },
+		{ TEXT("stand"),      0.8f, EAct::StandUp,   0.f,  false },
+	};
 	const FStep GRENADE_L2C_SCRIPT[] = {
 		{ TEXT("settle"),     1.0f, EAct::Home,      0.f,  false },
 		{ TEXT("foe_show"),   0.3f, EAct::FoeShow,   0.f,  false },
@@ -816,6 +849,7 @@ namespace
 		case EGrenCombo::QMeleeSame:  return { TEXT("InputTag.Ability.Melee"), TEXT("GA_Melee"),          -1 };
 		case EGrenCombo::ReloadQSame:
 		case EGrenCombo::QReloadSame: return { TEXT("InputTag.Weapon.Reload"), TEXT("GA_Weapon_Reload_"), -1 };
+		case EGrenCombo::CrouchQ:
 		case EGrenCombo::None:    break;
 		}
 		return { nullptr, nullptr, -1 };
@@ -834,6 +868,7 @@ namespace
 		case EGrenCombo::QMeleeSame:  return TEXT("q_melee_same");
 		case EGrenCombo::ReloadQSame: return TEXT("reload_q_same");
 		case EGrenCombo::QReloadSame: return TEXT("q_reload_same");
+		case EGrenCombo::CrouchQ:     return TEXT("crouch_q");
 		case EGrenCombo::None:    break;
 		}
 		return TEXT("none");
@@ -917,7 +952,7 @@ namespace
 	constexpr float MELEE_SIDE_FORWARD = 250.f;	// 옆 거리 칸에서 상대를 세우는 앞 거리 — 맞는 앞 범위(150~520, gym1) 한가운데쯤
 	constexpr float WATCH_LOG_EVERY = 5.f;		// 다리 판 마지막 칸에서 점수를 적는 간격(초)
 
-	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장) · 6 = 수류탄(연습장) · 7 = 수류탄 L-1-a 장면(연습장) · 8 = 수류탄 L-1-b 장면(L_Expanse) · 9 = 대시 L-1-c 같은 프레임 누름(연습장) · 10 = 수류탄 L-1-c 같은 프레임 누름(연습장) · 11 = 수류탄 L-1-d 상대가 던진 뒤 나감(연습장) · 12 = 수류탄 L-2-c 가까운 상대 메시 몸(연습장)
+	// 판 번호 0 = 연습 · 1 = 받침 · 2 = 다리 · 3 = 부딪힘(연습장) · 4 = 무기 받침 · 5 = 대시(연습장) · 6 = 수류탄(연습장) · 7 = 수류탄 L-1-a 장면(연습장) · 8 = 수류탄 L-1-b 장면(L_Expanse) · 9 = 대시 L-1-c 같은 프레임 누름(연습장) · 10 = 수류탄 L-1-c 같은 프레임 누름(연습장) · 11 = 수류탄 L-1-d 상대가 던진 뒤 나감(연습장) · 12 = 수류탄 L-2-c 가까운 상대 메시 몸(연습장) · 13 = 수류탄 L-3-d 상대가 던진 뒤 나가고 내 몸에 닿음(연습장) · 14 = 수류탄 L-12-a camBack 위 끝(연습장)
 	const FStep& StepAt(int32 Script, int32 I)
 	{
 		switch (Script)
@@ -935,6 +970,7 @@ namespace
 		case 11: return GRENADE_L1D_SCRIPT[I];
 		case 12: return GRENADE_L2C_SCRIPT[I];
 		case 13: return GRENADE_L3D_SCRIPT[I];
+		case 14: return GRENADE_L12A_SCRIPT[I];
 		default: return GYM_SCRIPT[I];
 		}
 	}
@@ -955,6 +991,7 @@ namespace
 		case 11: return UE_ARRAY_COUNT(GRENADE_L1D_SCRIPT);
 		case 12: return UE_ARRAY_COUNT(GRENADE_L2C_SCRIPT);
 		case 13: return UE_ARRAY_COUNT(GRENADE_L3D_SCRIPT);
+		case 14: return UE_ARRAY_COUNT(GRENADE_L12A_SCRIPT);
 		default: return UE_ARRAY_COUNT(GYM_SCRIPT);
 		}
 	}
@@ -1071,6 +1108,8 @@ void UMOBContentProbeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	if (bGrenL2C) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l2c steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L2C_SCRIPT));
 	bGrenL3D = bGrenade && GrenSet == TEXT("l3d");
 	if (bGrenL3D) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l3d steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L3D_SCRIPT));
+	bGrenL12A = bGrenade && GrenSet == TEXT("l12a");
+	if (bGrenL12A) UE_LOG(LogMOBCProbe, Log, TEXT("MOB_CPROBE_GRENSET set=l12a steps=%d"), (int32)UE_ARRAY_COUNT(GRENADE_L12A_SCRIPT));
 	FString DashSet;
 	FParse::Value(Cmd, TEXT("MOBCPDashSet="), DashSet);
 	bDashL1C = bDash && DashSet == TEXT("l1c");
@@ -4103,6 +4142,21 @@ void UMOBContentProbeSubsystem::DuringGrenCombo()
 			PressTag(GREN_TAG, false);
 			FrameEvents += TEXT("g_release;");
 			PressOther(false);
+		}
+		break;
+	case EGrenCombo::CrouchQ:
+		// L-12-a — 앉기 키는 능력이 아니라 영웅 컴포넌트가 부르는 함수(EAct::CrouchToggle 과 같은 길). 몸이 앉는 것은 다음 프레임 이동
+		if (ComboOtherPress < 0 && StepTime >= GREN_PRESS_AT)
+		{
+			if (ALyraCharacter* L = Cast<ALyraCharacter>(Me())) L->ToggleCrouch();
+			ComboOtherPress = Frame;
+			FrameEvents += TEXT("crouch_toggle;");
+		}
+		if (GrenPressFrame < 0 && ComboOtherPress >= 0 && Frame >= ComboOtherPress + (int32)G.Arg) PressQ();
+		else if (GrenPressFrame >= 0 && Frame == GrenPressFrame + 1)
+		{
+			PressTag(GREN_TAG, false);
+			FrameEvents += TEXT("g_release;");
 		}
 		break;
 	case EGrenCombo::ReloadQ:

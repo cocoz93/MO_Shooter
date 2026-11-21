@@ -67,9 +67,13 @@ namespace mo
 	// (content-impl-progress.md G-0 「camBack」 줄). 봇은 대표값으로 서서 피치 0 을 싣는다
 	// 아래 끝(L-3-c) — Lyra 카메라는 벽에 다 밀리면 몸 캡슐 안 점까지 온다(LyraCameraMode_ThirdPerson.cpp:137-150 · 348). 값 = (몸 − 카메라)·시선이라
 	// 그때 −캡슐 반높이(서 있는 90, Movement.h capsuleHalfHeight)보다 작을 수 없다(원본 기준 — 음수는 관측 안 함. 다리 실측 최소 17.25 · 27.14 가 옛 끝 30 아래였다).
-	// 위 끝은 G-0 실측 그대로(피치 −60 보다 아래를 본 기록은 없다)
+	// 위 끝(L-12-a) — Lyra 기록 l12a2(집 · 60fps) 서서 피치 −60 417.26(G-0 과 같음) · −75 439.76 · −89 453.95(피치 끝 ±89 — LyraPlayerCameraManager.cpp:23-24) ·
+	// 앉기 키 뒤 첫 프레임 474.90 · 다음 471.24 · 467.88 · 다 앉음 431.00. 앉으면 몸은 그 프레임에 25 내려가고 카메라 높이는 그 프레임 그대로, 다음 프레임부터
+	// 4.0 · 3.7 · 3.4 … 씩 줄며 내려온다(기록). 섞는 걸음이 프레임 시간에 비례하면(원본 앉기 덧셈 섞기 LyraCameraMode_ThirdPerson.cpp:364 가 그렇다) 프레임이 짧을수록
+	// 첫 프레임 값이 서서 −89 + 25 × sin 89° = 478.94 로 다가가고, 프레임 수에 따르면 474.90 이 끝이다 — 기록의 걸음 꼴은 그 식만으로 안 나와 둘을 못 가렸다.
+	// 위 끝 = 큰 쪽을 올림(60fps 보다 빠른 판은 안 찍음). 공중에선 앉기 키가 안 먹는다(LyraCharacter.cpp:434 — 땅에서만 Crouch)
 	inline constexpr double kGrenadeCamBackMin = -90.0;
-	inline constexpr double kGrenadeCamBackMax = 417.3;
+	inline constexpr double kGrenadeCamBackMax = 479.0;
 	inline constexpr double kGrenadeCamBackStanding = 283.98;
 	// 와이어 값을 범위로 자른다. 유한 값만 넘길 것 — 서버는 NaN · 무한 입력을 통째로 버린다(Room.cpp IsFiniteInput)
 	inline double ClampGrenadeCamBack(float camBack)
