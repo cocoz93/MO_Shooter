@@ -791,11 +791,13 @@ namespace mo
 		ApplyRecovery(input, outLocal);
 		// 차례 = Lyra ABP_Mannequin_Base AnimGraph 핀 연결(D72 — C:\tmp\mob\e2\graph_chain.py 로 따라감, 원본 기준):
 		//   윗몸 섞기(LayeredBoneBlend_2) → 사격 덧붙임(FullBodyAdditivePreAim) → 조준 층(FullBody_Aiming) → 맞은 쪽 반응(AdditiveHitReact)
-		//   → 덧붙임 층(FullBodyAdditives, 안 옮김) → 통째(FullBody) → 손 · 발 뒤처리. 쏜 뒤 덮기는 Lyra 그래프에 없는 이 파일 몫이라(D45) 자리를 D50 대로 둔다(사격 덧붙임 뒤 · 조준 앞)
+		//   → 덧붙임 층(FullBodyAdditives, 안 옮김) → 통째(FullBody) → 손 · 발 뒤처리. 쏜 뒤 덮기는 Lyra 그래프에 없는 이 파일 몫이라(D45) 끼움 자리 앞(착지 충격 바로 뒤)에 둔다 —
+		//   던짐 · 재장전 몽타주의 윗몸이 덮기 위에 온다. Lyra 는 쏜 뒤 덮기 비중이 1 인 프레임에도 던짐 자세 그대로다(미결 24 · L-6-a — G-4-b 기록 쏘기 0.1초 뒤 던짐에서
+		//   두 손 사이 Lyra 67.2cm · 옛 자리 33.0cm). 옛 자리(D50 — 사격 덧붙임 뒤 · 조준 앞)는 시험 깃발 kPoseTestOverrideLate
 		// 옛 차례(D50 — 통째 → 사격 덧붙임 → 윗몸 → 윗몸 덧붙임, 자리마다 뼈별 섞기)는 시험 깃발 kPoseTestD50Order. 시험 깃발은 후보 판을 다시 만들 때만
 		const bool d50 = (_poseTest & kPoseTestD50Order) != 0;
 		const bool overrideOn = (_poseTest & kPoseTestNoOverride) == 0;
-		const bool overrideEarly = (_poseTest & kPoseTestOverrideEarly) != 0;
+		const bool overrideLate = (_poseTest & kPoseTestOverrideLate) != 0;
 		const bool upperAfterAim = d50 && (_poseTest & kPoseTestUpperAfterAim) != 0;
 		const auto applyUpperD50 = [&]()
 		{
@@ -811,7 +813,7 @@ namespace mo
 			const float* mask = SlotMask(_slotOrder[2]);
 			if (mask) BlendPerBone(_b.data(), outLocal, 1.f, mask, outLocal);
 		};
-		if (overrideOn && overrideEarly) ApplyOverride(input, outLocal);
+		if (overrideOn && !overrideLate) ApplyOverride(input, outLocal);
 		if (d50)
 		{
 			ApplySlot(input, _slotOrder[0], outLocal);		// 통째(FullBody)
@@ -836,7 +838,7 @@ namespace mo
 			}
 			ApplySlot(input, _slotOrder[1], outLocal);		// 사격 덧붙임(FullBodyAdditivePreAim)
 		}
-		if (overrideOn && !overrideEarly) ApplyOverride(input, outLocal);
+		if (overrideOn && overrideLate) ApplyOverride(input, outLocal);
 		AccumulateAim(outLocal, ACLIP_AIM_UP, _bundle->aimPitch, input.pitch, input.aimBlend);
 		AccumulateAim(outLocal, ACLIP_READY_UP, _bundle->aimPitch + 3, input.pitch, 1.f - input.aimBlend);
 		if (upperAfterAim) applyUpperD50();

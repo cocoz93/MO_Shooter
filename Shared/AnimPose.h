@@ -111,7 +111,9 @@ namespace mo
 		static constexpr uint32_t kPoseTestChainUpper = 8;			// 윗몸 → 윗몸 덧붙임을 이어 평가한 뒤 뼈별 섞기를 한 번만(옛 차례 kPoseTestD50Order 에서만)
 		static constexpr uint32_t kPoseTestNoHandAlpha = 16;		// 왼팔 비중을 늘 1 로
 		static constexpr uint32_t kPoseTestD50Order = 64;			// 옛 차례(D50) — 통째 → 사격 덧붙임 → 윗몸 → 윗몸 덧붙임, 자리마다 뼈별 섞기. 옛 판과 같게 하려면 --slotProfile=UpperBodyMask 도
-		static constexpr uint32_t kPoseTestOverrideEarly = 32;		// 쏜 뒤 덮기를 끼움 자리 앞(착지 충격 바로 뒤)으로(실제 경로는 끼움 자리 뒤 · 조준 앞)
+		static constexpr uint32_t kPoseTestOverrideLate = 128;		// 쏜 뒤 덮기를 옛 자리(끼움 자리 뒤 · 조준 앞, L-6-a 전 실제 경로)로. 실제 경로는 끼움 자리 앞(착지 충격 바로 뒤).
+																	// 옛 값 32(kPoseTestOverrideEarly — 그때 「앞으로」 시험, G-4-b 기록의 --poseTest=32)는 지금 실제 경로라 뺐다 — 32 는 비워 둔다.
+																	// L-6-a 앞에 잰 판을 다시 만들려면 그 깃발에 128 을 더한다(예: 옛 차례 64 → 192)
 		void SetPoseTestFlags(uint32_t flags) { _poseTest = flags; }
 		void SetSlotProfileForTest(int profile) { _slotProfileTest = profile; }			// 비중 표가 있는 끼움 자리(덮기 자리 빼고)를 이 표로(-1 = 파일 그대로)
 		void SetOverrideProfileForTest(int profile) { _overrideProfileTest = profile; }	// 쏜 뒤 덮기 자리를 이 표로(-1 = 파일 그대로)
