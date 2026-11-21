@@ -112,8 +112,8 @@ namespace mo
 			for (int c = 0; c < 3; ++c) out[c] = v[c] + q[3] * t[c] + u[c];
 		}
 
-		// 엔진 GetSafeNormal — 길이가 거의 0 이면 0 벡터를 돌려준다
-		void SafeNormal(const double v[3], double out[3])
+		// 엔진 GetSafeNormal — 길이가 거의 0 이면 0 벡터를 돌려준다(tolerance = 길이 제곱 문턱, 엔진 기본값 UE_SMALL_NUMBER)
+		void SafeNormal(const double v[3], double out[3], double tolerance = kSmallNumber)
 		{
 			const double sum = Dot3(v, v);
 			if (sum == 1.0)
@@ -121,7 +121,7 @@ namespace mo
 				std::memcpy(out, v, sizeof(double) * 3);
 				return;
 			}
-			if (sum < kSmallNumber)
+			if (sum < tolerance)
 			{
 				out[0] = out[1] = out[2] = 0;
 				return;
@@ -133,6 +133,27 @@ namespace mo
 		void Sub(const double a[3], const double b[3], double out[3])
 		{
 			for (int c = 0; c < 3; ++c) out[c] = a[c] - b[c];
+		}
+
+		bool IsZero3(const double v[3]) { return v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0; }
+
+		// 엔진 FVector::Equals — 칸마다 |차| ≤ tolerance
+		bool Equals3(const double a[3], const double b[3], double tolerance)
+		{
+			return std::abs(a[0] - b[0]) <= tolerance && std::abs(a[1] - b[1]) <= tolerance && std::abs(a[2] - b[2]) <= tolerance;
+		}
+
+		// 엔진 FQuat::Equals — 칸마다 |차| ≤ tolerance 거나 |합| ≤ tolerance(부호만 반대인 같은 회전)
+		bool QuatEquals(const double a[4], const double b[4], double tolerance)
+		{
+			bool sub = true;
+			bool add = true;
+			for (int c = 0; c < 4; ++c)
+			{
+				sub = sub && std::abs(a[c] - b[c]) <= tolerance;
+				add = add && std::abs(a[c] + b[c]) <= tolerance;
+			}
+			return sub || add;
 		}
 
 		// 엔진 FQuat::FindBetweenNormals
@@ -251,6 +272,33 @@ namespace mo
 			Cross(axis1, v, axis2);
 		}
 
+		// 엔진 AnimNode_LegIK.cpp RotateLegByQuat(:160) — 다리 뼈 셋(발 · 종아리 · 허벅지, 부품 공간)을 허벅지 자리를 축으로 함께 돌린다
+		bool RotateLegByQuat(const double delta[4], BoneTransform leg[3])
+		{
+			const double identity[4] = { 0, 0, 0, 1 };
+			if (QuatEquals(delta, identity, kSmallNumber)) return false;		// 엔진 IsIdentity(UE_SMALL_NUMBER)
+			const double hip[3] = { leg[2].p[0], leg[2].p[1], leg[2].p[2] };
+			for (int i = 0; i < 3; ++i)
+			{
+				QuatMul(delta, leg[i].q, leg[i].q);
+				double offset[3];
+				double rotated[3];
+				Sub(leg[i].p, hip, offset);
+				Rotate(delta, offset, rotated);
+				for (int c = 0; c < 3; ++c) leg[i].p[c] = hip[c] + rotated[c];
+			}
+			return true;
+		}
+
+		// 엔진 RotateLegByDeltaNormals(:181) — from 을 to 로 돌리는 회전으로 다리를 돌린다(둘 다 길이 1 로 보고 — 엔진도 무릎 비틀림에선 길이 1 이 아닌 축을 넣는다)
+		bool RotateLegByDeltaNormals(const double from[3], const double to[3], BoneTransform leg[3])
+		{
+			if (IsZero3(from) || Equals3(from, to, kKindaSmall)) return false;
+			double delta[4];
+			FindBetweenNormals(from, to, delta);
+			return RotateLegByQuat(delta, leg);
+		}
+
 		// 엔진 AnimationCore::SolveTwoBoneIK (늘리기 없음) — 위치만 구한다
 		void SolveTwoBonePositions(const double root[3], const double joint[3], const double end[3], const double jointTarget[3], const double effector[3], double outJoint[3], double outEnd[3])
 		{
@@ -358,6 +406,17 @@ namespace mo
 		_footLeft = clips.FindBone("foot_l");
 		_footRight = clips.FindBone("foot_r");
 		if (_handR < 0 || _gun < 0 || _ikLeft < 0 || _upper < 0 || _lower < 0 || _hand < 0 || _pelvis < 0 || _footLeft < 0 || _footRight < 0) return false;
+		// 다리 IK 다리 둘 — Lyra LegIK_0 정의 차례(ik_foot_l → foot_l · ik_foot_r → foot_r). 다리 뼈 수 = 엔진 기본 NumBonesInLimb 2 → 발 · 부모 · 그 부모(PopulateLegBoneIndices)
+		const char* const ikFeet[2] = { "ik_foot_l", "ik_foot_r" };
+		const int feet[2] = { _footLeft, _footRight };
+		for (int leg = 0; leg < 2; ++leg)
+		{
+			_legs[leg][0] = feet[leg];
+			_legs[leg][1] = clips.Bones()[(size_t)feet[leg]].parent;
+			_legs[leg][2] = _legs[leg][1] >= 0 ? clips.Bones()[(size_t)_legs[leg][1]].parent : -1;
+			_legs[leg][3] = clips.FindBone(ikFeet[leg]);
+			if (_legs[leg][2] < 0 || _legs[leg][3] < 0) return false;
+		}
 
 		static_assert(sizeof(kSlotOrder) / sizeof(kSlotOrder[0]) == kSlotOrderCount, "kSlotOrder 와 칸 수가 같아야 한다");
 		const std::vector<ClipSlot>& slots = clips.Slots();
@@ -913,6 +972,160 @@ namespace mo
 		BlendWith(pose[_hand], oldHand, back);
 	}
 
+	// 다리 IK — Lyra 무기 층 FullBody_SkeletalControls 의 LegIK_0(ABP_ItemAnimLayersBase 덤프 14948-14975, 원본 기준): 다리 둘 ik_foot_l → foot_l · ik_foot_r → foot_r,
+	// 굽힘 축 Z, 그 밖은 엔진 기본값(다리 뼈 2 · 발 앞 축 Y · 무릎 비틀림 고침 켬 · 회전 제한 끔 · 부드러운 IK 끔(SoftPercentLength 1) · 비틀림 곡선 없음).
+	// 식 = 엔진 FAnimNode_LegIK::EvaluateSkeletalControl_AnyThread(AnimNode_LegIK.cpp:100) — 다리마다 ① 허벅지 자리를 축으로 발을 IK 발 쪽으로 돌림(:193)
+	// ② 발이 IK 발에서 0.01 넘게 떨어졌으면 두 뼈 IK(:403 · :334 — 닿으면 코사인 법칙, 안 닿으면 곧게) ③ 무릎 비틀림(:806 — 발 Y 축을 IK 발 Y 축에 맞춤)
+	// ④ 발 회전 = IK 발 회전. 결과는 비중으로 섞는다(LocalBlendCSBoneTransforms — ApplyHandIK 와 같은 셈). 비중 = 1 − 앞 프레임 곡선 DisableLegIK(CAnimState)
+	// 엔진과 다른 한 곳 — 다리가 곧아(무릎 · 발 방향 내적 ≥ 0.99) 굽힘 방향을 못 정하는 프레임에 엔진은 앞 프레임에 둔 방향을 돌려 쓰는데(:384-393)
+	// 이 계산기는 무기마다 하나를 여러 사람이 같이 써서 앞 프레임 값을 둘 자리가 없다. 그 프레임은 이번 자세에서 나온 방향 그대로 쓰고 센다(LegIKStraight)
+	void CAnimPoseEvaluator::ApplyLegIK(BoneTransform* pose, float alpha)
+	{
+		if (alpha <= kZeroWeight) return;		// 엔진 FAnimWeight::IsRelevant
+		BoneTransform* cs = _component.data();
+		ComponentFromLocal(pose, cs);
+		const std::vector<ClipBone>& bones = _clips->Bones();
+		const double reachPrecision = 0.01f;		// 엔진 ReachPrecision 기본값(float 0.01)
+		const double zAxis[3] = { 0, 0, 1 };
+		const double yAxis[3] = { 0, 1, 0 };
+		BoneTransform solved[2][3];
+		bool modified[2] = { false, false };
+		for (int leg = 0; leg < 2; ++leg)
+		{
+			BoneTransform* fk = solved[leg];		// [0] 발 · [1] 종아리 · [2] 허벅지(엔진 FKLegBoneTransforms 차례)
+			for (int i = 0; i < 3; ++i) fk[i] = cs[_legs[leg][i]];
+			const BoneTransform& ik = cs[_legs[leg][3]];
+			double temp[3];
+			double from[3];
+			double to[3];
+
+			// ① OrientLegTowardsIK
+			Sub(fk[0].p, fk[2].p, temp);
+			SafeNormal(temp, from);
+			Sub(ik.p, fk[2].p, temp);
+			SafeNormal(temp, to);
+			const bool oriented = RotateLegByDeltaNormals(from, to, fk);
+
+			// ② DoLegReachIK — 회전 제한 · 부드러운 IK · 비틀림 곡선이 없어 발이 목표에 있으면 건너뛴다
+			const bool reached = !Equals3(fk[0].p, ik.p, reachPrecision);
+			if (reached)
+			{
+				// InitializeFromLegData(:218) — 자리 · 마디 길이 · 굽힘 축(허벅지 Z 축)
+				double link[3][3];
+				for (int i = 0; i < 3; ++i) std::memcpy(link[i], fk[i].p, sizeof(link[i]));
+				Sub(fk[0].p, fk[1].p, temp);
+				const double lowerLength = std::sqrt(Dot3(temp, temp));		// Links[0].Length — 무릎 → 발
+				Sub(fk[1].p, fk[2].p, temp);
+				const double upperLength = std::sqrt(Dot3(temp, temp));		// Links[1].Length — 엉덩이 → 무릎
+				const double total = lowerLength + upperLength;
+				double hinge[3];
+				Rotate(fk[2].q, zAxis, hinge);
+				// ReachTarget(:268)
+				Sub(ik.p, link[2], temp);
+				if (!(Dot3(temp, temp) < total * total))
+				{
+					// 안 닿음 — 엉덩이에서 IK 발 쪽으로 곧게(OrientAllLinksToDirection :326)
+					++_legIKUnreachable;
+					double direction[3];
+					SafeNormal(temp, direction);
+					for (int c = 0; c < 3; ++c) link[1][c] = link[2][c] + direction[c] * upperLength;
+					for (int c = 0; c < 3; ++c) link[0][c] = link[1][c] + direction[c] * lowerLength;
+				}
+				else
+				{
+					// SolveTwoBoneIK(:334)
+					std::memcpy(link[0], ik.p, sizeof(link[0]));
+					double hipToFoot[3];
+					Sub(link[0], link[2], hipToFoot);
+					const double a = upperLength;
+					const double b = std::sqrt(Dot3(hipToFoot, hipToFoot));
+					const double c = lowerLength;
+					const double twoAB = 2.0 * a * b;
+					const double cosC = std::abs(twoAB) > kSmallNumber ? (a * a + b * b - c * c) / twoAB : 0.0;
+					const double angle = std::acos(cosC < -1.0 ? -1.0 : (cosC < 1.0 ? cosC : 1.0));		// 엔진 FMath::Acos 는 [-1, 1] 로 자른다
+					double hipToFootDir[3] = { 0, 0, 0 };
+					if (std::abs(b) > kSmallNumber)
+					{
+						for (int k = 0; k < 3; ++k) hipToFootDir[k] = hipToFoot[k] / b;
+					}
+					double hipToKnee[3];
+					Sub(link[1], link[2], hipToKnee);
+					const double along = Dot3(hipToKnee, hipToFootDir);
+					double projToKnee[3];
+					for (int k = 0; k < 3; ++k) projToKnee[k] = link[1][k] - (link[2][k] + hipToFootDir[k] * along);
+					double bendDir[3];
+					SafeNormal(projToKnee, bendDir, kKindaSmall);
+					if (!IsZero3(hinge) && !IsZero3(hipToFootDir) && std::abs(a) > kSmallNumber)
+					{
+						double hipToKneeDir[3];
+						for (int k = 0; k < 3; ++k) hipToKneeDir[k] = hipToKnee[k] / a;
+						if (IsZero3(bendDir) || Dot3(hipToKneeDir, hipToFootDir) >= 0.99) ++_legIKStraight;		// 엔진은 여기서 앞 프레임 방향을 읽는다
+					}
+					const double sinC = std::sin(angle);
+					for (int k = 0; k < 3; ++k) link[1][k] = link[2][k] + a * (hipToFootDir[k] * cosC + bendDir[k] * sinC);
+				}
+				// 회전(:443) — 허벅지 · 종아리를 새 자식 자리 쪽으로. 그다음 자리(:462)
+				for (int i = 1; i >= 0; --i)
+				{
+					Sub(fk[i].p, fk[i + 1].p, temp);
+					SafeNormal(temp, from);
+					Sub(link[i], link[i + 1], temp);
+					SafeNormal(temp, to);
+					double delta[4];
+					FindBetweenNormals(from, to, delta);
+					QuatMul(delta, fk[i + 1].q, fk[i + 1].q);
+				}
+				for (int i = 1; i >= 0; --i) std::memcpy(fk[i].p, link[i], sizeof(link[i]));
+			}
+
+			// ③ AdjustKneeTwist — 축은 엉덩이 → IK 발 방향에 수직으로만 깎고 길이는 안 맞춘다(엔진 그대로)
+			double footZ[3];
+			Sub(ik.p, fk[2].p, temp);
+			SafeNormal(temp, footZ);
+			double fkX[3];
+			double ikX[3];
+			double cross[3];
+			Rotate(fk[0].q, yAxis, temp);
+			Cross(footZ, temp, cross);
+			Cross(cross, footZ, fkX);
+			Rotate(ik.q, yAxis, temp);
+			Cross(footZ, temp, cross);
+			Cross(cross, footZ, ikX);
+			const bool twisted = RotateLegByDeltaNormals(fkX, ikX, fk);
+
+			// ④ 발 회전 = IK 발 회전
+			bool changed = oriented || reached || twisted;
+			if (changed || !QuatEquals(fk[0].q, ik.q, kKindaSmall))
+			{
+				std::memcpy(fk[0].q, ik.q, sizeof(ik.q));
+				changed = true;
+			}
+			modified[leg] = changed;
+		}
+
+		// 고친 뼈의 부모 기준값을 다시 구하고(SafeSetCSBoneTransforms) 비중이 1 보다 작으면 옛 부모 기준값 쪽으로 1 − 비중만큼 섞는다. 두 다리는 서로의 조상이 아니라 따로 넣어도 같다
+		const bool full = alpha >= 1.f - kZeroWeight;
+		for (int leg = 0; leg < 2; ++leg)
+		{
+			if (!modified[leg]) continue;
+			++_legIKSolves;
+			const int foot = _legs[leg][0];
+			const int calf = _legs[leg][1];
+			const int thigh = _legs[leg][2];
+			const BoneTransform oldThigh = pose[thigh];
+			const BoneTransform oldCalf = pose[calf];
+			const BoneTransform oldFoot = pose[foot];
+			RelativeTo(solved[leg][2], cs[bones[(size_t)thigh].parent], pose[thigh]);
+			RelativeTo(solved[leg][1], solved[leg][2], pose[calf]);
+			RelativeTo(solved[leg][0], solved[leg][1], pose[foot]);
+			if (full) continue;
+			const float back = 1.f - alpha;
+			BlendWith(pose[thigh], oldThigh, back);
+			BlendWith(pose[calf], oldCalf, back);
+			BlendWith(pose[foot], oldFoot, back);
+		}
+	}
+
 	void CAnimPoseEvaluator::ApplyPlant(const AnimPoseInput& input, BoneTransform* pose) const
 	{
 		const bool zero = std::abs(input.plantOffset[0]) <= kKindaSmall && std::abs(input.plantOffset[1]) <= kKindaSmall && std::abs(input.plantOffset[2]) <= kKindaSmall;
@@ -987,6 +1200,8 @@ namespace mo
 		if (!d50) ApplySlot(input, _slotOrder[0], outLocal);		// 통째(FullBody) — 부활 몽타주가 반응까지 덮는다(Lyra 와 같다, E-2-b spawn_hit 조각)
 		if (_handIK) ApplyHandIK(outLocal, (_poseTest & kPoseTestNoHandAlpha) != 0 ? 1.f : input.handLeftAlpha);
 		FromKey(_clips->Bones()[0].ref, outLocal[0]);
+		// 다리 IK — Lyra 차례 = 뿌리 돌림(RotateRootBone) 뒤 무기 층(FullBody_SkeletalControls) 안 손 IK 들 뒤 · 발 붙이기 장치(ControlRig_1) 앞(L-12-c, 원본 기준)
+		if ((_poseTest & kPoseTestNoLegIK) == 0) ApplyLegIK(outLocal, (_poseTest & kPoseTestNoLegAlpha) != 0 ? 1.f : input.legIKAlpha);
 		ApplyPlant(input, outLocal);
 	}
 

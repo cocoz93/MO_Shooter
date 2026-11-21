@@ -873,6 +873,7 @@ namespace mo
 		_poseMontageCount = 0;
 		_disableLeftHand = 0.f;
 		_handLeftAlpha = 1.f;
+		_legIKAlpha = 1.f;
 		_handFresh = false;
 		_timeSinceFired = kNeverFiredSeconds;
 		_overrideWeight = 0.f;
@@ -1491,6 +1492,9 @@ namespace mo
 
 		// 왼손 비중은 앞 자세의 곡선으로 — 기록에서 HandIK_Left_Alpha 가 곡선보다 한 프레임 늦다(실측). 그다음 몽타주를 넘기고 이번 자세 목록을 뜬다
 		_handLeftAlpha = _handFresh ? 1.f : Clamp(1.f - _disableLeftHand, 0.f, 1.f);
+		// 다리 IK 비중(L-12-c) — 같은 무기 층(FullBody_SkeletalControls)의 LegIK_0 이 갱신 중에 앞 자세 곡선을 읽는다(AnimNode_SkeletalControlBase.cpp:94 GetCurveValue,
+		// 비중 = 곡선 × −1 + 1 을 [0, 1] 로 — 원본 기준). 장치 켜짐(위 _plantAlpha)과 같은 곡선 · 같은 한 프레임 늦음. 묶음을 바꾼 첫 갱신은 새 층이 곡선을 못 읽어 1(왼손과 같은 까닭)
+		_legIKAlpha = _handFresh ? 1.f : Clamp(1.f - _disableLegIK, 0.f, 1.f);
 		_handFresh = false;
 		UpdateMontages(deltaSeconds);
 		SnapshotMontages();
@@ -1581,6 +1585,7 @@ namespace mo
 		// 몽타주 · 덮기 · 왼손 — 자세를 만든 값(사건 앞 목록, ToPoseInput 과 같은 것)을 싣는다. 비중이 0 칸으로 반올림되면 받는 쪽에서 비중 0 이라 자세를 안 바꾸므로 뺀다(D51)
 		out.overrideWeight = ToWireByte(_overrideWeight);
 		out.handLeftAlpha = ToWireByte(_handLeftAlpha);
+		out.legIKAlpha = ToWireByte(_legIKAlpha);
 		out.montageCount = 0;
 		for (int i = 0; i < _poseMontageCount; ++i)
 		{
@@ -1660,6 +1665,7 @@ namespace mo
 		for (int i = out.montageCount; i < kAnimMontageMax; ++i) out.montages[i] = AnimMontageSlot{};
 		out.overrideWeight = (float)in.overrideWeight / 255.f;
 		out.handLeftAlpha = (float)in.handLeftAlpha / 255.f;
+		out.legIKAlpha = (float)in.legIKAlpha / 255.f;
 	}
 
 	void CAnimState::ToPoseInput(AnimPoseInput& out) const
@@ -1690,5 +1696,6 @@ namespace mo
 		for (int i = 0; i < kAnimMontageMax; ++i) out.montages[i] = i < _poseMontageCount ? _poseMontages[i] : AnimMontageSlot{};
 		out.overrideWeight = _overrideWeight;
 		out.handLeftAlpha = _handLeftAlpha;
+		out.legIKAlpha = _legIKAlpha;
 	}
 }

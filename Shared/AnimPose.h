@@ -15,6 +15,7 @@
 //   차례 · 섞기 갈래 · 비중 표는 처음엔 애니 그래프를 읽은 값이 아니었다(D43) — 후보를 바꿔 Lyra 원본 기록과의 22부위 차이가 가장 작은 것을 골랐다(제 판단, D50)
 // - 컨텐츠 E-2-b 에서 그래프(ABP_Mannequin_Base AnimGraph 핀 연결)를 읽어 차례 · 윗몸 짜임 · 윗몸 비중 표를 그래프대로 바꿨다(D72, 원본 기준).
 //   옛 차례는 시험 깃발 kPoseTestD50Order 로 다시 만든다
+// - L-12-c 에서 무기 층(FullBody_SkeletalControls)의 다리 IK(LegIK_0 — 엔진 AnimNode_LegIK)를 뿌리 뒤 · 발 디딤 앞에 더했다(원본 기준, D150)
 // - 언리얼 안에서도 컴파일돼야 하므로 예외·RTTI 를 쓰지 않는다. 한 객체는 한 스레드에서만 쓴다(작업 공간을 들고 있다).
 namespace mo
 {
@@ -64,6 +65,7 @@ namespace mo
 		AnimMontageSlot montages[kAnimMontageMax];
 		float overrideWeight = 0.f;		// 쏜 뒤 윗몸 덮기 비중(D45). 0 = 안 덮음
 		float handLeftAlpha = 1.f;		// 왼손 붙이기 비중 = 1 − 앞 프레임 몽타주 곡선 DisableLHandIK
+		float legIKAlpha = 1.f;			// 다리 IK 비중 = 1 − 앞 프레임 곡선 DisableLegIK(L-12-c — 몽타주 · 점프 클립 곡선, 장치 켜짐과 같은 값)
 	};
 
 	// 몸 기준(캡슐 중심, 요 0) 부위 하나의 자리
@@ -78,7 +80,7 @@ namespace mo
 	class CAnimPoseEvaluator
 	{
 	public:
-		// 클립 자료와 묶음을 고른다. 묶음이 없거나 클립 수가 ACLIP_COUNT 보다 적거나 손 뼈가 없으면 false.
+		// 클립 자료와 묶음을 고른다. 묶음이 없거나 클립 수가 ACLIP_COUNT 보다 적거나 손 뼈 · IK 발 뼈(ik_foot_l · ik_foot_r, 클립 판 9 의 L-12-c 뒤 내보내기)가 없으면 false.
 		// 끼움 자리 표에 평가 차례(kSlotOrder)에도 덮기 자리에도 없는 자리가 있거나, 자리의 비중 표가 뼈 가림(방식 2)이 아니어도 false — 몽타주 줄을 말없이 버리지 않으려고
 		bool Init(const CAnimClips& clips, const char* bundleName);
 
@@ -93,7 +95,8 @@ namespace mo
 		// 근접 쓸기 시작점이다 — GA_Melee 는 GetSocketLocation("hand_r") 인데 메시에 그 이름 소켓이 없어 뼈 자리다(e1g3, 소켓 없음 82번 · 뼈 자리와 차이 0)
 		void HandRightFromLocal(const BoneTransform* local, double outPosition[3], double meshLiftZ = 0.0);
 		// 두 발 높이 — 부품 공간(메시 기준)에서 발 뼈가 뿌리 뼈보다 얼마나 위인가(cm), [0] 왼발 · [1] 오른발. 발 붙이기 장치(CAnimState, L-6-c-2)가 읽는다.
-		// Lyra 장치는 IK 발 뼈(ik_foot_l · ik_foot_r) 자리에서 쓸기를 하는데 우리 클립엔 IK 발 뼈가 없다 — foot_l · foot_r 로 셈해도 장치 켬 ↔ 끔 기록 차가 같다(2492프레임 최대 0.001cm, 기록 대조)
+		// Lyra 장치는 IK 발 뼈(ik_foot_l · ik_foot_r) 자리에서 쓸기를 하는데 여기선 foot_l · foot_r 로 센다 — 그렇게 셈해도 장치 켬 ↔ 끔 기록 차가 같았다(2492프레임 최대 0.001cm, 기록 대조).
+		// 그때(L-6-c-2)는 클립에 IK 발 뼈가 없었다. 지금은 다리 IK(L-12-c)가 장치 앞에서 발을 IK 발 뼈로 당긴다 — 장치가 켜지는 비중 1 프레임엔 두 자리가 같다(발이 닿을 때)
 		void FootHeightsFromLocal(const BoneTransform* local, double outHeights[2]);
 		// 이 계산기가 고른 묶음 — 발 붙이기 장치가 상태의 묶음과 같은 계산기를 받았는지 본다
 		const ClipBundle* Bundle() const { return _bundle; }
@@ -121,6 +124,8 @@ namespace mo
 																	// 옛 값 32(kPoseTestOverrideEarly — 그때 「앞으로」 시험, G-4-b 기록의 --poseTest=32)는 지금 실제 경로라 뺐다 — 32 는 비워 둔다.
 																	// L-6-a 앞에 잰 판을 다시 만들려면 그 깃발에 128 을 더한다(예: 옛 차례 64 → 192)
 		static constexpr uint32_t kPoseTestUniformBlendOut = 256;	// 빼기 비중 표를 안 쓴다 — 빠지는 몽타주도 모든 뼈를 몽타주 비중으로(L-6-b 전 실제 경로). L-6-b 앞에 잰 판은 256 을 더한다
+		static constexpr uint32_t kPoseTestNoLegIK = 512;			// 다리 IK 를 끈다(L-12-c 전 실제 경로). L-12-c 앞에 잰 판은 512 를 더한다
+		static constexpr uint32_t kPoseTestNoLegAlpha = 1024;		// 다리 IK 비중을 늘 1 로(곡선 DisableLegIK 를 안 봄)
 		void SetPoseTestFlags(uint32_t flags) { _poseTest = flags; }
 		void SetSlotProfileForTest(int profile) { _slotProfileTest = profile; }			// 비중 표가 있는 끼움 자리(덮기 자리 빼고)를 이 표로(-1 = 파일 그대로)
 		void SetOverrideProfileForTest(int profile) { _overrideProfileTest = profile; }	// 쏜 뒤 덮기 자리를 이 표로(-1 = 파일 그대로)
@@ -128,6 +133,11 @@ namespace mo
 		// 몽타주 칸이 가리키는 묶음 · 종류가 없어 버린 칸 수, 몽타주 시각이 그 줄 구간 밖이라 기준 자세를 쓴 수(엔진도 기준 자세다). 0 이어야 한다
 		uint64_t MontageMisses() const { return _montageMisses; }
 		uint64_t TrackOutside() const { return _trackOutside; }
+		// 다리 IK(L-12-c) 셈 — 다리를 고친 수(셈 한 번에 다리 하나씩) · 그중 다리가 곧아 엔진이 앞 프레임 굽힘 방향을 읽었을 수(여기선 안 둔다 — ApplyLegIK 주석) ·
+		// IK 발이 다리 길이 밖이라 곧게 편 수
+		uint64_t LegIKSolves() const { return _legIKSolves; }
+		uint64_t LegIKStraight() const { return _legIKStraight; }
+		uint64_t LegIKUnreachable() const { return _legIKUnreachable; }
 
 	private:
 		void BlendWalk(const AnimPoseInput& input, BoneTransform* pose);
@@ -139,6 +149,7 @@ namespace mo
 		void BlendPerBone(const BoneTransform* base, const BoneTransform* target, float layerWeight, const float* mask, BoneTransform* out);
 		void AccumulateAim(BoneTransform* pose, uint32_t firstClip, const float pitches[3], float pitch, float weight);
 		void ApplyHandIK(BoneTransform* pose, float leftAlpha);
+		void ApplyLegIK(BoneTransform* pose, float alpha);
 		void ApplyPlant(const AnimPoseInput& input, BoneTransform* pose) const;
 		void AccumulateAdditive(BoneTransform* pose, const BoneTransform* additive, float weight, uint8_t additiveType);
 		void AccumulateAdditivePerBone(BoneTransform* pose, const BoneTransform* additive, const float* weights, uint8_t additiveType);
@@ -157,10 +168,14 @@ namespace mo
 		int _pelvis = -1;
 		int _footLeft = -1;
 		int _footRight = -1;
+		int _legs[2][4] = { { -1, -1, -1, -1 }, { -1, -1, -1, -1 } };	// 다리 IK 다리 둘(Lyra 정의 차례 — 왼 · 오른) × 발 · 종아리 · 허벅지 · IK 발
 		static constexpr int kSlotOrderCount = 5;
 		int _slotOrder[kSlotOrderCount] = { -1, -1, -1, -1, -1 };		// 평가 차례의 끼움 자리 번호(Init 이 이름으로 찾는다, 없으면 -1)
 		uint64_t _montageMisses = 0;
 		uint64_t _trackOutside = 0;
+		uint64_t _legIKSolves = 0;
+		uint64_t _legIKStraight = 0;
+		uint64_t _legIKUnreachable = 0;
 		uint32_t _poseTest = 0;
 		int _slotProfileTest = -1;
 		int _overrideProfileTest = -1;

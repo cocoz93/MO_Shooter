@@ -806,7 +806,7 @@ namespace
 		int stanceInFrames = -1, stanceOutFrames = -1;	// 서기 안 전환을 넣고 빼는 섞기 후보(1/60초 프레임 수, D62 4 후보 비교). -1 = 안 줌 → 실제 경로(넣기 0 · 빼기 15, D63)
 		int tracePass = -1, traceFrom = 0, traceTo = -1;		// --trace=판:처음-끝 — 그 줄들의 상태 · 쌓기 칸을 찍는다(어긋난 곳 찾기용)
 		double maxReach = 0;
-		size_t poseMontageRows = 0, poseOverrideRows = 0, poseHandRows = 0;		// 자세에 몽타주 · 덮기 · 왼팔 비중이 실제로 들어간 줄(새 길을 지났는지)
+		size_t poseMontageRows = 0, poseOverrideRows = 0, poseHandRows = 0, poseLegRows = 0;		// 자세에 몽타주 · 덮기 · 왼팔 · 다리 IK 비중이 실제로 들어간 줄(새 길을 지났는지)
 		double poseKindSeconds[3] = {};		// 자세 한 번(EvaluateLocal + BodiesFromLocal) 시간 — 몽타주 있음 · 덮기만 · 둘 다 없음
 		size_t poseKindRows[3] = {};
 		for (int i = 6; i < argc; ++i)
@@ -1358,6 +1358,7 @@ namespace
 					for (int k = 0; k < kAnimMontageMax; ++k) got.montages[k] = exact.montages[k];
 					got.overrideWeight = exact.overrideWeight;
 					got.handLeftAlpha = exact.handLeftAlpha;
+					got.legIKAlpha = exact.legIKAlpha;
 				}
 			}
 			const AnimPoseInput& ref = row.input;
@@ -1399,6 +1400,7 @@ namespace
 			if (got.montageCount > 0) ++poseMontageRows;
 			if (got.overrideWeight > 0.00001f) ++poseOverrideRows;
 			if (got.handLeftAlpha < 1.f) ++poseHandRows;
+			if (got.legIKAlpha < 1.f) ++poseLegRows;
 			const auto poseStart = std::chrono::steady_clock::now();
 			evaluator.EvaluateLocal(got, local.data());
 			evaluator.BodiesFromLocal(local.data(), poses.data(), got.crouched ? crouchLift : 0.0);
@@ -1428,13 +1430,18 @@ namespace
 		std::printf("STATETIME updateUs=%.3f\n", fed > 0 ? updateSeconds * 1e6 / (double)fed : 0.0);
 		const auto poseUs = [&](int kind) { return poseKindRows[kind] > 0 ? poseKindSeconds[kind] * 1e6 / (double)poseKindRows[kind] : 0.0; };
 		std::printf("STATEPOSETIME montageUs=%.2f rows=%zu overrideOnlyUs=%.2f rows=%zu plainUs=%.2f rows=%zu\n", poseUs(0), poseKindRows[0], poseUs(1), poseKindRows[1], poseUs(2), poseKindRows[2]);
-		unsigned long long montageMisses = 0, trackOutside = 0;
+		unsigned long long montageMisses = 0, trackOutside = 0, legSolves = 0, legStraight = 0, legUnreachable = 0;
 		for (const CAnimPoseEvaluator& evaluator : evaluators)
 		{
 			montageMisses += evaluator.MontageMisses();
 			trackOutside += evaluator.TrackOutside();
+			legSolves += evaluator.LegIKSolves();
+			legStraight += evaluator.LegIKStraight();
+			legUnreachable += evaluator.LegIKUnreachable();
 		}
 		std::printf("STATEPOSE poseTest=%d slotProfile=%s overrideProfile=%s rows=%zu montageRows=%zu overrideRows=%zu handRows=%zu montageMisses=%llu trackOutside=%llu\n", poseTest, slotProfileName ? slotProfileName : "-", overrideProfileName ? overrideProfileName : "-", rows.size(), poseMontageRows, poseOverrideRows, poseHandRows, montageMisses, trackOutside);
+		// 다리 IK(L-12-c) — 비중이 1 보다 작은 줄 · 다리를 고친 수(셈마다 다리 하나씩, 발 붙이기 장치의 셈까지) · 다리가 곧아 엔진이 앞 프레임 굽힘 방향을 읽었을 수 · 안 닿아 곧게 편 수
+		std::printf("STATELEGIK rows=%zu partialRows=%zu solves=%llu straight=%llu unreachable=%llu\n", rows.size(), poseLegRows, legSolves, legStraight, legUnreachable);
 		double bound = 0;
 		for (CAnimPoseEvaluator& evaluator : evaluators) bound = std::max(bound, evaluator.ComputeBoundRadius(kCrouchMeshLiftZ));
 		std::printf("STATEBOUND reach=%.3f bound=%.3f wire=%d\n", maxReach, bound, useWire ? (wireKeepNew ? 2 : 1) : 0);

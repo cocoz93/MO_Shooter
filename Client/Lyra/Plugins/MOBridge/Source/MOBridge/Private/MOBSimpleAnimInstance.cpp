@@ -280,6 +280,8 @@ namespace
 	const TCHAR* const IK_GUN = TEXT("ik_hand_gun");
 	const TCHAR* const IK_HAND_L = TEXT("ik_hand_l");
 	const TCHAR* const LEFT_ARM[] = { TEXT("upperarm_l"), TEXT("lowerarm_l"), TEXT("hand_l") };
+	// 다리 IK(L-12-c) — Lyra 무기 층 LegIK_0 이 발을 이 뼈로 당긴다(조상 ik_foot_root · root 도 남는다). 판정 모양이 없어 따로 남긴다
+	const TCHAR* const IK_FEET[] = { TEXT("ik_foot_l"), TEXT("ik_foot_r") };
 	constexpr float GROUND_TRACE_DISTANCE = 100000.f;	// 땅까지 거리를 재는 선 길이 — Lyra GetGroundInfo 와 같은 값
 	constexpr int32 LAND_TABLE_HZ = 120;		// 착지 클립 거리 곡선을 뽑는 간격
 
@@ -2236,8 +2238,8 @@ bool UMOBSimpleAnimInstance::DumpClips(int32 SampleHz, FString& Out)
 			Index = Bones.GetParentBoneIndex(Index);
 		}
 	}
-	// 손 붙이기에 쓰는 뼈 — 판정 모양이 없어도 자세 계산에 필요하다
-	for (const TCHAR* Name : { HAND_R, IK_GUN, IK_HAND_L, LEFT_ARM[0], LEFT_ARM[1], LEFT_ARM[2] })
+	// 손 붙이기 · 다리 IK 에 쓰는 뼈 — 판정 모양이 없어도 자세 계산에 필요하다
+	for (const TCHAR* Name : { HAND_R, IK_GUN, IK_HAND_L, LEFT_ARM[0], LEFT_ARM[1], LEFT_ARM[2], IK_FEET[0], IK_FEET[1] })
 	{
 		FCompactPoseBoneIndex Index = FindCompactBone(Bones, Name);
 		if (!Index.IsValid())

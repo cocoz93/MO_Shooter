@@ -112,6 +112,7 @@ namespace mo
 		// 서기로 돌아가며 빠지는 중인 칸(settled)은 안 센다 — Lyra 는 그 섞기가 시작되는 프레임에 상태 이름을 Idle 로 바꾼다
 		int StanceLayer() const;
 		float HandLeftAlpha() const { return _handLeftAlpha; }
+		float LegIKAlpha() const { return _legIKAlpha; }		// 다리 IK 비중 = 1 − 앞 자세 곡선 DisableLegIK(L-12-c)
 		// 발 붙이기 장치의 이번 갱신 값(대조 도구 기록용). stepped = 이번 갱신에 스프링을 넘겼나(뜬 프레임 · 알파 0 이면 멈춤)
 		struct PlantView
 		{
@@ -307,6 +308,7 @@ namespace mo
 		int _poseMontageCount = 0;
 		float _disableLeftHand = 0.f;		// 이번 자세의 DisableLHandIK 곡선 — 다음 갱신의 왼손 비중이 된다
 		float _handLeftAlpha = 1.f;
+		float _legIKAlpha = 1.f;			// 다리 IK 비중(L-12-c) — 앞 자세의 _disableLegIK 에서 왼손 비중과 같은 때 낸다
 		bool _handFresh = false;			// 묶음을 바꾼 뒤 첫 갱신 — 새 층은 아직 곡선을 읽은 적이 없어 왼손 비중이 1 이다
 		float _timeSinceFired = 0.f;
 		float _overrideWeight = 0.f;
