@@ -165,6 +165,20 @@ namespace mo
 		return alive && !immune && (self || !sameTeam);
 	}
 
+	MapCapsule GrenadeStandable(const Vec3& location, const Rotator& rotation, const ProjectileParams& params, uint32_t grenadeId)
+	{
+		const Vec3 axis = RotateVector(rotation, Vec3(0.0, 0.0, 1.0));
+		const Vec3 center = location + RotateVector(rotation, params.capsuleOffset);
+		const double segmentHalf = std::max(0.0, params.capsuleHalfHeight - params.capsuleRadius);	// 언리얼 반높이는 반구 끝까지 — 축 선분은 반지름만큼 짧다
+		MapCapsule capsule;
+		capsule.a = center - axis * segmentHalf;
+		capsule.b = center + axis * segmentHalf;
+		capsule.radius = params.capsuleRadius;
+		capsule.object = kMapExtraObjectBit | grenadeId;
+		capsule.flags = MAP_BLOCK_MOVE;
+		return capsule;
+	}
+
 	size_t BodyObstacles(const BodyPlacement& body, const ProjectileObstacle& base, ProjectileObstacle* out, size_t maxCount)
 	{
 		if (body.skip || !body.pose || !body.shapes) return 0;

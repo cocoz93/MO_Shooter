@@ -430,6 +430,7 @@ namespace mo
 			out.impactNormal = hit.impactNormal;
 			out.traceStart = start;
 			out.traceEnd = end;
+			out.standable = (hit.object & kMapExtraObjectBit) != 0;	// 사람 맞음은 object 0 이라 안 붙는다
 		}
 
 		void InitHit(MoveHit& out, const Vec3& start, const Vec3& end)
@@ -665,7 +666,7 @@ namespace mo
 		if (!IsWalking())
 		{
 			// 제자리에서 키운다
-			encroached = _map.OverlapCapsule(pawnLocation, radius, standHalf, MAP_BLOCK_MOVE);
+			encroached = _map.OverlapCapsule(pawnLocation, radius, standHalf, MAP_BLOCK_MOVE, Standables());
 			if (encroached && halfHeightAdjust > 0.f)
 			{
 				// 반지름만큼 짧은 캡슐로 아래를 쓸어 바닥을 찾고, 거기서 일어설 수 있나 본다
@@ -682,7 +683,7 @@ namespace mo
 				{
 					const float distanceToBase = (hit.time * traceDist) + shortHalf;
 					const Vec3 newLocation = pawnLocation + Vec3(0.0, 0.0, (double)(-distanceToBase + standHalf + kSweepInflation + kMinFloorDist / 2.f));
-					encroached = _map.OverlapCapsule(newLocation, radius, standHalf, MAP_BLOCK_MOVE);
+					encroached = _map.OverlapCapsule(newLocation, radius, standHalf, MAP_BLOCK_MOVE, Standables());
 					if (!encroached)
 					{
 						MoveComponent(newLocation - pawnLocation, false, nullptr, false);
@@ -696,7 +697,7 @@ namespace mo
 		{
 			// 바닥 자리를 지키며 키운다
 			Vec3 standingLocation = pawnLocation + Vec3(0.0, 0.0, (double)(standHalf - currentHalf));
-			encroached = _map.OverlapCapsule(standingLocation, radius, standHalf, MAP_BLOCK_MOVE);
+			encroached = _map.OverlapCapsule(standingLocation, radius, standHalf, MAP_BLOCK_MOVE, Standables());
 			bool lowered = false;
 			if (encroached)
 			{
@@ -705,7 +706,7 @@ namespace mo
 				if (s.floor.blockingHit && s.floor.floorDist > minFloorDist)
 				{
 					standingLocation.z -= (double)(s.floor.floorDist - minFloorDist);
-					encroached = _map.OverlapCapsule(standingLocation, radius, standHalf, MAP_BLOCK_MOVE);
+					encroached = _map.OverlapCapsule(standingLocation, radius, standHalf, MAP_BLOCK_MOVE, Standables());
 					lowered = true;
 				}
 			}
@@ -1163,7 +1164,7 @@ namespace mo
 		}
 
 		CapsuleHit sweepHit;
-		bool hit = _map.SweepCapsule(traceStart, traceEnd, _p.capsuleRadius, HalfHeight(), MAP_BLOCK_MOVE, sweepHit);
+		bool hit = _map.SweepCapsule(traceStart, traceEnd, _p.capsuleRadius, HalfHeight(), MAP_BLOCK_MOVE, sweepHit, Standables());
 		// 다른 사람 캡슐(컨텐츠 F) — 맵보다 먼저 닿거나(같은 시각이면 맵), 맵 맞음이 빠져나가는 겹침이라 무시될 때 사람 맞음을 쓴다
 		// (엔진은 여러 맞음을 받아 무시하지 않는 첫 맞음을 고른다 — PrimitiveComponent MoveComponentImpl, 원본 기준)
 		bool pawnHit = false;
@@ -1189,6 +1190,7 @@ namespace mo
 				++_count.pawnHits;
 				if (blocking.startPenetrating) ++_count.pawnStartPenetrating;
 			}
+			if (blocking.standable) ++_count.standableHits;
 			if (blocking.startPenetrating) ++_count.startPenetrating;
 
 			// PullBackHit — 면에 딱 붙지 않게 시간을 조금 물린다. 닿은 위치(location)는 그대로 둔다
@@ -1255,7 +1257,7 @@ namespace mo
 		if (!IsZero(adjustment))
 		{
 			const bool encroached = _map.OverlapCapsule(hit.traceStart + adjustment, _p.capsuleRadius + kOverlapInflation,
-				HalfHeight() + kOverlapInflation, MAP_BLOCK_MOVE)
+				HalfHeight() + kOverlapInflation, MAP_BLOCK_MOVE, Standables())
 				|| OverlapPawns(hit.traceStart + adjustment, _p.capsuleRadius + kOverlapInflation, HalfHeight() + kOverlapInflation);
 			if (!encroached)
 			{
@@ -1463,7 +1465,7 @@ namespace mo
 	{
 		InitHit(out, start, end);
 		CapsuleHit hit;
-		if (_map.SweepCapsule(start, end, radius, halfHeight, MAP_BLOCK_MOVE, hit))
+		if (_map.SweepCapsule(start, end, radius, halfHeight, MAP_BLOCK_MOVE, hit, Standables()))
 		{
 			FillFromCapsule(out, hit, start, end);
 		}
@@ -1931,7 +1933,7 @@ namespace mo
 
 			RayHit ray;
 			++_count.floorLineTraces;
-			if (_map.Raycast(location, lineEnd, MAP_BLOCK_MOVE, ray))
+			if (_map.Raycast(location, lineEnd, MAP_BLOCK_MOVE, ray, Standables()))
 			{
 				const float time = (float)(ray.distance / (double)traceDist);
 				if (time > 0.f)
@@ -1944,6 +1946,7 @@ namespace mo
 					lineHit.impactPoint = lineHit.location;
 					lineHit.normal = ray.normal;
 					lineHit.impactNormal = ray.normal;
+					lineHit.standable = (ray.object & kMapExtraObjectBit) != 0;
 
 					const float maxPenetrationAdjust = std::max(kMaxFloorDist, pawnRadius);
 					const float lineResult = std::max(-maxPenetrationAdjust, time * traceDist - shrinkHeight);

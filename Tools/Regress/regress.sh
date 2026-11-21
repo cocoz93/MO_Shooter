@@ -97,6 +97,12 @@ run_checks() {
 		"$tools/GrenadeCheck/Release/GrenadeCheck.exe" "$DATA/map_gym.mocl" "$DATA" l2c2 > "$OUT/grenade_l2c.log" 2>&1
 		sed 's/^/grenade_l2c /' "$OUT/grenade_l2c.log" >> "$g"
 	fi
+	# 수류탄 위 걸음(L-8-b) — g0t1 · g0t2 걸음 칸 넷(멈춘 수류탄 위를 지남 · 수류탄 없음)을 산 수류탄 몸을 올라설 맵 몸으로 보는 이동으로 다시 굴림.
+	# 칸마다 대조군(지나는 칸은 수류탄을 뺌 · 없는 칸은 넣음)이 어긋나는지까지 도구가 판정한다. --break 이면 g0t2 를 빼 줄이 어긋나야 한다
+	local wtags="g0t1 g0t2"
+	[ "$BREAK" = 1 ] && wtags="g0t1"
+	"$tools/GrenadeWalkCheck/Release/GrenadeWalkCheck.exe" "$DATA/map_gym.mocl" "$DATA" $wtags > "$OUT/grenade_walk.log" 2>&1
+	sed 's/^/grenade_walk /' "$OUT/grenade_walk.log" >> "$g"
 	# 같은 입력 두 누름(L-5-b) — L-1-c 기록 넷(수류탄 l1c1 · l1c2 · 대시 l1cd1 · l1cd2)의 누름 차례를 예측(CSelfPrediction)에 넣어 Lyra 근접 켬 · 끊김 · 막힘 · 대시 · 던짐 ·
 	# 재장전 · 칸 끝 탄창과 대조. 차례 없이 넣은 대조군이 Lyra 와 다른 칸 수(fixedOrderDiff)까지 기준선에 든다. --break 이면 l1cd2 를 빼 합계 줄이 어긋나야 한다
 	local ptags="l1c1 l1c2 l1cd1 l1cd2"

@@ -161,4 +161,9 @@ namespace mo
 	// 모양 — Sphere = 캡슐(반높이 = 반지름) · Sphyl = 캡슐(축 = 몸 Z · 반높이 = 길이/2 + 반지름) · Box = 상자(반 길이 = 변/2).
 	// 나머지 칸(id · kind · owner · detonateOnHit)은 base 를 그대로 받고, part = 부위 차례. 돌려주는 값 = out 에 쓴 수(maxCount 를 넘으면 그만 쓴다)
 	size_t BodyObstacles(const BodyPlacement& body, const ProjectileObstacle& base, ProjectileObstacle* out, size_t maxCount);
+
+	// 산 수류탄 몸 → 사람 걸음이 올라설 수 있는 맵 몸(L-8-b · CMoveSim::SetStandables). 수류탄 메시 캡슐(뿌리 = 메시, L-2-b GCOLL root=1) —
+	// 가운데 = 자리 + 회전 × capsuleOffset · 축 = 회전 × Z · 반지름 · 반높이 = params(5 · 9 — 축 선분은 반높이 − 반지름 = 4 씩).
+	// 사람 걸음은 이것을 맵 몸으로 본다(올라서기 · 바닥 허용 — 사람 캡슐과 다름, L-2-b). object = kMapExtraObjectBit | grenadeId · 깃발 = 이동만
+	MapCapsule GrenadeStandable(const Vec3& location, const Rotator& rotation, const ProjectileParams& params, uint32_t grenadeId);
 }

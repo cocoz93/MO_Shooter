@@ -66,22 +66,39 @@ namespace mo
 		bool startPenetrating = false;	// 시작부터 겹쳐 있음
 	};
 
+	// 맵 파일 밖에서 질의마다 덧붙이는 캡슐(산 수류탄 몸 — L-8-b). 맵 파일 캡슐(kind 2)과 같은 셈 · 같은 차례(파일 캡슐 다음)로 본다.
+	// 불러온 맵은 안 바뀌므로 스레드마다 다른 목록으로 함께 질의해도 된다. 목록은 부른 쪽이 들고 있다
+	struct MapCapsule
+	{
+		Vec3 a, b;				// 축 선분 양 끝(구면 a == b)
+		double radius = 0;
+		uint32_t object = 0;	// 맞음의 object 칸에 그대로 나간다 — 맵 물체 번호와 안 겹치게 kMapExtraObjectBit 를 붙인다
+		uint32_t flags = 0;		// MAP_BLOCK_* — 이 질의 깃발과 겹쳐야 본다
+	};
+	constexpr uint32_t kMapExtraObjectBit = 0x80000000u;
+	struct MapExtras
+	{
+		const MapCapsule* capsules = nullptr;
+		size_t count = 0;
+	};
+
 	class CMapCollision
 	{
 	public:
 		// 다시 부르면 이전 내용을 버린다
 		EMapLoad LoadFromMemory(const void* data, size_t size);
 
-		// blockFlag = MAP_BLOCK_* 중 하나(이동 · 무기 · 수류탄 · 폭발 선). 가장 가까운 것 하나를 돌려준다
-		bool Raycast(const Vec3& start, const Vec3& end, uint32_t blockFlag, RayHit& out) const;
+		// blockFlag = MAP_BLOCK_* 중 하나(이동 · 무기 · 수류탄 · 폭발 선). 가장 가까운 것 하나를 돌려준다.
+		// extras = 이 질의에만 덧붙이는 캡슐(아래 질의 모두 같다 — 없으면 nullptr)
+		bool Raycast(const Vec3& start, const Vec3& end, uint32_t blockFlag, RayHit& out, const MapExtras* extras = nullptr) const;
 
 		// 똑바로 선 캡슐을 중심 기준으로 start → end 로 옮겨 처음 닿는 곳을 찾는다
 		// halfHeight = 캡슐 전체 높이의 절반(언리얼 GetScaledCapsuleHalfHeight 와 같은 뜻)
-		bool SweepCapsule(const Vec3& start, const Vec3& end, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out) const;
+		bool SweepCapsule(const Vec3& start, const Vec3& end, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out, const MapExtras* extras = nullptr) const;
 
 		// 기운 캡슐 — axis = 캡슐 축의 단위 벡터(언리얼 캡슐 회전의 위쪽). 쓸기 동안 회전은 그대로다(언리얼 쓸기도 시작 회전 하나)
 		// 위 함수는 axis = (0, 0, 1) 인 이 함수다
-		bool SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out) const;
+		bool SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out, const MapExtras* extras = nullptr) const;
 
 		// 시작 겹침을 물체마다 하나씩(그 물체에서 가장 깊은 것). out 은 위와 같다(물체를 가리지 않고 가장 깊은 것)
 		// 언리얼은 물체(컴포넌트)마다 맞음을 따로 받아 MoveComponentImpl 이 빠져나가는 겹침을 뺀 나머지에서 고른다 — 가장 깊은 것 하나만 받으면
@@ -93,10 +110,10 @@ namespace mo
 			size_t count = 0;
 			size_t dropped = 0;		// kMax 를 넘어 못 담은 물체 수
 		};
-		bool SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out, Penetrations* perObject) const;
+		bool SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out, Penetrations* perObject, const MapExtras* extras = nullptr) const;
 
 		// 이 자리에 똑바로 선 캡슐을 두면 무언가와 겹치나. 뒷면 규칙을 쓰지 않는다(언리얼 겹침 검사와 같음)
-		bool OverlapCapsule(const Vec3& center, double radius, double halfHeight, uint32_t blockFlag) const;
+		bool OverlapCapsule(const Vec3& center, double radius, double halfHeight, uint32_t blockFlag, const MapExtras* extras = nullptr) const;
 
 		uint32_t GetObjectCount() const { return _objectCount; }
 		uint32_t GetTriangleCount() const { return _triangleCount; }			// 파일 기준
@@ -122,13 +139,7 @@ namespace mo
 			uint32_t flags;
 		};
 
-		struct Prim
-		{
-			Vec3 a, b;			// 구면 a == b
-			double radius;
-			uint32_t object;
-			uint32_t flags;
-		};
+		using Prim = MapCapsule;	// 파일의 구 · 캡슐 — 덧붙인 캡슐과 한 모양이라 같은 셈을 탄다
 
 		// 속이 찬 볼록 물체. 삼각형은 면만 알려 주므로 한가운데 있는지는 면의 평면으로 따로 잰다
 		struct Solid

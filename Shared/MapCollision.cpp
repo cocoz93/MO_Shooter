@@ -807,7 +807,7 @@ namespace mo
 		tree.tris.insert(tree.tris.end(), side.tris.begin(), side.tris.end());
 	}
 
-	bool CMapCollision::Raycast(const Vec3& start, const Vec3& end, uint32_t blockFlag, RayHit& out) const
+	bool CMapCollision::Raycast(const Vec3& start, const Vec3& end, uint32_t blockFlag, RayHit& out, const MapExtras* extras) const
 	{
 		const Vec3 delta = end - start;
 		const double length = Length(delta);
@@ -879,17 +879,23 @@ namespace mo
 		}
 
 		const Prim* bestPrim = nullptr;
-		for (const Prim& prim : _prims)
+		for (int list = 0; list < 2; ++list)		// 파일 캡슐 → 덧붙인 캡슐(L-8-b — 맵 파일 끝에 붙인 것과 같은 차례)
 		{
-			if (!(prim.flags & blockFlag)) continue;
-			double t;
-			if (RayCapsule(start, delta, prim.a, prim.b, prim.radius, t) && t * length < best)
+			const Prim* prims = list == 0 ? _prims.data() : (extras ? extras->capsules : nullptr);
+			const size_t primCount = list == 0 ? _prims.size() : (extras && extras->capsules ? extras->count : 0);
+			for (size_t primIndex = 0; primIndex < primCount; ++primIndex)
 			{
-				best = t * length;
-				found = true;
-				bestPrim = &prim;
-				bestTri = nullptr;
-				bestInside = t == 0;
+				const Prim& prim = prims[primIndex];
+				if (!(prim.flags & blockFlag)) continue;
+				double t;
+				if (RayCapsule(start, delta, prim.a, prim.b, prim.radius, t) && t * length < best)
+				{
+					best = t * length;
+					found = true;
+					bestPrim = &prim;
+					bestTri = nullptr;
+					bestInside = t == 0;
+				}
 			}
 		}
 
@@ -993,17 +999,17 @@ namespace mo
 		return result;
 	}
 
-	bool CMapCollision::SweepCapsule(const Vec3& start, const Vec3& end, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out) const
+	bool CMapCollision::SweepCapsule(const Vec3& start, const Vec3& end, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out, const MapExtras* extras) const
 	{
-		return SweepCapsule(start, end, Vec3(0, 0, 1), radius, halfHeight, blockFlag, out);
+		return SweepCapsule(start, end, Vec3(0, 0, 1), radius, halfHeight, blockFlag, out, nullptr, extras);
 	}
 
-	bool CMapCollision::SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out) const
+	bool CMapCollision::SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out, const MapExtras* extras) const
 	{
-		return SweepCapsule(start, end, axis, radius, halfHeight, blockFlag, out, nullptr);
+		return SweepCapsule(start, end, axis, radius, halfHeight, blockFlag, out, nullptr, extras);
 	}
 
-	bool CMapCollision::SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out, Penetrations* perObject) const
+	bool CMapCollision::SweepCapsule(const Vec3& start, const Vec3& end, const Vec3& axis, double radius, double halfHeight, uint32_t blockFlag, CapsuleHit& out, Penetrations* perObject, const MapExtras* extras) const
 	{
 		if (perObject)
 		{
@@ -1174,26 +1180,32 @@ namespace mo
 			}
 		}
 
-		for (const Prim& prim : _prims)
+		for (int list = 0; list < 2; ++list)		// 파일 캡슐 → 덧붙인 캡슐(L-8-b — 맵 파일 끝에 붙인 것과 같은 차례)
 		{
-			if (!(prim.flags & blockFlag)) continue;
-			Vec3 c1, c2;
-			ClosestSegmentSegment(s0, s1, prim.a, prim.b, c1, c2);
-			const double reach = radius + prim.radius;
-			const double dist = Length(c1 - c2);
-			if (dist <= reach)
+			const Prim* prims = list == 0 ? _prims.data() : (extras ? extras->capsules : nullptr);
+			const size_t primCount = list == 0 ? _prims.size() : (extras && extras->capsules ? extras->count : 0);
+			for (size_t primIndex = 0; primIndex < primCount; ++primIndex)
 			{
-				notePenetration(reach - dist, dist > 1e-9 ? (c1 - c2) * (1.0 / dist) : Vec3(0, 0, 1), c2, prim.object, prim.flags);
-				continue;
-			}
-			if (penetrating) continue;
-			double t = best;
-			SweepSegmentSegment(s0, s1, delta, prim.a, prim.b, reach, t);
-			if (t < best)
-			{
-				best = t;
-				bestPrim = &prim;
-				bestTri = nullptr;
+				const Prim& prim = prims[primIndex];
+				if (!(prim.flags & blockFlag)) continue;
+				Vec3 c1, c2;
+				ClosestSegmentSegment(s0, s1, prim.a, prim.b, c1, c2);
+				const double reach = radius + prim.radius;
+				const double dist = Length(c1 - c2);
+				if (dist <= reach)
+				{
+					notePenetration(reach - dist, dist > 1e-9 ? (c1 - c2) * (1.0 / dist) : Vec3(0, 0, 1), c2, prim.object, prim.flags);
+					continue;
+				}
+				if (penetrating) continue;
+				double t = best;
+				SweepSegmentSegment(s0, s1, delta, prim.a, prim.b, reach, t);
+				if (t < best)
+				{
+					best = t;
+					bestPrim = &prim;
+					bestTri = nullptr;
+				}
 			}
 		}
 
@@ -1278,7 +1290,7 @@ namespace mo
 		return true;
 	}
 
-	bool CMapCollision::OverlapCapsule(const Vec3& center, double radius, double halfHeight, uint32_t blockFlag) const
+	bool CMapCollision::OverlapCapsule(const Vec3& center, double radius, double halfHeight, uint32_t blockFlag, const MapExtras* extras) const
 	{
 		const double axisHalf = std::max(0.0, halfHeight - radius);
 		const Vec3 up(0, 0, axisHalf);
@@ -1332,12 +1344,18 @@ namespace mo
 			}
 		}
 
-		for (const Prim& prim : _prims)
+		for (int list = 0; list < 2; ++list)		// 파일 캡슐 → 덧붙인 캡슐(L-8-b — 맵 파일 끝에 붙인 것과 같은 차례)
 		{
-			if (!(prim.flags & blockFlag)) continue;
-			Vec3 c1, c2;
-			ClosestSegmentSegment(s0, s1, prim.a, prim.b, c1, c2);
-			if (Length(c1 - c2) <= radius + prim.radius) return true;
+			const Prim* prims = list == 0 ? _prims.data() : (extras ? extras->capsules : nullptr);
+			const size_t primCount = list == 0 ? _prims.size() : (extras && extras->capsules ? extras->count : 0);
+			for (size_t primIndex = 0; primIndex < primCount; ++primIndex)
+			{
+				const Prim& prim = prims[primIndex];
+				if (!(prim.flags & blockFlag)) continue;
+				Vec3 c1, c2;
+				ClosestSegmentSegment(s0, s1, prim.a, prim.b, c1, c2);
+				if (Length(c1 - c2) <= radius + prim.radius) return true;
+			}
 		}
 		return FindSolidAt(tree, center, blockFlag) != nullptr;
 	}

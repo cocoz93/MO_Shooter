@@ -69,6 +69,7 @@ namespace mo
 	{
 		bool blocking = false;
 		bool startPenetrating = false;
+		bool standable = false;		// 덧붙인 캡슐(산 수류탄 몸 — L-8-b)에 맞음. 맵 몸과 같이 올라서기 · 바닥이 된다(사람 캡슐과 다름 — 원본 B_Grenade 는 올라서기 허용)
 		bool pawn = false;			// 다른 사람 캡슐에 맞음(컨텐츠 F) — 캐릭터 캡슐은 밟고 오를 수 없다(엔진 Character.cpp:81 CanCharacterStepUpOn = ECB_No)
 		float time = 1.f;
 		float penetrationDepth = 0.f;
@@ -236,6 +237,7 @@ namespace mo
 		uint64_t rootForceApexRefund = 0;	// 낙하 꼭대기 쪼개기가 밀기 시간을 돌려줌
 		// 다른 사람 캡슐(컨텐츠 F)
 		uint64_t pawnHits = 0;				// 이동 쓸기가 맵보다 먼저 사람 캡슐에 닿음
+		uint64_t standableHits = 0;			// 이동 쓸기가 덧붙인 캡슐(산 수류탄 몸 — L-8-b)에 닿음
 		uint64_t pawnStartPenetrating = 0;	// 그중 시작부터 겹쳐 있음
 		uint64_t pawnOddSimplex = 0;		// 사람 쓸기 반복에서 삼각형 단체가 퇴화하지 않음 — 세로 캡슐 둘이면 안 나온다(나오면 정확한 식으로 갈음)
 		uint64_t pawnTouchStart = 0;		// 정확한 식으론 안 겹쳤는데 단정밀도 반복이 처음부터 여유 안(λ = 0)으로 끝남 — 엔진처럼 겹침 맞음(깊이 0 근처)으로 돌려준다
@@ -321,6 +323,10 @@ namespace mo
 		// 다른 사람 캡슐(컨텐츠 F) — 다음 Tick 들의 이동 쓸기 · 겹침 풀기가 본다. 배열은 부른 쪽이 들고 있어야 한다. 비우려면 (nullptr, 0)
 		void SetPawns(const PawnCapsule* pawns, size_t count) { _pawns = pawns; _pawnCount = pawns ? count : 0; }
 
+		// 올라설 수 있는 몸(산 수류탄 — L-8-b) — 맵 질의 여덟 곳(이동 쓸기 · 겹침 풀기 · 바닥 쓸기 · 바닥 선 · 일어서기 겹침)이 맵 몸으로 같이 본다.
+		// object 에 kMapExtraObjectBit 를 붙여야 맞음이 standable 로 나온다. 배열은 부른 쪽이 들고 있어야 한다. 비우려면 (nullptr, 0)
+		void SetStandables(const MapCapsule* capsules, size_t count) { _standables.capsules = capsules; _standables.count = capsules ? count : 0; }
+
 		const MoveCounters& GetCounters() const { return _count; }
 		void ResetCounters() { _count = MoveCounters(); }
 
@@ -405,5 +411,7 @@ namespace mo
 		MoveCounters _count;
 		const PawnCapsule* _pawns = nullptr;
 		size_t _pawnCount = 0;
+		MapExtras _standables;
+		const MapExtras* Standables() const { return _standables.count > 0 ? &_standables : nullptr; }
 	};
 }
