@@ -24,6 +24,8 @@
 // 폭발 · 피해(G-2-b) — 터짐(GBOOM)마다 나 · 상대 칸을 TraceGrenadeBlast · GrenadeDamageApplies 로 셈해 Lyra 폭발 선(GTRACE) · 체력(GBOOM 앞>뒤) ·
 //   피해 소식 크기(GMSG)와 견준다. 처치 = 체력이 0 이 됨. 팀 · 무적 · 앉음은 기록 칸 그대로 넣는다(무적 시간 · 팀 정하기는 서버 몫)
 // 끝 코드: 0 = 전부 통과, 1 = 불일치, 2 = 입력 오류
+#include "AnimClips.h"
+#include "AnimPose.h"
 #include "Grenade.h"
 #include "MapCollision.h"
 #include "Movement.h"
@@ -184,6 +186,7 @@ namespace
 	{
 		int frame = -1, age = -1;
 		std::string who, comp;
+		std::string bone;				// 메시 맞음의 뼈 이름 — 부위 몸 대조(L-8-a)
 		double time = 0, distance = 0, penetrationDepth = 0;
 		Vec3 normal;
 		bool startPenetrating = false;
@@ -194,6 +197,16 @@ namespace
 		int frame = 0;
 		Vec3 location, velocity;
 		bool keepVelocity = false;		// GWALLSET — 멈춘 수류탄 자리만 옮김
+	};
+
+	// 맞은 메시의 물리 몸 하나 — 기록 MOB_CPROBE_MESHBODY(맞은 때 세계 자세, L-2-c 에서 맞은 점 ↔ 몸 겉면 0.00000 으로 확인)
+	struct MeshBody
+	{
+		int body = -1;
+		std::string bone;
+		EBodyShape kind = EBodyShape::Sphyl;
+		Vec3 p, x, y, z;
+		double a = 0, b = 0, c = 0;
 	};
 
 	struct Grenade
@@ -213,6 +226,8 @@ namespace
 		bool foeActive = true;			// 생길 때 상대 충돌이 켜져 있었나(기록 MOB_CPROBE_FOE_ACTIVE — 꺼진 상대는 숨김 · 충돌 끔)
 		bool exploded = false;			// 로그를 읽는 동안 GBOOM 을 지났나
 		int boomFrame = -1;				// GBOOM 프레임(-1 = 터지기 전에 기록이 끝남)
+		// 프레임 → 그 프레임에 맞은 메시의 물리 몸(기록 MESHBODY). 이 프레임 걸음에 부위 몸 막는 것으로 넣는다(L-8-a) — 몸 줄은 메시 맞음 프레임에만 있다
+		std::map<int, std::vector<MeshBody>> meshBodies;
 	};
 
 	void AddCounters(ProjectileCounters& a, const ProjectileCounters& b)
@@ -232,6 +247,8 @@ namespace
 		int sameKind[4] = {};	// 같음의 종류별 — 맵 · 나 · 상대 · 수류탄
 		int same = 0, early = 0, late = 0, kindDiff = 0, noneBoth = 0, ownerUnknown = 0, launchFails = 0;
 		int hitCompared = 0, hitFails = 0, meshHits = 0;
+		// 부위 몸(L-8-a) — 몸 자세 기록이 있는 프레임의 메시 맞음 대조 수 · 맞은 부위 다름(메시 ↔ 캡슐 갈림 포함) · 몸 줄은 있는데 맞은 사람을 못 가림
+		int firstMeshCompared = 0, firstMeshPartDiff = 0, meshCompared = 0, meshPartDiff = 0, meshNoWho = 0, meshBodyLines = 0;
 		double maxHitDist = 0, maxHitTime = 0, maxHitNormal = 0;
 		int rowsRead = 0, spawnsRead = 0, hitsRead = 0;
 		// 튕김(G-1-c) — 첫 부딪힘 프레임부터
@@ -258,6 +275,8 @@ namespace
 			same += o.same; early += o.early; late += o.late; kindDiff += o.kindDiff; noneBoth += o.noneBoth;
 			ownerUnknown += o.ownerUnknown; launchFails += o.launchFails;
 			hitCompared += o.hitCompared; hitFails += o.hitFails; meshHits += o.meshHits;
+			firstMeshCompared += o.firstMeshCompared; firstMeshPartDiff += o.firstMeshPartDiff; meshCompared += o.meshCompared;
+			meshPartDiff += o.meshPartDiff; meshNoWho += o.meshNoWho; meshBodyLines += o.meshBodyLines;
 			maxHitDist = std::max(maxHitDist, o.maxHitDist); maxHitTime = std::max(maxHitTime, o.maxHitTime);
 			maxHitNormal = std::max(maxHitNormal, o.maxHitNormal);
 			rowsRead += o.rowsRead; spawnsRead += o.spawnsRead; hitsRead += o.hitsRead;
@@ -336,6 +355,8 @@ namespace
 		struct PendingDrop { std::string name; Teleport tp; };
 		std::vector<PendingDrop> drops;
 		struct PendingMark { std::string name; int frame; Vec3 location; };
+		struct PendingBody { std::string name; int frame; MeshBody body; };
+		std::vector<PendingBody> meshBodies;
 		std::vector<PendingMark> bounceMarks, stopMarks;
 		bool foeActive = true;	// 기록 대본이 상대를 숨기고 충돌을 끈 구간(SetFoeActive) — 줄에 프레임이 없어 로그 차례로 가린다
 		for (const std::string& line : Lines(logData))
@@ -346,6 +367,34 @@ namespace
 				foeActive = line[foeAt + 25] == '1';
 				for (const Grenade& g : grenades)
 					if (!g.exploded) ++t.foeToggleWhileLive;	// 날아가는 동안 바뀌면 생길 때 값 하나로는 못 덮는다 — 0 이어야 한다
+				continue;
+			}
+			// 맞은 메시의 물리 몸(L-2-c 탐침) — 맞은 때 세계 자세 · 모양 칸(a = 반지름 또는 X 변 · b = 길이 또는 Y 변 · c = Z 변)
+			const size_t bodyAt = line.find("MOB_CPROBE_MESHBODY ");
+			if (bodyAt != std::string::npos)
+			{
+				const auto kv = KeyValues(line.substr(bodyAt + 20));
+				PendingBody pb;
+				pb.name = kv.count("name") ? kv.at("name") : "";
+				pb.frame = kv.count("frame") ? std::atoi(kv.at("frame").c_str()) : -1;
+				pb.body.body = kv.count("body") ? std::atoi(kv.at("body").c_str()) : -1;
+				pb.body.bone = kv.count("bone") ? kv.at("bone") : "";
+				const std::string kindName = kv.count("kind") ? kv.at("kind") : "";
+				const bool kindKnown = kindName == "sphere" || kindName == "sphyl" || kindName == "box";
+				pb.body.kind = kindName == "sphere" ? EBodyShape::Sphere : (kindName == "box" ? EBodyShape::Box : EBodyShape::Sphyl);
+				pb.body.a = kv.count("a") ? std::atof(kv.at("a").c_str()) : 0;
+				pb.body.b = kv.count("b") ? std::atof(kv.at("b").c_str()) : 0;
+				pb.body.c = kv.count("c") ? std::atof(kv.at("c").c_str()) : 0;
+				const double scale = kv.count("scale") ? std::atof(kv.at("scale").c_str()) : 0;
+				if (pb.name.empty() || pb.frame < 0 || pb.body.body < 0 || pb.body.bone.empty() || !kindKnown || scale != 1.0
+					|| !kv.count("p") || !kv.count("x") || !kv.count("y") || !kv.count("z")
+					|| !ParseVec(kv.at("p"), pb.body.p) || !ParseVec(kv.at("x"), pb.body.x) || !ParseVec(kv.at("y"), pb.body.y) || !ParseVec(kv.at("z"), pb.body.z))
+				{
+					std::printf("GRENADECHECK input tag=%s MESHBODY 줄 꼴 다름(크기 1 이 아닌 몸 포함)\n", tag.c_str());
+					return false;
+				}
+				meshBodies.push_back(pb);
+				++t.meshBodyLines;
 				continue;
 			}
 			const size_t at = line.find("MOB_CPROBE_G");
@@ -431,6 +480,7 @@ namespace
 				h.hit.age = kv.count("age") ? std::atoi(kv.at("age").c_str()) : -1;
 				h.hit.who = kv.count("who") ? kv.at("who") : "";
 				h.hit.comp = kv.count("comp") ? kv.at("comp") : "";
+				h.hit.bone = kv.count("bone") ? kv.at("bone") : "";
 				h.hit.time = kv.count("time") ? std::atof(kv.at("time").c_str()) : 0;
 				h.hit.distance = kv.count("dist") ? std::atof(kv.at("dist").c_str()) : 0;
 				h.hit.penetrationDepth = kv.count("penDepth") ? std::atof(kv.at("penDepth").c_str()) : 0;
@@ -470,6 +520,11 @@ namespace
 			if (!g) continue;
 			if (g->firstHit.frame < 0) g->firstHit = h.hit;
 			g->hits[h.hit.frame].push_back(h.hit);
+		}
+		for (const PendingBody& b : meshBodies)
+		{
+			Grenade* g = FindGrenade(grenades, b.name, b.frame);
+			if (g) g->meshBodies[b.frame].push_back(b.body);
 		}
 		for (const PendingMark& m : bounceMarks)
 		{
@@ -624,6 +679,46 @@ namespace
 						obstacles.push_back(o);
 					}
 				}
+				// 사람 메시 부위 몸(L-8-a) — 그 프레임 몸 자세 기록(MESHBODY)이 있을 때만. 기록 세계 자세를 요 0 · 가운데 0 자세로 보고 Shared BodyObstacles 로 옮긴다
+				// (서버가 쓸 같은 함수). 맞은 사람 = 그 프레임 메시 맞음 줄의 who. 몸 줄이 없는 프레임(옛 g0 기록 전부 · 메시 맞음이 없는 프레임)은 캡슐만
+				const std::vector<MeshBody>* frameBodies = nullptr;
+				{
+					const auto bodyIt = g.meshBodies.find(frame);
+					const auto hitIt = g.hits.find(frame);
+					uint32_t who = 0;
+					if (bodyIt != g.meshBodies.end() && hitIt != g.hits.end())
+						for (const RecordHit& h : hitIt->second)
+							if (h.comp == "CharacterMesh0") { who = h.who == "me" ? kIdMe : (h.who == "foe" ? kIdFoe : 0); break; }
+					if (bodyIt != g.meshBodies.end() && who == 0) ++t.meshNoWho;
+					else if (bodyIt != g.meshBodies.end())
+					{
+						frameBodies = &bodyIt->second;
+						const size_t count = frameBodies->size();
+						std::vector<ClipBody> shapes(count);
+						std::vector<BodyPose> poses(count);
+						for (size_t bi = 0; bi < count; ++bi)
+						{
+							const MeshBody& mb = (*frameBodies)[bi];
+							shapes[bi].kind = (uint8_t)mb.kind;
+							shapes[bi].a = (float)mb.a;
+							shapes[bi].b = (float)mb.b;
+							shapes[bi].c = (float)mb.c;
+							const Vec3* axes[4] = { &mb.p, &mb.x, &mb.y, &mb.z };
+							double* outs[4] = { poses[bi].center, poses[bi].axisX, poses[bi].axisY, poses[bi].axisZ };
+							for (int k = 0; k < 4; ++k) { outs[k][0] = axes[k]->x; outs[k][1] = axes[k]->y; outs[k][2] = axes[k]->z; }
+						}
+						BodyPlacement placement;
+						placement.pose = poses.data();
+						placement.shapes = shapes.data();
+						placement.shapeCount = (uint32_t)count;
+						ProjectileObstacle bodyBase;
+						bodyBase.id = who; bodyBase.kind = EProjectileHitKind::Pawn; bodyBase.owner = g.owner == who;
+						bodyBase.detonateOnHit = !bodyBase.owner && !sameTeam;
+						std::vector<ProjectileObstacle> parts(count);
+						parts.resize(BodyObstacles(placement, bodyBase, parts.data(), parts.size()));
+						obstacles.insert(obstacles.end(), parts.begin(), parts.end());
+					}
+				}
 				for (size_t oi = 0; oi < grenades.size(); ++oi)
 				{
 					if (oi == gi) continue;
@@ -679,10 +774,19 @@ namespace
 						{
 							const RecordHit& rh = (*recHits)[i];
 							const ProjectileHit& sh = *simHits[i];
-							if (rh.comp == "CharacterMesh0")
+							const bool meshRec = rh.comp == "CharacterMesh0";
+							if (meshRec && !frameBodies)
 							{
-								++t.meshFrames;	// 사람 메시 물리 몸 — 우리는 캡슐만(미결 18)
+								++t.meshFrames;	// 사람 메시 물리 몸 — 이 프레임 몸 자세 기록이 없어 못 견준다(옛 g0 기록, L-8-a)
 								continue;
+							}
+							// 메시 맞음 ↔ 부위 몸 맞음 — 맞은 뼈까지 같아야 한다. 한쪽만 메시(캡슐 ↔ 몸 갈림)도 다름
+							bool partDiff = false;
+							if (meshRec || sh.part >= 0)
+							{
+								++t.meshCompared;
+								partDiff = !meshRec || sh.part < 0 || (*frameBodies)[(size_t)sh.part].bone != rh.bone;
+								if (partDiff) ++t.meshPartDiff;
 							}
 							++t.allHitsCompared;
 							const double dd = std::fabs(sh.contactDistance - rh.distance), dt = std::fabs(sh.time - rh.time), dn = Dist(sh.normal, rh.normal);
@@ -693,14 +797,15 @@ namespace
 							t.maxAllHitTimeCm = std::max(t.maxAllHitTimeCm, dtCm);
 							t.maxAllHitNormal = std::max(t.maxAllHitNormal, dn);
 							t.maxAllHitDepth = std::max(t.maxAllHitDepth, dpen);
-							if (rh.who != KindName(sh) || rh.startPenetrating != sh.startPenetrating
+							if (rh.who != KindName(sh) || rh.startPenetrating != sh.startPenetrating || partDiff
 								|| dd > kHitDistTolerance || dtCm > kHitTimeCmTolerance || dn > kHitNormalTolerance || dpen > kHitDepthTolerance)
 							{
 								++t.allHitFails;
 								if (verbose)
-									std::printf("  hit %s@%d age=%d #%zu %s/%s pen=%d/%d dist=%.6f/%.6f time=%.7f/%.7f normal=%.6f depth=%.6f/%.6f\n",
+									std::printf("  hit %s@%d age=%d #%zu %s/%s pen=%d/%d dist=%.6f/%.6f time=%.7f/%.7f normal=%.6f depth=%.6f/%.6f bone=%s/%s\n",
 										g.name.c_str(), g.spawnFrame, age, i, rh.who.c_str(), KindName(sh), rh.startPenetrating ? 1 : 0, sh.startPenetrating ? 1 : 0,
-										sh.contactDistance, rh.distance, sh.time, rh.time, dn, sh.penetrationDepth, rh.penetrationDepth);
+										sh.contactDistance, rh.distance, sh.time, rh.time, dn, sh.penetrationDepth, rh.penetrationDepth,
+										meshRec ? rh.bone.c_str() : "-", sh.part >= 0 ? (*frameBodies)[(size_t)sh.part].bone.c_str() : "-");
 							}
 						}
 					}
@@ -840,9 +945,9 @@ namespace
 					++t.kindDiff;
 					result = "kindDiff";
 				}
-				else if (g.firstHit.comp == "CharacterMesh0")
+				else if (g.firstHit.comp == "CharacterMesh0" && g.meshBodies.count(recHitFrame) == 0)
 				{
-					// 상대 메시 물리 몸(팔 등)에 먼저 맞음 — 내 쪽은 사람을 캡슐로만 막아 맞은 거리를 못 견준다(프레임 · 종류만 견줌, 미결 18)
+					// 상대 메시 물리 몸(팔 등)에 먼저 맞음 — 그 프레임 몸 자세 기록이 없어 맞은 거리를 못 견준다(프레임 · 종류만 견줌, 옛 g0 기록 · L-8-a)
 					++t.same;
 					++t.sameKind[KindIndex(simFirst)];
 					++t.meshHits;
@@ -861,7 +966,18 @@ namespace
 					t.maxHitDist = std::max(t.maxHitDist, dd);
 					t.maxHitTime = std::max(t.maxHitTime, dt);
 					t.maxHitNormal = std::max(t.maxHitNormal, dn);
-					if (dd > kHitDistTolerance || dt > kHitTimeTolerance || dn > kHitNormalTolerance)
+					// 메시 맞음(몸 자세 기록 있음) ↔ 부위 몸 맞음 — 맞은 뼈까지(L-8-a)
+					const bool meshRec = g.firstHit.comp == "CharacterMesh0";
+					bool partDiff = false;
+					if (meshRec || simFirst.part >= 0)
+					{
+						++t.firstMeshCompared;
+						const auto bodyIt = g.meshBodies.find(recHitFrame);
+						partDiff = !meshRec || simFirst.part < 0 || bodyIt == g.meshBodies.end()
+							|| (size_t)simFirst.part >= bodyIt->second.size() || bodyIt->second[(size_t)simFirst.part].bone != g.firstHit.bone;
+						if (partDiff) ++t.firstMeshPartDiff;
+					}
+					if (dd > kHitDistTolerance || dt > kHitTimeTolerance || dn > kHitNormalTolerance || partDiff)
 					{
 						++t.hitFails;
 						if (verbose)
@@ -1499,13 +1615,306 @@ namespace
 		total.Add(t);
 		return true;
 	}
+
+	// ── 캡슐 대 상자 쓸기 자가 시험(L-8-a-1, --sweep-test) ─────────────────
+	// ① SweepCapsuleBox ↔ 무차별 기준 — 선분 위 점을 황금 분할로 훑어 점 ↔ 상자 정확 거리의 가장 작은 값을 잡고, 시각을 촘촘히 훑어 처음 닿는 칸을 이분법으로.
+	//    Shared 는 선분 ↔ 상자를 조각마다 2차식으로 바로 풀고 시각은 황금 분할 + 이분법 — 셈 길이 다르다
+	// ② BodyObstacles + 쓸기 ↔ TraceBody(자세 판정 — 구 쓸기 = 둥근 상자 · 캡슐) — 요 · 축 · 모양 칸 옮김과 상자 쓸기를 다른 구현과 맞춘다.
+	//    Sphere 는 뺀다 — TraceBody 의 SegmentCapsuleZ 가 축 반길이 0 이면 아래 반구만 센다(outerPart, L-8-a-1 에서 찾음 · 미결). Lyra 몸 22 에 Sphere 는 없다
+	struct CTestRandom
+	{
+		uint64_t state;
+		double Next()
+		{
+			state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+			return (double)(state >> 11) * (1.0 / 9007199254740992.0);
+		}
+		double Range(double lo, double hi) { return lo + (hi - lo) * Next(); }
+	};
+
+	double Dot3(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+	Vec3 Cross3(const Vec3& a, const Vec3& b) { return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x); }
+	Vec3 Unit3(const Vec3& v)
+	{
+		const double l = std::sqrt(Dot3(v, v));
+		return l > 0 ? v * (1.0 / l) : Vec3();
+	}
+
+	Vec3 RandomUnit(CTestRandom& r)
+	{
+		for (;;)
+		{
+			const Vec3 v(r.Range(-1, 1), r.Range(-1, 1), r.Range(-1, 1));
+			const double sq = Dot3(v, v);
+			if (sq > 1e-4 && sq <= 1.0) return v * (1.0 / std::sqrt(sq));
+		}
+	}
+
+	// 오른손 직교 세 축
+	void RandomFrame(CTestRandom& r, Vec3& x, Vec3& y, Vec3& z)
+	{
+		x = RandomUnit(r);
+		for (;;)
+		{
+			const Vec3 c = Cross3(x, RandomUnit(r));
+			if (Dot3(c, c) > 1e-4) { z = Unit3(c); break; }
+		}
+		y = Cross3(z, x);
+	}
+
+	struct TestBox { Vec3 center, x, y, z, half; };
+
+	// 무차별 선분 ↔ 상자 — 선분 위 점(s)마다 점 ↔ 상자 정확 거리(지역 좌표 자름), s 는 황금 분할 100번(거리가 s 에 볼록)
+	double RefSegmentBox(const Vec3& a, const Vec3& b, const TestBox& box, Vec3& outSeg, Vec3& outBox)
+	{
+		const auto at = [&](double s, Vec3& seg, Vec3& onBox)
+		{
+			seg = a + (b - a) * s;
+			const Vec3 d = seg - box.center;
+			const Vec3 q(Dot3(d, box.x), Dot3(d, box.y), Dot3(d, box.z));
+			const Vec3 c(std::min(box.half.x, std::max(-box.half.x, q.x)), std::min(box.half.y, std::max(-box.half.y, q.y)), std::min(box.half.z, std::max(-box.half.z, q.z)));
+			onBox = box.center + box.x * c.x + box.y * c.y + box.z * c.z;
+			const Vec3 over = q - c;
+			return std::sqrt(Dot3(over, over));
+		};
+		double lo = 0.0, hi = 1.0;
+		constexpr double kGolden = 0.6180339887498949;
+		Vec3 s1, b1;
+		for (int i = 0; i < 100; ++i)
+		{
+			const double m1 = hi - (hi - lo) * kGolden, m2 = lo + (hi - lo) * kGolden;
+			if (at(m1, s1, b1) < at(m2, s1, b1)) hi = m2;
+			else lo = m1;
+		}
+		return at(0.5 * (lo + hi), outSeg, outBox);
+	}
+
+	struct RefHit
+	{
+		bool hit = false, startPen = false;
+		double time = 0, depth = 0, startDistance = 0;
+		Vec3 normal;
+	};
+
+	RefHit RefSweepCapsuleBox(const Vec3& center, const Vec3& axis, double radius, double halfHeight, const Vec3& delta, const TestBox& box, int steps)
+	{
+		const Vec3 half = axis * std::max(0.0, halfHeight - radius);
+		const Vec3 a = center - half, b = center + half;
+		Vec3 seg, onBox;
+		const auto distanceAt = [&](double t)
+		{
+			const Vec3 m = delta * t;
+			return RefSegmentBox(a + m, b + m, box, seg, onBox);
+		};
+		RefHit out;
+		out.startDistance = distanceAt(0.0);
+		if (out.startDistance <= radius)
+		{
+			out.hit = out.startPen = true;
+			out.depth = radius - out.startDistance;
+			out.normal = Unit3(seg - onBox);
+			return out;
+		}
+		double prev = 0.0;
+		for (int k = 1; k <= steps; ++k)
+		{
+			const double t = (double)k / steps;
+			if (distanceAt(t) <= radius)
+			{
+				double lo = prev, hi = t;
+				for (int i = 0; i < 60; ++i)
+				{
+					const double mid = 0.5 * (lo + hi);
+					if (distanceAt(mid) > radius) lo = mid;
+					else hi = mid;
+				}
+				distanceAt(hi);
+				out.hit = true;
+				out.time = hi;
+				out.normal = Unit3(seg - onBox);
+				return out;
+			}
+			prev = t;
+		}
+		return out;
+	}
+
+	bool SweepSelfTest()
+	{
+		// 허용치 — 시각 1e-6(옮김 150cm 면 0.00015cm) · 법선 1e-4 · 깊이 · 맞은 점 1e-6cm(제 판단, 구현 전에 적음 — 두 셈 모두 어림 없는 거리라 기록 대조 허용치 0.01cm 보다 훨씬 좁게)
+		constexpr double kTimeTol = 1e-6, kNormalTol = 1e-4, kDepthTol = 1e-6, kPointTol = 1e-6;
+		CTestRandom r{ 0x18a1ULL };
+
+		// ①
+		constexpr int kCases = 3000;
+		int hits = 0, misses = 0, startPen = 0, coreInside = 0, spheres = 0, fineRetries = 0, diff = 0;
+		double maxTime = 0, maxNormal = 0, maxDepth = 0, maxImpact = 0;
+		for (int i = 0; i < kCases; ++i)
+		{
+			TestBox box;
+			box.center = Vec3(r.Range(-5, 5), r.Range(-5, 5), r.Range(-5, 5));
+			RandomFrame(r, box.x, box.y, box.z);
+			const bool aligned = i % 10 == 0;	// 축 맞춘 상자 · 곧은 캡슐 — 면과 나란한 옮김 · 면에 바로 맞음이 나온다
+			if (aligned) { box.x = Vec3(1, 0, 0); box.y = Vec3(0, 1, 0); box.z = Vec3(0, 0, 1); }
+			box.half = Vec3(r.Range(0.5, 20), r.Range(0.5, 20), r.Range(0.5, 20));
+			const double radius = r.Range(0.5, 10);
+			const bool sphere = i % 5 == 0;
+			const double halfHeight = sphere ? radius : radius + r.Range(0.0, 20);
+			const Vec3 axis = aligned ? Vec3(0, 0, 1) : RandomUnit(r);
+			const Vec3 center = box.center + RandomUnit(r) * r.Range(0, 80);
+			const double length = (i % 50 == 0) ? 0.0 : r.Range(0, 150);
+			Vec3 delta = r.Next() < 0.7 ? Unit3(box.center + Vec3(r.Range(-25, 25), r.Range(-25, 25), r.Range(-25, 25)) - center) * length : RandomUnit(r) * length;
+			if (aligned && i % 20 == 0) delta = Vec3(length, 0, 0);
+			if (sphere) ++spheres;
+
+			double t = 0, depth = 0;
+			Vec3 n, impact;
+			bool pen = false;
+			const bool got = SweepCapsuleBox(center, axis, radius, halfHeight, delta, box.center, box.x, box.y, box.z, box.half, t, n, impact, pen, depth);
+			RefHit ref = RefSweepCapsuleBox(center, axis, radius, halfHeight, delta, box, 1000);
+			if (got && !ref.hit)
+			{
+				++fineRetries;	// 스쳐 닿음 — 1000 칸 훑기가 사이를 놓쳤을 수 있다
+				ref = RefSweepCapsuleBox(center, axis, radius, halfHeight, delta, box, 100000);
+			}
+			bool bad = got != ref.hit;
+			if (!bad && got)
+			{
+				if (pen != ref.startPen) bad = true;
+				else if (pen)
+				{
+					++startPen;
+					if (ref.startDistance <= 1e-6) ++coreInside;	// 축 선분이 상자에 닿음(기준 거리 1e-6 안 — 황금 분할이 0 을 바로 못 짚어 방향이 없다) — 깊이 · 법선 기준이 없다(세기만)
+					else
+					{
+						const double dd = std::fabs(depth - ref.depth), dn = Dist(n, ref.normal);
+						maxDepth = std::max(maxDepth, dd);
+						maxNormal = std::max(maxNormal, dn);
+						if (dd > kDepthTol || dn > kNormalTol) bad = true;
+					}
+				}
+				else
+				{
+					++hits;
+					const double dt = std::fabs(t - ref.time), dn = Dist(n, ref.normal);
+					// 맞은 점 = 상자 위 · 그 시각 캡슐 축에서 반지름만큼
+					const Vec3 half = axis * std::max(0.0, halfHeight - radius);
+					const Vec3 move = delta * t;
+					const double di = std::fabs(PointSegmentDistance(impact, center - half + move, center + half + move) - radius);
+					maxTime = std::max(maxTime, dt);
+					maxNormal = std::max(maxNormal, dn);
+					maxImpact = std::max(maxImpact, di);
+					if (dt > kTimeTol || dn > kNormalTol || di > kPointTol) bad = true;
+				}
+			}
+			else if (!got) ++misses;
+			if (bad)
+			{
+				++diff;
+				if (diff <= 5)
+					std::printf("  sweep #%d got=%d/%d pen=%d/%d time=%.9f/%.9f startDist=%.9f\n", i, got ? 1 : 0, ref.hit ? 1 : 0, pen ? 1 : 0, ref.startPen ? 1 : 0, t, ref.time, ref.startDistance);
+			}
+		}
+
+		// ②
+		constexpr int kBodyCases = 3000;
+		int bodyCases = 0, bodyParts[3] = {}, bodyMiss = 0, bodyPen = 0, bodyDiff = 0;
+		double maxBodyTime = 0, maxBodyPoint = 0;
+		for (int i = 0; i < kBodyCases; ++i)
+		{
+			ClipBody shapes[3];
+			BodyPose poses[3];
+			shapes[0].kind = (uint8_t)EBodyShape::Sphyl;
+			shapes[0].a = (float)r.Range(2, 15);
+			shapes[0].b = (float)r.Range(0.5, 10);
+			shapes[1].kind = (uint8_t)EBodyShape::Sphyl;
+			shapes[1].a = (float)r.Range(2, 12);
+			shapes[1].b = (float)r.Range(0.5, 40);
+			shapes[2].kind = (uint8_t)EBodyShape::Box;
+			shapes[2].a = (float)r.Range(1, 30);
+			shapes[2].b = (float)r.Range(1, 30);
+			shapes[2].c = (float)r.Range(1, 30);
+			for (int k = 0; k < 3; ++k)
+			{
+				Vec3 x, y, z;
+				RandomFrame(r, x, y, z);
+				const Vec3 c(r.Range(-40, 40), r.Range(-40, 40), r.Range(-60, 60));
+				const Vec3* src[4] = { &c, &x, &y, &z };
+				double* dst[4] = { poses[k].center, poses[k].axisX, poses[k].axisY, poses[k].axisZ };
+				for (int m = 0; m < 4; ++m) { dst[m][0] = src[m]->x; dst[m][1] = src[m]->y; dst[m][2] = src[m]->z; }
+			}
+			BodyPlacement body;
+			body.center = Vec3(r.Range(-500, 500), r.Range(-500, 500), r.Range(0, 300));
+			body.yawDegrees = r.Range(-180, 180);
+			body.pose = poses;
+			body.shapes = shapes;
+			body.shapeCount = 3;
+			ProjectileObstacle base;
+			base.id = 7;
+			ProjectileObstacle obs[3];
+			const size_t count = BodyObstacles(body, base, obs, 3);
+			const double radius = r.Range(0.5, 10);
+			const int target = i % 3;
+			const Vec3 aim = obs[target].center + Vec3(r.Range(-10, 10), r.Range(-10, 10), r.Range(-10, 10));
+			const Vec3 start = aim + RandomUnit(r) * r.Range(30, 120);
+			const Vec3 end = start + Unit3(aim - start) * r.Range(20, 200);
+			if (count != 3 || obs[0].part != 0 || obs[2].part != 2 || obs[1].id != 7) { ++bodyDiff; continue; }
+
+			BodyHit traced;
+			const bool tracedHit = TraceBody(body, start, end, radius, traced);
+			bool got = false, pen = false;
+			double best = 2.0;
+			int bestPart = -1;
+			Vec3 bestPoint;
+			for (size_t k = 0; k < count; ++k)
+			{
+				const ProjectileObstacle& o = obs[k];
+				double t = 0, depth = 0;
+				Vec3 n, impact;
+				bool sp = false;
+				const bool h = o.shape == EObstacleShape::Box
+					? SweepCapsuleBox(start, Vec3(0, 0, 1), radius, radius, end - start, o.center, o.boxX, o.boxY, o.boxZ, o.halfExtent, t, n, impact, sp, depth)
+					: SweepCapsuleCapsule(start, Vec3(0, 0, 1), radius, radius, end - start, o.center, o.axis, o.radius, o.halfHeight, t, n, impact, sp, depth);
+				if (h && sp) pen = true;
+				if (h && !sp && t < best) { best = t; bestPart = o.part; bestPoint = impact; got = true; }
+			}
+			if (pen) { ++bodyPen; continue; }	// 시작부터 겹침 — TraceBody 는 겹침을 따로 안 다룬다(견주지 않음)
+			++bodyCases;
+			bool bad = tracedHit != got;
+			if (!bad && got)
+			{
+				++bodyParts[bestPart];
+				const double dt = std::fabs(traced.time - best), dp = Dist(traced.point, bestPoint);
+				maxBodyTime = std::max(maxBodyTime, dt);
+				maxBodyPoint = std::max(maxBodyPoint, dp);
+				if ((int)traced.shape != bestPart || dt > kTimeTol || dp > kPointTol * 100.0) bad = true;
+			}
+			else if (!got) ++bodyMiss;
+			if (bad)
+			{
+				++bodyDiff;
+				if (bodyDiff <= 5)
+					std::printf("  body #%d got=%d/%d part=%d/%u time=%.9f/%.9f\n", i, got ? 1 : 0, tracedHit ? 1 : 0, bestPart, traced.shape, best, traced.time);
+			}
+		}
+
+		const bool pass = diff == 0 && hits >= kCases / 5 && misses > 0 && startPen > 0 && spheres > 0
+			&& bodyDiff == 0 && bodyParts[0] > 0 && bodyParts[1] > 0 && bodyParts[2] > 0 && bodyMiss > 0;
+		std::printf("GRENADECHECK sweep cases=%d hits=%d misses=%d startPen=%d coreInside=%d spheres=%d fineRetries=%d diff=%d maxTimeDiff=%.9f maxNormalDiff=%.9f maxDepthDiff=%.9f maxImpactDiff=%.9f\n",
+			kCases, hits, misses, startPen, coreInside, spheres, fineRetries, diff, maxTime, maxNormal, maxDepth, maxImpact);
+		std::printf("GRENADECHECK sweep body cases=%d sphylShort=%d sphylLong=%d box=%d miss=%d startPen=%d diff=%d maxTimeDiff=%.9f maxPointDiff=%.9f\n",
+			bodyCases, bodyParts[0], bodyParts[1], bodyParts[2], bodyMiss, bodyPen, bodyDiff, maxBodyTime, maxBodyPoint);
+		std::printf("GRENADECHECK sweep %s\n", pass ? "PASS" : "FAIL");
+		return pass;
+	}
 }
 
 int main(int argc, char** argv)
 {
+	if (argc >= 2 && std::strcmp(argv[1], "--sweep-test") == 0) return SweepSelfTest() ? 0 : 1;
 	if (argc < 4)
 	{
-		std::printf("사용: GrenadeCheck <map_gym.mocl> <기록 폴더> <태그>... [--verbose] [--pawn-row now|prev]\n");
+		std::printf("사용: GrenadeCheck <map_gym.mocl> <기록 폴더> <태그>... [--verbose] [--pawn-row now|prev] | GrenadeCheck --sweep-test\n");
 		return 2;
 	}
 	std::vector<char> mapData;
@@ -1555,12 +1964,13 @@ int main(int argc, char** argv)
 		&& bl.damageCompared > 0 && bl.lineCompared > 0 && bl.lineFails == 0 && bl.notTracedHurt == 0 && bl.tracedNotAlive == 0
 		&& bl.deadAfterNotKilled == 0 && bl.hhDiff == 0 && bl.rowMissing == 0 && bl.sameFrameBooms == 0 && bl.msgOtherInst == 0
 		&& bl.damageFails == 0 && bl.msgFails == 0 && bl.msgMissing == 0 && bl.msgExtra == 0 && bl.killDiff == 0
-		&& total.count.mapPenetrationsDropped == 0;	// 맵 시작 겹침을 물체 칸이 모자라 못 본 것(L-1-a) — 나면 아래 줄이 뜬다
+		&& total.count.mapPenetrationsDropped == 0	// 맵 시작 겹침을 물체 칸이 모자라 못 본 것(L-1-a) — 나면 아래 줄이 뜬다
+		&& total.firstMeshPartDiff == 0 && total.meshPartDiff == 0 && total.meshNoWho == 0;	// 부위 몸(L-8-a) — 맞은 뼈 · 메시 ↔ 캡슐 갈림
 	const ProjectileCounters& c = total.count;
 	std::printf("GRENADECHECK flight grenades=%d frames=%d fails=%d maxPosDiff=%.6f maxVelDiff=%.6f maxRotDiff=%.6f firstHit same=%d early=%d late=%d kindDiff=%d none=%d\n",
 		total.grenades, total.frames, total.fails, total.maxPos, total.maxVel, total.maxRot, total.same, total.early, total.late, total.kindDiff, total.noneBoth);
-	std::printf("GRENADECHECK firstHit compared=%d fails=%d maxDistDiff=%.6f maxTimeDiff=%.7f maxNormalDiff=%.6f pawnMeshNotCompared=%d\n",
-		total.hitCompared, total.hitFails, total.maxHitDist, total.maxHitTime, total.maxHitNormal, total.meshHits);
+	std::printf("GRENADECHECK firstHit compared=%d fails=%d maxDistDiff=%.6f maxTimeDiff=%.7f maxNormalDiff=%.6f pawnMeshNotCompared=%d meshCompared=%d meshPartDiff=%d\n",
+		total.hitCompared, total.hitFails, total.maxHitDist, total.maxHitTime, total.maxHitNormal, total.meshHits, total.firstMeshCompared, total.firstMeshPartDiff);
 	std::printf("GRENADECHECK firstHit kinds world=%d me=%d foe=%d gren=%d\n", total.sameKind[0], total.sameKind[1], total.sameKind[2], total.sameKind[3]);
 	std::printf("GRENADECHECK launch grenades=%d fails=%d maxVelDiff=%.6f ownerUnknown=%d (rows=%d spawns=%d hits=%d)\n",
 		total.grenades, total.launchFails, total.maxLaunch, total.ownerUnknown, total.rowsRead, total.spawnsRead, total.hitsRead);
@@ -1570,6 +1980,7 @@ int main(int argc, char** argv)
 	std::printf("GRENADECHECK hits compared=%d fails=%d frameDiff=%d countDiff=%d maxDistDiff=%.6f maxTimeDiff=%.7f maxTimeCmDiff=%.6f maxNormalDiff=%.6f maxDepthDiff=%.6f pawnMeshNotCompared=%d passive=%d\n",
 		total.allHitsCompared, total.allHitFails, total.hitFrameDiff, total.hitCountDiff, total.maxAllHitDist, total.maxAllHitTime, total.maxAllHitTimeCm,
 		total.maxAllHitNormal, total.maxAllHitDepth, total.meshFrames, total.passiveHits);
+	std::printf("GRENADECHECK mesh bodyLines=%d compared=%d partDiff=%d noWho=%d\n", total.meshBodyLines, total.meshCompared, total.meshPartDiff, total.meshNoWho);
 	std::printf("GRENADECHECK detonate same=%d diff=%d\n", total.detonateSame, total.detonateDiff);
 	std::printf("GRENADECHECK fuse compared=%d diff=%d (frames=%d)\n", total.fuseCompared, total.fuseDiff, kGrenadeFuseFrames);
 	std::printf("GRENADECHECK script foeInactiveGrenades=%d foeToggleWhileLive=%d wallMoves=%d\n",

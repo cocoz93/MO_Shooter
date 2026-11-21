@@ -1,4 +1,6 @@
 ﻿#include "Grenade.h"
+#include "AnimClips.h"
+#include "AnimPose.h"
 
 #include <algorithm>
 #include <cmath>
@@ -161,5 +163,47 @@ namespace mo
 	bool GrenadeDamageApplies(bool alive, bool self, bool sameTeam, bool immune)
 	{
 		return alive && !immune && (self || !sameTeam);
+	}
+
+	size_t BodyObstacles(const BodyPlacement& body, const ProjectileObstacle& base, ProjectileObstacle* out, size_t maxCount)
+	{
+		if (body.skip || !body.pose || !body.shapes) return 0;
+		const double yaw = body.yawDegrees * kDegToRad;
+		const double cosYaw = std::cos(yaw), sinYaw = std::sin(yaw);
+		// 캐릭터 요 0 좌표 → 세계(TraceBody 의 toWorld 와 같다)
+		const auto toWorld = [&](const double v[3]) { return Vec3(v[0] * cosYaw - v[1] * sinYaw, v[0] * sinYaw + v[1] * cosYaw, v[2]); };
+		size_t written = 0;
+		for (uint32_t i = 0; i < body.shapeCount && written < maxCount; ++i)
+		{
+			const ClipBody& shape = body.shapes[i];
+			const BodyPose& pose = body.pose[i];
+			ProjectileObstacle o = base;
+			o.part = (int32_t)i;
+			o.center = body.center + toWorld(pose.center);
+			switch ((EBodyShape)shape.kind)
+			{
+			case EBodyShape::Sphere:
+				o.shape = EObstacleShape::Capsule;
+				o.axis = toWorld(pose.axisZ);
+				o.radius = shape.a;
+				o.halfHeight = shape.a;
+				break;
+			case EBodyShape::Sphyl:
+				o.shape = EObstacleShape::Capsule;
+				o.axis = toWorld(pose.axisZ);
+				o.radius = shape.a;
+				o.halfHeight = shape.b * 0.5 + shape.a;
+				break;
+			case EBodyShape::Box:
+				o.shape = EObstacleShape::Box;
+				o.boxX = toWorld(pose.axisX);
+				o.boxY = toWorld(pose.axisY);
+				o.boxZ = toWorld(pose.axisZ);
+				o.halfExtent = Vec3(shape.a * 0.5, shape.b * 0.5, shape.c * 0.5);
+				break;
+			}
+			out[written++] = o;
+		}
+		return written;
 	}
 }

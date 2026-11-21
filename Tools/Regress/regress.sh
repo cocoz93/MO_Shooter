@@ -89,6 +89,14 @@ run_checks() {
 	[ "$BREAK" = 1 ] && btags="l1b1"
 	"$tools/GrenadeCheck/Release/GrenadeCheck.exe" "$MAP" "$DATA" $btags > "$OUT/grenade_l1b.log" 2>&1
 	sed 's/^/grenade_l1b /' "$OUT/grenade_l1b.log" >> "$g"
+	# 수류탄 대 사람 몸 요소(L-8-a) — 캡슐 대 상자 쓸기 자가 시험(--sweep-test: 무차별 기준 · TraceBody 와 맞춤)과 l2c2 메시 맞음 대조(그 프레임 Lyra 몸 22 줄 · 맞음 6).
+	# l2c2 는 상대 가까이 던져 생긴 프레임에 팔에 맞고 터지는 판뿐이라 날아감 · 튕김 프레임이 없어 GRENADECHECK FAIL 줄도 그대로 기준선에 든다. --break 이면 l2c2 를 안 돌려 줄이 어긋나야 한다
+	"$tools/GrenadeCheck/Release/GrenadeCheck.exe" --sweep-test > "$OUT/grenade_sweep.log" 2>&1
+	sed 's/^/grenade_sweep /' "$OUT/grenade_sweep.log" >> "$g"
+	if [ "$BREAK" != 1 ]; then
+		"$tools/GrenadeCheck/Release/GrenadeCheck.exe" "$DATA/map_gym.mocl" "$DATA" l2c2 > "$OUT/grenade_l2c.log" 2>&1
+		sed 's/^/grenade_l2c /' "$OUT/grenade_l2c.log" >> "$g"
+	fi
 	# 같은 입력 두 누름(L-5-b) — L-1-c 기록 넷(수류탄 l1c1 · l1c2 · 대시 l1cd1 · l1cd2)의 누름 차례를 예측(CSelfPrediction)에 넣어 Lyra 근접 켬 · 끊김 · 막힘 · 대시 · 던짐 ·
 	# 재장전 · 칸 끝 탄창과 대조. 차례 없이 넣은 대조군이 Lyra 와 다른 칸 수(fixedOrderDiff)까지 기준선에 든다. --break 이면 l1cd2 를 빼 합계 줄이 어긋나야 한다
 	local ptags="l1c1 l1c2 l1cd1 l1cd2"

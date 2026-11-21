@@ -155,4 +155,10 @@ namespace mo
 	// 그 사람에게 피해가 들어가나 — Lyra 팀 규칙(던진 사람 자신은 들어감 · 같은 팀 0, LyraTeamSubsystem::CanCauseDamage) · 무적(부활 · 경기 끝) ·
 	// 죽은 몸(Lyra 는 죽기 시작하면 충돌을 꺼 겹침 · 선에 안 걸린다). 던진 사람의 생사는 안 본다(죽은 뒤에도 피해 — G-0-b2 짐작 3)
 	bool GrenadeDamageApplies(bool alive, bool self, bool sameTeam, bool immune);
+
+	// 사람 메시 부위 몸(자세, D32) → 수류탄 막는 것(L-8-a). Lyra 수류탄은 사람 캡슐과 메시 물리 몸 둘 다에 막힌다(L-2-c 실측 — 기록 맞음 줄 캡슐 89 · 메시 28).
+	// 자세는 BodyPlacement::pose · shapes(TraceBody 와 같은 꼴 — 캡슐 가운데 · 요 0 기준)만 쓴다. 자세가 없거나 skip 이면 0.
+	// 모양 — Sphere = 캡슐(반높이 = 반지름) · Sphyl = 캡슐(축 = 몸 Z · 반높이 = 길이/2 + 반지름) · Box = 상자(반 길이 = 변/2).
+	// 나머지 칸(id · kind · owner · detonateOnHit)은 base 를 그대로 받고, part = 부위 차례. 돌려주는 값 = out 에 쓴 수(maxCount 를 넘으면 그만 쓴다)
+	size_t BodyObstacles(const BodyPlacement& body, const ProjectileObstacle& base, ProjectileObstacle* out, size_t maxCount);
 }

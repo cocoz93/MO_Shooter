@@ -124,6 +124,63 @@ namespace mo
 			return { center - half, center + half };
 		}
 
+		// 상자 지역 좌표의 선분 p + s·d(s ∈ [0,1]) 와 반 길이 e 상자(가운데 0 · 축 = 좌표축) 사이 가장 가까운 거리. 거리 제곱 = 축마다 면 밖으로 넘친 몫의 제곱 합이라
+		// 선분이 면 평면을 지나는 s(축마다 둘) 사이 조각에서는 2차식 — 조각마다 꼭짓점을 바로 구해 어림이 없다. outSeg · outBox = 선분 위 · 상자 위 가장 가까운 점
+		double SegmentBoxClosest(const Vec3& p, const Vec3& d, const Vec3& e, Vec3& outSeg, Vec3& outBox)
+		{
+			const double pc[3] = { p.x, p.y, p.z }, dc[3] = { d.x, d.y, d.z }, ec[3] = { e.x, e.y, e.z };
+			double cuts[8];
+			int count = 0;
+			cuts[count++] = 0.0;
+			cuts[count++] = 1.0;
+			for (int i = 0; i < 3; ++i)
+			{
+				if (dc[i] == 0.0) continue;
+				const double faces[2] = { ec[i], -ec[i] };
+				for (const double face : faces)
+				{
+					const double s = (face - pc[i]) / dc[i];
+					if (s > 0.0 && s < 1.0) cuts[count++] = s;
+				}
+			}
+			std::sort(cuts, cuts + count);
+			const auto squaredAt = [&](double s)
+			{
+				double sum = 0;
+				for (int i = 0; i < 3; ++i)
+				{
+					const double v = pc[i] + dc[i] * s;
+					const double over = v > ec[i] ? v - ec[i] : (v < -ec[i] ? v + ec[i] : 0.0);
+					sum += over * over;
+				}
+				return sum;
+			};
+			double bestS = 0.0, best = squaredAt(0.0);
+			for (int k = 0; k + 1 < count; ++k)
+			{
+				const double lo = cuts[k], hi = cuts[k + 1];
+				if (hi <= lo) continue;
+				const double mid = 0.5 * (lo + hi);
+				double qa = 0, qb = 0;	// 이 조각의 거리 제곱 = qa·s² + qb·s + 상수(넘친 축만 든다)
+				for (int i = 0; i < 3; ++i)
+				{
+					const double v = pc[i] + dc[i] * mid;
+					if (v > ec[i]) { qa += dc[i] * dc[i]; qb += 2.0 * dc[i] * (pc[i] - ec[i]); }
+					else if (v < -ec[i]) { qa += dc[i] * dc[i]; qb += 2.0 * dc[i] * (pc[i] + ec[i]); }
+				}
+				const double s = qa > 0.0 ? std::min(hi, std::max(lo, -qb / (2.0 * qa))) : lo;
+				const double value = squaredAt(s);
+				if (value < best)
+				{
+					best = value;
+					bestS = s;
+				}
+			}
+			outSeg = p + d * bestS;
+			outBox = Vec3(std::min(e.x, std::max(-e.x, outSeg.x)), std::min(e.y, std::max(-e.y, outSeg.y)), std::min(e.z, std::max(-e.z, outSeg.z)));
+			return std::sqrt(best);
+		}
+
 		Vec3 Cross(const Vec3& a, const Vec3& b)
 		{
 			return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
@@ -323,13 +380,18 @@ namespace mo
 					const ProjectileObstacle& o = _obstacles[i];
 					if (o.owner && !_s.launchCleanedUp) continue;	// 던진 사람과는 타이머 전까지 서로 무시(IgnoreActorWhenMoving)
 					ProjectileHit h;
-					if (!SweepCapsuleCapsule(center, axis, _p.capsuleRadius, _p.capsuleHalfHeight, delta, o.center, o.axis, o.radius, o.halfHeight,
-						h.time, h.normal, h.impactPoint, h.startPenetrating, h.penetrationDepth))
-						continue;
+					const bool swept = o.shape == EObstacleShape::Box
+						? SweepCapsuleBox(center, axis, _p.capsuleRadius, _p.capsuleHalfHeight, delta, o.center, o.boxX, o.boxY, o.boxZ, o.halfExtent,
+							h.time, h.normal, h.impactPoint, h.startPenetrating, h.penetrationDepth)
+						: SweepCapsuleCapsule(center, axis, _p.capsuleRadius, _p.capsuleHalfHeight, delta, o.center, o.axis, o.radius, o.halfHeight,
+							h.time, h.normal, h.impactPoint, h.startPenetrating, h.penetrationDepth);
+					if (!swept) continue;
 					h.kind = o.kind;
 					h.id = o.id;
+					h.part = o.part;
 					h.contactDistance = h.time * length;
-					h.impactNormal = h.normal;	// 캡슐끼리는 면이 없다 — 받은 법선 그대로
+					// 캡슐끼리는 면이 없다 — 받은 법선 그대로. 상자도 같이 둔다 — 면에 맞으면 면 법선과 같고, 모서리 · 꼭짓점 맞음은 Lyra 대조가 없다(L-8-a-1 기록 6 은 다 Sphyl)
+					h.impactNormal = h.normal;
 					consider(h, &o);
 				}
 				return havePenetrating || haveHit;
@@ -694,5 +756,75 @@ namespace mo
 		}
 		distanceAt(hi, ca, cb);
 		return finish(hi, ca, cb, false);
+	}
+
+	bool SweepCapsuleBox(const Vec3& centerA, const Vec3& axisA, double radiusA, double halfHeightA, const Vec3& delta,
+		const Vec3& boxCenter, const Vec3& boxX, const Vec3& boxY, const Vec3& boxZ, const Vec3& halfExtent, double& outTime, Vec3& outNormal, Vec3& outImpact,
+		bool& outStartPenetrating, double& outPenetrationDepth)
+	{
+		const auto toBox = [&](const Vec3& v) { return Vec3(Dot(v, boxX), Dot(v, boxY), Dot(v, boxZ)); };
+		const auto toWorld = [&](const Vec3& v) { return boxX * v.x + boxY * v.y + boxZ * v.z; };
+		const Segment a = CapsuleSegment(centerA, axisA, radiusA, halfHeightA);
+		const Vec3 start = toBox(a.a - boxCenter), along = toBox(a.b - a.a), move = toBox(delta);
+		const double reach = radiusA;
+		Vec3 ps, pb;
+		const auto distanceAt = [&](double t, Vec3& seg, Vec3& box) { return SegmentBoxClosest(start + move * t, along, halfExtent, seg, box); };
+
+		const auto finish = [&](double t, const Vec3& seg, const Vec3& box, bool startPen) {
+			outTime = t;
+			outNormal = SafeNormal(toWorld(seg - box));	// 상자 → 쓸린 캡슐 축
+			outImpact = boxCenter + toWorld(box);
+			outStartPenetrating = startPen;
+			return true;
+		};
+
+		outPenetrationDepth = 0;
+		const double d0 = distanceAt(0.0, ps, pb);
+		if (d0 <= reach)
+		{
+			outPenetrationDepth = reach - d0;
+			if (d0 > 0.0) return finish(0.0, ps, pb, true);
+			// 축 선분이 상자에 닿거나 든다 — 가까운 점이 상자 안이라 방향이 없다. 그 점에서 가장 얕은 면으로 뺀다
+			const double pc[3] = { ps.x, ps.y, ps.z }, ec[3] = { halfExtent.x, halfExtent.y, halfExtent.z };
+			int face = 0;
+			for (int i = 1; i < 3; ++i)
+				if (ec[i] - std::fabs(pc[i]) < ec[face] - std::fabs(pc[face])) face = i;
+			const double sign = pc[face] < 0.0 ? -1.0 : 1.0;
+			double local[3] = { 0.0, 0.0, 0.0 };
+			local[face] = sign;
+			double onFace[3] = { pc[0], pc[1], pc[2] };
+			onFace[face] = sign * ec[face];
+			outTime = 0.0;
+			outNormal = toWorld(Vec3(local[0], local[1], local[2]));
+			outImpact = boxCenter + toWorld(Vec3(onFace[0], onFace[1], onFace[2]));
+			outStartPenetrating = true;
+			outPenetrationDepth = reach + (ec[face] - std::fabs(pc[face]));
+			return true;
+		}
+		const double length = std::sqrt(SizeSquared(delta));
+		if (d0 - length > reach) return false;				// 끝까지 가도 못 닿는다
+
+		// SweepCapsuleCapsule 과 같은 찾기 — 가장 가까운 때를 황금 분할로, 그 앞에서 처음 닿는 때를 이분법으로
+		double lo = 0.0, hi = 1.0;
+		constexpr double kGolden = 0.6180339887498949;
+		for (int i = 0; i < 80; ++i)
+		{
+			const double m1 = hi - (hi - lo) * kGolden, m2 = lo + (hi - lo) * kGolden;
+			Vec3 p1, p2, p3, p4;
+			if (distanceAt(m1, p1, p2) < distanceAt(m2, p3, p4)) hi = m2;
+			else lo = m1;
+		}
+		const double tMin = 0.5 * (lo + hi);
+		if (distanceAt(tMin, ps, pb) > reach) return false;
+		lo = 0.0;
+		hi = tMin;
+		for (int i = 0; i < 64; ++i)
+		{
+			const double mid = 0.5 * (lo + hi);
+			if (distanceAt(mid, ps, pb) > reach) lo = mid;
+			else hi = mid;
+		}
+		distanceAt(hi, ps, pb);
+		return finish(hi, ps, pb, false);
 	}
 }

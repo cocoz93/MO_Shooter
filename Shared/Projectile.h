@@ -51,13 +51,25 @@ namespace mo
 		Projectile,
 	};
 
+	// 막는 것 모양 — 캡슐(사람 캡슐 · 수류탄 · 부위 몸 Sphyl · Sphere) · 상자(부위 몸 Box — 두 손 · 두 발, L-8-a)
+	enum class EObstacleShape : uint8_t
+	{
+		Capsule,
+		Box,
+	};
+
 	// 맵 밖의 막는 것 — 사람 캡슐 · 다른 수류탄. 캡슐은 가운데 · 축(단위 벡터) · 반지름 · 반높이
+	// 사람 메시 부위 몸(L-8-a)도 여기 든다 — 캡슐이면 위 칸, 상자면 가운데 · 세 축(단위 벡터) · 반 길이
 	struct ProjectileObstacle
 	{
 		Vec3 center;
 		Vec3 axis{ 0.0, 0.0, 1.0 };
 		double radius = 0;
 		double halfHeight = 0;
+		EObstacleShape shape = EObstacleShape::Capsule;
+		Vec3 boxX{ 1.0, 0.0, 0.0 }, boxY{ 0.0, 1.0, 0.0 }, boxZ{ 0.0, 0.0, 1.0 };	// 상자 축
+		Vec3 halfExtent;								// 상자 반 길이(축 차례)
+		int32_t part = -1;								// 부위 몸 번호(자세 몸 차례) — 사람 캡슐 · 수류탄은 -1
 		uint32_t id = 0;
 		EProjectileHitKind kind = EProjectileHitKind::Pawn;
 		bool owner = false;								// 던진 사람 — 생긴 뒤 한동안 서로 무시
@@ -70,6 +82,7 @@ namespace mo
 	{
 		EProjectileHitKind kind = EProjectileHitKind::Map;
 		uint32_t id = 0;								// 맵이면 물체 번호, 아니면 막는 것의 id
+		int32_t part = -1;								// 맞은 막는 것의 부위 몸 번호(ProjectileObstacle::part) — 맵 · 캡슐 · 수류탄은 -1
 		double time = 0;								// 이 쓸기 안에서 멈춘 시각(뒤로 물린 값, 언리얼 FHitResult::Time)
 		double contactDistance = 0;						// 쓸기 시작에서 맞닿은 곳까지(물리기 전)
 		Vec3 normal;
@@ -136,5 +149,12 @@ namespace mo
 	// 시작부터 겹치면 시각 0 · 겹친 깊이 = 두 반지름 합 − 축 거리
 	bool SweepCapsuleCapsule(const Vec3& centerA, const Vec3& axisA, double radiusA, double halfHeightA, const Vec3& delta,
 		const Vec3& centerB, const Vec3& axisB, double radiusB, double halfHeightB, double& outTime, Vec3& outNormal, Vec3& outImpact,
+		bool& outStartPenetrating, double& outPenetrationDepth);
+
+	// 기운 캡슐 a 가 delta 만큼 옮겨 갈 때 상자 b(가운데 · 세 축 · 반 길이)에 처음 닿는 시각(0~1). 찾기는 SweepCapsuleCapsule 과 같다 — 캡슐 축 선분과 상자의 거리가
+	// 옮김에 대해 볼록. 선분 ↔ 상자 거리는 어림 없이 구한다(조각마다 2차식). 법선 = 상자 위 가까운 점 → 캡슐 축, 맞은 점 = 상자 위 가까운 점.
+	// 시작부터 겹치면 시각 0 · 겹친 깊이 = 반지름 − 축 거리. 축 선분이 상자에 닿거나 들면 그 점에서 가장 얕은 면으로 뺀다(엔진과 대조 없음 — L-8-a-1)
+	bool SweepCapsuleBox(const Vec3& centerA, const Vec3& axisA, double radiusA, double halfHeightA, const Vec3& delta,
+		const Vec3& boxCenter, const Vec3& boxX, const Vec3& boxY, const Vec3& boxZ, const Vec3& halfExtent, double& outTime, Vec3& outNormal, Vec3& outImpact,
 		bool& outStartPenetrating, double& outPenetrationDepth);
 }

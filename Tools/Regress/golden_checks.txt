@@ -388,11 +388,12 @@ grenade GRENADECHECK tag=g0t2 bounce grenades=44 frames=4135 fails=0 maxPosDiff=
 grenade GRENADECHECK tag=g0t2 ability presses=979 thrown=51 lyraThrown=51 throwDiff=0 cooldownDiff=0 postGameDiff=0 gabilDiff=0 throw fails=0 branchDiff=0 aim traceDiff=0 endFails=0 startInsideDiff=0 bodyMiss=0 cdClears=3 gapFrames=35
 grenade GRENADECHECK tag=g0t2 blast booms=51 lineCompared=25 lineFails=0 notTracedHurt=0 damage compared=102 fails=0 msgFails=0 kills=2 killDiff=0
 grenade GRENADECHECK flight grenades=545 frames=15530 fails=0 maxPosDiff=0.000001 maxVelDiff=0.000001 maxRotDiff=0.000000 firstHit same=516 early=0 late=0 kindDiff=0 none=29
-grenade GRENADECHECK firstHit compared=502 fails=0 maxDistDiff=0.000098 maxTimeDiff=0.0000024 maxNormalDiff=0.000006 pawnMeshNotCompared=14
+grenade GRENADECHECK firstHit compared=502 fails=0 maxDistDiff=0.000098 maxTimeDiff=0.0000024 maxNormalDiff=0.000006 pawnMeshNotCompared=14 meshCompared=0 meshPartDiff=0
 grenade GRENADECHECK firstHit kinds world=444 me=0 foe=70 gren=2
 grenade GRENADECHECK launch grenades=545 fails=0 maxVelDiff=0.000000 ownerUnknown=0 (rows=98239 spawns=545 hits=1866)
 grenade GRENADECHECK bounce grenades=461 frames=43990 fails=0 maxPosDiff=0.006306 maxVelDiff=0.005264 maxRotDiff=0.003091 (unexplained=0.000005) bounceFrameDiff=0 (rec=1807 sim=1807) stopFrameDiff=0 (compared=446) maxStopPosDiff=0.000075
 grenade GRENADECHECK hits compared=1848 fails=0 frameDiff=0 countDiff=0 maxDistDiff=0.004234 maxTimeDiff=0.0002851 maxTimeCmDiff=0.004259 maxNormalDiff=0.000006 maxDepthDiff=0.000002 pawnMeshNotCompared=14 passive=4
+grenade GRENADECHECK mesh bodyLines=0 compared=0 partDiff=0 noWho=0
 grenade GRENADECHECK detonate same=55 diff=0
 grenade GRENADECHECK fuse compared=545 diff=0 (frames=120)
 grenade GRENADECHECK script foeInactiveGrenades=254 foeToggleWhileLive=0 wallMoves=22
@@ -412,11 +413,12 @@ grenade_l1a GRENADECHECK tag=l1a2 bounce grenades=26 frames=2799 fails=0 maxPosD
 grenade_l1a GRENADECHECK tag=l1a2 ability presses=26 thrown=26 lyraThrown=26 throwDiff=0 cooldownDiff=0 postGameDiff=0 gabilDiff=0 throw fails=0 branchDiff=0 aim traceDiff=0 endFails=0 startInsideDiff=0 bodyMiss=0 cdClears=0 gapFrames=0
 grenade_l1a GRENADECHECK tag=l1a2 blast booms=26 lineCompared=5 lineFails=0 notTracedHurt=0 damage compared=52 fails=0 msgFails=0 kills=0 killDiff=0
 grenade_l1a GRENADECHECK flight grenades=52 frames=642 fails=0 maxPosDiff=0.000016 maxVelDiff=0.000001 maxRotDiff=0.000000 firstHit same=52 early=0 late=0 kindDiff=0 none=0
-grenade_l1a GRENADECHECK firstHit compared=52 fails=0 maxDistDiff=0.001129 maxTimeDiff=0.0000063 maxNormalDiff=0.000001 pawnMeshNotCompared=0
+grenade_l1a GRENADECHECK firstHit compared=52 fails=0 maxDistDiff=0.001129 maxTimeDiff=0.0000063 maxNormalDiff=0.000001 pawnMeshNotCompared=0 meshCompared=0 meshPartDiff=0
 grenade_l1a GRENADECHECK firstHit kinds world=52 me=0 foe=0 gren=0
 grenade_l1a GRENADECHECK launch grenades=52 fails=0 maxVelDiff=0.000000 ownerUnknown=0 (rows=9362 spawns=52 hits=240)
 grenade_l1a GRENADECHECK bounce grenades=52 frames=5598 fails=0 maxPosDiff=0.000424 maxVelDiff=0.001953 maxRotDiff=0.011554 (unexplained=0.000003) bounceFrameDiff=0 (rec=208 sim=208) stopFrameDiff=0 (compared=48) maxStopPosDiff=0.000243
 grenade_l1a GRENADECHECK hits compared=240 fails=0 frameDiff=0 countDiff=0 maxDistDiff=0.001129 maxTimeDiff=0.0001123 maxTimeCmDiff=0.000496 maxNormalDiff=0.000001 maxDepthDiff=0.000029 pawnMeshNotCompared=0 passive=0
+grenade_l1a GRENADECHECK mesh bodyLines=0 compared=0 partDiff=0 noWho=0
 grenade_l1a GRENADECHECK detonate same=0 diff=0
 grenade_l1a GRENADECHECK fuse compared=52 diff=0 (frames=120)
 grenade_l1a GRENADECHECK script foeInactiveGrenades=52 foeToggleWhileLive=0 wallMoves=0
@@ -436,11 +438,12 @@ grenade_l1b GRENADECHECK tag=l1b2 bounce grenades=5 frames=491 fails=3 maxPosDif
 grenade_l1b GRENADECHECK tag=l1b2 ability presses=5 thrown=5 lyraThrown=5 throwDiff=0 cooldownDiff=0 postGameDiff=0 gabilDiff=0 throw fails=0 branchDiff=0 aim traceDiff=0 endFails=0 startInsideDiff=0 bodyMiss=0 cdClears=0 gapFrames=0
 grenade_l1b GRENADECHECK tag=l1b2 blast booms=5 lineCompared=2 lineFails=0 notTracedHurt=0 damage compared=10 fails=0 msgFails=0 kills=0 killDiff=0
 grenade_l1b GRENADECHECK flight grenades=10 frames=218 fails=0 maxPosDiff=0.000001 maxVelDiff=0.000001 maxRotDiff=0.000000 firstHit same=10 early=0 late=0 kindDiff=0 none=0
-grenade_l1b GRENADECHECK firstHit compared=10 fails=4 maxDistDiff=0.000927 maxTimeDiff=0.0000504 maxNormalDiff=0.000791 pawnMeshNotCompared=0
+grenade_l1b GRENADECHECK firstHit compared=10 fails=4 maxDistDiff=0.000927 maxTimeDiff=0.0000504 maxNormalDiff=0.000791 pawnMeshNotCompared=0 meshCompared=0 meshPartDiff=0
 grenade_l1b GRENADECHECK firstHit kinds world=10 me=0 foe=0 gren=0
 grenade_l1b GRENADECHECK launch grenades=10 fails=0 maxVelDiff=0.000000 ownerUnknown=0 (rows=1802 spawns=10 hits=36)
 grenade_l1b GRENADECHECK bounce grenades=10 frames=982 fails=6 maxPosDiff=0.346785 maxVelDiff=0.395529 maxRotDiff=0.075540 (unexplained=0.058303) bounceFrameDiff=0 (rec=36 sim=36) stopFrameDiff=0 (compared=10) maxStopPosDiff=0.346786
 grenade_l1b GRENADECHECK hits compared=36 fails=0 frameDiff=0 countDiff=0 maxDistDiff=0.000927 maxTimeDiff=0.0000504 maxTimeCmDiff=0.000926 maxNormalDiff=0.000791 maxDepthDiff=0.000000 pawnMeshNotCompared=0 passive=0
+grenade_l1b GRENADECHECK mesh bodyLines=0 compared=0 partDiff=0 noWho=0
 grenade_l1b GRENADECHECK detonate same=0 diff=0
 grenade_l1b GRENADECHECK fuse compared=10 diff=0 (frames=120)
 grenade_l1b GRENADECHECK script foeInactiveGrenades=6 foeToggleWhileLive=0 wallMoves=4
@@ -451,6 +454,30 @@ grenade_l1b GRENADECHECK aim compared=10 none=6 mapHits=4 traceDiff=0 maxMapDist
 grenade_l1b GRENADECHECK blast booms=10 targets=20 alive=14 dead=6 foeHidden=6 traced=4 lineCompared=4 lineFails=0 body=2 map=2 maxLineDistDiff=0.000006 farMap=0 deadAfter=0 deadAfterNotKilled=0 notTraced=10 notTracedNear=0 notTracedHurt=0 tracedNotAlive=0 crouched=0 hhDiff=0 rowMissing=0 sameFrameBooms=0
 grenade_l1b GRENADECHECK damage compared=20 fails=0 maxDamageDiff=0.000096 msgCompared=2 msgFails=0 maxMsgDiff=0.000004 msgMissing=0 msgExtra=0 msgOtherInst=0 hurt=2 kills=0 killDiff=0 sameTeam=0 immune=0
 grenade_l1b GRENADECHECK FAIL
+grenade_sweep GRENADECHECK sweep cases=3000 hits=787 misses=1443 startPen=770 coreInside=511 spheres=600 fineRetries=0 diff=0 maxTimeDiff=0.000000000 maxNormalDiff=0.000000153 maxDepthDiff=0.000000000 maxImpactDiff=0.000000000
+grenade_sweep GRENADECHECK sweep body cases=2971 sphylShort=676 sphylLong=715 box=667 miss=913 startPen=29 diff=0 maxTimeDiff=0.000000000 maxPointDiff=0.000000000
+grenade_sweep GRENADECHECK sweep PASS
+grenade_l2c GRENADECHECK tag=l2c2 grenades=6 frames=0 fails=0 maxPosDiff=0.000000 maxVelDiff=0.000000 maxRotDiff=0.000000 firstHit same=6 early=0 late=0 kindDiff=0 none=0 (rows=1081 spawns=6 hits=6)
+grenade_l2c GRENADECHECK tag=l2c2 bounce grenades=0 frames=0 fails=0 maxPosDiff=0.000000 maxVelDiff=0.000000 bounceFrameDiff=0 stopFrameDiff=0 hitFails=0 detonateDiff=0
+grenade_l2c GRENADECHECK tag=l2c2 ability presses=6 thrown=6 lyraThrown=6 throwDiff=0 cooldownDiff=0 postGameDiff=0 gabilDiff=0 throw fails=0 branchDiff=0 aim traceDiff=0 endFails=0 startInsideDiff=0 bodyMiss=0 cdClears=0 gapFrames=0
+grenade_l2c GRENADECHECK tag=l2c2 blast booms=6 lineCompared=12 lineFails=0 notTracedHurt=0 damage compared=12 fails=0 msgFails=0 kills=0 killDiff=0
+grenade_l2c GRENADECHECK flight grenades=6 frames=0 fails=0 maxPosDiff=0.000000 maxVelDiff=0.000000 maxRotDiff=0.000000 firstHit same=6 early=0 late=0 kindDiff=0 none=0
+grenade_l2c GRENADECHECK firstHit compared=6 fails=0 maxDistDiff=0.000005 maxTimeDiff=0.0000001 maxNormalDiff=0.000039 pawnMeshNotCompared=0 meshCompared=6 meshPartDiff=0
+grenade_l2c GRENADECHECK firstHit kinds world=0 me=0 foe=6 gren=0
+grenade_l2c GRENADECHECK launch grenades=6 fails=0 maxVelDiff=0.000000 ownerUnknown=0 (rows=1081 spawns=6 hits=6)
+grenade_l2c GRENADECHECK bounce grenades=0 frames=0 fails=0 maxPosDiff=0.000000 maxVelDiff=0.000000 maxRotDiff=0.000000 (unexplained=-1000000000.000000) bounceFrameDiff=0 (rec=0 sim=0) stopFrameDiff=0 (compared=0) maxStopPosDiff=0.000000
+grenade_l2c GRENADECHECK hits compared=6 fails=0 frameDiff=0 countDiff=0 maxDistDiff=0.000005 maxTimeDiff=0.0000001 maxTimeCmDiff=0.000004 maxNormalDiff=0.000039 maxDepthDiff=0.000000 pawnMeshNotCompared=0 passive=0
+grenade_l2c GRENADECHECK mesh bodyLines=132 compared=6 partDiff=0 noWho=0
+grenade_l2c GRENADECHECK detonate same=6 diff=0
+grenade_l2c GRENADECHECK fuse compared=6 diff=0 (frames=120)
+grenade_l2c GRENADECHECK script foeInactiveGrenades=0 foeToggleWhileLive=0 wallMoves=0
+grenade_l2c GRENADECHECK branches steps=6 blocked=0 extraIterations=0 startPenetrating=0 resolveMoved=0 resolveCombined=0 resolveWithMove=0 resolveFailed=0 ignoredOverlaps=0 minMoveZeroed=0 bounces=0 stopsOnImpact=0 stopsOnSlide=0 multiHits=0 slides=0 corners=0 slideMoves=0 slideHits=0 slideFriction=0 detonations=6
+grenade_l2c GRENADECHECK ability inputs=1943 presses=6 thrown=6 lyraThrown=6 onCooldown=0 whileDash=0 dead=0 postGame=0 throwDiff=0 cooldownDiff=0 postGameDiff=0 gabil=0 gabilDiff=0 rowGaps=0 gapFrames=0 gapNotDead=0 cdClears=0
+grenade_l2c GRENADECHECK throw compared=6 fails=0 maxPosDiff=0.000005 maxRotDiff=0.000000 maxVelDiff=0.000004 ctl=0 hit=6 end=0 branchDiff=0
+grenade_l2c GRENADECHECK aim compared=6 none=0 mapHits=6 traceDiff=0 maxMapDistDiff=0.000011 endFails=0 maxEndRotDiff=0.000000 maxEndVelDiff=0.000000 startInside=0 startInsideDiff=0 simpleSame=6 bodyCompared=0 bodyHits=0 bodyMiss=0 maxBodyDistDiff=0.0000 maxBodyRotDiff=0.0000 crouchedFoe=0
+grenade_l2c GRENADECHECK blast booms=6 targets=12 alive=12 dead=0 foeHidden=0 traced=12 lineCompared=12 lineFails=0 body=12 map=0 maxLineDistDiff=0.000004 farMap=0 deadAfter=0 deadAfterNotKilled=0 notTraced=0 notTracedNear=0 notTracedHurt=0 tracedNotAlive=0 crouched=0 hhDiff=0 rowMissing=0 sameFrameBooms=0
+grenade_l2c GRENADECHECK damage compared=12 fails=0 maxDamageDiff=0.000291 msgCompared=12 msgFails=0 maxMsgDiff=0.000009 msgMissing=0 msgExtra=0 msgOtherInst=0 hurt=12 kills=0 killDiff=0 sameTeam=0 immune=0
+grenade_l2c GRENADECHECK FAIL
 press PRESSCHECK tag=l1c1 step=s_melee_q ok order=M>G inputs=305 presses=2 multi=1 ours=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] lyra=[melee=1 cut=1 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] fixed=diff [melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12]
 press PRESSCHECK tag=l1c1 step=s_q_melee ok order=G>M inputs=305 presses=2 multi=1 ours=[melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] lyra=[melee=1 cut=0 blocked=0 dash=0 grenade=1 reload=0 reloadCut=0 mag=12] fixed=same
 press PRESSCHECK tag=l1c1 step=s_q_reload ok order=G>R inputs=305 presses=2 multi=1 ours=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 mag=12] lyra=[melee=0 cut=0 blocked=0 dash=0 grenade=1 reload=1 reloadCut=0 mag=12] fixed=same
