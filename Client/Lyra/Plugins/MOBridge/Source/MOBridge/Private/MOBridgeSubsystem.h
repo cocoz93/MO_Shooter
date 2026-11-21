@@ -690,6 +690,15 @@ private:
 	double CorrectionSum = 0, CorrectionMax = 0;
 	double SelfDriftMax = 0;
 	int64 SelfDriftOver1cm = 0;
+	// 내 밀림 까닭(L-9-b) — 놓기 프레임에 자리를 놓은 뒤(SetActorLocation · SelfLastSet) 같은 프레임 안에서 바뀐 높이. 이동 방식 바꾸기(ApplyMoveToCharacter →
+	// SetMovementMode)가 걷기로 들어가면 엔진이 FindFloor · AdjustFloorHeight 로 캡슐을 바닥 틈 1.9~2.4cm 로 옮긴다(CharacterMovementComponent.cpp OnMovementModeChanged).
+	// 그 옮김은 이제 ApplyMoveToCharacter 가 되돌린다(GModeSwitchRestores) — 여기는 그 밖에 남은 옮김을 잡는 자리라 0 이어야 한다
+	double SelfSetMovedZ = 0;			// 지난 놓기 프레임에 놓은 뒤 바뀐 높이
+	int32 SelfSetModeFrom = -1, SelfSetModeTo = -1;	// 지난 놓기 프레임 이동 방식 바꾸기 앞 · 뒤(EMovementMode)
+	bool bSelfSetCrouchChanged = false;	// 지난 놓기 프레임에 다리가 앉음을 바꿨나(ApplyCrouchToCharacter)
+	int64 SelfSetMoves = 0;			// 놓은 뒤 같은 프레임에 높이가 0.01cm 넘게 바뀐 놓기 프레임 수
+	double SelfSetMoveMax = 0;
+	int64 SelfDriftFromSetMove = 0;	// 1cm 넘는 밀림 중 그 높이 바뀜이 다 설명하는 수(밀림 Z − 놓은 뒤 바뀐 높이 < 0.01 · 평면 밀림 0)
 	double MaxFrameGap = 0;
 	int32 RemoteSpawned = 0, RemoteSpawnFail = 0;
 	int64 RemoteFrames = 0, RemoteUnderrun = 0, RemoteTeleports = 0, RemoteDriftOver1cm = 0;

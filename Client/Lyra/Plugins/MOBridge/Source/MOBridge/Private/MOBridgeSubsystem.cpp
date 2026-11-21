@@ -289,11 +289,29 @@ namespace
 		Mesh->SetRelativeLocation(Rel);
 	}
 
+	// 이동 방식을 바꾸다 엔진이 옮긴 자리를 되돌린 수 · 최대 거리(내 몸 · 남의 몸 합 — MOB_SUMMARY3 modeSwitchRestores). 밀림 0 인 판이 착지가 없었던 판인지 가른다
+	int64 GModeSwitchRestores = 0;
+	double GModeSwitchRestoreMax = 0.0;
+
+	// 자리는 부르는 쪽이 이미 놓았다. 엔진은 걷기로 들어갈 때 바닥을 찾고(FindFloor) 캡슐을 바닥 틈 1.9~2.4cm 로 옮긴다(AdjustFloorHeight —
+	// CharacterMovementComponent.cpp OnMovementModeChanged). 화면 자리는 두 입력 · 두 상태 사이를 메운 값이라 착지 순간 그 틈 밖에 있어 한 프레임 튀었다(L-9-b —
+	// 내 밀림 1cm 넘는 5번이 다 이 옮김, 최대 23.1cm). 바닥 찾기 · 바탕 정하기는 놓은 자리에서 그대로 하고 옮김만 되돌린다
 	void ApplyMoveToCharacter(ACharacter* Ch, const FVector& Velocity, bool bFalling)
 	{
 		UCharacterMovementComponent* M = Ch->GetCharacterMovement();
 		if (!M) return;
-		if (bFalling != M->IsFalling()) M->SetMovementMode(bFalling ? MOVE_Falling : MOVE_Walking);
+		if (bFalling != M->IsFalling())
+		{
+			const FVector Placed = Ch->GetActorLocation();
+			M->SetMovementMode(bFalling ? MOVE_Falling : MOVE_Walking);
+			const double Moved = FVector::Dist(Ch->GetActorLocation(), Placed);
+			if (Moved > 0.0)
+			{
+				Ch->SetActorLocation(Placed, false, nullptr, ETeleportType::TeleportPhysics);
+				++GModeSwitchRestores;
+				GModeSwitchRestoreMax = FMath::Max(GModeSwitchRestoreMax, Moved);
+			}
+		}
 		M->Velocity = Velocity;
 		M->UpdateComponentVelocity();	// 애니가 읽는 GetVelocity 는 이쪽 값이다
 	}
@@ -1221,6 +1239,8 @@ void UMOBridgeSubsystem::TickSelfVisual(double Now, float DeltaTime)
 		const double Drift = FVector::Dist(Ch->GetActorLocation(), SelfLastSet);
 		SelfDriftMax = FMath::Max(SelfDriftMax, Drift);
 		if (Drift > 1.0) ++SelfDriftOver1cm;
+		const FVector DriftMoved = Ch->GetActorLocation() - SelfLastSet;
+		if (Drift > 1.0 && FMath::Abs(DriftMoved.Z - SelfSetMovedZ) < 0.01 && FVector2D(DriftMoved.X, DriftMoved.Y).Size() < 0.01) ++SelfDriftFromSetMove;
 		if (Drift > 1.0 && DriftLinesLeft > 0)
 		{
 			// 누가 옮겼나 가르기 — Lyra 근접 능력이 켜져 있었나(GA_Melee 의 밀기 · 몽타주) · 상대 몸이 붙어 있었나(겹침 밀어내기)
@@ -1236,10 +1256,17 @@ void UMOBridgeSubsystem::TickSelfVisual(double Now, float DeltaTime)
 			const UCharacterMovementComponent* CMC = Ch->GetCharacterMovement();
 			// 대시(D-5) — Lyra 대시 능력이 켜져 있나 · 마지막으로 켜진 뒤 몇 프레임(-1 = 없음) · 캡슐 반높이(웅크림 바뀜이 자리를 옮기나)
 			const UCapsuleComponent* Capsule = Ch->GetCapsuleComponent();
-			UE_LOG(LogMOB, Log, TEXT("MOB_SELF_DRIFT frame=%llu seq=%u drift=%.2f moved=(%.2f,%.2f,%.2f) lyraMelee=%d nearestRemote=%.1f mode=%d crouched=%d lyraDash=%d dashFramesAgo=%lld capsuleHalf=%.1f"),
+			// 까닭 가르기(L-9-b) — 자리 · 지난 놓기 프레임에 놓은 뒤 바뀐 높이 · 이동 방식 바꿈 앞뒤 · 앉음 바꿈 · Lyra 이동 컴포넌트 바닥(틈 · 걸을 수 있나 · 높이 · 물체) · 예측 방식 · 바닥 틈 · 높이
+			const FFindFloorResult* LyraFloor = CMC ? &CMC->CurrentFloor : nullptr;
+			const mo::MoveState& SimMove = Core->Prediction.GetMove();
+			UE_LOG(LogMOB, Log, TEXT("MOB_SELF_DRIFT frame=%llu seq=%u drift=%.2f moved=(%.2f,%.2f,%.2f) lyraMelee=%d nearestRemote=%.1f mode=%d crouched=%d lyraDash=%d dashFramesAgo=%lld capsuleHalf=%.1f"
+				" at=(%.2f,%.2f,%.2f) setMovedZ=%.2f setMode=%d>%d setCrouch=%d lyraFloorDist=%.2f lyraWalkable=%d lyraFloorZ=%.2f lyraFloor=%s simMode=%d simFloorDist=%.2f simZ=%.2f"),
 				(unsigned long long)GFrameCounter, Seq, Drift, Moved.X, Moved.Y, Moved.Z, bLyraMeleeWasActive ? 1 : 0, NearestRemote,
 				CMC ? (int32)CMC->MovementMode.GetValue() : -1, Ch->IsCrouched() ? 1 : 0, bLyraDashWasActive ? 1 : 0,
-				DashLastStartFrame ? (long long)(GFrameCounter - DashLastStartFrame) : -1LL, Capsule ? Capsule->GetUnscaledCapsuleHalfHeight() : -1.0f);
+				DashLastStartFrame ? (long long)(GFrameCounter - DashLastStartFrame) : -1LL, Capsule ? Capsule->GetUnscaledCapsuleHalfHeight() : -1.0f,
+				Ch->GetActorLocation().X, Ch->GetActorLocation().Y, Ch->GetActorLocation().Z, SelfSetMovedZ, SelfSetModeFrom, SelfSetModeTo, bSelfSetCrouchChanged ? 1 : 0,
+				LyraFloor ? LyraFloor->FloorDist : -1.f, LyraFloor && LyraFloor->IsWalkableFloor() ? 1 : 0, LyraFloor ? LyraFloor->HitResult.ImpactPoint.Z : 0.0,
+				LyraFloor ? *GetNameSafe(LyraFloor->HitResult.GetActor()) : TEXT("-"), (int32)SimMove.mode, SimMove.floor.floorDist, SimMove.location.z);
 		}
 	}
 
@@ -1251,11 +1278,21 @@ void UMOBridgeSubsystem::TickSelfVisual(double Now, float DeltaTime)
 
 	// 앉음 = 예측의 지금 값(서버와 같은 코드). 자리는 직전 · 지금 입력 사이를 메우지만 앉음은 섞지 않는다 — 한 입력(1/60초) 안의 차이라 둔다(제 판단).
 	// 캡슐 반높이가 Lyra 카메라 중심 높이에 들어가므로(ULyraCameraMode::GetPivotLocation) 자리 입히기 앞에 바꾼다
-	if (ApplyCrouchToCharacter(Ch, Move.crouched)) ++SelfCrouchChanges;
+	bSelfSetCrouchChanged = ApplyCrouchToCharacter(Ch, Move.crouched);
+	if (bSelfSetCrouchChanged) ++SelfCrouchChanges;
 	Ch->SetActorLocation(Shown, false, nullptr, ETeleportType::TeleportPhysics);
 	SelfLastSet = Ch->GetActorLocation();
 	bSelfSet = true;
+	const UCharacterMovementComponent* SetCMC = Ch->GetCharacterMovement();
+	SelfSetModeFrom = SetCMC ? (int32)SetCMC->MovementMode.GetValue() : -1;
 	ApplyMoveToCharacter(Ch, bWaiting ? FVector::ZeroVector : ToFVector(Move.velocity), !bWaiting && Move.mode == mo::EMoveMode::Falling);
+	SelfSetModeTo = SetCMC ? (int32)SetCMC->MovementMode.GetValue() : -1;
+	SelfSetMovedZ = Ch->GetActorLocation().Z - SelfLastSet.Z;
+	if (FMath::Abs(SelfSetMovedZ) > 0.01)
+	{
+		++SelfSetMoves;
+		SelfSetMoveMax = FMath::Max(SelfSetMoveMax, FMath::Abs(SelfSetMovedZ));
+	}
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -4435,8 +4472,8 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY2 states=%lld statesWithoutMe=%lld shots=%lld damages=%lld matches=%lld kills=%lld unknown=%lld hp=%.0f mag=%d spare=%d phase=%u score=%u:%u posDiff n=%lld avg=%.1f max=%.1f"),
 		StatesRecv, StatesWithoutMe, ShotsRecv, DamagesRecv, MatchesRecv, KillsRecv, UnknownPackets, ServerHp, ServerMagazine, ServerSpare, MatchPhase, ScoreA, ScoreB,
 		PosDiffCount, PosDiffCount ? PosDiffSum / PosDiffCount : 0.0, PosDiffMax);
-	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY3 posNonZero=%lld velMax=%.3f corrections=%lld correctionAvg=%.2f correctionMax=%.2f visualSnaps=%lld pawnChanges=%lld selfDriftMax=%.3f selfDriftOver1cm=%lld maxFrameGap=%.3f"),
-		PosDiffNonZero, VelDiffMax, Corrections, Corrections ? CorrectionSum / Corrections : 0.0, CorrectionMax, VisualSnaps, PawnChanges, SelfDriftMax, SelfDriftOver1cm, MaxFrameGap);
+	UE_LOG(LogMOB, Log, TEXT("MOB_SUMMARY3 posNonZero=%lld velMax=%.3f corrections=%lld correctionAvg=%.2f correctionMax=%.2f visualSnaps=%lld pawnChanges=%lld selfDriftMax=%.3f selfDriftOver1cm=%lld selfDriftFromSetMove=%lld selfSetMoves=%lld selfSetMoveMax=%.3f modeSwitchRestores=%lld modeSwitchRestoreMax=%.3f maxFrameGap=%.3f"),
+		PosDiffNonZero, VelDiffMax, Corrections, Corrections ? CorrectionSum / Corrections : 0.0, CorrectionMax, VisualSnaps, PawnChanges, SelfDriftMax, SelfDriftOver1cm, SelfDriftFromSetMove, SelfSetMoves, SelfSetMoveMax, GModeSwitchRestores, GModeSwitchRestoreMax, MaxFrameGap);
 	UE_LOG(LogMOB, Log, TEXT("MOB_CROUCH presses=%lld comparedOn=%lld flagDiff=%lld selfChanges=%lld remoteChanges=%lld remoteLiftFrames=%lld lyraBlocked=%lld"),
 		InputsCrouch, CrouchComparedOn, CrouchFlagDiff, SelfCrouchChanges, RemoteCrouchChanges, RemoteLiftFrames, GLyraCrouchBlocked);
 	// 내 몸 Quinn(D85) — donePawns = 몸 Quinn · 여성형 층으로 닫은 내 캐릭터 수(부활마다 하나). sets = 몸 바꾸기 부른 수 · reequips = 층 때문에 다시 쥔 수
