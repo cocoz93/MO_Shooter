@@ -233,6 +233,15 @@ namespace mo
 		uint64_t grenadeStateMsgs = 0;		// 보낸 S2C_GRENADE_STATE — 산 수류탄이 있는 틱 수
 		uint64_t grenadeStateEntries = 0;	// 그 칸 수의 합
 		uint64_t grenadeStateBounced = 0;	// 그중 튕김 깃발 — grenadeBounces 보다 작거나 같다(한 틱에 여러 번 튕겨도 깃발은 하나)
+		// 수류탄 대 몸 부위(L-8-a-2) — checks = noAnim + far + noPose + poses(갈래마다 세는 자리를 둬 빠진 갈래를 가린다)
+		uint64_t grenadeBodyChecks = 0;		// 수류탄 걸음마다 산 사람마다 — 캡슐 곁에 몸 부위를 넣을지 본 수
+		uint64_t grenadeBodyNoAnim = 0;		// 그중 클립 없는 서버라 몸 부위가 없음(캡슐만)
+		uint64_t grenadeBodyFar = 0;		// 그중 이 걸음에 못 닿는 거리라 자세를 안 구함
+		uint64_t grenadeBodyNoPose = 0;		// 그중 지난 틱 기록이 없음(이 틱에 부활 · 들어옴 — 겨눔 선과 같이 뺀다)
+		uint64_t grenadeBodyPoses = 0;		// 그중 몸 부위를 넣음
+		uint64_t grenadeBodyParts = 0;		// 넣은 몸 부위 수 — poses × 몸 수(22)여야 한다(막는 것 목록이 실제로 는 수)
+		uint64_t grenadeBodyHits = 0;		// 걸음 맞음 중 몸 부위(part ≥ 0)
+		uint64_t grenadeCapsuleHits = 0;	// 걸음 맞음 중 사람 캡슐(몸 부위 맞음과 견줄 대조)
 
 		// 권위 확인 — 일부러 보낸 나쁜 입력을 사유별로 센다. 정직한 클라는 여기 일곱이 전부 0 이어야 한다
 		uint64_t inputsRejectedBadValue = 0;	// NaN·무한대 — 통째로 버림
@@ -557,7 +566,7 @@ namespace mo
 		std::vector<LiveGrenade> _grenades;				// 산 수류탄 — 방 크기(kMaxPlayersInRoom)까지. 사람당 하나(쿨다운 301 입력 > 수명 121 틱)
 		uint32_t _nextGrenadeId = 1;
 		std::vector<BodyPlacement> _grenadeBodies;		// 겨눔 선이 보는 남의 부위 몸 — 던질 때마다 다시 채운다
-		std::vector<ProjectileObstacle> _grenadeObstacles;	// 한 수류탄 걸음이 보는 막는 것(산 사람 · 다른 수류탄)
+		std::vector<ProjectileObstacle> _grenadeObstacles;	// 한 수류탄 걸음이 보는 막는 것(산 사람 캡슐 · 몸 부위 · 다른 수류탄)
 		std::vector<ProjectileObstacle> _grenadeCapsules;	// 이 틱 걸음 전 수류탄 캡슐 — 서로 막는 것은 걸음 전 자리로(대조 도구와 같은 꼴)
 		bool _animReady = false;
 		std::array<CAnimPoseEvaluator, (size_t)EWeapon::Count> _poseEvaluators;	// 무기 번호 차례 — 묶음마다 하나

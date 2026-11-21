@@ -1307,6 +1307,8 @@ namespace mo
 
 	// 산 수류탄마다 한 걸음 — 입력 · 받침 뒤(Lyra 「이동 뒤 액터 틱」과 같은 차례, 플랜 94줄). 던진 틱에도 걷는다(짐작 5 — 생긴 프레임에 한 걸음).
 	// 막는 것 = 산 사람 캡슐(이 틱 걸음 뒤 자리) · 다른 수류탄(이 틱 걸음 전 자리). 다른 팀 사람에 맞으면 그 걸음에서 터진다(B_Grenade ReceiveHit → Detonate)
+	// 산 사람은 캡슐 곁에 몸 부위 22 도 넣는다(L-8-a-2 — Lyra 수류탄은 캡슐과 메시 물리 몸 둘 다에 막힌다, L-2-c 실측). 자리 · 요 = 캡슐과 같은 이 틱 걸음 뒤 값,
+	// 자세 = 마지막으로 적은 틱(_tick − 1) — 이 걸음은 애니 앞이라 이 틱 자세가 아직 없다(Lyra 도 이동 뒤 · 애니 앞이면 새 자리 · 옛 자세 — 원본 기준 짐작, 제 판단)
 	void CRoom::TickGrenades()
 	{
 		if (_grenades.empty()) return;
@@ -1323,6 +1325,10 @@ namespace mo
 			_grenadeCapsules.push_back(o);
 		}
 
+		const uint32_t poseTick = _tick - 1;
+		// 이 걸음에 몸 부위가 닿을 수 있는 거리 — 몸 경계 반지름 + 수류탄 캡슐 끝(자리에서 오프셋 + 반높이 = 16) + 한 걸음 최대 이동(최대 속도 × 틱 = 42.5)
+		// + 여유 10(제 판단 — 튕김으로 꺾인 길 · 어림 틀림을 덮는 몫). 이보다 멀면 자세를 안 구한다
+		const double bodyReach = _anim.boundRadius + Length(kGrenadeParams.capsuleOffset) + kGrenadeParams.capsuleHalfHeight + (double)kGrenadeParams.maxSpeed * kTickSeconds + 10.0;
 		size_t index = 0;
 		while (index < _grenades.size())
 		{
@@ -1340,6 +1346,37 @@ namespace mo
 				o.owner = p->id == grenade.owner;		// 생긴 뒤 0.16초 서로 무시 — 날아감이 launchCleanedUp 으로 가른다
 				o.detonateOnHit = !o.owner && !grenade.ownerGone && p->team != grenade.team;	// 같은 팀 · 자기 몸 · 던진 사람이 나간 수류탄(L-3-d)은 튕긴다
 				_grenadeObstacles.push_back(o);
+
+				// 몸 부위 — 번호 · 종류 · 자기 몸 · 터짐은 캡슐과 같다(BodyObstacles 가 o 를 본으로 쓴다)
+				++_stats.grenadeBodyChecks;
+				if (!_animReady)
+				{
+					++_stats.grenadeBodyNoAnim;
+					continue;
+				}
+				if (Length(p->move.location - grenade.state.location) > bodyReach)
+				{
+					++_stats.grenadeBodyFar;
+					continue;
+				}
+				const RewindSample& sample = p->rewindHistory[poseTick % p->rewindHistory.size()];
+				if (sample.tick != poseTick || !sample.alive)
+				{
+					++_stats.grenadeBodyNoPose;
+					continue;
+				}
+				BodyPlacement body;
+				body.center = p->move.location;
+				body.yawDegrees = p->yaw;
+				body.id = p->id;
+				body.pose = GetPoseAt(*p, poseTick, 0.f, false);		// 한 틱에 사람마다 한 번 푼다(같은 사람 · 틱은 저장한 자세를 돌려준다)
+				body.shapes = _anim.clips->Bodies().data();
+				body.shapeCount = (uint32_t)_anim.clips->Bodies().size();
+				const size_t first = _grenadeObstacles.size();
+				_grenadeObstacles.resize(first + body.shapeCount);
+				_grenadeObstacles.resize(first + BodyObstacles(body, o, _grenadeObstacles.data() + first, body.shapeCount));
+				++_stats.grenadeBodyPoses;
+				_stats.grenadeBodyParts += _grenadeObstacles.size() - first;
 			}
 			for (const ProjectileObstacle& other : _grenadeCapsules)
 			{
@@ -1351,6 +1388,11 @@ namespace mo
 			grenade.bouncedThisTick = false;
 			for (size_t i = 0; i < std::min(hitCount, kGrenadeHitSlots); ++i)
 			{
+				if (hits[i].kind == EProjectileHitKind::Pawn)
+				{
+					if (hits[i].part >= 0) ++_stats.grenadeBodyHits;
+					else ++_stats.grenadeCapsuleHits;
+				}
 				if (grenade.ownerGone && hits[i].kind == EProjectileHitKind::Pawn && hits[i].dispatched) ++_stats.grenadeOwnerGoneBodyHits;		// 맞음 알림이 나간 몸 맞음 — 팀 비교가 안 돼 안 터짐
 				if (!hits[i].bounced) continue;
 				++_stats.grenadeBounces;

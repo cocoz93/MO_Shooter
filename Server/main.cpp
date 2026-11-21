@@ -752,6 +752,11 @@ int main(int argc, char** argv)
 	std::printf("SERVER grenadeWire camBackClamped=%llu throwMsgs=%llu boomMsgs=%llu stateMsgs=%llu stateEntries=%llu stateBounced=%llu\n",
 		(unsigned long long)room.grenadeCamBackClamped, (unsigned long long)room.grenadeThrowMsgs, (unsigned long long)room.grenadeBoomMsgs,
 		(unsigned long long)room.grenadeStateMsgs, (unsigned long long)room.grenadeStateEntries, (unsigned long long)room.grenadeStateBounced);
+	// 수류탄 대 몸 부위(L-8-a-2) — checks = noAnim + far + noPose + poses · parts = poses × 몸 수 · bodyHits = 몸 부위 맞음 · capsuleHits = 사람 캡슐 맞음(대조)
+	std::printf("SERVER grenadeBody checks=%llu noAnim=%llu far=%llu noPose=%llu poses=%llu parts=%llu bodyHits=%llu capsuleHits=%llu\n",
+		(unsigned long long)room.grenadeBodyChecks, (unsigned long long)room.grenadeBodyNoAnim, (unsigned long long)room.grenadeBodyFar,
+		(unsigned long long)room.grenadeBodyNoPose, (unsigned long long)room.grenadeBodyPoses, (unsigned long long)room.grenadeBodyParts,
+		(unsigned long long)room.grenadeBodyHits, (unsigned long long)room.grenadeCapsuleHits);
 	std::printf("REJECT badValue=%llu moveOver=%llu weaponId=%llu debugPlace=%llu aimFar=%llu swap=%llu aimWall=%llu droppedFull=%llu oldSeq=%llu badPackets=%llu | aimStale=%llu fireTooSoon=%llu fireEmpty=%llu seqGapFire=%llu\n",
 		(unsigned long long)room.inputsRejectedBadValue, (unsigned long long)room.movesOverLength, (unsigned long long)room.weaponIdRejected, (unsigned long long)room.debugPlacesRejected, (unsigned long long)room.shotsAimReplaced,
 		(unsigned long long)room.firesRejectedSwap, (unsigned long long)room.shotsAimPulledBack, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq, (unsigned long long)badPackets,

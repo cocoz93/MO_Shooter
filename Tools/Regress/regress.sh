@@ -329,10 +329,11 @@ run_grenade() {
 	[ $brc = 0 ] && [ $src = 0 ] || ok=0
 	cmp -s "$OUT/grenade_srv.csv" "$OUT/grenade_bot.csv" || ok=0
 	grep -q '^RESULT PASS' "$OUT/grenade_bot.log" || ok=0
-	local sg sw sa bg bw nb thrown timer hit alive smsgs sents sbnc hurt bhit bwire ev dr st
+	local sg sw sa sb bg bw nb thrown timer hit alive smsgs sents sbnc hurt bhit bwire ev dr st bc bna bfar bnp bpo bpa nbody
 	sg="$(grep -a '^SERVER grenade ' "$OUT/grenade_srv.log")"
 	sw="$(grep -a '^SERVER grenadeWire ' "$OUT/grenade_srv.log")"
 	sa="$(grep -a '^SERVER animGrenade ' "$OUT/grenade_srv.log")"
+	sb="$(grep -a '^SERVER grenadeBody ' "$OUT/grenade_srv.log")"
 	bg="$(grep -a '^BOT grenade ' "$OUT/grenade_bot.log")"
 	bw="$(grep -a '^BOT grenadeWire ' "$OUT/grenade_bot.log")"
 	nb="$(grep -a '^BOT 방 ' "$OUT/grenade_bot.log" | head -1 | sed -nE 's/.*: 봇 ([0-9]+) .*/\1/p')"
@@ -361,9 +362,18 @@ run_grenade() {
 	else
 		ok=0
 	fi
+	# 몸 부위(L-8-a-2) — 클립 실은 판: 갈래 합 = checks · noAnim 0 · 몸 부위를 넣은 걸음 > 0 · 넣은 부위 수 = poses × 몸 수(ANIMBOUND bodies).
+	# 몸 부위 맞음 bodyHits 는 판마다 달라(같은 빌드 두 판 4 · 8) 보이기만 한다
+	bc="$(num "$sb" checks)"; bna="$(num "$sb" noAnim)"; bfar="$(num "$sb" far)"; bnp="$(num "$sb" noPose)"; bpo="$(num "$sb" poses)"; bpa="$(num "$sb" parts)"
+	nbody="$(num "$(grep -a '^ANIMBOUND ' "$OUT/grenade_srv.log")" bodies)"
+	if [ -n "$bc" ] && [ -n "$bna" ] && [ -n "$bfar" ] && [ -n "$bnp" ] && [ -n "$bpo" ] && [ -n "$bpa" ] && [ -n "$nbody" ]; then
+		[ "$bc" = $((bna + bfar + bnp + bpo)) ] && [ "$bna" = 0 ] && [ "$bpo" -gt 0 ] && [ "$bpa" = $((bpo * nbody)) ] || ok=0
+	else
+		ok=0
+	fi
 	press_check "$OUT/grenade_srv.log" "$OUT/grenade_bot.log" 0
 	[ $press_ok = 1 ] || ok=0
-	verdict 봇수류탄 $ok "봇 rc=$brc 서버 rc=$src 봇 $nb 던짐=$thrown 신관=$timer 맞음=$hit 피해·자기·처치=${hurt[*]} 봇=${bhit[*]} 사건=$ev 버림=$dr 튼수=$st$(echo "$sg" | grep -oE ' (noHit|whileDash|melee|reload|wall|alive|ownerLeft)=[0-9]+' | tr -d '\n')$(echo "$bg" | grep -oE ' (grenadeDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n')$press_note"
+	verdict 봇수류탄 $ok "봇 rc=$brc 서버 rc=$src 봇 $nb 던짐=$thrown 신관=$timer 맞음=$hit 피해·자기·처치=${hurt[*]} 봇=${bhit[*]} 사건=$ev 버림=$dr 튼수=$st$(echo "$sg" | grep -oE ' (noHit|whileDash|melee|reload|wall|alive|ownerLeft)=[0-9]+' | tr -d '\n')$(echo "$bg" | grep -oE ' (grenadeDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n') 몸부위$(echo "$sb" | grep -oE ' (poses|parts|bodyHits|capsuleHits)=[0-9]+' | tr -d '\n')$press_note"
 }
 
 # 사람끼리 막기 대조(컨텐츠 F-1) — Lyra 연습장에서 두 사람이 부딪힌 기록을 Shared 이동으로 다시 돌려 위치 · 속도가 0.01 안이어야 한다.
@@ -436,18 +446,21 @@ run_rules() {
 # 던진 사람 나감(L-3-d) — 프로브 --grenadeLeave 가 칸 셋(① 안 나감 대조 ② 던지고 나감 · 상대 몸에 닿음 ③ 던지고 나감 · 곁에서 터짐)을 돈다.
 # 프로브 RESULT PASS = ① 맞아 터지고 피해 · ② 신관 터짐 · 피해 0 · ③ 같은 코드 곡선 피해 > 0 인데 피해 0. 여기서 더 보는 것 = 서버가 센 나간 사람 몫
 # ownerLeft 2(② · ③) · 나간 뒤 몸 맞음 ownerGoneBody ≥ 1(② 가 몸에 닿았다 — 안 닿았으면 ② 가 아무것도 안 본다) · 반지름 안 피해 0 ownerGone ≥ 1(③) · 남은 수 alive 0
+# 클립 없는 서버라 몸 부위가 없다 — 몸 부위를 본 수 전부 noAnim(L-8-a-2)
 run_grenade_leave() {
 	"$SRV" "--map=$MAP" --port=7968 --debug --exitWhenEmpty --warmup=0 --matchSeconds=100000 --targetScore=1000 > "$OUT/gleave_srv.log" 2>&1 &
 	local spid=$!
 	"$PROBE" "$MAP" "$DATA/move_expanse_fixed.csv" --port=7968 --grenadeLeave > "$OUT/gleave_probe.log" 2>&1
 	local prc=$?
 	wait $spid
-	local src=$? ok=1 sg
+	local src=$? ok=1 sg sb
 	[ $prc = 0 ] && [ $src = 0 ] || ok=0
 	grep -q '^RESULT PASS' "$OUT/gleave_probe.log" || ok=0
 	sg="$(grep -a '^SERVER grenade ' "$OUT/gleave_srv.log")"
+	sb="$(grep -a '^SERVER grenadeBody ' "$OUT/gleave_srv.log")"
+	[ "$(num "$sb" checks)" -gt 0 ] 2>/dev/null && [ "$(num "$sb" noAnim)" = "$(num "$sb" checks)" ] || ok=0
 	[ "$(num "$sg" ownerLeft)" = 2 ] && [ "$(num "$sg" ownerGoneBody)" -ge 1 ] 2>/dev/null && [ "$(num "$sg" ownerGone)" -ge 1 ] 2>/dev/null && [ "$(num "$sg" alive)" = 0 ] || ok=0
-	verdict 던진사람나감 $ok "프로브 rc=$prc 서버 rc=$src$(echo "$sg" | grep -oE ' (timer|hit|alive|ownerLeft|ownerGoneBody|ownerGone|damage)=[0-9]+' | tr -d '\n')"
+	verdict 던진사람나감 $ok "프로브 rc=$prc 서버 rc=$src$(echo "$sg" | grep -oE ' (timer|hit|alive|ownerLeft|ownerGoneBody|ownerGone|damage)=[0-9]+' | tr -d '\n') 몸부위$(echo "$sb" | grep -oE ' (checks|noAnim)=[0-9]+' | tr -d '\n')"
 }
 
 # 한 입력 안 누름 차례(판 14 · L-4) — 서버 시험이 쓰고 읽기 왕복(모음 11 · 차례 60)을 보고, 차례 실은 둘 · 0 을 실은 둘 켬 하나 · 하나만 켠 하나를 보내
