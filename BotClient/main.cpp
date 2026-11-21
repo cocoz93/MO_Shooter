@@ -591,6 +591,7 @@ namespace
 			wire::Input input = wire::Input();
 			if (_scripted) ThinkScript(input);
 			else Think(input);
+			AssignPressOrder(input);	// 근접 판정(WillMeleeStart)도 실린 차례를 본다 — 그 앞에서
 			_self.SetDebugMoveScale(breakMirror ? 0.999 : 1.0);
 			// 근접(E-3) — 이 입력이 근접을 켜면 넣기 전에 화면 판정을 해, 맞음이면 밀기를 같이 넣는다(Lyra 화면도 능력 프레임 이동부터 민다)
 			MeleeGuess guess;
@@ -752,6 +753,8 @@ namespace
 		uint64_t GetCrouchCompared() const { return _crouchCompared; }
 		uint64_t GetCrouchDiff() const { return _crouchDiff; }
 		uint64_t GetCrouchPresses() const { return _crouchPresses; }
+		uint64_t GetPressMulti() const { return _pressMulti; }
+		uint64_t GetPressPair(int lo, int hi, int dir) const { return _pressPairs[lo][hi][dir]; }
 		const MeleeBotCounts& GetMeleeCounts() const { return _meleeCounts; }
 		const CSelfPrediction::MeleeCounters& GetMeleeFixes() const { return _self.GetMeleeCounters(); }
 		size_t GetMeleePendingDamage() const { return _meleePendingDamage.size(); }
@@ -2126,6 +2129,37 @@ namespace
 			}
 		}
 
+		// 같은 입력 누름 차례(L-5-c) — 봇은 한 입력 안에서 단추를 코드 차례로 켤 뿐이라 누른 차례가 없다. 코드 차례를 그대로 실으면 짝마다 한 방향만 돈다
+		// (근접 → 대시만 · 대시 → 근접 0). 넷(근접 · 대시 · 수류탄 · 재장전) 중 둘 이상이면 따로 쓰는 난수(_pressRng)로 섞어 싣는다 — 서버 · 예측이 두 방향을 다 돈다.
+		// 하나 이하면 차례가 뜻이 없어 0 을 두고(ReadPressOrder 가 안 본다) 난수도 안 뽑는다
+		void AssignPressOrder(wire::Input& input)
+		{
+			uint8_t keys[wire::kPressKeyCount];
+			int n = 0;
+			for (uint8_t key = 0; key < wire::kPressKeyCount; ++key)
+			{
+				if ((input.buttons & wire::kPressKeyButtons[key]) != 0) keys[n++] = key;
+			}
+			input.pressOrder = 0;
+			if (n < 2) return;
+			for (int k = n - 1; k > 0; --k)
+			{
+				const int j = std::min(k, (int)(_pressRng.NextFloat() * (float)(k + 1)));
+				std::swap(keys[k], keys[j]);
+			}
+			input.pressOrder = wire::MakePressOrder(keys, n);
+			++_pressMulti;
+			// 짝(작은 번호 a · 큰 번호 b)마다 a 가 먼저인 입력 · b 가 먼저인 입력 — 두 방향이 다 돌았나
+			for (int x = 0; x < n; ++x)
+			{
+				for (int y = x + 1; y < n; ++y)
+				{
+					const int lo = std::min(keys[x], keys[y]), hi = std::max(keys[x], keys[y]);
+					++_pressPairs[lo][hi][keys[x] == lo ? 0 : 1];
+				}
+			}
+		}
+
 		// 하늘 각본의 겨눔 선 — 서버 ThrowGrenade 와 같은 식(카메라 = 눈 − 시선 × 카메라 거리 · 선 450~3150 · 무기 채널). 사람 몸은 안 본다
 		bool SkyLineOpen(const wire::Input& input) const
 		{
@@ -2143,7 +2177,7 @@ namespace
 		const CMapCollision& _map;
 		const MatchRules& _rules;
 		CMoveSim& _sim;			// 봇끼리 나눠 쓴다 — 사람끼리 막기의 남 캡슐은 넣기 · 다시 돌리기 동안만 걸고 바로 뗀다
-		// 난수 다섯 — 씨앗 하나에서 갈라 심는다(전부터의 값). 기다림 판은 환영 때 자리 번호로 다시 심는다(SetSeedByPlayerId)
+		// 난수 여섯 — 씨앗 하나에서 갈라 심는다(전부터의 값 · 누름 차례 난수는 L-5-c). 기다림 판은 환영 때 자리 번호로 다시 심는다(SetSeedByPlayerId)
 		void SeedRngs(uint32_t seed)
 		{
 			_rng = CSpreadRng(seed);
@@ -2151,6 +2185,7 @@ namespace
 			_crouchRng = CSpreadRng(seed ^ 0x3C3C5678u);
 			_dashRng = CSpreadRng(seed ^ 0x6A6A9ABCu);
 			_grenadeRng = CSpreadRng(seed ^ 0x4E4E2B1Du);
+			_pressRng = CSpreadRng(seed ^ 0x2D2D7A5Eu);
 		}
 		uint32_t _seedByPlayerBase = 0;
 		CSpreadRng _rng;
@@ -2322,6 +2357,10 @@ namespace
 		bool _grenadePress = false;		// --grenade
 		int _breakGrenade = 0;			// --breakGrenade — kBreakGrenadePredict · kBreakGrenadeServer
 		CSpreadRng _grenadeRng;
+		// 같은 입력 누름 차례(L-5-c) — 섞는 난수 · 둘 이상 누른 입력 수
+		CSpreadRng _pressRng;
+		uint64_t _pressMulti = 0;
+		uint64_t _pressPairs[wire::kPressKeyCount][wire::kPressKeyCount][2] = {};	// [작은 번호][큰 번호][0 = 작은 쪽 먼저 · 1 = 큰 쪽 먼저]
 		int _grenadeWait = 30;			// 다음 누름까지 남은 입력(대시와 같은 첫 30)
 		int _grenadeSkyWait = 0;		// 하늘 각본을 다시 볼 때까지 남은 입력
 		int _grenadeNearWait = 0;		// 가까운 적 각본을 다시 볼 때까지 남은 입력
@@ -2679,7 +2718,8 @@ int main(int argc, char** argv)
 
 	uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, detours = 0, lockstepTimeouts = 0;
 	uint64_t adsCompared = 0, adsDiff = 0, adsInputs = 0, lockDiff = 0, lockCompared = 0;
-	uint64_t crouchCompared = 0, crouchDiff = 0, crouchPresses = 0;
+	uint64_t crouchCompared = 0, crouchDiff = 0, crouchPresses = 0, pressMulti = 0;
+	uint64_t pressPairs[wire::kPressKeyCount][wire::kPressKeyCount][2] = {};
 	uint64_t pawnReconciles = 0, pawnCorrected = 0, fallDiff = 0;
 	double pawnCorrectSum = 0, pawnCorrectMax = 0;
 	MeleeBotCounts melee;
@@ -2717,6 +2757,15 @@ int main(int argc, char** argv)
 		crouchCompared += bot.GetCrouchCompared();
 		crouchDiff += bot.GetCrouchDiff();
 		crouchPresses += bot.GetCrouchPresses();
+		pressMulti += bot.GetPressMulti();
+		for (int lo = 0; lo < wire::kPressKeyCount; ++lo)
+		{
+			for (int hi = lo + 1; hi < wire::kPressKeyCount; ++hi)
+			{
+				pressPairs[lo][hi][0] += bot.GetPressPair(lo, hi, 0);
+				pressPairs[lo][hi][1] += bot.GetPressPair(lo, hi, 1);
+			}
+		}
 		pawnReconciles += bot.GetPawnReconciles();
 		pawnCorrected += bot.GetPawnCorrected();
 		fallDiff += bot.GetFallDiff();
@@ -2807,6 +2856,20 @@ int main(int argc, char** argv)
 	std::printf("BOT 서버 ↔ 같은 코드: compared=%llu posDiff=%llu posMax=%.5f velDiff=%llu ammoDiff=%llu flagDiff=%llu 처음 어긋난 봇=%d 번호=%u\n", (unsigned long long)compared, (unsigned long long)posDiff, posMax, (unsigned long long)velDiff, (unsigned long long)ammoDiff, (unsigned long long)flagDiff, firstBadBot, firstBad);
 	std::printf("BOT ads inputs=%llu comparedOn=%llu diff=%llu (diff 는 flagDiff 안에도 든다)\n", (unsigned long long)adsInputs, (unsigned long long)adsCompared, (unsigned long long)adsDiff);
 	std::printf("BOT crouch presses=%llu comparedOn=%llu diff=%llu (diff 는 막기를 끈 판만 flagDiff 안에도 든다)\n", (unsigned long long)crouchPresses, (unsigned long long)crouchCompared, (unsigned long long)crouchDiff);
+	// 같은 입력에 근접 · 대시 · 수류탄 · 재장전 중 둘 이상을 실은 입력 — 모두 섞은 차례를 실었다(L-5-c). 서버 SERVER pressOrder multi · ordered 와 같아야 한다
+	// 짝 = 두 글자(M 근접 · D 대시 · G 수류탄 · R 재장전 — EPressKey 차례) · 값 = 앞 글자 먼저 / 뒤 글자 먼저 입력 수
+	{
+		static const char kKeyLetter[wire::kPressKeyCount] = { 'M', 'D', 'G', 'R' };
+		std::printf("BOT pressOrder multi=%llu", (unsigned long long)pressMulti);
+		for (int lo = 0; lo < wire::kPressKeyCount; ++lo)
+		{
+			for (int hi = lo + 1; hi < wire::kPressKeyCount; ++hi)
+			{
+				std::printf(" %c%c=%llu/%llu", kKeyLetter[lo], kKeyLetter[hi], (unsigned long long)pressPairs[lo][hi][0], (unsigned long long)pressPairs[lo][hi][1]);
+			}
+		}
+		std::printf("\n");
+	}
 	// 부활 직후 이동 막음 — comparedOn = 서버가 막음으로 보낸 비교 줄. 서버 빈 입력 이동(SERVER idleMoves)이 막음을 따로 줄이면 diff 가 선다
 	std::printf("BOT moveLock comparedOn=%llu diff=%llu (diff 는 flagDiff 안에도 든다)\n", (unsigned long long)lockCompared, (unsigned long long)lockDiff);
 	// 사람끼리 막기(F-2) — 꺼진 판은 0. 예측 쪽 계수는 봇끼리 나눠 쓰는 sim 하나의 합(다시 돌린 걸음 포함)

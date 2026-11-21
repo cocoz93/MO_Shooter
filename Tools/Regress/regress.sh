@@ -270,7 +270,34 @@ run_dash() {
 	aw="$(grep -a '^BOT animWire ' "$OUT/dash_bot.log")"
 	sbo="$(num "$ad" blendOutCells)"
 	[ -n "$sbo" ] && [ "$sbo" -gt 0 ] && [ "$(num "$aw" blendOut)" -gt 0 ] 2>/dev/null && [ "$(num "$aw" blendOutBad)" = 0 ] || ok=0
-	verdict 봇대시 $ok "봇 rc=$brc 서버 rc=$src 켬=$started 소식=$msgs 봇받음=$mine 방향=$f/$b/$l/$r 사건=${ev[*]} 버림=${dr[*]} 튼수=${st[*]}$(echo "$bd" | grep -oE ' (dashDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n') 빼기칸 서버=$sbo 봇=$(num "$aw" blendOut) 대시밖=$(num "$aw" blendOutBad)"
+	press_check "$OUT/dash_srv.log" "$OUT/dash_bot.log" 1
+	[ $press_ok = 1 ] || ok=0
+	verdict 봇대시 $ok "봇 rc=$brc 서버 rc=$src 켬=$started 소식=$msgs 봇받음=$mine 방향=$f/$b/$l/$r 사건=${ev[*]} 버림=${dr[*]} 튼수=${st[*]}$(echo "$bd" | grep -oE ' (dashDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n') 빼기칸 서버=$sbo 봇=$(num "$aw" blendOut) 대시밖=$(num "$aw" blendOutBad)$press_note"
+}
+
+# 같은 입력 누름 차례(L-5-c) — 봇대시 · 봇수류탄 판 공통. 봇은 넷(근접 · 대시 · 수류탄 · 재장전) 중 둘 이상 누른 입력마다 섞은 차례를 싣는다.
+# 서버가 그런 입력을 다 믿고(unordered 0 · ordered = multi > 0), 봇이 센 수 − 서버 수는 0 이상 · 서버가 받고 안 돌린 입력(received − applied − whileDead —
+# 방을 닫을 때 봇마다 마지막 하나쯤, 11-21 판 10) 이하. $3 = 1 이면 근접 · 대시 짝(MD)이 두 방향 다 1 이상이어야 한다(봇대시 판 — 11-21 두 판 10/8).
+# 결과는 press_ok(1 · 0) · press_note(판정 줄에 붙일 값)
+press_check() {
+	local sp bp si sm bm rc ap wd left="?" md
+	press_ok=1
+	sp="$(grep -a '^SERVER pressOrder ' "$1")"
+	si="$(grep -a '^SERVER inputs ' "$1")"
+	bp="$(grep -a '^BOT pressOrder ' "$2")"
+	sm="$(num "$sp" multi)"; bm="$(num "$bp" multi)"
+	rc="$(num "$si" received)"; ap="$(num "$si" applied)"; wd="$(num "$si" whileDead)"
+	md=($(echo "$bp" | sed -nE 's/.* MD=([0-9]+)\/([0-9]+) .*/\1 \2/p'))
+	# 빈 값으로 $(( )) 를 셈하면 bash 가 스크립트를 끝낸다 — 다 있는지 먼저 본다
+	if [ -n "$sm" ] && [ -n "$bm" ] && [ -n "$rc" ] && [ -n "$ap" ] && [ -n "$wd" ] && [ ${#md[@]} = 2 ]; then
+		left=$((rc - ap - wd))
+		[ "$sm" -gt 0 ] && [ "$(num "$sp" ordered)" = "$sm" ] && [ "$(num "$sp" unordered)" = 0 ] || press_ok=0
+		[ $((bm - sm)) -ge 0 ] && [ $((bm - sm)) -le "$left" ] || press_ok=0
+		[ "$3" != 1 ] || { [ "${md[0]}" -gt 0 ] && [ "${md[1]}" -gt 0 ]; } || press_ok=0
+	else
+		press_ok=0
+	fi
+	press_note=" 누름 서버=$sm 봇=$bm 안돌림=$left unordered=$(num "$sp" unordered) reordered=$(num "$sp" reordered) MD=${md[0]}/${md[1]}"
 }
 
 # 수류탄(컨텐츠 G-3 · G-4) — 봇이 수류탄을 던지며(--grenade, 대시 · 조준 · 근접 · 앉기와 섞어 대시 중 · 근접 끊기 · 재장전 끊기 갈래까지) 싸운다. 서버엔 클립을 줘 수류탄 몽타주를 튼다.
@@ -326,7 +353,9 @@ run_grenade() {
 	else
 		ok=0
 	fi
-	verdict 봇수류탄 $ok "봇 rc=$brc 서버 rc=$src 봇 $nb 던짐=$thrown 신관=$timer 맞음=$hit 피해·자기·처치=${hurt[*]} 봇=${bhit[*]} 사건=$ev 버림=$dr 튼수=$st$(echo "$sg" | grep -oE ' (noHit|whileDash|melee|reload|wall|alive|ownerLeft)=[0-9]+' | tr -d '\n')$(echo "$bg" | grep -oE ' (grenadeDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n')"
+	press_check "$OUT/grenade_srv.log" "$OUT/grenade_bot.log" 0
+	[ $press_ok = 1 ] || ok=0
+	verdict 봇수류탄 $ok "봇 rc=$brc 서버 rc=$src 봇 $nb 던짐=$thrown 신관=$timer 맞음=$hit 피해·자기·처치=${hurt[*]} 봇=${bhit[*]} 사건=$ev 버림=$dr 튼수=$st$(echo "$sg" | grep -oE ' (noHit|whileDash|melee|reload|wall|alive|ownerLeft)=[0-9]+' | tr -d '\n')$(echo "$bg" | grep -oE ' (grenadeDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n')$press_note"
 }
 
 # 사람끼리 막기 대조(컨텐츠 F-1) — Lyra 연습장에서 두 사람이 부딪힌 기록을 Shared 이동으로 다시 돌려 위치 · 속도가 0.01 안이어야 한다.
