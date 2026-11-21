@@ -277,6 +277,11 @@ run_dash() {
 	f="$(num "$sd" F)"; b="$(num "$sd" B)"; l="$(num "$sd" L)"; r="$(num "$sd" R)"
 	[ -n "$started" ] && [ "$started" -gt 0 ] && [ "$msgs" = "$started" ] && [ "$mine" = "$started" ] && [ "$results" = "$started" ] || ok=0
 	[ "$(num "$bd" dashDiff)" = 0 ] && [ "$(num "$bd" noSlot)" = 0 ] || ok=0
+	# 판 끝 확인 안 된 켬(BOT dash unacked, L-11-c) — 방을 닫을 때 서버가 받고 안 돌린 대시 누름(봇 pressed − 서버 presses, 서버는 돌릴 때 센다)에만 있을 수 있다.
+	# 그보다 크면 예측이 서버 없이 켠 것을 이 몫이 덮는다. 11-21 남겨 둔 대시 판 56개 중 누름이 어긋난 판은 하나(서버 364 · 봇 365)뿐이고 그 판만 봇 판정 FAIL 이었다
+	local un bpr spr pdiff="?"
+	un="$(num "$bd" unacked)"; bpr="$(num "$bd" pressed)"; spr="$(num "$sd" presses)"
+	if [ -n "$un" ] && [ -n "$bpr" ] && [ -n "$spr" ]; then pdiff=$((bpr - spr)); [ "$pdiff" -ge 0 ] && [ "$un" -le "$pdiff" ] || ok=0; else ok=0; fi
 	if [ -n "$f" ] && [ -n "$b" ] && [ -n "$l" ] && [ -n "$r" ]; then
 		[ $((f + b + l + r)) = "$started" ] && [ "$f" -gt 0 ] && [ "$b" -gt 0 ] && [ "$l" -gt 0 ] && [ "$r" -gt 0 ] || ok=0
 	else
@@ -301,7 +306,7 @@ run_dash() {
 	[ -n "$sbo" ] && [ "$sbo" -gt 0 ] && [ "$(num "$aw" blendOut)" -gt 0 ] 2>/dev/null && [ "$(num "$aw" blendOutBad)" = 0 ] || ok=0
 	press_check "$OUT/dash_srv.log" "$OUT/dash_bot.log" 1
 	[ $press_ok = 1 ] || ok=0
-	verdict 봇대시 $ok "봇 rc=$brc 서버 rc=$src 켬=$started 소식=$msgs 봇받음=$mine 방향=$f/$b/$l/$r 사건=${ev[*]} 버림=${dr[*]} 튼수=${st[*]}$(echo "$bd" | grep -oE ' (dashDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n') 빼기칸 서버=$sbo 봇=$(num "$aw" blendOut) 대시밖=$(num "$aw" blendOutBad)$press_note"
+	verdict 봇대시 $ok "봇 rc=$brc 서버 rc=$src 켬=$started 소식=$msgs 봇받음=$mine 방향=$f/$b/$l/$r 사건=${ev[*]} 버림=${dr[*]} 튼수=${st[*]}$(echo "$bd" | grep -oE ' (dashDiff|startMismatches|unconfirmed|unconfirmedPost|unacked)=[0-9]+' | tr -d '\n') 누름차=$pdiff 빼기칸 서버=$sbo 봇=$(num "$aw" blendOut) 대시밖=$(num "$aw" blendOutBad)$press_note"
 }
 
 # 같은 입력 누름 차례(L-5-c) — 봇대시 · 봇수류탄 판 공통. 봇은 넷(근접 · 대시 · 수류탄 · 재장전) 중 둘 이상 누른 입력마다 섞은 차례를 싣는다.

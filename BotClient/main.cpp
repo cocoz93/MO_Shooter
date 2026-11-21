@@ -658,6 +658,7 @@ namespace
 		const GrenadeBotCounts& GetGrenadeCounts() const { return _grenadeCounts; }
 		const CSelfPrediction::GrenadeCounters& GetGrenadeFixes() const { return _self.GetGrenadeCounters(); }
 		uint64_t GetDashUnconfirmedPost() const { return _dashUnconfirmedPost; }
+		uint64_t GetDashUnacked() const { return _self.CountDashStartedUnacked(); }
 		void SetPush(bool on) { _push = on; }
 		void SetFireAlways(bool on) { _fireAlways = on; }
 		void SetPauseAfterSpawn(int ticks) { _pauseAfterSpawn = ticks; }
@@ -2819,7 +2820,7 @@ int main(int argc, char** argv)
 	GrenadeBotCounts grenade;
 	CSelfPrediction::GrenadeCounters grenadeFixes;
 	uint64_t grenadeUnconfirmedPost = 0, grenadeUnacked = 0;
-	uint64_t dashUnconfirmedPost = 0;
+	uint64_t dashUnconfirmedPost = 0, dashUnacked = 0;
 	uint64_t meleePendingLeft = 0;
 	uint64_t padMsgs = 0, padBad = 0, padSeekStarts = 0, padSeekTicks = 0, padHealsMine = 0, padHealsSought = 0;
 	uint64_t invDiff = 0, invMulti = 0, weaponPickupsMine = 0, weaponSeekStarts = 0, weaponSeekTicks = 0, weaponTakesSought = 0, weaponSeekAmmoStarts = 0, spareOutTicks = 0;
@@ -2870,6 +2871,7 @@ int main(int argc, char** argv)
 		grenadeUnconfirmedPost += bot.GetGrenadeUnconfirmedPost();
 		grenadeUnacked += bot.GetGrenadeUnacked();
 		dashUnconfirmedPost += bot.GetDashUnconfirmedPost();
+		dashUnacked += bot.GetDashUnacked();
 		meleePendingLeft += bot.GetMeleePendingDamage();
 		states += bot.GetStates();
 		detours += bot.GetDetours();
@@ -2983,10 +2985,11 @@ int main(int argc, char** argv)
 		// 대시(D-3) — mine 합 = 서버 SERVER dash started(봇만 든 판). dashDiff = 서버 소식으로 고친 대시(켬 어긋남 + 방향 · 힘 + 소식 없이 지나감), 봇 판 기대 0. unconfirmedPost = 그중 경기 끝 단계 몫(기대 0 — L-3-b).
 		// pressed = 봇이 누른 입력, predPresses = 예측이 센 누름(같아야 한다). kinds = 앞 · 뒤 · 왼 · 오른 · 위 보고 앞 · 아래 보고 앞, dir = 서버가 고른 방향(앞 · 뒤 · 왼 · 오른)
 		// respawn = 부활 다시 돌리기에서 켜짐이 바뀐 칸(늘어남/줄어듦). 서버 켬 = mine = predStarted + 늘어남 − 줄어듦 + startMismatches − unconfirmed − unconfirmedDead(죽은 줄 모르고 켠 몫)
-		std::printf("BOT dash pressed=%llu predPresses=%llu predStarted=%llu respawn=+%llu/-%llu kinds=%llu/%llu/%llu/%llu/%llu/%llu extra jump=%llu reload=%llu melee=%llu pairMelee=%llu | mine=%llu dir=%llu/%llu/%llu/%llu results=%llu noSlot=%llu | dashDiff=%llu startMismatches=%llu forceFixes=%llu unconfirmed=%llu unconfirmedPost=%llu unconfirmedDead=%llu replays=%llu replaysMissed=%llu meleeInReplay=%llu\n",
+		// − unacked(마지막 확인 번호 뒤 소식 없이 켠 칸 — 방을 닫을 때 서버가 받고 안 돌린 입력의 몫. 11-21 l6\c2\rep 1회차가 1 어긋났다 — 서버 누름 364 · 봇 365 이고, 확인 번호 앞 칸은 AckDash · OnSpawn 이 unconfirmed · unconfirmedDead 로 다 세므로 남는 켬 1 은 이 몫으로 본다, L-11-c)
+		std::printf("BOT dash pressed=%llu predPresses=%llu predStarted=%llu respawn=+%llu/-%llu kinds=%llu/%llu/%llu/%llu/%llu/%llu extra jump=%llu reload=%llu melee=%llu pairMelee=%llu | mine=%llu dir=%llu/%llu/%llu/%llu results=%llu noSlot=%llu | dashDiff=%llu startMismatches=%llu forceFixes=%llu unconfirmed=%llu unconfirmedPost=%llu unconfirmedDead=%llu unacked=%llu replays=%llu replaysMissed=%llu meleeInReplay=%llu\n",
 			u(dash.presses), u(dashFixes.presses), u(dashFixes.started), u(dashFixes.respawnGained), u(dashFixes.respawnLost), u(dash.kinds[0]), u(dash.kinds[1]), u(dash.kinds[2]), u(dash.kinds[3]), u(dash.kinds[4]), u(dash.kinds[5]),
 			u(dash.extraJump), u(dash.extraReload), u(dash.extraMelee), u(dash.pairMelee), u(dash.mine), u(dash.mineDir[0]), u(dash.mineDir[1]), u(dash.mineDir[2]), u(dash.mineDir[3]), u(dashFixes.results), u(dashFixes.resultsNoSlot),
-			u(dashFixes.startMismatches + dashFixes.forceFixes + dashFixes.unconfirmed), u(dashFixes.startMismatches), u(dashFixes.forceFixes), u(dashFixes.unconfirmed), u(dashUnconfirmedPost), u(dashFixes.unconfirmedDead), u(dashFixes.replays), u(dashFixes.replaysMissed), u(dashFixes.meleeInReplay));
+			u(dashFixes.startMismatches + dashFixes.forceFixes + dashFixes.unconfirmed), u(dashFixes.startMismatches), u(dashFixes.forceFixes), u(dashFixes.unconfirmed), u(dashUnconfirmedPost), u(dashFixes.unconfirmedDead), u(dashUnacked), u(dashFixes.replays), u(dashFixes.replaysMissed), u(dashFixes.meleeInReplay));
 		std::printf("BOT dashRules msgs=%llu post=%llu | bad shape=%llu dead=%llu\n", u(dash.msgs), u(dash.post), u(dash.badShape), u(dash.badDead));
 		// 수류탄(G-3) — mine 합 = 서버 SERVER grenade thrown(봇만 든 판). 소식 · 상태 · 피해 받은 수(msgs)는 봇마다 같은 소식을 따로 받으므로 봇 수 배.
 		// pressed = 봇이 누른 입력, predPresses = 예측이 센 누름(같아야 한다). kinds = 피치 그대로 · 하늘 · 발 앞 바닥 · 먼 바닥, waiting · post = 부활 대기 · 경기 끝에 누름.
@@ -3056,7 +3059,7 @@ int main(int argc, char** argv)
 	// 서버 켬 = 예측 켬(입력 때 + 부활 다시 돌리기 늘어남 − 줄어듦 + 서버 소식으로 켬 − 소식 없이 지나감) — 세는 자리가 빠지면 갈린다
 	if (dash.badShape != 0 || dash.badDead != 0) ok = false;
 	if (dashFixes.startMismatches != 0 || dashFixes.forceFixes != 0 || dashFixes.unconfirmed != 0 || dashFixes.results + dashFixes.resultsNoSlot != dash.mine) ok = false;
-	if (args.dash && (dash.mine == 0 || dash.presses != dashFixes.presses || dashFixes.started + dashFixes.respawnGained + dashFixes.startMismatches != dash.mine + dashFixes.respawnLost + dashFixes.unconfirmed + dashFixes.unconfirmedDead)) ok = false;
+	if (args.dash && (dash.mine == 0 || dash.presses != dashFixes.presses || dashFixes.started + dashFixes.respawnGained + dashFixes.startMismatches != dash.mine + dashFixes.respawnLost + dashFixes.unconfirmed + dashFixes.unconfirmedDead + dashUnacked)) ok = false;
 	// 수류탄(G-3) — 소식 · 피해 규칙 · 고친 수 0(죽음 몫 빼고 — 경기 끝 단계 몫도 넣는다, L-3-b) · 받은 내 소식 = 예측이 받은 수(칸 있음 + 없음) · 예측 칸에 남은 던짐 = 내 소식.
 	// --grenade 면 서버가 한 번 이상 던지고 누른 수가 봇 · 예측 같고, 상태 소식을 받았다(플랜 177줄)
 	if (grenade.badKind != 0 || grenade.badState != 0 || grenade.badStateId != 0 || grenade.badDead != 0 || grenade.badDamage != 0) ok = false;

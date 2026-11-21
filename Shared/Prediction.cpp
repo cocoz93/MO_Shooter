@@ -606,6 +606,17 @@ namespace mo
 		return replayFrom;
 	}
 
+	uint64_t CSelfPrediction::CountDashStartedUnacked() const
+	{
+		uint64_t count = 0;
+		for (uint32_t seq = _dashAckedSeq + 1; seq <= _seq; ++seq)
+		{
+			const Slot& slot = _ring[seq % kRingSize];
+			if (slot.seq == seq && slot.dashStarted && !slot.dashServer) ++count;
+		}
+		return count;
+	}
+
 	uint64_t CSelfPrediction::CountGrenadeThrownUnacked() const
 	{
 		uint64_t count = 0;

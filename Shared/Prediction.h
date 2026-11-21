@@ -221,6 +221,8 @@ namespace mo
 		const GrenadeCounters& GetGrenadeCounters() const { return _grenadeCounters; }
 		// 아직 확인 안 된 번호(AckGrenade 가 본 번호 뒤) 중 서버 소식 없이 내가 던진 칸 — 판이 끝날 때 서버가 돌렸는지 모르는 몫(봇 판정에서 뺀다)
 		uint64_t CountGrenadeThrownUnacked() const;
+		// 대시도 같다 — 아직 확인 안 된 번호(AckDash 가 본 번호 뒤) 중 서버 소식 없이 내가 켠 칸. 판이 끝날 때 서버가 받고 안 돌린 입력의 몫(봇 판정에서 뺀다, L-11-c)
+		uint64_t CountDashStartedUnacked() const;
 		int GetGrenadeCooldownLeft() const { return _grenade.CooldownLeft(); }	// 남은 입력 수 — 다리가 던진 입력에 쿨다운 메시지를 낼 때 읽는다(grenade-plan 「예측」, G-5)
 
 		// 맞춰 보기만 하는 쪽(봇)이 쓰는 슬롯. 비교할 수 없으면 nullptr
