@@ -43,6 +43,31 @@ namespace mo
 		return (uint32_t)std::ceil(seconds * wire::kTickRate);
 	}
 
+	// Lyra Delay 노드가 끝나는 틱 수 — 엔진 FDelayAction 은 float 남은 시간에서 매 프레임 지난 시간(float)을 빼 0 이하가 된 프레임에 끝난다
+	// (DelayAction.h:29-30 · 둘 다 float). 곱해 올림(SecondsToTicks)과 다를 수 있다 — 2.75초는 1/60(float 0.016666668)을 165번 빼도 0.0000019 가 남아
+	// 166틱(Lyra 기록 걸림 → 풀림 166프레임 14번, lyra-match L-1-d · L-10-b). 이동 막음 2.0625 · 부활 5초는 둘이 같다(124 · 300).
+	// 한 시간이 넘으면 곱해 올림으로 — float 남은 시간이 크면 1/60 이 반올림에 묻혀 빼는 폭이 틀어지고, 2^19초(약 52만 초)를 넘으면 안 줄어 셈이 안 끝난다
+	inline uint32_t LyraDelayTicks(double seconds)
+	{
+		if (!(seconds > 0.0)) return 0;
+		if (seconds > 3600.0) return SecondsToTicks(seconds);
+		const float frame = (float)(1.0 / wire::kTickRate);
+		float remaining = (float)seconds;
+		uint32_t ticks = 0;
+		while (remaining > 0.f)
+		{
+			remaining -= frame;
+			++ticks;
+		}
+		return ticks;
+	}
+
+	// 부활 무적 틱 수 — GA_SpawnEffect 가 GE_SpawnIn 을 걸고 Delay(부활 몽타주 길이) 뒤 능력 끝에서 뺀다(L-1-d 그래프 덤프). 서버 무적 · 봇 무적 셈 · 프로브 기대가 같이 쓴다
+	inline uint32_t SpawnImmunityTicks(const MatchRules& rules)
+	{
+		return LyraDelayTicks(rules.spawnImmunitySeconds);
+	}
+
 	// 이동 막음은 틱이 아니라 입력 개수로 센다 — 클라가 같은 입력을 돌려 보면 같은 결과가 나오게
 	inline int SpawnMoveLockInputs(const MatchRules& rules)
 	{

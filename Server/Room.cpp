@@ -543,7 +543,7 @@ namespace mo
 			DropAnimEvents(player);
 			PushAnimEvent(player, EAnimEvent::Spawn, player.weapon);
 		}
-		player.immuneUntilTick = _tick + SecondsToTicks(_rules.spawnImmunitySeconds);
+		player.immuneUntilTick = _tick + SpawnImmunityTicks(_rules);	// Lyra Delay float 셈 — 2.75초 = 166틱(MatchRules.h LyraDelayTicks · L-10-b)
 		player.moveLockInputs = SpawnMoveLockInputs(_rules);
 		player.fireGate = CWeaponFireGate();
 		player.starvedInRow = 0;

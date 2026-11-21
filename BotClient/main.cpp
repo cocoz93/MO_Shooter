@@ -939,7 +939,7 @@ namespace
 			// 경기가 끝나는 틱의 앞선 탄은 정상이다 — 그 틱 안에서 승리가 난다
 			if (_playTick == 0 || damage.tick < _playTick || (_postTick != 0 && damage.tick > _postTick)) ++_checks.damageOutsidePlaying;
 			const auto spawned = _spawnTick.find(damage.target);
-			if (spawned != _spawnTick.end() && damage.tick < spawned->second + SecondsToTicks(_rules.spawnImmunitySeconds)) ++_checks.damageWhileImmune;
+			if (spawned != _spawnTick.end() && damage.tick < spawned->second + SpawnImmunityTicks(_rules)) ++_checks.damageWhileImmune;
 			// 도움 셈 — 0보다 큰 피해만 알림이 오고(LyraHealthSet), 받은 차례 그대로 든다.
 			// 자기 피해(수류탄)도 든다 — AssistProcessor 의 「시킨 쪽 ≠ 맞은 쪽」은 몸 · 선수 상태라 늘 다르다(G-0-b2 실측 · 서버 NoteDamage 와 같은 규칙, D112)
 			if (damage.amount > 0)
@@ -1002,7 +1002,7 @@ namespace
 					// 피해 0 은 무적일 때만(서버 IsImmune — 경기 중이 아님 · 부활 무적). OnDamage 의 대기 · 무적 피해 검사와 반대 방향
 					const bool playing = _playTick != 0 && melee.tick >= _playTick && (_postTick == 0 || melee.tick <= _postTick);
 					const auto spawned = _spawnTick.find(melee.target);
-					const bool immune = spawned != _spawnTick.end() && melee.tick < spawned->second + SecondsToTicks(_rules.spawnImmunitySeconds);
+					const bool immune = spawned != _spawnTick.end() && melee.tick < spawned->second + SpawnImmunityTicks(_rules);
 					if (playing && !immune) ++c.badZero;
 				}
 			}

@@ -969,7 +969,7 @@ namespace
 	bool RunRules(int port, const CMapCollision& map, const std::vector<Row>& rows)
 	{
 		const MatchRules rules;
-		const uint32_t kImmuneTicks = SecondsToTicks(rules.spawnImmunitySeconds);
+		const uint32_t kImmuneTicks = SpawnImmunityTicks(rules);
 		const int kLockInputs = SpawnMoveLockInputs(rules);
 		const uint32_t kRespawnTicks = SecondsToTicks(rules.respawnSeconds);
 		const uint32_t kPostGameTicks = SecondsToTicks(rules.postGameSeconds);
@@ -1079,7 +1079,27 @@ namespace
 			}
 		}
 		std::printf("RULES 무적 중 맞음=%d 첫 피해 틱=시작+%u (무적 %u틱) 첫 처치 수=%zu\n", immuneHits, firstDamageTick ? firstDamageTick - tickB : 0, kImmuneTicks, a.kills.size());
-		Expect(immuneHits > 0 && firstDamageTick >= tickB + kImmuneTicks && firstDamageTick <= tickB + kImmuneTicks + 12, fails, "부활 무적 165틱 — 그 안은 피해 0, 지나면 바로 들어옴");
+		Expect(immuneHits > 0 && firstDamageTick >= tickB + kImmuneTicks && firstDamageTick <= tickB + kImmuneTicks + 12, fails, "부활 무적 166틱 — 그 안은 피해 0, 지나면 바로 들어옴");
+		// 무적 끝 틱을 정확히(L-10-b) — 쏘기는 발사 간격마다라 경계를 틱 단위로 못 가른다. B 가 받은 내 상태의 무적 깃발이 시작 틱부터 몇 틱 켜졌나 ·
+		// 처음 꺼진 틱. 받은 상태 틱이 끊기면(빠진 상태) 셈을 믿지 않는다
+		uint32_t immuneStates = 0, firstOpenTick = 0, prevTick = 0;
+		bool contiguous = true;
+		for (size_t h = 0; h < b.history.size(); ++h)
+		{
+			const uint32_t t = b.historyTicks[h];
+			if (t < tickB) continue;
+			if (prevTick != 0 && t != prevTick + 1) contiguous = false;
+			prevTick = t;
+			if (b.history[h].flags & wire::STATE_DEAD) break;
+			if ((b.history[h].flags & wire::STATE_IMMUNE) == 0)
+			{
+				firstOpenTick = t;
+				break;
+			}
+			++immuneStates;
+		}
+		std::printf("RULES 무적 깃발 켜진 상태=%u 처음 꺼진 틱=시작+%u 끊김=%d\n", immuneStates, firstOpenTick ? firstOpenTick - tickB : 0, contiguous ? 0 : 1);
+		Expect(contiguous && firstOpenTick == tickB + kImmuneTicks && immuneStates == kImmuneTicks, fails, "부활 무적 깃발 = 시작 틱부터 정확히 166틱(Lyra Delay float 셈)");
 		if (a.kills.empty())
 		{
 			std::printf("RULES 처치가 나오지 않음\n");
