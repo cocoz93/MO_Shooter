@@ -52,6 +52,7 @@
 #include "Abilities/GameplayAbilityTargetTypes.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/GameplayMessageSubsystem.h"
+#include "AbilitySystem/Abilities/LyraAbilitySimpleFailureMessage.h"
 #include "MOBServerDamageEffect.h"
 #include "MOBSimpleAnimInstance.h"
 #include "Physics/LyraCollisionChannels.h"
@@ -496,6 +497,7 @@ void UMOBridgeSubsystem::Deinitialize()
 		if (UGameplayCueManager* GCM = UAbilitySystemGlobals::Get().GetGameplayCueManager()) GCM->OnGameplayCueRouted().Remove(GrenadeCueRouteHandle);
 		GrenadeCueRouteHandle.Reset();
 	}
+	if (FailMsgHandle.IsValid()) FailMsgHandle.Unregister();
 	Super::Deinitialize();
 }
 
@@ -3820,7 +3822,7 @@ namespace
 	const FWsSpot kWsSpots[4] = {
 		{ mo::EPadKind::Rifle, FVector(12.1, 1634.6, 95.9) },			// 0 = R2 소총(B_WeaponSpawner2) — 새 무기, 든다
 		{ mo::EPadKind::Rifle, FVector(0.0, -1623.7, 95.9) },			// 1 = R4 소총(B_WeaponSpawner4) — 가진 무기, 예비 채움
-		{ mo::EPadKind::Pistol, FVector(4586.5, -1008.4, -368.031) },	// 2 = P8 권총(B_WeaponSpawner8) — 예비 가득, 실패(소식 없음)
+		{ mo::EPadKind::Pistol, FVector(4586.5, -1008.4, -368.031) },	// 2 = P8 권총(B_WeaponSpawner8) — 예비 가득, 실패(판 14 부터 실패 소식 → 받침 그래프 실패 길 문구, L-9-a)
 		{ mo::EPadKind::Shotgun, FVector(-1472.0, 0.0, -1205.475) },	// 3 = S6 샷건(B_WeaponSpawner6) — 재장전 중 새 무기, 안 든다
 	};
 	struct FWsAmmo { uint8 Weapon; int16 Magazine, Spare; };
@@ -4565,11 +4567,11 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 	// 무기 받침 · 가방(W-4) — 판정은 Tools/LyraPilot/check_pads_bridge.py --weapons(서버 PADEV 줄과 견준다). 예측 줍기 칸은 봇 「BOT weapons」 줄과 같은 이름
 	{
 		const mo::CSelfPrediction::PickupCounters PickupFix = Core ? Core->Prediction.GetPickupCounters() : mo::CSelfPrediction::PickupCounters();
-		UE_LOG(LogMOB, Log, TEXT("MOB_WEAPONPADS takesMine=%lld takesOther=%lld gives=%lld giveDiff=%lld cues=%lld noPawn=%lld bad=%lld bagStates=%lld bagDiffStates=%lld bagAdds=%lld bagRemoves=%lld bagStrays=%lld bag1s=%lld bagDiff1s=%lld invCompared=%lld invMulti=%lld invDiff=%lld ammoCompared=%lld ammoDiff=%lld received=%llu rerun=%llu noSlot=%llu resultDiffs=%llu ammoFixes=%llu meleeInWindow=%llu places=%lld noPad=%lld steps=%d"),
+		UE_LOG(LogMOB, Log, TEXT("MOB_WEAPONPADS takesMine=%lld takesOther=%lld gives=%lld giveDiff=%lld cues=%lld noPawn=%lld bad=%lld bagStates=%lld bagDiffStates=%lld bagAdds=%lld bagRemoves=%lld bagStrays=%lld bag1s=%lld bagDiff1s=%lld invCompared=%lld invMulti=%lld invDiff=%lld ammoCompared=%lld ammoDiff=%lld received=%llu rerun=%llu noSlot=%llu resultDiffs=%llu ammoFixes=%llu meleeInWindow=%llu places=%lld noPad=%lld steps=%d failMine=%lld failGives=%lld failMsgs=%lld failDiff=%lld failNoPawn=%lld failMsgsElsewhere=%lld"),
 			PadWeaponTakesMine, PadWeaponTakesOther, PadWeaponGives, PadWeaponGiveDiff, PadWeaponCues, PadWeaponNoPawn, PadWeaponBad, BagStates, BagDiffStates, BagAdds, BagRemoves, BagStrays,
 			BagCheck1s, BagDiff1s, InvCompared, InvMulti, InvDiff, AmmoCompared, AmmoDiff,
 			(unsigned long long)PickupFix.received, (unsigned long long)PickupFix.rerun, (unsigned long long)PickupFix.noSlot, (unsigned long long)PickupFix.resultDiffs, (unsigned long long)PickupFix.ammoFixes, (unsigned long long)PickupFix.meleeInWindow,
-			WsPlaces, WsNoPad, WsStep);
+			WsPlaces, WsNoPad, WsStep, PadFailMine, PadFailGives, PadFailMsgs, PadFailDiff, PadFailNoPawn, PadFailMsgsElsewhere);
 	}
 	if (bHumanCheck) LogHumanCheck();
 	if (!bAbilityOwnTimer)
@@ -5001,7 +5003,7 @@ void UMOBridgeSubsystem::HandlePickup(const wire::Pickup& M)
 	if (!Actor && !bKeepPickups) Actor = BindPad(M.pad);	// 묶을 때 지금 상태로 그린다
 	if (!Actor) ++PadNoActor;
 	// 효과는 집음 · 다시 켜짐만 — 현황(들어올 때 · 경기 시작)은 상태만 맞춘다. Lyra 도 새로 놓은 받침은 효과 없이 켜진다.
-	// 실패 소식은 받침이 그대로라 그리지 않는다(「예비 탄약 가득 참」 알림 띄우기는 L-9-a — 이 판은 싣고 읽기만)
+	// 실패 소식은 받침이 그대로라 그리지 않는다(「예비 탄약 가득 참」 알림은 아래 ApplyWeaponPickupFail — L-9-a)
 	if (Actor && !bFail) ApplyPadLook(*Actor, Pad.bAvailable, M.reason != wire::PICKUP_SYNC);
 	// 받침 종류로 가른다(W-4) — 체력 받침은 회복, 무기 받침은 가방. 무기 받침 집음은 줍기 칸(give)이 늘 차 있다(서버 SendPad)
 	const bool bHealPad = M.kind == (uint8)mo::EPadKind::Heal;
@@ -5011,6 +5013,8 @@ void UMOBridgeSubsystem::HandlePickup(const wire::Pickup& M)
 		if (M.give == wire::kPickupGiveNone || M.weapon >= (uint8)mo::EWeapon::Count) ++PadWeaponBad;
 		else ApplyWeaponPickup(M, Actor);
 	}
+	// 예비 가득 실패(L-9-a) — 내 것이면 받침 그래프를 내 몸에 불러 그래프 실패 길이 문구를 띄우게 한다. 모양이 틀린 소식(failBad)은 안 부른다
+	if (bFail && !bKeepPickups && M.picker == PlayerId && M.give == (uint8)mo::EGiveResult::Full && M.weapon < (uint8)mo::EWeapon::Count) ApplyWeaponPickupFail(M, Actor);
 	static const TCHAR* ReasonNames[] = { TEXT("take"), TEXT("takeRecheck"), TEXT("ready"), TEXT("sync"), TEXT("failFull") };	// EPickupReason 차례
 	UE_LOG(LogMOB, Log, TEXT("MOB_PAD tick=%u pad=%u reason=%s avail=%u ready=%u picker=%u heal=%.1f hpAfter=%.1f lyraHp=%.1f actor=%d kind=%u give=%u weapon=%u slot=%u mag=%d spare=%d seq=%u"), M.tick, M.pad,
 		M.reason < UE_ARRAY_COUNT(ReasonNames) ? ReasonNames[M.reason] : TEXT("?"), M.available, M.readyTick, M.picker, M.heal, M.hpAfter, LyraHp, Actor ? 1 : 0,
@@ -5238,6 +5242,94 @@ void UMOBridgeSubsystem::ApplyWeaponPickup(const wire::Pickup& M, ALyraWeaponSpa
 		MOBSetItemStack(*Item, MOBMagazineTag(), M.magazine);
 		MOBSetItemStack(*Item, MOBSpareTag(), M.spare);
 	}
+}
+
+// 무기 받침 예비 가득 실패(L-9-a) — 집음(ApplyWeaponPickup)과 같은 길로 받침 그래프 GiveWeapon 을 내 몸에 부른다. 그래프는 가진 무기의 예비가 기본값 이상이면
+// 실패 길(Broadcast Failure Message · Object = 받는 몸 → 거짓 반환)로 가고, 「예비 탄약 가득 참」 문구는 Lyra HUD 가 그 소식을 받아 띄운다(B_WeaponSpawner GiveWeapon 그래프 덤프).
+// 실패 길을 지났나 = 부르는 동안 실패 채널에서 받은 내 PC 소식. 그 뒤 Lyra 탄이 서버 소식과 다르면(Lyra 예비가 덜 차 그래프가 채움 길로 감) 어긋남 — 서버 탄으로 되돌린다.
+// 예측 · 가방 맞추기는 안 건드린다 — 실패는 서버 가방을 안 바꾼다(IsGiveTaken 거짓)
+void UMOBridgeSubsystem::ApplyWeaponPickupFail(const wire::Pickup& M, ALyraWeaponSpawner* Actor)
+{
+	++PadFailMine;
+	if (!FailMsgHandle.IsValid())
+	{
+		// 태그 변수(TAG_ABILITY_SIMPLE_FAILURE_MESSAGE)는 LyraGame 이 안 내보낸다 — 이름으로 찾는다(프로브 WatchWeapons 와 같음)
+		static const FGameplayTag FailChannel = FGameplayTag::RequestGameplayTag(TEXT("Ability.UserFacingSimpleActivateFail.Message"));
+		FailMsgHandle = UGameplayMessageSubsystem::Get(this).RegisterListener(FailChannel, this, &UMOBridgeSubsystem::OnFailMsg);
+	}
+	APawn* Pawn = FindPlayerPawn(M.picker);
+	APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	ULyraQuickBarComponent* Bar = PC ? PC->FindComponentByClass<ULyraQuickBarComponent>() : nullptr;
+	const ULyraPickupDefinition* PadDef = MOBPadWeaponDefinition(Actor);
+	if (!Pawn || !Bar || !PadDef)
+	{
+		++PadFailNoPawn;
+		return;
+	}
+	LoadWeaponClasses();
+	UClass* WantDef = WeaponItemDefs.IsValidIndex(M.weapon) ? WeaponItemDefs[M.weapon].Get() : nullptr;
+	// 소식의 칸(서버 SlotOf)에 그 무기가 있어야 한다 — 없으면 탄을 못 견줘 어긋남
+	auto SlotItem = [&]() -> ULyraInventoryItemInstance*
+	{
+		const TArray<ULyraInventoryItemInstance*> Slots = Bar->GetSlots();
+		ULyraInventoryItemInstance* It = Slots.IsValidIndex(M.slot) ? Slots[M.slot] : nullptr;
+		return It && WantDef && It->GetItemDef() == WantDef ? It : nullptr;
+	};
+	ULyraInventoryItemInstance* Item = SlotItem();
+	int32 SpareBefore = Item ? Item->GetStatTagStackCount(MOBSpareTag()) : -1;	// 부르기 직전 Lyra 예비(일부러 깨기 16 이면 줄인 뒤)
+	if ((BreakBag & 16) && Item)
+	{
+		BreakBag &= ~16;
+		--SpareBefore;
+		MOBSetItemStack(*Item, MOBSpareTag(), SpareBefore);
+		UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_BAG lowSpare tick=%u pad=%u weapon=%u spare=%d"), M.tick, M.pad, M.weapon, SpareBefore);
+	}
+	bool bCalled = false;
+	PadFailCallMsgs = 0;
+	if (BreakBag & 8)
+	{
+		BreakBag &= ~8;
+		UE_LOG(LogMOB, Log, TEXT("MOB_BREAK_BAG skippedFailGive tick=%u pad=%u weapon=%u"), M.tick, M.pad, M.weapon);
+	}
+	else
+	{
+		bInPadFailGive = true;
+		Actor->GiveWeapon(PadDef->InventoryItemDefinition, Pawn);
+		bInPadFailGive = false;
+		bCalled = true;
+		++PadFailGives;
+	}
+	Item = SlotItem();
+	const int32 Mag = Item ? Item->GetStatTagStackCount(MOBMagazineTag()) : -1;
+	const int32 Spare = Item ? Item->GetStatTagStackCount(MOBSpareTag()) : -1;
+	const bool bAmmoOk = Mag == (int32)M.magazine && Spare == (int32)M.spare;
+	const bool bOk = bCalled && PadFailCallMsgs == 1 && bAmmoOk;
+	UE_LOG(LogMOB, Log, TEXT("MOB_PAD_FAIL tick=%u pad=%u weapon=%u slot=%u mag=%d spare=%d lyraSpareBefore=%d lyraMag=%d lyraSpare=%d called=%d msgs=%d ok=%d"),
+		M.tick, M.pad, M.weapon, M.slot, (int32)M.magazine, (int32)M.spare, SpareBefore, Mag, Spare, bCalled ? 1 : 0, PadFailCallMsgs, bOk ? 1 : 0);
+	// 문구 사진 — 프로브 W-0-b 가 실패 뒤 10 · 40 프레임(60fps)에 찍은 것과 같은 때. -MOBEventShots 일 때만(RequestEventShot)
+	RequestEventShot(TEXT("padfail"), 10.0 / 60.0, 4);
+	RequestEventShot(TEXT("padfail"), 40.0 / 60.0, 4);
+	if (bOk) return;
+	++PadFailDiff;
+	if (Item && !bAmmoOk)
+	{
+		MOBSetItemStack(*Item, MOBMagazineTag(), M.magazine);
+		MOBSetItemStack(*Item, MOBSpareTag(), M.spare);
+	}
+}
+
+// 실패 채널 소식(L-9-a) — 받침 그래프 실패 길 · Lyra 능력 실패가 다 이 채널로 온다. 내 GiveWeapon 을 부르는 동안 온 내 PC 소식만 그래프 실패 길로 센다
+void UMOBridgeSubsystem::OnFailMsg(FGameplayTag Channel, const FLyraAbilitySimpleFailureMessage& Msg)
+{
+	const bool bMine = Msg.PlayerController && Msg.PlayerController == GetWorld()->GetFirstPlayerController();
+	if (bInPadFailGive && bMine)
+	{
+		++PadFailCallMsgs;
+		++PadFailMsgs;
+	}
+	else ++PadFailMsgsElsewhere;
+	UE_LOG(LogMOB, Log, TEXT("MOB_PAD_FAILMSG during=%d mine=%d pc=%s tags=%s reason=\"%s\""), bInPadFailGive ? 1 : 0, bMine ? 1 : 0, *GetNameSafe(Msg.PlayerController),
+		*Msg.FailureTags.ToStringSimple(), *Msg.UserFacingReason.ToString());
 }
 
 FString UMOBridgeSubsystem::DescribeLyraBag(int32* OutActive) const

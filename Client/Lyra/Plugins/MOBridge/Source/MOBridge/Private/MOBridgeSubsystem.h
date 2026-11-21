@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "Subsystems/WorldSubsystem.h"
+#include "GameFramework/GameplayMessageSubsystem.h"	// FGameplayMessageListenerHandle(실패 채널 듣개, L-9-a)
 #include "MOBridgeSubsystem.generated.h"
 
 class FSocket;
@@ -19,6 +20,7 @@ struct FMOBCore;
 struct FGameplayAbilityActorInfo;
 class ULyraAbilitySystemComponent;
 struct FGameplayTag;
+struct FLyraAbilitySimpleFailureMessage;
 
 namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; struct Grenade; } struct Vec3; }
 
@@ -245,6 +247,8 @@ private:
 	void ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects);
 	float ApplyPadHeal(const mo::wire::Pickup& M, ALyraWeaponSpawner* Actor);
 	void ApplyWeaponPickup(const mo::wire::Pickup& M, ALyraWeaponSpawner* Actor);	// 무기 받침 집음(W-4) — 내 몸이면 받침 그래프 GiveWeapon, 남의 몸이면 줍기 신호만
+	void ApplyWeaponPickupFail(const mo::wire::Pickup& M, ALyraWeaponSpawner* Actor);	// 내 예비 가득 실패(L-9-a) — 내 몸에 받침 그래프 GiveWeapon(그래프 실패 길이 실패 소식 → Lyra HUD 문구)
+	void OnFailMsg(FGameplayTag Channel, const FLyraAbilitySimpleFailureMessage& Msg);	// 실패 채널 듣개(L-9-a) — GiveWeapon 부르는 동안 온 내 소식을 센다
 	FString DescribeLyraBag(int32* OutActive) const;	// Lyra 빠른 칸 셋의 무기 번호(빈 칸 -) — 로그 · 1초 대조용
 	bool LyraBagMatches(uint8 PackedSlots, uint8 HeldWeapon) const;	// Lyra 빠른 칸 셋 · 든 칸이 서버 빠른 칸(와이어 quickSlots) · 든 무기와 같은가
 	void SetLyraItemAmmo(uint8 WeaponIndex, int32 Magazine, int32 Spare);	// 빠른 칸의 그 무기 아이템 탄 — 없으면 안 함
@@ -277,7 +281,7 @@ private:
 	float BreakPadsAt = -1;
 	bool bBreakPadHeal = false;		// 일부러 틀림 — 다음 회복 효과를 건너뜀
 	bool bBreakPadDrop = false;		// 일부러 틀림 — 다음 받침 소식을 버림
-	int32 BreakBag = 0;				// -MOBBreakBag=N 일부러 틀림(비트, W-4) — 1 = 다음 내 줍기에 받침과 다른 무기로 GiveWeapon · 2 = 다음 내 줍기를 예측에 안 넘김 · 4 = 다음 1초 대조 직전 든 칸 아이템을 뺌
+	int32 BreakBag = 0;				// -MOBBreakBag=N 일부러 틀림(비트, W-4) — 1 = 다음 내 줍기에 받침과 다른 무기로 GiveWeapon · 2 = 다음 내 줍기를 예측에 안 넘김 · 4 = 다음 1초 대조 직전 든 칸 아이템을 뺌 · 8 = 다음 내 실패에 받침 그래프를 안 부름 · 16 = 다음 내 실패에 부르기 전 Lyra 예비를 하나 줄임(L-9-a)
 	// 무기 각본(-MOBWeaponScript, W-4) — 서버 프로브 무기 각본(ServerProbe RunWeapons)과 같은 차례 · 길이를 프로브가 안 쓰는 받침 넷에서 돈다.
 	// 자리 · 탄 · 죽음은 시험 입력(C2S_DEBUG_PLACE)으로, 칸 고르기 · 재장전은 보통 입력(키 1 · 2 · 3 · R 과 같은 길)으로
 	bool bWeaponScript = false;
@@ -467,6 +471,13 @@ private:
 	// cues = 남의 몸에 줍기 신호를 튼 수, noPawn = 집은 사람 몸 · 가방 · 맵 받침이 없던 수, bad = 줍기 칸이 빈 집음 소식(무기 번호 밖)
 	int64 PadWeaponTakesMine = 0, PadWeaponTakesOther = 0, PadWeaponGives = 0, PadWeaponGiveDiff = 0, PadWeaponCues = 0, PadWeaponNoPawn = 0, PadWeaponBad = 0;
 	int32 WeaponGiveLinesLeft = 30;
+	// 예비 가득 실패(L-9-a) — failMine = 내 실패 소식(give = Full) 수, failGives = 그때 받침 그래프 GiveWeapon 을 부른 수, failMsgs = 부르는 동안 실패 채널에서 받은 내 PC 소식 수(그래프 실패 길),
+	// failDiff = 부름이 없었거나 · 그 동안 내 소식이 한 개가 아니었거나 · 그 뒤 Lyra 탄창 · 예비가 서버 소식과 다른 수(탄은 서버 값으로 되돌림), failNoPawn = 내 몸 · 빠른 칸 · 맵 받침이 없던 수,
+	// failMsgsElsewhere = 부르는 동안이 아니거나 남의 PC 로 온 실패 채널 소식(Lyra 능력 실패도 이 채널 — 세기만)
+	int64 PadFailMine = 0, PadFailGives = 0, PadFailMsgs = 0, PadFailDiff = 0, PadFailNoPawn = 0, PadFailMsgsElsewhere = 0;
+	bool bInPadFailGive = false;		// 받침 그래프 GiveWeapon 을 부르는 중(실패 소식은 그 안에서 바로 온다 — BroadcastMessage 는 듣개를 그 자리에서 부름)
+	int32 PadFailCallMsgs = 0;		// 이번 부름 동안 받은 내 실패 소식
+	FGameplayMessageListenerHandle FailMsgHandle;	// 첫 실패 때 건다 · Deinitialize 에서 뗌
 	// 내 가방 맞추기(W-4) — states = 맞춰 본 상태, diffStates = 맞추기 전 Lyra 빠른 칸(무기 아이템 · 칸 밖 무기 아이템)이 서버 빠른 칸과 달랐던 상태,
 	// adds · removes = 칸에 넣고 뺀 아이템, strays = 빠른 칸 밖에 남은 무기 아이템을 지운 수, check1s · diff1s = 1초마다 Lyra 빠른 칸 · 든 칸을 마지막 서버 상태와 견준 수 · 다른 수
 	int64 BagStates = 0, BagDiffStates = 0, BagAdds = 0, BagRemoves = 0, BagStrays = 0, BagCheck1s = 0, BagDiff1s = 0;

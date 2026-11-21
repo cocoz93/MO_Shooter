@@ -16,6 +16,11 @@
 #    with states holding two or more weapons > 0); the once-a-second compare of Lyra's quick bar with the last server state ran and never differed;
 #    every take by someone else played the pickup cue on that body (cues = their takes); the script found its four pads and ran to the end.
 #    With --weapons the heal verdict may compare nothing (no health pad is taken in that run) and says so.
+# Spare-full failures (L-9-a): the server sends PICKUP_FAIL_FULL to the picker only (PADEV kind=full give=full); the ones to the bridge's own player
+#   are part of the message compare with give, weapon and ammo (the server line has no slot, so the slot is not compared).
+# 5. Fail message (--weapons only, bridge MOB_WEAPONPADS line): every spare-full failure of mine called the pad's own GiveWeapon (failMine = failGives =
+#    my server failures > 0), the graph went down its failure path and sent exactly one failure message to my player controller per call
+#    (failMsgs = my failures, which Lyra's HUD shows as text), Lyra's ammo stayed the server's (failDiff 0) and no body was missing (failNoPawn 0).
 # Counts are printed next to each verdict, because nothing compared would also be "equal".
 import re
 import sys
@@ -36,6 +41,7 @@ def num(text, key):
 
 # Shared/Loadout.h EGiveResult in wire order, named as the server's PADEV give= (Shared/Loadout.cpp GiveResultName)
 GIVE_NUMBERS = {"new": 0, "newNoSwitch": 1, "ammo": 2}
+GIVE_FULL = 3   # EGiveResult::Full — a spare-full failure (PICKUP_FAIL_FULL)
 HEAL_KIND = 0   # Shared/Pickups.h EPadKind::Heal (bridge MOB_PAD kind=)
 SCRIPT_STEPS = 23   # MOBridgeSubsystem.cpp kWsSteps
 
@@ -47,6 +53,7 @@ def main():
     me = None
     got, heal_diff, heal_before, summary = [], [], [], None
     give_diff, inv_diff, bag_diff_1s, bag_diff, weapon_summary = [], [], [], [], None
+    fail_diff = []
     for line in lyra:
         if me is None and "MOB_WELCOME player=" in line:
             me = int(num(line, "player"))
@@ -57,6 +64,8 @@ def main():
             kind = num(t, "kind")
             if head[2] in ("take", "takeRecheck") and kind is not None and int(kind) != HEAL_KIND:
                 got.append(head + (int(num(t, "give")), int(num(t, "weapon")), int(num(t, "slot")), int(num(t, "mag")), int(num(t, "spare"))))
+            elif head[2] == "failFull":
+                got.append(head + (int(num(t, "give")), int(num(t, "weapon")), int(num(t, "mag")), int(num(t, "spare"))))
             else:
                 got.append(head + (round(float(num(t, "heal")), 1), round(float(num(t, "hpAfter")), 1)))
         for key, bucket in (("MOB_PAD_HEAL_DIFF", heal_diff), ("MOB_PAD_HEAL_BEFORE", heal_before), ("MOB_WEAPON_GIVE_DIFF", give_diff),
@@ -67,6 +76,8 @@ def main():
             summary = line[line.find("MOB_PADS"):]
         if "MOB_WEAPONPADS " in line:
             weapon_summary = line[line.find("MOB_WEAPONPADS"):]
+        if "MOB_PAD_FAIL " in line and " ok=0" in line:
+            fail_diff.append(line[line.find("MOB_PAD_FAIL "):])
     if me is None:
         sys.exit("FAIL no MOB_WELCOME in the bridge log")
 
@@ -82,6 +93,11 @@ def main():
             slots = [int(s) for s in re.search(r"slots=(\S+)", rest).group(1).split(",")]
             want.append((tick, pad, kind, 0, int(num(rest, "ready")), int(num(rest, "player")),
                          GIVE_NUMBERS.get(give, -1), weapon, slots.index(weapon) if weapon in slots else -1, int(num(rest, "mag")), int(num(rest, "spare"))))
+        elif kind == "full" and " give=full " in rest and int(num(rest, "player")) == me:
+            # spare-full failure sent to my player only (Room.cpp SendPad PICKUP_FAIL_FULL): pad still on, no ready tick
+            want.append((tick, pad, "failFull", 1, 0, me, GIVE_FULL, int(num(rest, "weapon")), int(num(rest, "mag")), int(num(rest, "spare"))))
+        elif kind == "full":
+            continue   # health pad full, post-game, someone else's failure: no message to the bridge
         elif kind in ("take", "takeRecheck"):
             hp = re.search(r"hp=(\S+)>(\S+)", rest)
             before, after = float(hp.group(1)), float(hp.group(2))
@@ -166,6 +182,15 @@ def main():
             print("    " + line)
         if weapon_summary is None:
             print("    no MOB_WEAPONPADS line (old bridge build or the bridge did not finish normally)")
+        my_fails = sum(1 for e in want if e[2] == "failFull")
+        ok = (weapon_summary is not None and my_fails > 0 and w_int("failMine") == my_fails and w_int("failGives") == my_fails
+              and w_int("failMsgs") == my_fails and w_int("failDiff") == 0 and w_int("failNoPawn") == 0)
+        fails += not ok
+        print(f"{'PASS' if ok else 'FAIL'} fail message: my spare-full failures {my_fails} bridge {w_int('failMine')} graph called {w_int('failGives')}"
+              f" failure-path messages {w_int('failMsgs')} differences {w_int('failDiff')} (lines {len(fail_diff)}) no body {w_int('failNoPawn')}")
+        for line in fail_diff[:5]:
+            print("    " + line)
+        print(f"     note: other failure-channel messages (not during the call or not mine) {w_int('failMsgsElsewhere')}")
     print(f"PADS_BRIDGE {'PASS' if fails == 0 else 'FAIL'} fails={fails}")
     sys.exit(0 if fails == 0 else 1)
 
