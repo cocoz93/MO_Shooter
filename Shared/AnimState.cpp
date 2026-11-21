@@ -175,26 +175,6 @@ namespace mo
 			return current + distance * Clamp(deltaSeconds * speed, 0.f, 1.f);
 		}
 
-		// 엔진 FAlphaBlend::AlphaToBlendOption 의 세 갈래(kBlendOptionMax 까지 — 읽기에서 그 밖은 거부한다)
-		float BlendCurve(uint8_t option, float alpha)
-		{
-			switch (option)
-			{
-			case 1:		// Cubic = FMath::CubicInterp(0, 0, 1, 0, a)
-			{
-				const float a2 = alpha * alpha;
-				const float a3 = a2 * alpha;
-				return Clamp((-2.f * a3) + (3.f * a2), 0.f, 1.f);
-			}
-			case 2:		// HermiteCubic = FMath::SmoothStep(0, 1, a)
-				if (alpha < 0.f) return 0.f;
-				if (alpha >= 1.f) return 1.f;
-				return Clamp(alpha * alpha * (3.f - 2.f * alpha), 0.f, 1.f);
-			default:	// 선형
-				return Clamp(alpha, 0.f, 1.f);
-			}
-		}
-
 		// 몽타주 곡선 값 — hz 칸 사이는 선형, 끝 밖은 끝 값
 		float SampleCurve(const MontageCurve& curve, float seconds)
 		{
@@ -225,12 +205,12 @@ namespace mo
 	void CAnimState::MontageBlend::SetAlpha(float value)
 	{
 		alpha = Clamp(value, 0.f, 1.f);
-		blended = begin + (desired - begin) * BlendCurve(option, alpha);
+		blended = begin + (desired - begin) * BlendOptionCurve(option, alpha);
 	}
 
 	bool CAnimState::MontageBlend::IsComplete() const
 	{
-		return begin + (desired - begin) * BlendCurve(option, 1.f) == blended;
+		return begin + (desired - begin) * BlendOptionCurve(option, 1.f) == blended;
 	}
 
 	void CAnimState::MontageBlend::Update(float deltaSeconds)
@@ -284,12 +264,13 @@ namespace mo
 		const bool linear = (_montageTest & kMontageTestLinear) != 0;
 		const uint8_t inOption = linear ? 0 : montage->blendInOption;
 
-		// 같은 무리를 새 몽타주의 넣기 섞기로 끈다 — 뒤 칸부터(엔진 StopAllMontagesByGroupName)
+		// 같은 무리를 새 몽타주의 넣기 섞기로 끈다 — 뒤 칸부터(엔진 StopAllMontagesByGroupName).
+		// 비중 표는 새 몽타주의 넣기 비중 표(엔진 BlendProfileIn)인데 Lyra 몽타주 20개가 다 없다(기록 animcmp_*_montages.csv profileIn = None) → -1
 		if ((_montageTest & kMontageTestNoGroup) == 0)
 		{
 			for (int i = _montageCount - 1; i >= 0; --i)
 			{
-				if (_montages[i].montage->group == montage->group) StopMontage(_montages[i], inOption, montage->blendIn);
+				if (_montages[i].montage->group == montage->group) StopMontage(_montages[i], inOption, montage->blendIn, -1);
 			}
 		}
 		// 칸이 찼으면 다 빠진 칸(목표 0 · 섞기 끝)부터 걷는다 — 사건은 갱신 앞에 틀어서(D46) 이 칸은 다음 UpdateMontages 가 자세에 넣기 전에 지운다. 그래도 차야 살아 있는 칸을 버린다(플랜 넘칠 때 규칙)
@@ -335,7 +316,7 @@ namespace mo
 			MontageInstance& instance = _montages[i];
 			if (instance.montage != montage || instance.blend.desired == 0.f) continue;
 			const uint8_t outOption = (_montageTest & kMontageTestLinear) != 0 ? 0 : montage->blendOutOption;
-			StopMontage(instance, outOption, montage->blendOut);
+			StopMontage(instance, outOption, montage->blendOut, montage->blendOutProfile);		// 엔진 Montage_Stop — 몽타주의 빼기 비중 표(AnimInstance.cpp:2908)
 			return true;
 		}
 		return false;
@@ -359,23 +340,44 @@ namespace mo
 		return PlayMontage(kind, playRate, bundle);
 	}
 
-	void CAnimState::StopMontage(MontageInstance& instance, uint8_t option, float blendSeconds)
+	// 엔진 FAnimMontageInstance::Stop(AnimMontage.cpp:1558). option · blendSeconds · profile = 끄는 쪽의 섞기 — profile 은 엔진 ActiveBlendProfile 이 될 값
+	// (제 빼기 = 몽타주의 빼기 비중 표, 무리 끄기 = 새 몽타주의 넣기 비중 표 = 없음)
+	void CAnimState::StopMontage(MontageInstance& instance, uint8_t option, float blendSeconds, int16_t profile)
 	{
 		MontageBlend& blend = instance.blend;
+		// 엔진은 비중 표 뼈의 시작 비중을 끄기 직전 선형 진행(BlendStartAlpha)으로 잡는데 와이어엔 그 칸이 없어 자세 계산은 1 로 본다(L-6-b · D130).
+		// 진행이 표의 1 아래 배율 중 가장 큰 값(FastFeet 0.5) 이상이면 표의 뼈마다 시작 비중이 1 로 같고, 아래면 다르다 → 다른 칸만 센다
+		const int16_t active = blend.desired != 0.f ? profile : instance.profile;
+		if (active >= 0 && (blend.desired != 0.f || blendSeconds < blend.blendTime) && blend.alpha < ProfileMaxFactor(active)) ++_profileStartMisses;
 		if (blend.desired != 0.f)
 		{
 			blend.option = option;
 			blend.SetBlendTime(blendSeconds);
 			blend.SetValueRange(blend.blended, 0.f);
 			blend.Update(0.f);
+			instance.profile = profile;
 		}
 		else if (blendSeconds < blend.blendTime)
 		{
-			// 이미 빠지는 중이면 더 짧은 시간으로만 바꾼다
+			// 이미 빠지는 중이면 더 짧은 시간으로만 바꾼다. 비중 표는 그대로(엔진도 그대로)
 			blend.SetBlendTime(blendSeconds);
 			blend.SetValueRange(blend.blended, 0.f);
 		}
 		if (blend.blendTime <= 0.f) instance.playing = false;
+	}
+
+	// 빼기 비중 표에서 1 아래 배율 중 가장 큰 값 — 시작 진행이 이 값 이상이면 표의 뼈마다 시작 비중이 1 이다(엔진 CalculateBoneWeight 의 BeginValue = 시작 진행 ÷ 배율, 1 에서 자름).
+	// 시작 진행을 안 쓰는 방식(무게 배율 · 뼈 가림)은 0
+	float CAnimState::ProfileMaxFactor(int profile) const
+	{
+		const ClipProfile& table = _clips->Profiles()[(size_t)profile];
+		if (table.mode != 0) return 0.f;		// 0 = 엔진 EBlendProfileMode::TimeFactor
+		float most = 0.f;
+		for (float factor : table.weights)
+		{
+			if (factor < 1.f - kZeroWeight) most = std::max(most, factor);
+		}
+		return most;
 	}
 
 	// 칸이 찼다 — 비중이 가장 작은 것을 버린다. 같으면 빠지는 중인 것, 그다음 오래된 것(제 판단 — Lyra 기록은 3칸을 안 넘는다, D45)
@@ -447,7 +449,7 @@ namespace mo
 					if (toEnd <= std::max(trigger, kKindaSmall))
 					{
 						const uint8_t outOption = (_montageTest & kMontageTestLinear) != 0 ? 0 : asset.blendOutOption;
-						StopMontage(instance, outOption, customTrigger ? asset.blendOut : toEnd);
+						StopMontage(instance, outOption, customTrigger ? asset.blendOut : toEnd, asset.blendOutProfile);		// 엔진 Stop(FAlphaBlend) — 몽타주의 빼기 비중 표(AnimMontage.cpp:1672)
 					}
 				}
 
@@ -466,7 +468,11 @@ namespace mo
 	// 엔진 UAnimInstance::UpdateMontage — 비중을 다 갱신한 뒤 시각을 다 넘기고, 다 빠진 칸은 뺀다(차례는 그대로)
 	void CAnimState::UpdateMontages(float deltaSeconds)
 	{
-		for (int i = 0; i < _montageCount; ++i) _montages[i].blend.Update(deltaSeconds);
+		for (int i = 0; i < _montageCount; ++i)
+		{
+			_montages[i].blend.Update(deltaSeconds);
+			if (_montages[i].blend.remaining < 0.0001f) _montages[i].profile = -1;		// 엔진 UpdateWeight — 섞기가 끝나면 비중 표를 뗀다(AnimMontage.cpp:2048)
+		}
 		int kept = 0;
 		for (int i = 0; i < _montageCount; ++i)
 		{
@@ -528,8 +534,9 @@ namespace mo
 			slot.kind = instance.montage->kind;
 			slot.position = instance.position;
 			slot.weight = instance.blend.blended;
-			// 빼기 진행(L-4) — 엔진은 빼기 비중 표가 걸린 몽타주(대시 넷 = FastFeet)만 빼는 동안 선형 진행으로 뼈마다 뺀다(D103). 빼기 = 바라는 비중 0(StopMontage)
-			slot.blendOut = instance.montage->blendOutProfile >= 0 && instance.blend.desired == 0.f ? instance.blend.alpha : -1.f;
+			// 빼기 진행(L-4) — 엔진은 빼기 비중 표가 걸린 몽타주(대시 넷 = FastFeet)만 빼는 동안 선형 진행으로 뼈마다 뺀다(D103).
+			// 걸린 표 = 제 빼기로 빠질 때만(StopMontage 의 profile, L-6-b) — 무리 끄기로 빠지는 대시는 표 없이 몽타주 비중대로 빠진다
+			slot.blendOut = instance.profile >= 0 ? instance.blend.alpha : -1.f;
 		}
 		_disableLeftHand = LeftHandCurve();
 	}

@@ -202,7 +202,8 @@ namespace mo
 			uint16_t time;			// 몽타주 시각, 1/6000초 칸
 			uint8_t weight;			// 몽타주 비중 0~255. 0 으로 반올림되는 칸은 안 싣는다
 			uint8_t blendOut;		// 빼기 진행(L-4 · 판 14) — 0 = 빼기 비중 표가 없거나 빠지는 중이 아님, 1~255 = 선형 진행 0~1(엔진 FAlphaBlend 의 선형 진행).
-									// 엔진은 빼기 비중 표(대시 넷 = FastFeet)가 걸린 몽타주를 이 진행으로 뼈마다 빼는데(D103) 서버 되감기 판정이 와이어 기록으로 자세를 만들어 와이어에 싣는다
+									// 엔진은 빼기 비중 표(대시 넷 = FastFeet)가 걸린 몽타주를 이 진행으로 뼈마다 빼는데(D103) 서버 되감기 판정이 와이어 기록으로 자세를 만들어 와이어에 싣는다.
+									// 받는 쪽 자세 계산(AnimPose ApplySlot)이 이 진행으로 뼈마다 뺀다(L-6-b · D130) — 시작 진행은 1 로 본다(엔진과 다른 칸 = CAnimState::ProfileStartMisses)
 		};
 
 		struct AnimStateWire

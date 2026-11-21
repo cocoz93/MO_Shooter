@@ -1404,8 +1404,8 @@ namespace
 		std::printf("STATEBOUND reach=%.3f bound=%.3f wire=%d\n", maxReach, bound, useWire ? (wireKeepNew ? 2 : 1) : 0);
 		if (probePath)
 		{
-			std::printf("STATEMONT rows=%zu countDiff=%zu nameDiff=%zu births=%zu unknownBirths=%zu failedPlays=%zu lateBirths=%zu drops=%d bundleChanges=%zu multiUpdateRows=%zu test=%d",
-				montRows, montCountDiff, montNameDiff, births, unknownBirths, failedPlays, lateBirths, state.MontageDrops(), bundleChanges, multiUpdateRows, montageTest);
+			std::printf("STATEMONT rows=%zu countDiff=%zu nameDiff=%zu births=%zu unknownBirths=%zu failedPlays=%zu lateBirths=%zu drops=%d profileStartMisses=%d bundleChanges=%zu multiUpdateRows=%zu test=%d",
+				montRows, montCountDiff, montNameDiff, births, unknownBirths, failedPlays, lateBirths, state.MontageDrops(), state.ProfileStartMisses(), bundleChanges, multiUpdateRows, montageTest);
 			if (hasCountFirst) std::printf(" countFirst=(pass=%d frame=%d)", rows[countFirstRow].pass, rows[countFirstRow].frame);
 			std::printf("\n");
 			for (const auto& entry : birthRates)

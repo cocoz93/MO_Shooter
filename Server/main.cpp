@@ -781,11 +781,13 @@ int main(int argc, char** argv)
 			ev(EAnimEvent::Melee), ev(EAnimEvent::HitBack), ev(EAnimEvent::HitFront), dropped(EAnimEvent::Melee), dropped(EAnimEvent::HitBack), dropped(EAnimEvent::HitFront),
 			starts(mo::MONTAGE_MELEE), starts(mo::MONTAGE_HIT_BACK), starts(mo::MONTAGE_HIT_FRONT), (unsigned long long)room.meleeReloadMontageCancels);
 		// 대시 몽타주(D-4) — 방향마다 사건 − 버림 = 튼 수. 사건 = SERVER dash 의 montage 칸(켠 방향)
-		// blendOutCells = 빼기 진행을 실은 몽타주 칸(판 14 · L-4) — 사람 × 틱 되감기 기록 칸 수. 빼기 비중 표가 걸린 대시 넷이 빠지는 동안만
-		std::printf("SERVER animDash events forward=%llu backward=%llu left=%llu right=%llu dropped forward=%llu backward=%llu left=%llu right=%llu starts forward=%llu backward=%llu left=%llu right=%llu blendOutCells=%llu\n",
+		// blendOutCells = 빼기 진행을 실은 몽타주 칸(판 14 · L-4) — 사람 × 틱 되감기 기록 칸 수. 빼기 비중 표가 걸린 대시 넷이 빠지는 동안만(제 빼기로 빠질 때만, L-6-b)
+		// profileStartMisses = 그 빼기 중 시작 진행이 표의 배율 아래라 자세가 엔진과 다른 수(L-6-b · Lyra 기록 0)
+		std::printf("SERVER animDash events forward=%llu backward=%llu left=%llu right=%llu dropped forward=%llu backward=%llu left=%llu right=%llu starts forward=%llu backward=%llu left=%llu right=%llu blendOutCells=%llu profileStartMisses=%llu\n",
 			ev(EAnimEvent::DashForward), ev(EAnimEvent::DashBackward), ev(EAnimEvent::DashLeft), ev(EAnimEvent::DashRight),
 			dropped(EAnimEvent::DashForward), dropped(EAnimEvent::DashBackward), dropped(EAnimEvent::DashLeft), dropped(EAnimEvent::DashRight),
-			starts(mo::MONTAGE_DASH_FORWARD), starts(mo::MONTAGE_DASH_BACKWARD), starts(mo::MONTAGE_DASH_LEFT), starts(mo::MONTAGE_DASH_RIGHT), (unsigned long long)room.animBlendOutCells);
+			starts(mo::MONTAGE_DASH_FORWARD), starts(mo::MONTAGE_DASH_BACKWARD), starts(mo::MONTAGE_DASH_LEFT), starts(mo::MONTAGE_DASH_RIGHT), (unsigned long long)room.animBlendOutCells,
+			(unsigned long long)room.animProfileStartMisses);
 		// 수류탄 몽타주(G-4) — 사건 − 버림 = 튼 수. 사건 = SERVER grenade 의 thrown. afterFire = 같은 입력 쏘기를 던짐 앞에 끼운 수 · reloadCancels = 던짐이 먼저 끈 재장전 칸
 		std::printf("SERVER animGrenade events=%llu dropped=%llu starts=%llu afterFire=%llu reloadCancels=%llu\n",
 			ev(EAnimEvent::Grenade), dropped(EAnimEvent::Grenade), starts(mo::MONTAGE_GRENADE), (unsigned long long)room.grenadeAnimAfterFire,

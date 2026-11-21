@@ -277,6 +277,7 @@ namespace mo
 		uint64_t animEventsDropped[(size_t)EAnimEvent::Count] = {};	// 틀기 전에 버린 사건 — 같은 틱에 죽었거나 시험용 자리 옮기기 · 칸 넘침
 		uint64_t montageStarts[(size_t)MONTAGE_KIND_COUNT] = {};	// 튼 몽타주(EMontageKind 차례)
 		uint64_t animBlendOutCells = 0;		// 빼기 진행을 실은 몽타주 칸 — 사람 × 틱 되감기 기록(= 상태 꼬리) 칸 수(L-4). 빼기 비중 표가 걸린 대시 몽타주가 빠지는 동안만
+		uint64_t animProfileStartMisses = 0;	// 빼기 비중 표가 걸린 빼기 중 시작 진행이 표의 배율 아래였던 수(L-6-b) — 그 빼기만 화면 · 되감기 자세(시작 1 로 봄)가 엔진과 다르다
 		uint64_t montageFails = 0;				// 묶음에 그 종류가 없어 못 틈 — 시작할 때 세 묶음을 다 읽으므로 0 이어야 한다
 		uint64_t reloadCancels = 0;				// 쏘기가 재장전 칸을 먼저 끔
 		uint64_t montageDrops = 0;				// 칸이 차서 버린 몽타주(플랜 montageDropped). 0 이 아니면 칸 수를 다시 본다

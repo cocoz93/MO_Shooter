@@ -94,6 +94,7 @@ namespace mo
 		int MontageCount() const { return _montageCount; }
 		MontageView MontageAt(int index) const;
 		int MontageDrops() const { return _montageDrops; }		// 칸이 차서 버린 몽타주 수(누적). 0 이어야 Lyra 와 같다
+		int ProfileStartMisses() const { return _profileStartMisses; }	// 빼기 비중 표가 걸린 빼기 중 시작 진행이 표의 배율 아래라 자세 계산(시작 1 로 봄)이 엔진과 다른 수(누적, L-6-b). Lyra 기록은 0
 		int BundleIndex() const { return _bundleIndex; }
 		float TimeSinceFired() const { return _timeSinceFired; }
 		float OverrideWeight() const { return _overrideWeight; }
@@ -152,6 +153,7 @@ namespace mo
 			float timeLeft = 0.f;			// 엔진 FMontageSubStepper::TimeRemaining — 이번 갱신에 아직 못 쓴 시간
 			bool playing = false;
 			bool autoBlendOut = true;
+			int16_t profile = -1;			// 걸린 빼기 비중 표(엔진 ActiveBlendProfile) — 제 빼기로 빠질 때만 몽타주의 blendOutProfile, 섞기가 끝나면 -1(L-6-b)
 			MontageBlend blend;
 		};
 
@@ -190,7 +192,8 @@ namespace mo
 		void UpdateFiring(bool accelerating, bool falling, bool ads, bool crouched, float deltaSeconds);
 		void UpdateMontages(float deltaSeconds);
 		bool AdvanceMontage(MontageInstance& instance, float deltaSeconds);		// false = 다 빠졌다(엔진 Terminate)
-		void StopMontage(MontageInstance& instance, uint8_t option, float blendSeconds);
+		void StopMontage(MontageInstance& instance, uint8_t option, float blendSeconds, int16_t profile);
+		float ProfileMaxFactor(int profile) const;
 		void DropMontage();
 		void SnapshotMontages();
 		bool FullBodyCoversSource(float deltaSeconds);		// 이번 갱신에 통째(FullBody) 자리 몽타주가 몸을 다 덮나 — 그러면 걸음 쪽 그래프를 안 넘긴다
@@ -281,6 +284,7 @@ namespace mo
 		float _overrideWeight = 0.f;
 		bool _firing = false;
 		int _montageDrops = 0;
+		int _profileStartMisses = 0;
 		int _montageTest = 0;
 	};
 

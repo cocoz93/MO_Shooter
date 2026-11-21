@@ -11,6 +11,7 @@
 //   같은 입력에 언리얼과 같은 자세가 나오는지는 Tools/AnimCheck + check_pose.py 로 대조한다(0.1cm · 0.3도).
 // - 9단계 3-b 에서 더한 것 = 착지 충격 뒤에 끼움 자리 넷(통째 · 사격 덧붙임 · 윗몸 · 윗몸 덧붙임) → 쏜 뒤 윗몸 덮기 → 조준, 손 붙이기의 왼팔 비중.
 //   자리 하나 = 엔진 SlotEvaluatePose(AnimInstanceProxy.cpp:1885) + 비중 표가 있으면 뼈별 섞기(BlendPosesPerBoneFilter 메시 기준 회전 갈래, AnimationRuntime.cpp:2213).
+//   그 자리에 빼기 비중 표가 걸린 몽타주(대시 넷이 제 빼기로 빠질 때)가 있으면 SlotEvaluatePoseWithBlendProfiles(:1560)처럼 뼈마다 비중을 따로 낸다(L-6-b · D130)
 //   차례 · 섞기 갈래 · 비중 표는 처음엔 애니 그래프를 읽은 값이 아니었다(D43) — 후보를 바꿔 Lyra 원본 기록과의 22부위 차이가 가장 작은 것을 골랐다(제 판단, D50)
 // - 컨텐츠 E-2-b 에서 그래프(ABP_Mannequin_Base AnimGraph 핀 연결)를 읽어 차례 · 윗몸 짜임 · 윗몸 비중 표를 그래프대로 바꿨다(D72, 원본 기준).
 //   옛 차례는 시험 깃발 kPoseTestD50Order 로 다시 만든다
@@ -37,7 +38,7 @@ namespace mo
 		float position = 0;		// 몽타주 시각(초)
 		float weight = 0;		// 0~1 몽타주 비중
 		float blendOut = -1.f;	// 빼기 진행 0~1(엔진 FAlphaBlend 선형 진행) — 빼기 비중 표가 걸린 몽타주가 빠지는 중일 때만, 아니면 -1(L-4 · 와이어 판 14).
-								// 자세 계산은 아직 안 쓴다 — 뼈별 비중 길은 L-6-b
+								// 끼움 자리가 이 진행 · 몽타주의 빼기 비중 표로 뼈마다 뺀다(ApplySlot, L-6-b · D130)
 	};
 
 	// 자세 계산의 입력. 언리얼 쪽 재생 상태(FMOBSimpleAnimProxy)와 칸마다 같은 뜻이다
@@ -114,6 +115,7 @@ namespace mo
 		static constexpr uint32_t kPoseTestOverrideLate = 128;		// 쏜 뒤 덮기를 옛 자리(끼움 자리 뒤 · 조준 앞, L-6-a 전 실제 경로)로. 실제 경로는 끼움 자리 앞(착지 충격 바로 뒤).
 																	// 옛 값 32(kPoseTestOverrideEarly — 그때 「앞으로」 시험, G-4-b 기록의 --poseTest=32)는 지금 실제 경로라 뺐다 — 32 는 비워 둔다.
 																	// L-6-a 앞에 잰 판을 다시 만들려면 그 깃발에 128 을 더한다(예: 옛 차례 64 → 192)
+		static constexpr uint32_t kPoseTestUniformBlendOut = 256;	// 빼기 비중 표를 안 쓴다 — 빠지는 몽타주도 모든 뼈를 몽타주 비중으로(L-6-b 전 실제 경로). L-6-b 앞에 잰 판은 256 을 더한다
 		void SetPoseTestFlags(uint32_t flags) { _poseTest = flags; }
 		void SetSlotProfileForTest(int profile) { _slotProfileTest = profile; }			// 비중 표가 있는 끼움 자리(덮기 자리 빼고)를 이 표로(-1 = 파일 그대로)
 		void SetOverrideProfileForTest(int profile) { _overrideProfileTest = profile; }	// 쏜 뒤 덮기 자리를 이 표로(-1 = 파일 그대로)
@@ -134,6 +136,7 @@ namespace mo
 		void ApplyHandIK(BoneTransform* pose, float leftAlpha);
 		void ApplyPlant(const AnimPoseInput& input, BoneTransform* pose) const;
 		void AccumulateAdditive(BoneTransform* pose, const BoneTransform* additive, float weight, uint8_t additiveType);
+		void AccumulateAdditivePerBone(BoneTransform* pose, const BoneTransform* additive, const float* weights, uint8_t additiveType);
 		void ComponentFromLocal(const BoneTransform* local, BoneTransform* component) const;
 
 		const CAnimClips* _clips = nullptr;
@@ -158,6 +161,7 @@ namespace mo
 		std::vector<BoneTransform> _a;
 		std::vector<BoneTransform> _b;
 		std::vector<BoneTransform> _base;		// 끼움 자리에 들어온 아래 자세
+		std::vector<float> _boneWeights;		// 빼기 비중 표 길의 뼈별 비중 — (몽타주 칸 수 + 아래 자세 + 일반 줄 합) × 뼈 수
 		std::vector<BoneTransform> _component;
 	};
 }

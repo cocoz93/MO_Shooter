@@ -236,6 +236,33 @@ namespace mo
 	// 몽타주 넣기 · 빼기 곡선으로 옮긴 엔진 EAlphaBlendOption 값의 끝 — 0 = 선형 · 1 = Cubic · 2 = HermiteCubic. 15개 몽타주가 쓰는 셋이다(3-a 덤프, 실측). 더 큰 값은 읽기에서 거부한다
 	inline constexpr uint8_t kBlendOptionMax = 2;
 
+	// 엔진 FAlphaBlend::AlphaToBlendOption 의 세 갈래(kBlendOptionMax 까지 — 읽기에서 그 밖은 거부한다).
+	// 몽타주 비중(AnimState MontageBlend)과 빼기 비중 표의 뼈별 비중(AnimPose ApplySlot, 엔진 UBlendProfile::CalculateBoneWeight)이 같이 쓴다
+	//   0~1 자르기는 std::max(0, std::min(x, 1)) 와 같은 비교 차례로 적었다(머리 파일이라 windows.h 의 max 매크로를 피한다)
+	inline float BlendOptionCurve(uint8_t option, float alpha)
+	{
+		const auto unit = [](float x)
+		{
+			const float upper = 1.f < x ? 1.f : x;
+			return 0.f < upper ? upper : 0.f;
+		};
+		switch (option)
+		{
+		case 1:		// Cubic = FMath::CubicInterp(0, 0, 1, 0, a)
+		{
+			const float a2 = alpha * alpha;
+			const float a3 = a2 * alpha;
+			return unit((-2.f * a3) + (3.f * a2));
+		}
+		case 2:		// HermiteCubic = FMath::SmoothStep(0, 1, a)
+			if (alpha < 0.f) return 0.f;
+			if (alpha >= 1.f) return 1.f;
+			return unit(alpha * alpha * (3.f - 2.f * alpha));
+		default:	// 선형
+			return unit(alpha);
+		}
+	}
+
 	struct ClipMontage
 	{
 		std::string name;
@@ -251,7 +278,8 @@ namespace mo
 		bool autoBlendOut = true;
 		// 빼기 비중 표(버전 6) — ClipProfile 번호, -1 = 없음. 엔진은 빼는 동안 이 표(시간 배율 방식)로 뼈마다 빠르기를 달리한다
 		// (FAnimInstanceProxy::SlotEvaluatePoseWithBlendProfiles · UBlendProfile::CalculateBoneWeight, 원본 기준). 대시 넷 = FastFeet(다리 뼈 0.5).
-		// 자세 계산은 아직 이 칸을 안 쓴다 — 와이어 몽타주 칸에 빼기 진행이 없어 되감기 판정이 따라 할 수 없다(content-impl-progress.md 미결 8)
+		// 제 빼기(자동 빼기 · StopMontageKind)로 빠질 때만 걸린다 — 상태가 칸마다 들고(MontageInstance::profile) 빼기 진행을 와이어에 실어
+		// 자세 계산(AnimPose ApplySlot)이 뼈마다 뺀다(L-6-b · D130. 그 전엔 이 칸을 안 썼다 — content-impl-progress.md 미결 8)
 		int16_t blendOutProfile = -1;
 		std::vector<MontageTrack> tracks;
 		std::vector<MontageCurve> curves;

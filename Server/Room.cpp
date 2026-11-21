@@ -1948,11 +1948,13 @@ namespace mo
 				DropAnimEvents(*player);		// 이 틱 입력에서 떨어져 죽었다 — 몸이 없으니 틀지 않는다
 				continue;
 			}
+			const int startMissesBefore = player->anim.ProfileStartMisses();		// 사건 틀기(무리 끄기) · 갱신(자동 빼기) 둘 다 StopMontage 를 부른다
 			PlayAnimEvents(*player);
 			player->anim.SetFiring(player->weapons[player->weapon].IsFireActive());		// Lyra IsFiring 태그 = 쏘기 능력이 켜진 동안(소총 · 권총 8프레임이 기록과 같다)
 			AnimMoveInput input;
 			MakeMoveInput(*player, input);
 			player->anim.Update(input);
+			_stats.animProfileStartMisses += (uint64_t)(player->anim.ProfileStartMisses() - startMissesBefore);
 			++_stats.animUpdates;
 		}
 	}

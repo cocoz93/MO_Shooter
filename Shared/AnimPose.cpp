@@ -16,7 +16,33 @@ namespace mo
 		constexpr double kKindaSmall = 1.e-4;			// 엔진 UE_KINDA_SMALL_NUMBER / DOUBLE_KINDA_SMALL_NUMBER
 		constexpr uint8_t kAdditiveNone = 0;			// AAT_None
 		constexpr uint8_t kAdditiveMeshRotation = 2;	// AAT_RotationOffsetMeshSpace
+		constexpr uint8_t kProfileTimeFactor = 0;		// 엔진 EBlendProfileMode::TimeFactor
+		constexpr uint8_t kProfileWeightFactor = 1;		// WeightFactor
 		constexpr uint8_t kProfileBlendMask = 2;		// 엔진 EBlendProfileMode::BlendMask
+
+		// 엔진 UBlendProfile::CalculateBoneWeight(BlendProfile.cpp:415) — 빼기 비중 표가 걸린 몽타주 한 뼈의 비중. 걸리는 건 빠질 때뿐이라 바라는 비중 = 0,
+		// 시작 진행(엔진 BlendStartAlpha) = 1 로 본다(와이어에 없음 — 다른 칸은 CAnimState::ProfileStartMisses 가 센다). alpha = 빼기 선형 진행 · option = 빼기 곡선
+		float ProfileBoneWeight(uint8_t mode, float factor, float mainWeight, float alpha, uint8_t option)
+		{
+			switch (mode)
+			{
+			case kProfileTimeFactor:
+			{
+				if (factor >= 1.f - kZeroWeight) return mainWeight;		// 표에 없는 뼈(배율 1)는 몽타주 비중 그대로
+				const float clamped = std::max(0.f, std::min(factor, 1.f));
+				const float begin = clamped > kZeroWeight ? std::max(0.f, std::min(1.f / clamped, 1.f)) : 1.f;
+				const float realBegin = BlendOptionCurve(option, begin);
+				const float linear = clamped > kZeroWeight ? std::max(0.f, std::min(alpha / clamped, 1.f)) : 1.f;
+				const float realBone = BlendOptionCurve(option, linear);
+				const float weight = realBegin + realBone * (0.f - realBegin);
+				return std::max(kZeroWeight, std::min(weight, 1.f));
+			}
+			case kProfileWeightFactor:
+				return std::max(mainWeight * factor, kZeroWeight);
+			default:		// 뼈 가림 방식은 엔진도 여기서 안 받는다(checkf) — 몽타주 비중 그대로(:475)
+				return mainWeight;
+			}
+		}
 
 		// 끼움 자리 이름 표 — 처음엔 이 표 차례대로 얹었다(플랜 「구조」의 차례, 제 판단 · D43). 지금 차례는 EvaluateLocal 이 Lyra 그래프대로 정한다(D72)
 		// 다섯째 AdditiveHitReact(맞은 쪽 반응, 컨텐츠 E-2)는 앞 넷과 따로 조준 뒤 · 손 뒤처리 앞에 얹는다(EvaluateLocal) — 차례는 Lyra 그래프 덤프에서 읽었다(원본 기준)
@@ -347,6 +373,7 @@ namespace mo
 		_a.resize(_boneCount);
 		_b.resize(_boneCount);
 		_base.resize(_boneCount);
+		_boneWeights.resize(_boneCount * (kAnimMontageMax + 2));
 		_component.resize(_boneCount);
 		_meshRotations.resize(_boneCount * 12);
 		return true;
@@ -492,6 +519,43 @@ namespace mo
 		NormalizeRotations(pose, _boneCount);
 	}
 
+	// 덧붙임 줄을 뼈마다 다른 비중으로 — 엔진 SlotEvaluatePoseWithBlendProfiles 의 덧붙임 갈래(AnimInstanceProxy.cpp:1828). 비중 1 도 항등에서 섞는다
+	// (그 길은 BlendFromIdentityAndAccumulate 만 쓴다 — AccumulateAdditive 의 「비중 1 이면 그대로 쌓기」 갈래가 없다)
+	void CAnimPoseEvaluator::AccumulateAdditivePerBone(BoneTransform* pose, const BoneTransform* additive, const float* weights, uint8_t additiveType)
+	{
+		const bool meshRotation = additiveType == kAdditiveMeshRotation;
+		const std::vector<ClipBone>& bones = _clips->Bones();
+		if (meshRotation)
+		{
+			for (size_t b = 1; b < _boneCount; ++b) QuatMul(pose[(size_t)bones[b].parent].q, pose[b].q, pose[b].q);
+		}
+
+		for (size_t b = 0; b < _boneCount; ++b)
+		{
+			const float weight = weights[b];
+			const double bias = additive[b].q[3] >= 0 ? 1.0 : -1.0;
+			double delta[4];
+			delta[0] = additive[b].q[0] * weight;
+			delta[1] = additive[b].q[1] * weight;
+			delta[2] = additive[b].q[2] * weight;
+			delta[3] = additive[b].q[3] * weight + bias * (1.f - weight);
+			QuatNormalize(delta);
+			for (int c = 0; c < 3; ++c) pose[b].p[c] += additive[b].p[c] * weight;
+			QuatMul(delta, pose[b].q, pose[b].q);
+		}
+
+		if (meshRotation)
+		{
+			for (size_t b = _boneCount - 1; b > 0; --b)
+			{
+				double inverse[4];
+				QuatInverse(pose[(size_t)bones[b].parent].q, inverse);
+				QuatMul(inverse, pose[b].q, pose[b].q);
+			}
+		}
+		NormalizeRotations(pose, _boneCount);
+	}
+
 	void CAnimPoseEvaluator::ApplyRecovery(const AnimPoseInput& input, BoneTransform* pose)
 	{
 		const AnimClip& clip = _bundle->clips[ACLIP_RECOVERY];
@@ -588,11 +652,15 @@ namespace mo
 			const AnimClip* clip;
 			double time;		// 줄 클립 시각. 음수 = 줄 구간 밖(엔진은 기준 자세)
 			float weight;
+			int profile;		// 걸린 빼기 비중 표(-1 = 없음) — 빼기 진행이 실렸고 몽타주에 표가 있을 때(엔진 ActiveBlendProfile)
+			float blendOut;		// 빼기 선형 진행
+			uint8_t option;		// 빼기 곡선 — 표가 걸리는 건 제 빼기뿐이라 몽타주의 빼기 곡선(상태 시험 깃발 kMontageTestLinear 의 선형은 모른다)
 		};
 		Entry entries[kAnimMontageMax];
 		int count = 0;
 		float total = 0.f;
 		float nonAdditive = 0.f;
+		bool profiled = false;
 		const std::vector<ClipBundle>& bundles = _clips->Bundles();
 		for (int m = 0; m < input.montageCount && m < kAnimMontageMax; ++m)
 		{
@@ -631,7 +699,9 @@ namespace mo
 			{
 				++_trackOutside;
 			}
-			entries[count++] = { &bundle, &clip, time, view.weight };
+			const int profile = view.blendOut >= 0.f && montage->blendOutProfile >= 0 && (_poseTest & kPoseTestUniformBlendOut) == 0 ? montage->blendOutProfile : -1;
+			entries[count++] = { &bundle, &clip, time, view.weight, profile, view.blendOut, montage->blendOutOption };
+			profiled = profiled || profile >= 0;
 			total += view.weight;
 			if (clip.additive == kAdditiveNone) nonAdditive += view.weight;
 		}
@@ -654,6 +724,75 @@ namespace mo
 		};
 
 		std::memcpy(_base.data(), pose, sizeof(BoneTransform) * _boneCount);
+		if (profiled)
+		{
+			// 엔진 SlotEvaluatePoseWithBlendProfiles(AnimInstanceProxy.cpp:1560) — 이 자리에 빼기 비중 표가 걸린 몽타주가 있으면(:1907) 뼈마다 비중을 따로 낸다.
+			//   표가 걸린 줄 = ProfileBoneWeight, 나머지 줄 = 몽타주 비중. 일반 줄은 뼈마다 합이 넘으면 나누고(아래 자세가 있으면 1, 없으면 0 을 넘을 때 · 없는데 안 넘으면 1),
+			//   아래 자세 = 1 − 일반 줄 합(뼈마다). 덧붙임 줄은 그 뼈 비중 그대로(나누지 않는다) 항등에서 쌓는다
+			const std::vector<ClipProfile>& tables = _clips->Profiles();
+			float* sums = _boneWeights.data() + (size_t)kAnimMontageMax * _boneCount;
+			float* source = sums + _boneCount;
+			std::fill(sums, sums + _boneCount, 0.f);
+			for (int e = 0; e < count; ++e)
+			{
+				const Entry& entry = entries[e];
+				float* weights = _boneWeights.data() + (size_t)e * _boneCount;
+				if (entry.profile >= 0)
+				{
+					const ClipProfile& table = tables[(size_t)entry.profile];
+					for (size_t b = 0; b < _boneCount; ++b) weights[b] = ProfileBoneWeight(table.mode, table.weights[b], entry.weight, entry.blendOut, entry.option);
+				}
+				else
+				{
+					std::fill(weights, weights + _boneCount, entry.weight);
+				}
+				if (entry.clip->additive == kAdditiveNone)
+				{
+					for (size_t b = 0; b < _boneCount; ++b) sums[b] += weights[b];
+				}
+			}
+			const bool hasSource = sourceWeight > kZeroWeight;
+			const float threshold = hasSource ? 1.f + kZeroWeight : kZeroWeight;
+			std::fill(source, source + _boneCount, 0.f);		// 일반 줄 합(나눈 뒤) — 끝에 1 − 합으로 바꾼다(엔진 :1736 과 같은 더하기 차례)
+			int blendedPerBone = 0;
+			for (int e = 0; e < count; ++e)
+			{
+				if (entries[e].clip->additive != kAdditiveNone) continue;
+				float* weights = _boneWeights.data() + (size_t)e * _boneCount;
+				for (size_t b = 0; b < _boneCount; ++b)
+				{
+					if (sums[b] > threshold) weights[b] /= sums[b];
+					else if (!hasSource) weights[b] = 1.f;
+					source[b] += weights[b];
+				}
+				sample(entries[e], _a.data());
+				for (size_t b = 0; b < _boneCount; ++b)
+				{
+					if (blendedPerBone == 0) BlendOverwrite(pose + b, _a.data() + b, weights[b], 1);
+					else BlendAccumulate(pose + b, _a.data() + b, weights[b], 1);
+				}
+				++blendedPerBone;
+			}
+			if (blendedPerBone > 0)
+			{
+				if (hasSource)
+				{
+					for (size_t b = 0; b < _boneCount; ++b) BlendAccumulate(pose + b, _base.data() + b, 1.f - source[b], 1);
+				}
+				NormalizeRotations(pose, _boneCount);
+			}
+			for (int e = 0; e < count; ++e)
+			{
+				if (entries[e].clip->additive == kAdditiveNone) continue;
+				sample(entries[e], _a.data());
+				AccumulateAdditivePerBone(pose, _a.data(), _boneWeights.data() + (size_t)e * _boneCount, entries[e].clip->additive);
+			}
+
+			const float* mask = SlotMask(slot);
+			if (perBone && mask) BlendPerBone(_base.data(), pose, 1.f, mask, pose);
+			return true;
+		}
+
 		int blended = 0;
 		for (int e = 0; e < count; ++e)
 		{
