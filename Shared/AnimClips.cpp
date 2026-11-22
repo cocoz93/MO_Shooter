@@ -180,6 +180,7 @@ namespace mo
 				clip.additive = reader.Read<uint8_t>();
 				clip.loop = reader.Read<uint8_t>() != 0;
 				clip.rootSpeed = reader.Read<float>();
+				clip.rate = reader.Read<float>();
 				clip.samples = reader.Read<uint32_t>();
 
 				const uint16_t markerCount = reader.Read<uint16_t>();

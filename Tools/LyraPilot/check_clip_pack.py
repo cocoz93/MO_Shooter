@@ -58,7 +58,7 @@ def parse(src_path):
             s['parent'][int(c[1])] = int(c[3])
             s['ref'][c[2]] = c[4:11]
         elif c[0] == 'CLIP':
-            s['clips'][int(c[1])] = c[2:8]
+            s['clips'][int(c[1])] = c[2:9]
         elif c[0] == 'MARK':
             s['marks'].setdefault(int(c[1]), []).append((c[2], c[3]))
         elif c[0] == 'CURVE':
@@ -320,7 +320,7 @@ for line in open(dump_path, encoding='utf-8', errors='replace'):
         if s[0] != c[2]:
             diff += 1
             note('clip name', (cur, i))
-        for k in (3, 6):        # 길이 · rootSpeed
+        for k in (3, 6, 8):     # 길이 · rootSpeed · 자산 재생 배율(판 10)
             values += 1
             if not same(s[k - 2], c[k]):
                 diff += 1

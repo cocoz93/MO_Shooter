@@ -19,7 +19,7 @@ import struct
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
-VERSION = 9                                     # 9 = 클립마다 DisableLegIK 곡선 칸(점프 클립 다섯, L-6-c-3 — csv BCURVE 줄). 8 = 곡선 DisableLegIK 를 넣음(L-6-c-1 — 형식 칸은 그대로). 7 = 몽타주 종류 13(수류탄 던짐, G-4 — 형식 칸은 그대로). 6 = 몽타주 종류 12(대시 넷, D-4) · 몽타주마다 빼기 비중 표 칸 i16(형식이 바뀐 판). 5 = 몽타주 종류 8(근접 · 반응 둘, E-2). 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3). 3 = 묶음 클립 30개 뒤에 조준 클립 17개(C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
+VERSION = 10                                    # 10 = 클립마다 자산 재생 배율 f(엔진 RateScale — csv CLIP 줄 끝 칸, L-13-b). 9 = 클립마다 DisableLegIK 곡선 칸(점프 클립 다섯, L-6-c-3 — csv BCURVE 줄). 8 = 곡선 DisableLegIK 를 넣음(L-6-c-1 — 형식 칸은 그대로). 7 = 몽타주 종류 13(수류탄 던짐, G-4 — 형식 칸은 그대로). 6 = 몽타주 종류 12(대시 넷, D-4) · 몽타주마다 빼기 비중 표 칸 i16(형식이 바뀐 판). 5 = 몽타주 종류 8(근접 · 반응 둘, E-2). 4 = 조준 클립 뒤에 앉기 클립 20개(컨텐츠 D-3). 3 = 묶음 클립 30개 뒤에 조준 클립 17개(C-3, D60). 형식 칸은 그대로고 앞 클립 수만 는다
 KINDS = {'sphere': 0, 'sphyl': 1, 'box': 2}     # Shared/Weapon.h EBodyShape 값
 SCALE_LIMIT = 1e-4
 CLIPS_PER_BUNDLE = 67                           # Shared/AnimClips.h ACLIP_COUNT — 앞 67개(조준 17개 · 앉기 20개 포함). 그 뒤는 몽타주 · 덮기 자세 클립
@@ -83,7 +83,9 @@ def parse(name, src):
         elif h == 'BONE':
             d['bones'][int(c[1])] = dict(name=c[2], parent=int(c[3]), ref=[float(x) for x in c[4:14]])
         elif h == 'CLIP':
-            d['clips'][int(c[1])] = dict(name=c[2], length=float(c[3]), samples=int(c[4]), additive=int(c[5]), root=float(c[6]), loop=int(c[7]))
+            if len(c) < 9:
+                fail(f'{src} CLIP 줄에 재생 배율 칸이 없다(판 10 앞 내보내기) — {line.strip()[:80]}')
+            d['clips'][int(c[1])] = dict(name=c[2], length=float(c[3]), samples=int(c[4]), additive=int(c[5]), root=float(c[6]), loop=int(c[7]), rate=float(c[8]))
         elif h == 'CLIPFAIL':
             d['fails'].append(int(c[1]))
         elif h == 'MARK':
@@ -242,7 +244,7 @@ for d in bundles:
             fail(f'bundle={d["name"]} clip={c["name"]} samples={c["samples"]} want={want_samples} hz={d["hz"]}')
         n = c['name'].encode('ascii')
         out += struct.pack('<B', len(n)) + n
-        out += struct.pack('<fBBfI', c['length'], c['additive'], c['loop'], c['root'], c['samples'])
+        out += struct.pack('<fBBffI', c['length'], c['additive'], c['loop'], c['root'], c['rate'], c['samples'])
         m = d['marks'].get(i, [])
         out += struct.pack('<H', len(m))
         for t, name in m:
@@ -354,6 +356,7 @@ print(f'CLIPPACK slots ' + ' '.join(f'{s}={m}/{p or "-"}' for s, m, p in SLOTS))
 for d, samples, seconds, extra, mline, dropped in summary:
     print(f'CLIPPACK bundle={d["name"]} clips={len(d["clips"])} hz={d["hz"]} samples={samples} seconds={seconds:.2f} extraSeconds={extra:.2f} src={d["src"]}')
     print(f'CLIPPACK bundle={d["name"]} additive ' + ' '.join(f'{c["name"]}={c["additive"]}' for c in d['clips'].values() if c['additive'] != 0))
+    print(f'CLIPPACK bundle={d["name"]} rate ' + ' '.join(f'{c["name"]}#{i}={c["rate"]:g}' for i, c in d['clips'].items() if c['rate'] != 1.0))
     print(f'CLIPPACK bundle={d["name"]} move ' + ' '.join(f'{k}={v}' for k, v in d['move'].items()))
     print(f'CLIPPACK bundle={d["name"]} montages ' + ' '.join(mline) + f' override={d["clips"][d["override"]]["name"]}#{d["override"]}')
     print(f'CLIPPACK bundle={d["name"]} droppedCurves ' + (' '.join(dropped) if dropped else '-'))

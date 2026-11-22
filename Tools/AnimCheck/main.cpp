@@ -113,7 +113,7 @@ namespace
 			for (size_t c = 0; c < bundle.clips.size(); ++c)
 			{
 				const AnimClip& clip = bundle.clips[c];
-				std::fprintf(file, "CLIP,%zu,%s,%.9g,%u,%d,%.9g,%d\n", c, clip.name.c_str(), clip.length, clip.samples, (int)clip.additive, clip.rootSpeed, clip.loop ? 1 : 0);
+				std::fprintf(file, "CLIP,%zu,%s,%.9g,%u,%d,%.9g,%d,%.9g\n", c, clip.name.c_str(), clip.length, clip.samples, (int)clip.additive, clip.rootSpeed, clip.loop ? 1 : 0, clip.rate);
 				for (const ClipMarker& marker : clip.markers) std::fprintf(file, "MARK,%zu,%.9g,%s\n", c, marker.time, marker.left ? "L" : "R");
 				if (clip.hasCurve)
 				{

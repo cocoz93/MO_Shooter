@@ -15,8 +15,8 @@ namespace mo
 		constexpr float kMaxPlayRate = 1.5f;
 		constexpr float kAimBlendSpeed = 10.f;
 		constexpr float kJumpBlendSeconds = 0.1f;
-		constexpr float kApexLeadSeconds = 0.25f;
-		constexpr float kApexExitRemaining = 0.12f;
+		constexpr float kApexLeadSeconds = 0.4f;
+		constexpr float kApexExitRemaining = 0.133f;
 		constexpr float kLandFadeSeconds = 0.3f;
 		constexpr float kLandedStandSeconds = 0.15f;
 		constexpr float kLandedMoveSeconds = 0.2f;
@@ -797,10 +797,18 @@ namespace mo
 		if (_stepCycle > 255) return false;		// 패킷의 걸음 번호는 1바이트다
 
 		for (int i = 0; i < kAnimStackClips; ++i) _stackLengths[i] = std::max(bundle->clips[StackClipIndex(i)].length, 0.01f);
+		for (int i = 0; i < kAnimJumpClips; ++i) _jumpRates[i] = bundle->clips[(size_t)ACLIP_JUMP_START + (size_t)i].rate;
 		for (size_t c = 0; c < ACLIP_COUNT; ++c)
 		{
 			// 패킷의 시각은 이 길이까지만 담는다 — 대기 몸짓 칸만 눈금이 다르다. 67개 뒤 몽타주 클립은 클립 시각이 아니라 몽타주 시각이 패킷에 실린다(조각 4)
 			if (bundle->clips[c].length > (c == ACLIP_FIDGET ? kWireFidgetMax : kWireTimeMax)) return false;
+		}
+		// 자산 재생 배율(버전 10) — 엔진은 시퀀스 재생에도 몽타주 구간에도 이 배율을 곱한다(AnimCompositeBase.h:136). 우리가 배율로 시각을 흘리는 곳은 점프 쌓기 넷뿐이라
+		// (내려앉음은 땅까지 거리로 시각을 정한다) 그 밖 클립 — 몽타주 · 덮기 클립 포함 — 이 1 이 아니면 엔진과 갈리므로 묶지 않는다
+		for (size_t c = 0; c < bundle->clips.size(); ++c)
+		{
+			const float rate = bundle->clips[c].rate;
+			if (!(rate > 0.f) || (rate != 1.f && (c < (size_t)ACLIP_JUMP_START || c > (size_t)ACLIP_JUMP_FALL_LOOP))) return false;
 		}
 		// 몽타주 칸(조각 4) — 몽타주 시각이 패킷 시각 칸에, 묶음 번호가 칸 번호의 위 4비트에 들어가야 한다. 다른 묶음 몽타주도 틀 수 있어 전부 본다
 		if (clips.Bundles().size() > ((size_t)1 << (8 - wire::kAnimMontageKindBits))) return false;
@@ -1298,7 +1306,8 @@ namespace mo
 				if (timeToApex < kApexLeadSeconds) PushJump(kJumpApex, kJumpBlendSeconds);
 				break;
 			case kJumpApex:
-				if (_stackLengths[kJumpApex] - topTime < kApexExitRemaining) PushJump(kJumpFallLoop, kJumpBlendSeconds);
+				// 엔진 자동 규칙 — 남은 시간이 섞기 길이 이하면 넘어가고, 섞기는 그때 남은 시간만큼(AnimNode_StateMachine.cpp:847-854 · :70)
+				if (_stackLengths[kJumpApex] - topTime <= kApexExitRemaining) PushJump(kJumpFallLoop, std::max(_stackLengths[kJumpApex] - topTime, 0.f));
 				break;
 			case kJumpFallLoop:
 				if (!land.empty() && groundDistance < land[0]) PushJump(kJumpLand, kLandFadeSeconds);
@@ -1319,7 +1328,7 @@ namespace mo
 		{
 			Layer& layer = _stack[i];
 			if (layer.clip >= kAnimJumpClips && layer.clip < kAnimStanceEntry) layer.time = TransitionClipTime(layer, deltaSeconds);
-			else layer.time = layer.clip == kJumpLand && !land.empty() ? std::max(layer.time, LandTimeFromDistance(groundDistance)) : layer.time + deltaSeconds;
+			else layer.time = layer.clip == kJumpLand && !land.empty() ? std::max(layer.time, LandTimeFromDistance(groundDistance)) : layer.time + deltaSeconds * (layer.clip >= 0 && layer.clip < kAnimJumpClips ? _jumpRates[layer.clip] : 1.f);
 			if (layer.fadeSeconds > 0.f) layer.fade = std::min(layer.fade + deltaSeconds / layer.fadeSeconds, 1.f);
 		}
 		// 다 덮인 아래 상태는 버린다. 걷기 · 서기만 남으면 점프 쪽을 끈다

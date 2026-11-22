@@ -20,7 +20,7 @@
 //     u8 이름 길이, 이름, u32 표본 Hz, 6f 조준 각도(위 · 가운데 · 아래 · 느슨한 위 · 가운데 · 아래),
 //     5f (groundFriction, brakingFriction, brakingFrictionFactor, brakingDecelerationWalking, gravityZ), u8 separateBraking,
 //     u32 클립 수(앞 ACLIP_COUNT 개는 EAnimClip 차례 — 버전 3 부터 조준 클립 17개 · 버전 4 부터 앉기 클립 20개 포함, 그 뒤는 몽타주 · 덮기 자세 클립), 클립마다 {
-//       u8 이름 길이, 이름, f 길이(초), u8 덧붙임 종류(0 = 일반), u8 반복, f rootSpeed, u32 표본 수,
+//       u8 이름 길이, 이름, f 길이(초), u8 덧붙임 종류(0 = 일반), u8 반복, f rootSpeed, f 자산 재생 배율(버전 10 — 엔진 RateScale), u32 표본 수,
 //       u16 발 표시 수, 표시마다 { f 시각, u8 왼발 },
 //       u8 곡선 유무, 있으면 { u32 hz, u32 값 수, f[값 수] },
 //       u8 DisableLegIK 곡선 유무(버전 9), 있으면 { u32 hz, u32 값 수, f[값 수] },
@@ -36,7 +36,8 @@
 // 크기 칸은 넣지 않는다. 일반 클립은 1, 덧붙임 클립은 0 으로 항상 같고, 다르면 도구가 파일을 만들지 않는다.
 namespace mo
 {
-	inline constexpr uint32_t kClipPackVersion = 9;	// 9 = 클립마다 DisableLegIK 곡선 칸(점프 클립 다섯 — 뜨면 발 붙이기 장치를 끈다, L-6-c-3). 8 은 거부한다(점프 중에도 장치가 돈다).
+	inline constexpr uint32_t kClipPackVersion = 10;	// 10 = 클립마다 자산 재생 배율 칸(엔진 RateScale — 운동 클립 중 소총 떨어지는 중만 2, L-13-b). 9 는 거부한다(떨어지는 중을 1배로 돌린다).
+								// 9 = 클립마다 DisableLegIK 곡선 칸(점프 클립 다섯 — 뜨면 발 붙이기 장치를 끈다, L-6-c-3). 8 은 거부한다(점프 중에도 장치가 돈다).
 															// 8 = 몽타주 곡선에 DisableLegIK(앞 대시가 발 붙이기 장치를 끔, L-6-c-1). 칸 꼴은 그대로다. 7 은 거부한다(곡선이 없어 앞 대시 중에도 골반을 내린다).
 														// 7 = 몽타주 종류 12 → 13(수류탄 던짐, 컨텐츠 G-4). 칸 꼴은 그대로다. 6 은 거부한다(수류탄 몽타주가 없다).
 														// 6 = 몽타주 종류 8 → 12(대시 앞 · 뒤 · 왼 · 오른, 컨텐츠 D-4) · 몽타주마다 빼기 비중 표 칸(대시 넷 = FastFeet). 5 는 거부한다(대시 몽타주가 없다).
@@ -193,6 +194,7 @@ namespace mo
 		uint8_t additive = 0;
 		bool loop = false;
 		float rootSpeed = 0;
+		float rate = 1;					// 자산 재생 배율(엔진 RateScale, 버전 10). 점프 쌓기 넷만 이 배율로 시각을 흘린다 — 그 밖 클립은 몽타주 · 덮기 클립까지 1 이어야 묶는다(엔진은 몽타주 구간에도 곱한다 · CAnimState::LoadBundle)
 		uint32_t samples = 0;
 		std::vector<ClipMarker> markers;
 		bool hasCurve = false;

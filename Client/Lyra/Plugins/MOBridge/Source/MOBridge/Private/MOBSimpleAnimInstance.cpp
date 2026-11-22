@@ -252,9 +252,9 @@ namespace
 	// 아래는 Lyra 원본 실행값에서 읽은 값이다(animcmp_probe_lyra_probe.csv, 11-06 · 60프레임 · 제자리 점프와 달리며 점프가 같은 값).
 	// 애니 블루프린트를 열어 본 값이 아니라 프레임별 클립 가중치·시각·변수에서 읽은 것 — 「확인」 옆 숫자가 그 근거다
 	constexpr float AIM_BLEND_SPEED = 10.f;		// 조준 보정 바꿈 빠르기(FInterpTo). 확인: 이동 입력이 생기고 0.1초 뒤 가중치 1 → 0.334, 멈추고 2프레임 뒤 0 → 0.305
-	constexpr float JUMP_BLEND_SECONDS = 0.1f;	// 걷기 → 뛰어오름, 오르는 중 → 꼭대기, 꼭대기 → 떨어지는 중. 확인: 가중치 0.07 · 0.26 · 0.50 · 0.74 · 0.93 = 부드러운 곡선
-	constexpr float APEX_LEAD_SECONDS = 0.25f;	// 꼭대기까지 남은 시간이 이보다 짧으면 꼭대기 클립으로. 확인: 0.260 에선 그대로, 0.244 에서 넘어감
-	constexpr float APEX_EXIT_REMAINING = 0.12f;	// 꼭대기 클립이 이만큼 못 남으면 떨어지는 중으로. 확인: 0.133 남았을 땐 그대로, 0.117 남았을 때 넘어감
+	constexpr float JUMP_BLEND_SECONDS = 0.1f;	// 걷기 → 뛰어오름, 오르는 중 → 꼭대기(Lyra T13 · T24 섞기 0.1 — ABP_Mannequin_Base_bp.t3d 5790 · 6126, 원본 기준). 꼭대기 → 떨어지는 중은 APEX_EXIT_REMAINING. 확인: 가중치 0.07 · 0.26 · 0.50 · 0.74 · 0.93 = 부드러운 곡선
+	constexpr float APEX_LEAD_SECONDS = 0.4f;	// 꼭대기까지 남은 시간이 이보다 짧으면 꼭대기 클립으로 — Lyra T24 규칙 TimeToJumpApex < 0.4(ABP_Mannequin_Base_bp.t3d 6126, 원본 기준). 옛 값 0.25 는 소총 실행값 「0.260 에선 그대로, 0.244 에서 넘어감」에서 읽었다 — 소총은 오르는 중에 들어온 프레임에 이미 0.243 이라 문턱이 안 보였다. 권총은 0.277 에서 넘어간다(L-13-b)
+	constexpr float APEX_EXIT_REMAINING = 0.133f;	// 꼭대기 클립이 이만큼 이하로 남으면 떨어지는 중으로, 섞기는 그때 남은 시간만큼 — Lyra T25 자동 규칙 섞기 0.133(ABP_Mannequin_Base_bp.t3d 6174) · 엔진 AnimNode_StateMachine.cpp:847-854 · :70(원본 기준). 확인: 0.133 남았을 땐 그대로, 0.117 남았을 때 넘어감 · 섞기 비중 0.06 · 0.20 · 0.38 …(옛 섞기 0.1 과 다름, L-13-b)
 	constexpr float LAND_FADE_SECONDS = 0.3f;	// 떨어지는 중 → 착지 클립(부드러운 곡선). 확인: 2 · 8 · 13프레임 뒤 0.03 · 0.42 · 0.78
 	// 착지 클립으로 넘어가는 문턱 = 착지 클립 곡선의 시작 거리(203cm). Lyra 의 문턱은 모른다 — 실행값에선 83.5cm 보다 크다는 것만 안다
 	constexpr float LANDED_STAND_SECONDS = 0.15f;	// 땅에 닿은 뒤 서기로(부드러운 곡선, 이동 입력 없음). 확인: 2 · 5 · 8프레임 뒤 0.13 · 0.58 · 0.97
@@ -1090,7 +1090,7 @@ float FMOBSimpleAnimProxy::LandTimeFromDistance(float GroundDistance) const
 
 // 점프 상태 — Lyra 실행값의 차례와 때를 따른다. 넘어갈지는 이번 프레임 입력과 지난 프레임까지 흐른 클립 시각으로 정하고, 정한 뒤 시간을 흘린다
 // (새 상태도 들어온 프레임에 한 프레임만큼 간다 — 실행값이 그랬다)
-//   뛰어오름 →(클립 끝) 오르는 중 →(꼭대기까지 APEX_LEAD_SECONDS 미만) 꼭대기 →(클립이 APEX_EXIT_REMAINING 못 남음) 떨어지는 중 →(땅까지 거리가 착지 클립 곡선 안) 착지 클립
+//   뛰어오름 →(클립 끝) 오르는 중 →(꼭대기까지 APEX_LEAD_SECONDS 미만) 꼭대기 →(클립이 APEX_EXIT_REMAINING 이하 남음 · 그 남은 시간만큼 섞음) 떨어지는 중 →(땅까지 거리가 착지 클립 곡선 안) 착지 클립
 //   착지 클립은 땅까지 거리로 시각을 맞춰 땅에 닿을 때 끝난다. 걸어서 떨어지면(뜰 때 위 속도 ≤ 0) 바로 떨어지는 중.
 //   땅에 닿으면 걷기·서기를 얹고 착지 충격 덧붙임을 시작한다
 void FMOBSimpleAnimProxy::UpdateJump(bool bFalling, bool bAccelerating, float VelZ, float TimeToApex, float GroundDistance, float DeltaSeconds)
@@ -1112,7 +1112,7 @@ void FMOBSimpleAnimProxy::UpdateJump(bool bFalling, bool bAccelerating, float Ve
 			if (TimeToApex < APEX_LEAD_SECONDS) PushJump(JUMP_APEX, JUMP_BLEND_SECONDS);
 			break;
 		case JUMP_APEX:
-			if (JumpLengths[JUMP_APEX] - TopTime < APEX_EXIT_REMAINING) PushJump(JUMP_FALL_LOOP, JUMP_BLEND_SECONDS);
+			if (JumpLengths[JUMP_APEX] - TopTime <= APEX_EXIT_REMAINING) PushJump(JUMP_FALL_LOOP, FMath::Max(JumpLengths[JUMP_APEX] - TopTime, 0.f));
 			break;
 		case JUMP_FALL_LOOP:
 			if (LandDistances.Num() > 0 && GroundDistance < LandDistances[0]) PushJump(JUMP_LAND, LAND_FADE_SECONDS);
@@ -1133,7 +1133,8 @@ void FMOBSimpleAnimProxy::UpdateJump(bool bFalling, bool bAccelerating, float Ve
 	{
 		FJumpLayer& Layer = JumpStack[I];
 		if (bTransitions && I == JumpCount - 1 && Layer.Clip >= kJump) Layer.Time = TransitionClipTime(Layer, DeltaSeconds);
-		else Layer.Time = Layer.Clip == JUMP_LAND && LandDistances.Num() > 0 ? FMath::Max(Layer.Time, LandTimeFromDistance(GroundDistance)) : Layer.Time + DeltaSeconds;
+		else Layer.Time = Layer.Clip == JUMP_LAND && LandDistances.Num() > 0 ? FMath::Max(Layer.Time, LandTimeFromDistance(GroundDistance))
+			: Layer.Time + DeltaSeconds * (Layer.Clip >= 0 && Layer.Clip < kJump && JumpClips[Layer.Clip] ? JumpClips[Layer.Clip]->RateScale : 1.f);	// 자산 시각 — 엔진처럼 자산 재생 배율만큼(소총 떨어지는 중 2배, L-13-b)
 		if (Layer.FadeSeconds > 0.f) Layer.Fade = FMath::Min(Layer.Fade + DeltaSeconds / Layer.FadeSeconds, 1.f);
 	}
 	// 다 덮인 아래 상태는 버린다. 걷기·서기만 남으면 점프 쪽을 끈다
@@ -1420,7 +1421,7 @@ void FMOBSimpleAnimProxy::AppendClipDump(FString& Out, int32 SampleHz, const TSe
 			continue;
 		}
 		const int32 Samples = FMath::CeilToInt32(Entry.Length * SampleHz) + 1;
-		Out += FString::Printf(TEXT("CLIP,%d,%s,%.9g,%d,%d,%.6f,%d\n"), I, *Entry.Clip->GetName(), Entry.Length, Samples, (int32)Entry.Clip->GetAdditiveAnimType(), Entry.RootSpeed, Entry.bLoop ? 1 : 0);
+		Out += FString::Printf(TEXT("CLIP,%d,%s,%.9g,%d,%d,%.6f,%d,%.9g\n"), I, *Entry.Clip->GetName(), Entry.Length, Samples, (int32)Entry.Clip->GetAdditiveAnimType(), Entry.RootSpeed, Entry.bLoop ? 1 : 0, Entry.Clip->RateScale);	// 끝 칸 = 자산 재생 배율(클립 묶음 판 10)
 		for (const FAnimSyncMarker& Marker : Entry.Clip->AuthoredSyncMarkers) Out += FString::Printf(TEXT("MARK,%d,%.6f,%s\n"), I, Marker.Time, *Marker.MarkerName.ToString());
 		for (int32 S = 0; S < Samples; ++S)
 		{

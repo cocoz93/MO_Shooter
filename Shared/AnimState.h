@@ -228,6 +228,7 @@ namespace mo
 		std::vector<float> _stepTimes[kAnimBaseClips];		// 왼발 표시부터 차례로. 클립 끝을 넘어가면 길이를 더해 계속 커진다
 		int _stepCycle = 1;									// 걸음 클립 열둘(허리 · 조준 · 앉음)의 발 표시 수의 최소공배수
 		float _stackLengths[kAnimStackClips] = {};
+		float _jumpRates[kAnimJumpClips] = {};				// 점프 클립 자산 재생 배율(엔진 RateScale) — 칸 시각은 엔진처럼 자산 시각이라 갱신마다 dt × 배율만큼 간다(L-13-b)
 		const std::vector<float>* _transitionDistances[kAnimTransitionClips] = {};
 		const std::vector<ClipMarker>* _transitionMarkers[kAnimTransitionClips] = {};
 		const std::vector<float>* _landDistances = nullptr;
