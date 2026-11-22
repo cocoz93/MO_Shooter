@@ -1,6 +1,8 @@
 param(
     [string]$Tag = 'h1',
-    [string]$ServerArgs = '--warmup=10 --matchSeconds=300',
+    # Human play only: win at 50 kills (user asked 11-22; Lyra's 30 ended games too soon). At the 11-22 pace (30 kills in 252 s, game_jp3)
+    # 50 takes about 420 s, so the 300 s clock would end it first - 600 s lets the score decide. Shared/MatchRules.h keeps Lyra's values.
+    [string]$ServerArgs = '--warmup=10 --matchSeconds=600 --targetScore=50',
     [int]$Bots = 9,
     [string]$BotArgs = '',   # extra BotClient arguments, e.g. '--ads' so remote bodies aim on screen (content C-5)
     [int]$Port = 7791,
