@@ -106,8 +106,9 @@ run_checks() {
 	# 같은 입력 두 누름(L-5-b) — L-1-c 기록 넷(수류탄 l1c1 · l1c2 · 대시 l1cd1 · l1cd2)의 누름 차례를 예측(CSelfPrediction)에 넣어 Lyra 근접 켬 · 끊김 · 막힘 · 대시 · 던짐 ·
 	# 재장전 · 칸 끝 탄창과 대조. 차례 없이 넣은 대조군이 Lyra 와 다른 칸 수(fixedOrderDiff)까지 기준선에 든다. --break 이면 l1cd2 를 빼 합계 줄이 어긋나야 한다
 	# L-12-b 기록 l12b1 = 대시 · 수류탄 짝 둘 · 셋 누름 여섯 · 넷 누름 · 근접 → Q + 쥔 사격(사격 켬 · 탄창까지 대조)
-	local ptags="l1c1 l1c2 l1cd1 l1cd2 l12b1"
-	[ "$BREAK" = 1 ] && ptags="l1c1 l1c2 l1cd1 l12b1"
+	# l12b2 = 같은 각본을 다시 기록 + 사격을 쥔 채 Q 둘(s_fhq2 · s_fhq5 — 수류탄이 사격을 끊고 다음 프레임에 다시 쏨, D156). 사격 켬 프레임 목록(fires=)까지 대조
+	local ptags="l1c1 l1c2 l1cd1 l1cd2 l12b1 l12b2"
+	[ "$BREAK" = 1 ] && ptags="l1c1 l1c2 l1cd1 l12b1 l12b2"
 	"$tools/PressCheck/Release/PressCheck.exe" "$DATA/map_gym.mocl" "$DATA" $ptags > "$OUT/press.log" 2>&1
 	sed 's/^/press /' "$OUT/press.log" >> "$g"
 	for t in expanse gym; do

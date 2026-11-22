@@ -879,7 +879,7 @@ namespace mo
 		weaponInput.reloadBeforeGrenade = slot.reloadBeforeGrenade;
 		weaponInput.dashActive = slot.dashBlocksFire;
 		weaponInput.dashStarted = slot.dashStarted;
-		weaponInput.grenadeThrown = slot.grenadeThrown;		// 도는 재장전만 끊는다(서버 ApplyInput 과 같은 값)
+		weaponInput.grenadeThrown = slot.grenadeThrown;		// 도는 재장전 · 켜져 있던 사격을 끊는다(서버 ApplyInput 과 같은 값)
 		// 서버와 같은 순서(Room.cpp ApplyInput) — 대시가 앞 입력부터 켜져 있으면 쥔 사격을 발사 문 앞에서 뺀다
 		if (weaponInput.fireHeld && weaponInput.dashActive) weaponInput.fireHeld = false;
 		_fireGate.NextInput();
@@ -887,6 +887,7 @@ namespace mo
 		_lastWeaponEvents = _weapons[_weapon].Tick(kTick, weaponInput, motion);
 		_aimCamera.Tick(_ads.active, kTick);
 		if (_lastWeaponEvents.fired) _fireGate.OnFired((EWeapon)_weapon, _weapons[_weapon].GetDef(), kTick);
+		if (_lastWeaponEvents.fireCancelledByGrenade) _fireGate.OnFireCancelled((EWeapon)_weapon);	// 서버와 같다 — OnFired 뒤(Room.cpp ApplyInput)
 	}
 
 	void CSelfPrediction::RememberMove(Slot& slot) const

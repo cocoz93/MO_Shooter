@@ -106,6 +106,7 @@ namespace
 			else if (s == "--debug") out.debug = true;
 			else if (s == "--testNoPawnBlock") out.rules.pawnBlock = false;	// 시험 전용 — 사람끼리 막기를 끈다(MatchRules.h · 봇도 같이 줘야 한다)
 			else if (s == "--testStartAllWeapons") out.rules.startAllWeapons = true;	// 시험 전용 — 세 무기로 부활(무기 줍기 전 동작, MatchRules.h · 봇도 같이 줘야 한다)
+			else if (value("--testGodPlayer=", v)) out.rules.testGodPlayerId = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);	// 시험 전용 — 그 번호 사람 무적(MatchRules.h · 봇도 같이 줘야 한다)
 			else if (s == "--rewindShadow") out.rewind.shadow = true;
 			else if (s == "--rewindLog") out.rewind.log = true;
 			else if (s == "--rewindNoSpread") out.rewind.noSpread = true;
@@ -742,10 +743,10 @@ int main(int argc, char** argv)
 	// 수류탄(G-2) — presses = thrown + onCooldown + whileDash + dead(경기 끝 단계도 던진다 — L-3-b). 겨눔 갈래 넷의 합 = thrown. 터짐 timer + hit + alive(닫을 때 남은 수) = 생긴 수.
 	// ownerLeft = 던진 사람이 나갈 때 살아 있던 수(남김 — L-3-d) · ownerGoneBody = 그 뒤 몸 맞음(안 터짐).
 	// 폭발 과녁 targets = wall + ownerGone + immune + sameTeam + zero + damage(zero = 곡선 피해 0 — 450 안이면 0 보다 커서 0 이어야 한다)
-	std::printf("SERVER grenade presses=%llu thrown=%llu onCooldown=%llu whileDash=%llu dead=%llu aim replaced=%llu noHit=%llu near45=%llu lookAt=%llu lookAtEnd=%llu listFull=%llu cancel melee=%llu meleePush=%llu reload=%llu bounces=%llu stops=%llu detonate timer=%llu hit=%llu alive=%llu ownerLeft=%llu ownerGoneBody=%llu targets=%llu wall=%llu ownerGone=%llu immune=%llu sameTeam=%llu zero=%llu damage=%llu self=%llu kills=%llu\n",
+	std::printf("SERVER grenade presses=%llu thrown=%llu onCooldown=%llu whileDash=%llu dead=%llu aim replaced=%llu noHit=%llu near45=%llu lookAt=%llu lookAtEnd=%llu listFull=%llu cancel melee=%llu meleePush=%llu reload=%llu fire=%llu bounces=%llu stops=%llu detonate timer=%llu hit=%llu alive=%llu ownerLeft=%llu ownerGoneBody=%llu targets=%llu wall=%llu ownerGone=%llu immune=%llu sameTeam=%llu zero=%llu damage=%llu self=%llu kills=%llu\n",
 		(unsigned long long)room.grenadePresses, (unsigned long long)room.grenadeThrown, (unsigned long long)room.grenadeOnCooldown, (unsigned long long)room.grenadeWhileDash, (unsigned long long)room.grenadeDead,
 		(unsigned long long)room.grenadeAimReplaced, (unsigned long long)room.grenadeAimNoHit, (unsigned long long)room.grenadeAimNear45, (unsigned long long)room.grenadeAimLookAt, (unsigned long long)room.grenadeAimLookAtEnd, (unsigned long long)room.grenadeListFull,
-		(unsigned long long)room.grenadeMeleeCancels, (unsigned long long)room.grenadeMeleePushRemoved, (unsigned long long)room.grenadeReloadCancels, (unsigned long long)room.grenadeBounces, (unsigned long long)room.grenadeStops,
+		(unsigned long long)room.grenadeMeleeCancels, (unsigned long long)room.grenadeMeleePushRemoved, (unsigned long long)room.grenadeReloadCancels, (unsigned long long)room.grenadeFireCancels, (unsigned long long)room.grenadeBounces, (unsigned long long)room.grenadeStops,
 		(unsigned long long)room.grenadeDetonateTimer, (unsigned long long)room.grenadeDetonateHit, (unsigned long long)room.grenadeAliveAtClose,
 		(unsigned long long)room.grenadeOwnerLeft, (unsigned long long)room.grenadeOwnerGoneBodyHits, (unsigned long long)room.grenadeTargets, (unsigned long long)room.grenadeWallHits, (unsigned long long)room.grenadeOwnerGoneTargets,
 		(unsigned long long)room.grenadeImmune, (unsigned long long)room.grenadeSameTeam, (unsigned long long)room.grenadeZeroDamage, (unsigned long long)room.grenadeDamageEvents, (unsigned long long)room.grenadeSelfDamage, (unsigned long long)room.grenadeKills);

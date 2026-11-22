@@ -36,6 +36,11 @@ namespace mo
 		// 처음 무기(무기 줍기 W-2) — Lyra 는 권총 하나만 준다(영웅 InitialInventoryItems, D97 · W-0 실측). 세 무기로 시작은 시험 전용 —
 		// 서버 · 봇 --testStartAllWeapons. 세 무기를 전제로 한 기존 시험이 기준선을 지키게 하려고 둔다(Loadout.h)
 		bool startAllWeapons = false;
+
+		// 무적 한 사람 — 시험 전용 서버 --testGodPlayer=번호. 그 번호 사람은 경기 중에도 무적(Room.cpp IsImmune)이라 맞아도 피해가 없다(낙사는 그대로).
+		// 사람이 화면을 보며 확인할 때 봇에 죽지 않게 둔다(사람 판은 Lyra 가 먼저 들어와 1번). 0 = 없음.
+		// 봇도 같이 준다 — 봇 규칙 검사(근접 피해 0 · 무적 중 피해)가 무적을 스스로 셈해서, 안 주면 그 사람의 피해 0 을 잘못으로 센다. 다리는 안 줘도 된다
+		uint32_t testGodPlayerId = 0;
 	};
 
 	inline uint32_t SecondsToTicks(double seconds)

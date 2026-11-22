@@ -682,6 +682,16 @@ namespace mo
 			_reloadLeft = 0;
 			ev.reloadCancelledByGrenade = true;
 		}
+		// 켜져 있던 사격(방금 쏜 발 포함)도 끝난다 — 던짐 몽타주가 쏘기 몽타주를 끊고, 사격 능력은 몽타주가 끊기면 끝난다
+		// (GA_Weapon_Fire 몽타주 재생 노드의 OnInterrupted · OnCancelled → K2_EndAbility, 원본 기준). 그래서 쥔 방아쇠는 다음 입력에 다시 쏜다 —
+		// Lyra 혼자 기록 ghold(L-6-a 미결): 쏨 475 · 던짐 480 · 다음 발 481, 평소 간격 8프레임이 6 으로(실측). 사격 능력이 켜져 있으면 쏘기 몽타주도 도는 중이다(FireDelay · 몽타주 중 먼저 끝나는 쪽에 끝남)
+		if (input.grenadeThrown && _fireActive)
+		{
+			_fireActive = false;
+			_fireLeft = 0;
+			_fireMontageLeft = 0;
+			ev.fireCancelledByGrenade = true;
+		}
 
 		// 대시가 켜지는 입력 — 켜져 있던 사격(방금 쏜 발 포함)과 도는 재장전을 끊는다(대시의 끊기 태그 Ability.Type.Action). 타이머 앞이라 끊긴 재장전은 탄이 안 들어간다
 		const bool dashBlocks = input.dashActive || input.dashStarted;

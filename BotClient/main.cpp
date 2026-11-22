@@ -9,6 +9,7 @@
 //   --script=startstop [--scriptHold=초] [--scriptWeapon=pistol|rifle|shotgun] = 화면 판정 촬영. 서버 --debug 로 애니 비교 촬영의 시작 자리에 서서, 그 촬영과 같은 경로를 달린다. 쏘지 않는다
 //   --script=events [--scriptHold=초] [--scriptWeapon=...] = 9단계 사건 경로(쏘기 · 당겨 쏘기 · 위아래 겨눠 쏘기 · 재장전 · 재장전 중 쏘기 · 무기 바꾸기). 애니 비교 사건 경로와 같은 조각 · 사건 프레임. 부활은 없다.
 //   --script=crouch [--scriptHold=초] [--scriptWeapon=...] = 앉기 경로(컨텐츠 D-6 나란히 영상). 애니 비교 앉기 경로(-MOBACScript=crouch)와 같은 조각 · 사건 프레임 — 앉기 · 일어서기 · 조준 · 한 발 · 앉은 데서 점프
+//   --script=grenade [--scriptHold=초] [--scriptWeapon=...] = 수류탄 경로(L-6-a) — 안 쏘고 던짐 · 쏘고 0.3초 · 0.1초 뒤 던짐 · 당긴 채 던짐 · 달리며 쏘고 던짐. 애니 비교 쪽 짝 없음
 //     경로 모드는 받은 자기 몽타주 칸을 상태마다 SCRIPTANIM 줄로 찍는다(Tools/LyraPilot/check_script_anim.py 가 Lyra 기록과 견준다)
 //
 // 판정은 하지 않는다 — 입력을 보내고 받은 것을 적어 맞춰 볼 뿐이다.
@@ -144,6 +145,7 @@ namespace
 		bool meleeNear = false;			// --melee — 적이 가까이 보이면 근접 단추를 누른다(E-3). 꺼져 있으면 기존 시험과 같은 입력
 		bool pawnBlock = true;			// 사람끼리 막기(D83 늘 켬) — 예측이 남 캡슐을 보고 어긋나면 고친다. --testNoPawnBlock(시험 전용 · 서버도 같이)이면 끄고 위치 차이 0 을 엄격히 본다
 		bool startAllWeapons = false;	// --testStartAllWeapons(시험 전용 · 서버도 같이) — 세 무기로 부활(무기 줍기 전 동작). 예측의 가방이 서버와 같게(W-2)
+		uint32_t testGodPlayer = 0;		// --testGodPlayer=번호(시험 전용 · 서버도 같이) — 그 번호는 늘 무적. 규칙 검사(피해 0 · 무적 중 피해)가 서버 IsImmune 과 같게
 		bool push = false;				// --push — 쏘지 않고 가장 가까운 사람 쪽으로 걷는다(F-2 보정 양 측정)
 		bool breakMelee = false;			// --breakMelee — 화면 판정 밀기를 반으로(일부러 틀림)
 		bool dash = false;				// --dash — 가끔 대시를 누른다(D-3). 꺼져 있으면 기존 시험과 같은 입력
@@ -166,7 +168,8 @@ namespace
 	// 경로 안의 사건 — MOBAnimCompareSubsystem.cpp EACEvent 와 같은 뜻. Fire = 방아쇠를 kScriptFireTapTicks 동안 · Hold/Release = 당긴 채 두기/놓기
 	// Swap = 경로 무기가 권총이면 소총, 아니면 권총으로 · Back = 경로 무기로. 부활은 봇이 입력으로 낼 길이 없어 없다(그쪽은 부활 효과 능력만 다시 튼다)
 	// CrouchOn · CrouchOff = 앉기 단추 한 번(이미 그 상태면 안 누른다 — 그쪽 SetFoeCrouch 와 같다) · AdsOn · AdsOff = 조준 단추를 누른 채 두기 · 놓기(D-6)
-	enum class EScriptEvent : uint8_t { None, Fire, Hold, Release, Reload, Swap, Back, CrouchOn, CrouchOff, AdsOn, AdsOff };
+	// Grenade = 수류탄 단추를 입력 하나에만(GameProtocol.h BUTTON_GRENADE) — 그쪽 짝이 없다(수류탄 경로 전용, 아래 kGrenadeScript)
+	enum class EScriptEvent : uint8_t { None, Fire, Hold, Release, Reload, Swap, Back, CrouchOn, CrouchOff, AdsOn, AdsOff, Grenade };
 	constexpr uint32_t kScriptFireTapTicks = 3;	// 그쪽 FIRE_TAP_SECONDS 0.05초 = 3프레임
 	constexpr uint32_t kScriptJumpTicks = 6;	// 그쪽 JUMP_PRESS_SECONDS 0.1초 = 6프레임 — 조각 처음부터 누른다
 	// 사건을 넣는 틱 = 기록 프레임 + 이 값. 몽타주 사건은 + 1(ThinkScript 주석). 앉기는 + 0 — 기록 도구가 프레임 끝에 이동 입력과 ToggleCrouch 를 같이 넣어 둘 다 다음 프레임 이동에서 먹는다
@@ -267,6 +270,21 @@ namespace
 		{ "stop_end", 121, false, 0 },
 		{ "idle_end", 121, false, 0, 0.f, 0.f, 2.0f, SE::CrouchOff, 0 },
 	};
+	// 수류탄 경로 — 쏘고 곧바로 던질 때 받는 화면의 왼팔(lyra-match L-6-a 사람 확인)을 고정 카메라로 찍는다. 애니 비교 쪽 짝이 없다(Lyra 기록과 견주지 않는다).
+	// 던짐 사이는 쿨다운(Grenade.h kGrenadeCooldownInputs 301) 넘게 — 조각 331틱 · 당긴 채 던짐은 61 + 300 틱. 안 쏘고 던짐이 견줄 기준이다.
+	// 쏨 → 던짐 간격 0.3초(18틱) · 0.1초(6틱)는 사람 확인 문구 「0.5초 안」 안의 두 값(제 판단). 움직이는 조각은 맨 뒤 하나 — 고정 카메라 촬영은 첫 움직임 뒤 길이로 끝을 정한다
+	// (첫 움직임 뒤 543틱 = 9.05초, record_remote_shot.ps1 -Script grenade). 옆으로 달린다 — 앞으로 달리면 5초 동안 떨어진 수류탄 자리를 지나 제 수류탄에 맞는다
+	constexpr ScriptStep kGrenadeScript[] = {
+		{ "idle", 121, false, 0 },
+		{ "g_plain", 331, false, 0, 0.f, 0.f, 0.f, SE::Grenade, 30 },
+		{ "g_fire03", 331, false, 0, 0.f, 0.f, 0.f, SE::Fire, 0, SE::Grenade, 18 },
+		{ "g_fire01", 331, false, 0, 0.f, 0.f, 0.f, SE::Fire, 0, SE::Grenade, 6 },
+		{ "g_hold", 61, false, 0, 0.f, 0.f, 0.f, SE::Hold, 0, SE::Grenade, 30 },
+		{ "g_hold_rel", 300, false, 0, 0.f, 0.f, 0.f, SE::Release, 0 },
+		{ "g_run_fire", 331, true, 90, 0.f, 0.f, 0.f, SE::Fire, 17, SE::Grenade, 35 },
+		{ "stop_g", 121, false, 0 },
+		{ "idle_end", 91, false, 0 },
+	};
 	const Vec3 kScriptHome(-1020.0, -1070.0, 142.0);	// MOBAnimCompareSubsystem.cpp FIXED_HOME
 	constexpr float kScriptYaw = 180.f;					// MOBAnimCompareSubsystem.cpp FIXED_YAW
 
@@ -360,6 +378,7 @@ namespace
 		uint64_t post = 0;				// 경기 끝 단계 근접 — 서버도 켠다(L-3-b — Lyra 는 맵을 다시 열기 한 틱 전까지 능력 입력을 안 막는다). 그 갈래를 지났나
 		uint64_t badDamage = 0;			// 근접 피해 소식이 바로 앞 근접 맞음(공격자 · 대상 · 양 · 틱)과 다르거나 앞 맞음 없이 옴
 		uint64_t badZero = 0;			// 경기 중 · 무적 아닌 상대를 맞혔는데 피해 0
+		uint64_t godZero = 0;			// 경기 중 시험 무적(--testGodPlayer)을 맞혀 피해 0 — 그 갈래를 지났나(badZero 에서 빠진 몫)
 		double forceDiffMax = 0;		// 화면 판정 밀기 힘 ↔ 서버 힘 차이의 최댓값(내 근접, 결과가 같은 것 · 다른 것 모두)
 	};
 
@@ -387,6 +406,7 @@ namespace
 		to.post += from.post;
 		to.badDamage += from.badDamage;
 		to.badZero += from.badZero;
+		to.godZero += from.godZero;
 		to.forceDiffMax = std::max(to.forceDiffMax, from.forceDiffMax);
 	}
 
@@ -684,6 +704,11 @@ namespace
 				_scriptSteps = kCrouchScript;
 				_scriptStepCount = sizeof(kCrouchScript) / sizeof(kCrouchScript[0]);
 			}
+			else if (name == "grenade")
+			{
+				_scriptSteps = kGrenadeScript;
+				_scriptStepCount = sizeof(kGrenadeScript) / sizeof(kGrenadeScript[0]);
+			}
 			else
 			{
 				_scriptSteps = kStartStopScript;
@@ -936,13 +961,16 @@ namespace
 			}
 		}
 
+		// 시험 전용 --testGodPlayer(MatchRules.h) — 서버 IsImmune 처럼 그 번호는 경기 내내 무적으로 본다
+		bool IsGod(uint32_t playerId) const { return _rules.testGodPlayerId != 0 && playerId == _rules.testGodPlayerId; }
+
 		void OnDamage(const wire::Damage& damage)
 		{
 			++_checks.damages;
 			// 경기가 끝나는 틱의 앞선 탄은 정상이다 — 그 틱 안에서 승리가 난다
 			if (_playTick == 0 || damage.tick < _playTick || (_postTick != 0 && damage.tick > _postTick)) ++_checks.damageOutsidePlaying;
 			const auto spawned = _spawnTick.find(damage.target);
-			if (spawned != _spawnTick.end() && damage.tick < spawned->second + SpawnImmunityTicks(_rules)) ++_checks.damageWhileImmune;
+			if (IsGod(damage.target) || (spawned != _spawnTick.end() && damage.tick < spawned->second + SpawnImmunityTicks(_rules))) ++_checks.damageWhileImmune;
 			// 도움 셈 — 0보다 큰 피해만 알림이 오고(LyraHealthSet), 받은 차례 그대로 든다.
 			// 자기 피해(수류탄)도 든다 — AssistProcessor 의 「시킨 쪽 ≠ 맞은 쪽」은 몸 · 선수 상태라 늘 다르다(G-0-b2 실측 · 서버 NoteDamage 와 같은 규칙, D112)
 			if (damage.amount > 0)
@@ -1005,8 +1033,9 @@ namespace
 					// 피해 0 은 무적일 때만(서버 IsImmune — 경기 중이 아님 · 부활 무적). OnDamage 의 대기 · 무적 피해 검사와 반대 방향
 					const bool playing = _playTick != 0 && melee.tick >= _playTick && (_postTick == 0 || melee.tick <= _postTick);
 					const auto spawned = _spawnTick.find(melee.target);
-					const bool immune = spawned != _spawnTick.end() && melee.tick < spawned->second + SpawnImmunityTicks(_rules);
+					const bool immune = IsGod(melee.target) || (spawned != _spawnTick.end() && melee.tick < spawned->second + SpawnImmunityTicks(_rules));
 					if (playing && !immune) ++c.badZero;
+					if (playing && IsGod(melee.target)) ++c.godZero;
 				}
 			}
 			if (melee.attacker != _welcome.playerId) return;
@@ -1919,6 +1948,7 @@ namespace
 				break;
 			case EScriptEvent::AdsOn: _scriptAdsHeld = true; break;
 			case EScriptEvent::AdsOff: _scriptAdsHeld = false; break;
+			case EScriptEvent::Grenade: input.buttons |= wire::BUTTON_GRENADE; break;
 			case EScriptEvent::None: break;
 			}
 			std::printf("SCRIPT event=%d tick=%u weapon=%u\n", (int)ev, _scriptTick - 1, (unsigned)_scriptCurWeapon);
@@ -2536,6 +2566,7 @@ namespace
 			}
 			else if (s == "--testNoPawnBlock") out.pawnBlock = false;
 			else if (s == "--testStartAllWeapons") out.startAllWeapons = true;
+			else if (value("--testGodPlayer=", v)) out.testGodPlayer = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
 			else if (s == "--push") out.push = true;
 			else if (s == "--breakMelee") out.breakMelee = true;
 			else if (s == "--breakRecord") out.breakRecord = true;
@@ -2550,7 +2581,7 @@ namespace
 				return false;
 			}
 		}
-		if (!out.script.empty() && out.script != "startstop" && out.script != "events" && out.script != "crouch")
+		if (!out.script.empty() && out.script != "startstop" && out.script != "events" && out.script != "crouch" && out.script != "grenade")
 		{
 			std::printf("모르는 경로 %s\n", out.script.c_str());
 			return false;
@@ -2579,6 +2610,7 @@ int main(int argc, char** argv)
 	MatchRules rules;
 	rules.pawnBlock = args.pawnBlock;
 	rules.startAllWeapons = args.startAllWeapons;
+	rules.testGodPlayerId = args.testGodPlayer;
 
 	JudgeShared judge;
 	const bool judging = !args.judgeClips.empty();
@@ -2980,8 +3012,8 @@ int main(int argc, char** argv)
 			u(melee.presses), u(melee.judged), u(melee.screen[0]), u(melee.screen[1]), u(melee.screen[2]), u(melee.screen[3]), u(melee.mine), u(melee.mineHitForce), u(melee.mineHitNoForce), u(melee.agree), u(melee.kindDiff), u(melee.targetDiff), melee.forceDiffMax, u(melee.noGuess), u(melee.guessNoResult));
 		std::printf("BOT meleeFix started=%llu pushesGiven=%llu pushesIgnored=%llu results=%llu noSlot=%llu startMismatches=%llu hitFixes=%llu forceFixes=%llu unconfirmed=%llu rerunsMissed=%llu\n",
 			u(meleeFixes.started), u(meleeFixes.pushesGiven), u(meleeFixes.pushesIgnored), u(meleeFixes.results), u(meleeFixes.resultsNoSlot), u(meleeFixes.startMismatches), u(meleeFixes.pushHitFixes), u(meleeFixes.pushForceFixes), u(meleeFixes.unconfirmed), u(meleeFixes.rerunsMissed));
-		std::printf("BOT meleeRules msgs=%llu hits=%llu damaged=%llu zero=%llu damageMsgs=%llu kills=%llu pendingLeft=%llu post=%llu | bad shape=%llu dead=%llu damage=%llu zero=%llu\n",
-			u(melee.msgs), u(melee.hits), u(melee.hitsDamaged), u(melee.hitsZero), u(melee.damageMsgs), u(melee.kills), u(meleePendingLeft), u(melee.post), u(melee.badShape), u(melee.badDead), u(melee.badDamage), u(melee.badZero));
+		std::printf("BOT meleeRules msgs=%llu hits=%llu damaged=%llu zero=%llu damageMsgs=%llu kills=%llu pendingLeft=%llu post=%llu godZero=%llu | bad shape=%llu dead=%llu damage=%llu zero=%llu\n",
+			u(melee.msgs), u(melee.hits), u(melee.hitsDamaged), u(melee.hitsZero), u(melee.damageMsgs), u(melee.kills), u(meleePendingLeft), u(melee.post), u(melee.godZero), u(melee.badShape), u(melee.badDead), u(melee.badDamage), u(melee.badZero));
 		// 대시(D-3) — mine 합 = 서버 SERVER dash started(봇만 든 판). dashDiff = 서버 소식으로 고친 대시(켬 어긋남 + 방향 · 힘 + 소식 없이 지나감), 봇 판 기대 0. unconfirmedPost = 그중 경기 끝 단계 몫(기대 0 — L-3-b).
 		// pressed = 봇이 누른 입력, predPresses = 예측이 센 누름(같아야 한다). kinds = 앞 · 뒤 · 왼 · 오른 · 위 보고 앞 · 아래 보고 앞, dir = 서버가 고른 방향(앞 · 뒤 · 왼 · 오른)
 		// respawn = 부활 다시 돌리기에서 켜짐이 바뀐 칸(늘어남/줄어듦). 서버 켬 = mine = predStarted + 늘어남 − 줄어듦 + startMismatches − unconfirmed − unconfirmedDead(죽은 줄 모르고 켠 몫)

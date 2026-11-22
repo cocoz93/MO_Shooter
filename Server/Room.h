@@ -207,6 +207,7 @@ namespace mo
 		uint64_t grenadeMeleeCancels = 0;	// 던진 입력에 끊은 근접(던짐 몽타주가 근접 몽타주를 바꿔 낌 — G-0-c)
 		uint64_t grenadeMeleePushRemoved = 0;	// 그중 밀기 힘 번호가 있어 지움(대시 끊기와 같은 길)
 		uint64_t grenadeReloadCancels = 0;	// 던진 입력에 끊은 재장전(탄이 안 들어감)
+		uint64_t grenadeFireCancels = 0;	// 던진 입력에 끊은 사격 능력(그 입력에 쏜 발 포함) — 쥔 방아쇠는 다음 입력에 다시 쏜다(L-6-a 미결)
 		uint64_t grenadeReloadPressCuts = 0;	// 같은 입력에 수류탄보다 먼저 누른 재장전을 켜자마자 끊음(L-5-a · L-1-c reload_q 탄창 4 → 4)
 		uint64_t grenadeAnimAfterFire = 0;	// 같은 입력에 쏘기가 있어 쏘기 사건을 던짐 사건 앞에 끼운 수(G-4-b) — 아래 fireAnimBeforeAbility 중 던짐이 있던 입력
 		uint64_t fireAnimBeforeAbility = 0;	// 같은 입력에 켠 능력(근접 · 대시 · 수류탄) 사건 앞에 쏘기 사건을 끼운 수(L-12-b)

@@ -363,7 +363,9 @@ namespace
 	// G-0-c 섞어 누름(묶음 13~16) — Spam = 칸 안 GREN_PRESS_AT ~ GREN_SPAM_UNTIL 동안 매 프레임 Q(떼지 않음) · QFire / FireQ = 한 프레임에 Q 와 사격 탭(앞이 먼저 누름) ·
 	// ReloadQ · DashQ · MeleeQ = 그 능력을 누르고, 켜진 뒤 GrenComboSpec 의 QAfter 프레임에 Q
 	// L-1-c(미결 5 · 22) — …Same = 한 프레임 안에 두 누름(이름 차례 = 누르는 차례, 켜진 뒤 기다림 없음)
-	enum class EGrenCombo : uint8 { None, Spam, QFire, FireQ, ReloadQ, DashQ, MeleeQ, MeleeQSame, QMeleeSame, ReloadQSame, QReloadSame, CrouchQ, DashQSame, QDashSame, SeqMDG, SeqMGD, SeqDMG, SeqDGM, SeqGMD, SeqGDM, SeqRMGD, MeleeQFireSame };
+	enum class EGrenCombo : uint8 { None, Spam, QFire, FireQ, ReloadQ, DashQ, MeleeQ, MeleeQSame, QMeleeSame, ReloadQSame, QReloadSame, CrouchQ, DashQSame, QDashSame, SeqMDG, SeqMGD, SeqDMG, SeqDGM, SeqGMD, SeqGDM, SeqRMGD, MeleeQFireSame, FireHoldQ2, FireHoldQ5 };
+	// L-6-a 미결(D156) — FireHoldQ2 · Q5 = 사격을 쥐고(fire_press) 첫 발이 켜지고 GrenComboSpec 의 QAfter(2 · 5) 프레임에 Q, Q 뒤 GREN_FIRE_HOLD_AFTER_Q 프레임에 사격을 뗀다.
+	// 켜져 있던 사격을 수류탄이 끊으면 쥔 방아쇠가 몇 프레임에 다시 쏘나를 본다(2 = 연사 문지기 안 · 5 = 문지기 밖, Weapon.h OnFireCancelled)
 	// L-12-b 같은 프레임 여럿 누름(DashQSame ~ MeleeQFireSame) — 누를 것과 차례는 GrenComboSeq 글자(M 근접 · D 대시 · G 수류탄 · R 재장전 · F 사격). 다른 능력이 하나가 아니라
 	// GrenComboSpec 은 비고(GCOMBO other=-) 켜짐은 능력 알림(MOB_CPROBE_GABIL)으로 본다. 누름 사건 이름 = m_press · dash_press · g_press · r_press · fire_press(PressCheck 가 읽음)
 	// CrouchQ(L-12-a) = 앉기 키(ToggleCrouch) 뒤 칸 Arg 프레임에 Q — 앉기 시작 때 camBack 을 본다
@@ -502,6 +504,9 @@ namespace
 		{ TEXT("s_gdm"),              EGrenPlace::FoeAt,       45.f,  150.f, false, false, 0.f,  0.f,  -1, -1, EGrenCombo::SeqGDM },	// 99
 		{ TEXT("s_rmgd"),             EGrenPlace::FoeAt,       45.f,  150.f, false, false, 0.f,  0.f,  -1, -1, EGrenCombo::SeqRMGD },	// 100
 		{ TEXT("s_mgf"),              EGrenPlace::FoeAt,       45.f,  150.f, false, false, 0.f,  0.f,  -1, -1, EGrenCombo::MeleeQFireSame },	// 101
+		// L-6-a 미결 — 사격을 쥔 채 Q(s_mgf 와 같은 세움 · 피치 45 로 상대 위로 던짐)
+		{ TEXT("s_fhq2"),             EGrenPlace::FoeAt,       45.f,  150.f, false, false, 0.f,  0.f,  -1, -1, EGrenCombo::FireHoldQ2 },	// 102
+		{ TEXT("s_fhq5"),             EGrenPlace::FoeAt,       45.f,  150.f, false, false, 0.f,  0.f,  -1, -1, EGrenCombo::FireHoldQ5 },	// 103
 	};
 	// L-1-a 옮겨 놓을 자리 · 속도 — 값은 Shared 탄체 걸음으로 골랐다(리포 밖 C:\tmp\mob\lm\l1a\search — 집 수평 던짐 회전 1.1957 · 1.5889 · 0 의 캡슐로
 	// 면까지 틈을 재고, 소수 여섯째 자리로 자른 값 그대로 걸어 그 갈래가 나고 이웃 값에서도 나는 자리). 정답지는 이 값의 Lyra 기록이다.
@@ -825,6 +830,11 @@ namespace
 		{ TEXT("s_rmgd"),     5.1f, EAct::GrenThrow, 100.f, false },
 		{ TEXT("s_ammo2"),    0.3f, EAct::SetAmmo,   1.f,  false },	// 권총 4 · 48
 		{ TEXT("s_mgf"),      5.1f, EAct::GrenThrow, 101.f, false },
+		// L-6-a 미결(D156) — 사격을 쥔 채 Q 둘. 탄창을 채워 쥔 사격이 칸 안에서 비지 않게 한다(쏨 넷 — 아래 GREN_FIRE_HOLD_AFTER_Q 주석)
+		{ TEXT("s_ammo3"),    0.3f, EAct::SetAmmo,   4.f,  false },	// 권총 12 · 48
+		{ TEXT("s_fhq2"),     5.1f, EAct::GrenThrow, 102.f, false },
+		{ TEXT("s_ammo4"),    0.3f, EAct::SetAmmo,   4.f,  false },	// 권총 12 · 48
+		{ TEXT("s_fhq5"),     5.1f, EAct::GrenThrow, 103.f, false },
 	};
 	const FStep GRENADE_L2C_SCRIPT[] = {
 		{ TEXT("settle"),     1.0f, EAct::Home,      0.f,  false },
@@ -856,6 +866,11 @@ namespace
 	// 섞어 누름 칸(G-0-c) — 매 프레임 Q 를 그치는 칸 안 시각(16초 = 누름 시작 0.5초 + 쿨다운 5초 셋 + 여유 0.5초 → 간격이 301 이어도 생김 넷) · 재장전이 켜지고 Q 까지(제안값)
 	constexpr float GREN_SPAM_UNTIL = 16.0f;
 	constexpr int32 GREN_RELOAD_Q_AFTER = 10;
+	// 사격을 쥔 채 Q 칸(L-6-a 미결) — 첫 발이 켜지고 Q 까지(GrenComboSpec QAfter) · Q 뒤 사격을 떼기까지. 2 = 던짐이 첫 발 +3 이라 연사 문지기(쏜 입력 +7 까지 막음) 안,
+	// 5 = 던짐 +6 · 다시 쏨 +7 이라 문지기 밖. 둘 다 권총 평소 간격(9프레임) 안이라 던질 때 사격이 켜져 있다. 24 = 던진 뒤 쏨 셋(+1 · +10 · +19 짐작)이 들어가는 길이(제안값)
+	constexpr int32 GREN_FIRE_HOLD_Q_EARLY = 2;
+	constexpr int32 GREN_FIRE_HOLD_Q_LATE = 5;
+	constexpr int32 GREN_FIRE_HOLD_AFTER_Q = 24;
 	// G-0-c2 — 첫 수류탄이 멈추고 둘째 Q 까지 · 둘째를 놓을 높이(첫째 가운데 위) · 아래로 속도. 걷기 = 수류탄 뒤 거리 · 순간이동 뒤 쉼 · 걷는 프레임(제안값).
 	// 집으로 돌아가는 프레임(멈춤 + 1 + 10 + 40 = 멈춤 + 51, g0t1 16610 → 16661)이 터짐(생김 + 120 = 멈춤 + 74) 전이라 폭발에 안 걸린다(집 ↔ 멈춘 자리 약 900cm > 450)
 	constexpr int32 TOUCH_DROP_AFTER = 2;
@@ -899,6 +914,9 @@ namespace
 		case EGrenCombo::QMeleeSame:  return { TEXT("InputTag.Ability.Melee"), TEXT("GA_Melee"),          -1 };
 		case EGrenCombo::ReloadQSame:
 		case EGrenCombo::QReloadSame: return { TEXT("InputTag.Weapon.Reload"), TEXT("GA_Weapon_Reload_"), -1 };
+		// 사격은 PressOther 가 아니라 PressSeqKey('F') 로 누른다(누름 사건 이름 fire_press — PressCheck 가 쥔 사격으로 읽음). 능력 이름은 켜짐 가장자리(otherStart)만 본다
+		case EGrenCombo::FireHoldQ2: return { TEXT("InputTag.Weapon.Fire"), TEXT("GA_Weapon_Fire"), GREN_FIRE_HOLD_Q_EARLY };
+		case EGrenCombo::FireHoldQ5: return { TEXT("InputTag.Weapon.Fire"), TEXT("GA_Weapon_Fire"), GREN_FIRE_HOLD_Q_LATE };
 		case EGrenCombo::DashQSame:
 		case EGrenCombo::QDashSame:
 		case EGrenCombo::SeqMDG:
@@ -938,6 +956,8 @@ namespace
 		case EGrenCombo::SeqGDM: return TEXT("gdm_same");
 		case EGrenCombo::SeqRMGD: return TEXT("rmgd_same");
 		case EGrenCombo::MeleeQFireSame: return TEXT("mgf_same");
+		case EGrenCombo::FireHoldQ2: return TEXT("fire_hold_q2");
+		case EGrenCombo::FireHoldQ5: return TEXT("fire_hold_q5");
 		case EGrenCombo::CrouchQ:     return TEXT("crouch_q");
 		case EGrenCombo::None:    break;
 		}
@@ -4258,6 +4278,26 @@ void UMOBContentProbeSubsystem::DuringGrenCombo()
 		else if (GrenPressFrame >= 0 && Frame == GrenPressFrame + 1)
 			for (const TCHAR* K = GrenComboSeq(G.Combo); *K; ++K) PressSeqKey(*K, false);
 		break;
+	case EGrenCombo::FireHoldQ2:
+	case EGrenCombo::FireHoldQ5:
+	{
+		// 사격을 쥐고(떼지 않음) 첫 발이 켜진 프레임(otherStart) + QAfter 에 Q, 다음 프레임에 Q 만 뗀다. 사격은 Q 뒤 GREN_FIRE_HOLD_AFTER_Q 프레임에 뗀다 —
+		// 사격이 안 켜져 Q 를 못 누르면 누르고 60프레임(1초)에 뗀다(다음 칸까지 쥐지 않게)
+		if (ComboOtherPress < 0 && StepTime >= GREN_PRESS_AT)
+		{
+			PressSeqKey(TEXT('F'), true);
+			ComboOtherPress = Frame;
+		}
+		if (GrenPressFrame < 0 && ComboOtherStart >= 0 && Frame >= ComboOtherStart + C.QAfter) PressQ();
+		else if (GrenPressFrame >= 0 && Frame == GrenPressFrame + 1)
+		{
+			PressTag(GREN_TAG, false);
+			FrameEvents += TEXT("g_release;");
+		}
+		const int32 FireReleaseAt = GrenPressFrame >= 0 ? GrenPressFrame + GREN_FIRE_HOLD_AFTER_Q : ComboOtherPress + 60;
+		if (ComboOtherPress >= 0 && Frame == FireReleaseAt) PressSeqKey(TEXT('F'), false);
+		break;
+	}
 	case EGrenCombo::ReloadQ:
 	case EGrenCombo::DashQ:
 	case EGrenCombo::MeleeQ:

@@ -54,7 +54,7 @@ namespace mo
 			CDashAbility dashAfter;		// 이 입력 뒤 대시 상태 — 다시 고르기(ReplayDash)의 앞 칸
 			// 수류탄(G-3) — 쿨다운만 서버와 같은 입력 수로 돌려 「이 입력에 던졌다」를 낸다(수류탄 자체는 예측 안 함, grenade-plan 「예측」).
 			// 서버는 죽은 입력에도 쿨다운을 세고 부활에 안 지운다 — 부활 대기 입력까지 칸마다 grenadeAfter 를 남겨 한 사슬로 잇는다
-			bool grenadeThrown = false;		// 이 입력에 던졌다 — 무기 쪽 재장전 끊기 · 걸음 쪽 근접 밀기 지우기가 읽는다
+			bool grenadeThrown = false;		// 이 입력에 던졌다 — 무기 쪽 재장전 · 사격 끊기 · 걸음 쪽 근접 밀기 지우기가 읽는다
 			bool grenadeCutMelee = false;	// 던지며 근접을 끊었다 — 걸음 쪽이 그 근접의 밀기 힘을 지운다(서버 ThrowGrenade)
 			bool grenadeDead = false;		// 부활을 기다리는 동안 넣은 입력 — 서버 죽은 갈래처럼 쿨다운만 준다(OnSpawn 이 새 몸으로 다시 돌리면 꺼짐)
 			bool grenadeTicks = true;		// 수류탄 입력 수를 센다 — 자리 옮기기 칸은 서버도 안 센다(ApplyPlace)

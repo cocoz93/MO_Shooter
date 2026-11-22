@@ -14,7 +14,10 @@
 //   근접 켬(Lyra GABIL on GA_Melee) · 같은 입력에 끊김(on 과 end 가 같은 프레임) · 막힘(fail) / 대시 켬 / 던짐 / 재장전 켬(on 이고 그 프레임에 안 끝남) ·
 //   재장전 누름 끊김(on 과 end 가 같은 프레임 — 예측은 reloadPressCutByGrenade, 또는 재장전이 같은 입력에 켠 근접 · 대시보다 먼저 눌려 켤 수 있었는데 안 켜짐:
 //   예측은 그 차례를 막음으로 다루고(D127 ④ — 탄 · 재장전 사건이 없어 결과 같음, L-12-b s_rmgd 탄창 4 → 4) 이 도구가 끊김으로 읽는다 · 칸 수 reloadCutByOrder) / 사격 켬(GA_Weapon_Fire on — 예측은 무기 순환 fired) / 칸 끝 탄창(GCOMBO magEnd, 있을 때만)
+//   사격이 켜진 프레임 목록(GABIL on GA_Weapon_Fire 전부 — 예측은 fired 가 난 입력의 프레임)
 //   몽타주는 예측에 없어 안 본다(서버 몽타주는 ServerProbe --pressCells, L-5-a)
+// 쥔 사격 칸(GCOMBO combo=fire_hold_* — L-6-a 미결 · D156, 사격을 쥔 채 Q)은 같은 입력 두 누름이 없어 multi 를 안 바라고, 대신 예측이 그 칸에서 수류탄으로 사격을 끊어야
+//   한다(fireCancelledByGrenade 가 한 번 이상 — 없으면 끊기 길을 안 거친 칸이라 FAIL)
 // 대조군 = 같은 입력을 차례 없이(pressOrder 0 → 판 13 고정 차례 대시 → 수류탄 → 근접) 한 번 더 — Lyra 와 다른 칸이 0 이면 이 대조가 차례를 못 본다(FAIL)
 // 끝 코드: 0 = 전부 통과, 1 = 불일치, 2 = 입력 오류
 #include "GameProtocol.h"
@@ -93,9 +96,13 @@ namespace
 	{
 		AbilityTimes melee, dash, grenade, reload, fire;
 		std::string act, other;		// DCOMBO act= · GCOMBO other=
+		std::string comboName;		// GCOMBO combo=(fire_hold_* = 쥔 사격 칸)
+		std::vector<int> fireOns;	// 사격 켬 프레임 전부(fire.on 은 처음 것만)
 		int magBegin = -1, magEnd = -1;
 		bool combo = false;			// 칸 결과 줄(DCOMBO · GCOMBO)이 있다 = 두 누름 칸. 없는 s_ 칸(탄 준비 s_ammo1 · 2)은 안 본다
 	};
+
+	bool IsFireHoldStep(const LyraStep& s) { return s.comboName.compare(0, 9, "fire_hold") == 0; }
 
 	AbilityTimes* Pick(LyraStep& s, const std::string& ability)
 	{
@@ -112,18 +119,22 @@ namespace
 		bool meleeOn = false, meleeCut = false, meleeBlocked = false;
 		bool dashOn = false, grenadeOn = false, reloadOn = false, reloadCut = false, fireOn = false;
 		int mag = -1;		// −1 = 안 견줌
+		std::vector<int> fires;		// 사격이 켜진 프레임(Lyra GABIL on · 예측 fired 입력의 표 프레임)
 
 		bool operator==(const Outcome& o) const
 		{
 			return meleeOn == o.meleeOn && meleeCut == o.meleeCut && meleeBlocked == o.meleeBlocked && dashOn == o.dashOn &&
-				grenadeOn == o.grenadeOn && reloadOn == o.reloadOn && reloadCut == o.reloadCut && fireOn == o.fireOn && mag == o.mag;
+				grenadeOn == o.grenadeOn && reloadOn == o.reloadOn && reloadCut == o.reloadCut && fireOn == o.fireOn && mag == o.mag && fires == o.fires;
 		}
 		std::string Text() const
 		{
 			char buf[160];
-			std::snprintf(buf, sizeof(buf), "melee=%d cut=%d blocked=%d dash=%d grenade=%d reload=%d reloadCut=%d fire=%d mag=%d",
+			std::snprintf(buf, sizeof(buf), "melee=%d cut=%d blocked=%d dash=%d grenade=%d reload=%d reloadCut=%d fire=%d mag=%d fires=",
 				meleeOn, meleeCut, meleeBlocked, dashOn, grenadeOn, reloadOn, reloadCut, fireOn, mag);
-			return buf;
+			std::string text = buf;
+			for (size_t k = 0; k < fires.size(); ++k) text += (k ? "," : "") + std::to_string(fires[k]);
+			if (fires.empty()) text += "-";
+			return text;
 		}
 	};
 
@@ -139,6 +150,7 @@ namespace
 		o.reloadCut = s.reload.on >= 0 && s.reload.end == s.reload.on;
 		o.fireOn = s.fire.on >= 0;
 		o.mag = s.magEnd;
+		o.fires = s.fireOns;
 		return o;
 	}
 
@@ -186,6 +198,7 @@ namespace
 	struct RunCounts
 	{
 		int inputs = 0, presses = 0, multi = 0, reloadCutByOrder = 0;
+		int fireCuts = 0;		// 예측이 수류탄으로 사격을 끊은 입력 수(WeaponEvents::fireCancelledByGrenade)
 		std::string order;		// 누름이 둘 이상인 입력의 누른 차례(M>D …)
 	};
 
@@ -259,7 +272,12 @@ namespace
 					++counts.reloadCutByOrder;
 				}
 			}
-			if (ev.fired) out.fireOn = true;
+			if (ev.fired)
+			{
+				out.fireOn = true;
+				out.fires.push_back(frames[i]);		// 입력 i = 표 frames[i] 프레임(누름 한 프레임 늦음 — 위 머리 주석)
+			}
+			if (ev.fireCancelledByGrenade) ++counts.fireCuts;
 		}
 		if (lyra.magEnd >= 0) out.mag = pred->GetWeapon().GetMagazine();
 		return out;
@@ -268,6 +286,7 @@ namespace
 	struct Totals
 	{
 		int steps = 0, fails = 0, fixedDiff = 0, inputs = 0, multi = 0, noMulti = 0, skipped = 0, reloadCutByOrder = 0;
+		int holdSteps = 0, fireCuts = 0;		// 쥔 사격 칸 수 · 그 밖도 합친 사격 끊김 입력 수
 	};
 
 	bool RunTag(CMoveSim& sim, const MatchRules& rules, float maxWalk, const std::string& dir, const std::string& tag, Totals& total)
@@ -302,6 +321,7 @@ namespace
 				{
 					AbilityTimes* t = Pick(s, Token(tail, "ability"));
 					if (!t) continue;
+					if (ev == "on" && t == &s.fire) s.fireOns.push_back(frame);
 					if (ev == "on" && t->on < 0) t->on = frame;
 					else if (ev == "end" && t->on >= 0 && t->end < 0) t->end = frame;
 				}
@@ -320,6 +340,7 @@ namespace
 			else if (kind == "GCOMBO")
 			{
 				s.combo = true;
+				s.comboName = Token(tail, "combo");
 				s.other = Token(tail, "other");
 				s.magBegin = std::atoi(Token(tail, "magBegin").c_str());
 				s.magEnd = std::atoi(Token(tail, "magEnd").c_str());
@@ -384,17 +405,20 @@ namespace
 			RunCounts counts, fixedCounts;
 			const Outcome got = RunStep(sim, rules, maxWalk, rows, frames, s, true, counts);
 			const Outcome fixed = RunStep(sim, rules, maxWalk, rows, frames, s, false, fixedCounts);
-			const bool ok = got == want && counts.multi > 0;
+			const bool hold = IsFireHoldStep(s);
+			const bool ok = got == want && (hold ? counts.fireCuts > 0 : counts.multi > 0);
 			const bool fixedSame = fixed == want;
 			++total.steps;
 			total.inputs += counts.inputs;
 			total.multi += counts.multi;
 			total.reloadCutByOrder += counts.reloadCutByOrder;
-			if (counts.multi == 0) ++total.noMulti;
+			total.fireCuts += counts.fireCuts;
+			if (hold) ++total.holdSteps;
+			else if (counts.multi == 0) ++total.noMulti;
 			if (!ok) ++tagFails;
 			if (!fixedSame) ++total.fixedDiff;
-			std::printf("PRESSCHECK tag=%s step=%s %s order=%s inputs=%d presses=%d multi=%d ours=[%s] lyra=[%s] fixed=%s%s\n",
-				tag.c_str(), name.c_str(), ok ? "ok" : "DIFF", counts.order.empty() ? "-" : counts.order.c_str(), counts.inputs, counts.presses, counts.multi,
+			std::printf("PRESSCHECK tag=%s step=%s %s order=%s inputs=%d presses=%d multi=%d fireCuts=%d ours=[%s] lyra=[%s] fixed=%s%s\n",
+				tag.c_str(), name.c_str(), ok ? "ok" : "DIFF", counts.order.empty() ? "-" : counts.order.c_str(), counts.inputs, counts.presses, counts.multi, counts.fireCuts,
 				got.Text().c_str(), want.Text().c_str(), fixedSame ? "same" : "diff", fixedSame ? "" : (" [" + fixed.Text() + "]").c_str());
 		}
 		if (stepFrames.empty())
@@ -429,8 +453,8 @@ int main(int argc, char** argv)
 	for (int i = 3; i < argc; ++i)
 		if (!RunTag(sim, rules, (float)params.maxWalkSpeed, argv[2], argv[i], total)) return 2;
 	const bool pass = total.steps > 0 && total.fails == 0 && total.noMulti == 0 && total.fixedDiff > 0;
-	std::printf("PRESSCHECK steps=%d fails=%d fixedOrderDiff=%d inputs=%d multi=%d noMulti=%d skipped=%d reloadCutByOrder=%d\n",
-		total.steps, total.fails, total.fixedDiff, total.inputs, total.multi, total.noMulti, total.skipped, total.reloadCutByOrder);
+	std::printf("PRESSCHECK steps=%d fails=%d fixedOrderDiff=%d inputs=%d multi=%d noMulti=%d skipped=%d reloadCutByOrder=%d holdSteps=%d fireCuts=%d\n",
+		total.steps, total.fails, total.fixedDiff, total.inputs, total.multi, total.noMulti, total.skipped, total.reloadCutByOrder, total.holdSteps, total.fireCuts);
 	std::printf("PRESSCHECK %s\n", pass ? "PASS" : "FAIL");
 	return pass ? 0 : 1;
 }

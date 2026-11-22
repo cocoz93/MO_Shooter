@@ -6,7 +6,7 @@ param(
     [string]$Weapon = 'rifle',   # bot weapon (BotClient --scriptWeapon: pistol, rifle, shotgun); the screen poses it with that weapon's clips
     [double]$HoldSec = -1,   # longer than the 4 s the shot waits before filming; route must start before the idle fidget, as the passed video did. -1 = by weapon (below)
     [string]$Res = '1280x720',
-    [string]$Script = 'startstop',   # BotClient --script: startstop (passed start/stop video), events (fire, reload, swap; record_anim_compare.ps1 -Script events) or crouch (content D-6; record_anim_compare.ps1 -Script crouch)
+    [string]$Script = 'startstop',   # BotClient --script: startstop (passed start/stop video), events (fire, reload, swap; record_anim_compare.ps1 -Script events) or crouch (content D-6; record_anim_compare.ps1 -Script crouch) or grenade (L-6-a; no Lyra counterpart)
     [int]$TimeoutSec = 400
 )
 # The route starts at hold + 2.02 s (first script piece = stand 121 ticks). The fidget comes at stop clip seconds + 6 s after the bot is placed:
@@ -34,6 +34,8 @@ $botSeconds = [int]($HoldSec + 48.9 + 25)
 # so the film runs (4820 - 607) / 60 = 70.22 s after the first move (MOBRemoteShotSubsystem -MOBRemoteShotAfterMove) and the bot stays for the whole route.
 $afterMove = ''
 if ($Script -eq 'crouch') { $botSeconds = [int]($HoldSec + 4820 / 60 + 25); $afterMove = '-MOBRemoteShotAfterMove=70.22' }
+# grenade route (lyra-match L-6-a, left arm when throwing right after firing): 2018 ticks, first move at 1475, so 543 / 60 = 9.05 s after it
+if ($Script -eq 'grenade') { $botSeconds = [int]($HoldSec + 2018 / 60 + 25); $afterMove = '-MOBRemoteShotAfterMove=9.05' }
 
 # --testStartAllWeapons (server and bot): the bot poses with -Weapon (rifle by default). Respawning with the pistol only (Lyra rule, weapon pickup W-2)
 # the server rejects the switch (W-5 run w5r1: switchRejected=1) and the screen records pistol poses instead

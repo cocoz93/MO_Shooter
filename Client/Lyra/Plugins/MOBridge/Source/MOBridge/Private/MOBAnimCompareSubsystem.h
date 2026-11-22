@@ -35,7 +35,7 @@ class UPhysicalMaterial;
  * 판정에 쓰는 줄은 전부 「MOB_ACOMP」 로 시작한다.
  * 데디 서버(-server)에 주면 서버의 봇을 같은 경로로 움직인다. 카메라와 촬영은 건너뛴다(candidate1-impl-plan.md 0단계)
  */
-enum class EMOBACScript : uint8 { Run, AimJump, StartStop, Events, Ads, Crouch, Melee, AdsLong, Dash, Grenade };
+enum class EMOBACScript : uint8 { Run, AimJump, StartStop, Events, Ads, Crouch, Melee, AdsLong, Dash, Grenade, GrenadeHold };
 
 UCLASS()
 class UMOBAnimCompareSubsystem : public UTickableWorldSubsystem

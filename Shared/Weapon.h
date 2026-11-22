@@ -215,6 +215,7 @@ namespace mo
 		bool fireCancelledByDash = false;		// 이번 입력에 켜진 대시가 켜져 있던 사격 능력을 끊었다(이 입력에 쏜 발 포함)
 		bool reloadCancelledByGrenade = false;	// 이번 입력에 던진 수류탄이 도는 재장전을 끊었다 — 탄이 안 들어간다(G-0-c)
 		bool reloadPressCutByGrenade = false;	// 이번 입력에 수류탄보다 먼저 누른 재장전 — 켜진 프레임에 끊겨 탄 · 재장전 사건이 없다(L-5-a)
+		bool fireCancelledByGrenade = false;	// 이번 입력에 던진 수류탄이 켜져 있던 사격 능력을 끊었다(이 입력에 쏜 발 포함) — 부르는 쪽이 연사 문지기를 푼다
 		float spreadAngle = 0;			// fired 일 때 — 이번 발의 퍼짐. 이번 발이 더하는 열은 들어가지 않는다(Lyra 는 광선을 쏜 뒤 열을 더한다)
 		float spreadMultiplier = 1;
 	};
@@ -246,6 +247,9 @@ namespace mo
 			const float seconds = def.fireDelay < def.fireMontageSeconds ? def.fireDelay : def.fireMontageSeconds;
 			_readyInput[(size_t)weapon] = _inputIndex + (uint32_t)(seconds / tickSeconds + 1e-3f);
 		}
+		// 수류탄이 사격 능력을 끊었을 때(WeaponEvents::fireCancelledByGrenade) — Lyra 는 끊긴 다음 프레임에 쥔 방아쇠로 다시 쏜다(Weapon.cpp 수류탄 끊기 주석).
+		// 무기를 안 바꿨으니 막을 까닭이 없다. 같은 입력에 쏜 발이 있으면 OnFired 뒤에 불러야 한다
+		void OnFireCancelled(EWeapon weapon) { _readyInput[(size_t)weapon] = 0; }
 		uint32_t GetInputIndex() const { return _inputIndex; }
 
 	private:

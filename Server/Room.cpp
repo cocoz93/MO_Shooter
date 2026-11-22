@@ -593,6 +593,7 @@ namespace mo
 	{
 		// GE_PregameLobby · GE_SpawnIn · GE_DamageImmunity_FromGameMode
 		if (_phase != wire::EMatchPhase::Playing) return true;
+		if (_rules.testGodPlayerId != 0 && player.id == _rules.testGodPlayerId) return true;	// 시험 전용 --testGodPlayer(MatchRules.h)
 		return _tick < player.immuneUntilTick;
 	}
 
@@ -1140,7 +1141,7 @@ namespace mo
 		// 대시(D-2) — 앞 입력부터 켜져 있으면 쥔 사격을 뺀다(근접과 같은 까닭). 켜는 입력의 쥔 사격은 무기 순환이 먼저 쏘고 끊는다(Dash.h BlocksHeldFire)
 		weaponInput.dashActive = player.dash.BlocksHeldFire();
 		weaponInput.dashStarted = player.dash.JustStarted();
-		weaponInput.grenadeThrown = player.grenade.JustThrown();	// 도는 재장전만 끊는다 — 막기는 없다(Weapon.h)
+		weaponInput.grenadeThrown = player.grenade.JustThrown();	// 도는 재장전 · 켜져 있던 사격을 끊는다 — 막기는 없다(Weapon.h)
 		if (weaponInput.fireHeld && weaponInput.dashActive)
 		{
 			++_stats.dashFiresBlocked;
@@ -1193,6 +1194,12 @@ namespace mo
 			shot.viewAlpha = input.viewAlpha;
 			shot.seq = input.seq;
 			_pendingShots.push_back(shot);
+		}
+		// 수류탄이 사격을 끊었으면 연사 문지기를 푼다 — 다음 입력에 쥔 방아쇠로 다시 쏜다(Weapon.h OnFireCancelled). 같은 입력에 쏜 발의 OnFired 뒤
+		if (events.fireCancelledByGrenade)
+		{
+			++_stats.grenadeFireCancels;
+			player.fireGate.OnFireCancelled((EWeapon)player.weapon);
 		}
 		if (events.reloadStarted) PushAnimEvent(player, EAnimEvent::Reload, player.weapon);		// 손으로 · 탄창이 비어 스스로 둘 다. 무기 순환 차례(쏘기 → 재장전) 그대로
 	}
