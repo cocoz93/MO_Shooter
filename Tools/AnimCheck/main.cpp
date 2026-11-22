@@ -792,6 +792,7 @@ namespace
 		const char* probePath = nullptr;
 		const char* montDumpPath = nullptr;
 		const char* plantDumpPath = nullptr;		// --plantDump=<csv> — 갱신마다 발 붙이기 장치 값(L-6-c-2). seq = 그 판 입력 번호(한 줄 앞 갱신이 여럿이면 같은 frame 에 여러 줄)
+		const char* stackDumpPath = nullptr;		// --stackDump=<csv> — 갱신마다 점프 · 전환 쌓기 칸(칸 수 · 칸별 클립 · 시각 · 섞기, L-13-b 점프 대조). 줄 꼴은 --plantDump 와 같다
 		int montageTest = 0;
 		int poseTest = 0;							// 끼움 자리 후보 고르기(CAnimPoseEvaluator::kPoseTest*)
 		const char* slotProfileName = nullptr;		// 비중 표가 있는 끼움 자리(덮기 자리 빼고)를 이 표로
@@ -818,6 +819,7 @@ namespace
 			else if (std::strncmp(argv[i], "--probe=", 8) == 0) probePath = argv[i] + 8;
 			else if (std::strncmp(argv[i], "--montDump=", 11) == 0) montDumpPath = argv[i] + 11;
 			else if (std::strncmp(argv[i], "--plantDump=", 12) == 0) plantDumpPath = argv[i] + 12;
+			else if (std::strncmp(argv[i], "--stackDump=", 12) == 0) stackDumpPath = argv[i] + 12;
 			else if (std::strncmp(argv[i], "--montageTest=", 14) == 0) montageTest = std::atoi(argv[i] + 14);
 			else if (std::strncmp(argv[i], "--poseTest=", 11) == 0) poseTest = std::atoi(argv[i] + 11);
 			else if (std::strncmp(argv[i], "--slotProfile=", 14) == 0) slotProfileName = argv[i] + 14;
@@ -1009,6 +1011,21 @@ namespace
 			return 1;
 		}
 		if (plantDump) std::fprintf(plantDump, "pass,frame,seq,footL,footR,ground,target,current,alpha,stepped,offsetZ\n");
+		FILE* stackDump = nullptr;
+		if (stackDumpPath && (fopen_s(&stackDump, stackDumpPath, "wb") != 0 || !stackDump))
+		{
+			std::printf("STATE FAIL 쌓기 칸 덤프를 못 씀: %s\n", stackDumpPath);
+			std::fclose(file);
+			if (montDump) std::fclose(montDump);
+			if (plantDump) std::fclose(plantDump);
+			return 1;
+		}
+		if (stackDump)
+		{
+			std::fprintf(stackDump, "pass,frame,seq,count");
+			for (int k = 0; k < kAnimLayerMax; ++k) std::fprintf(stackDump, ",clip%d,time%d,fade%d", k, k, k);
+			std::fprintf(stackDump, ",crouchBlend,adsBlend,plantAlpha\n");
+		}
 		const auto bundleIndexOf = [&](const std::string& name)
 		{
 			for (size_t b = 0; b < bundles.size(); ++b)
@@ -1136,6 +1153,15 @@ namespace
 					state.ToPoseInput(after);
 					std::fprintf(plantDump, "%d,%d,%d,%.4f,%.4f,%.4f,%.4f,%.5f,%.5f,%d,%.5f\n", row.pass, row.frame, nextSeq, plantView.feet[0], plantView.feet[1], plantView.ground,
 						plantView.target, plantView.current, plantView.alpha, plantView.stepped ? 1 : 0, after.plantOffset[2]);
+				}
+				if (stackDump)
+				{
+					AnimPoseInput after;
+					state.ToPoseInput(after);
+					std::fprintf(stackDump, "%d,%d,%d,%d", row.pass, row.frame, nextSeq, after.layerCount);
+					for (int k = 0; k < kAnimLayerMax; ++k)
+						std::fprintf(stackDump, ",%d,%.5f,%.5f", k < after.layerCount ? (int)after.layers[k].clip : -99, k < after.layerCount ? after.layers[k].time : 0.f, k < after.layerCount ? after.layers[k].fade : 0.f);
+					std::fprintf(stackDump, ",%.5f,%.5f,%.5f\n", after.crouchBlend, after.adsBlend, after.plantAlpha);
 				}
 				++fed;
 			}
@@ -1428,6 +1454,7 @@ namespace
 		std::fclose(file);
 		if (montDump) std::fclose(montDump);
 		if (plantDump) std::fclose(plantDump);
+		if (stackDump) std::fclose(stackDump);
 
 		const double count = (double)rows.size();
 		std::printf("STATEOUT rows=%zu moves=%zu fed=%zu lines=%zu resets=%zu brakeScale=%.3f groundAdd=%.1f overflows=%d\n", rows.size(), moves.size(), fed, lines, byReset.size(), brakeScale, groundAdd, state.StackOverflows());
