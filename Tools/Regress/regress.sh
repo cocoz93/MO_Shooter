@@ -58,6 +58,10 @@ run_checks() {
 		"$tools/MoveCheck/Release/MoveCheck.exe" "$DATA/$m" "$DATA/move_$t.csv" $limit > "$OUT/move_$t.log" 2>&1
 		grep -E '^(ONE frames|RUN frames|RUN segments|COUNT |ONE crouch|RUN crouch|CROUCH_COUNT|PARAM crouch)' "$OUT/move_$t.log" | sed "s/^/move_$t /" >> "$g"
 	done
+	# 점프대(jumppad-plan j-3) — Lyra 점프대 기록(move_expanse_pads, 64구간)과 make_launchers.py 표로 겹침 비트 · 발사 프레임 · 발사 속도를 프레임마다 대조하고,
+	# 이어 달리기는 기록 발사 칸 대신 우리 셈(TickWithLaunchers)으로 쏜다. 순간이동 구간 둘은 범위 밖이라 뺀다(D157)
+	"$tools/MoveCheck/Release/MoveCheck.exe" "$DATA/map_expanse.mocl" "$DATA/move_expanse_pads.csv" $limit --launchers "$DATA/launchers_expanse.txt" > "$OUT/move_expanse_pads.log" 2>&1
+	grep -E '^(ONE frames|RUN frames|RUN segments|COUNT |PAD |PAD_COVER|PADCHECK|RUNPAD )' "$OUT/move_expanse_pads.log" | sed "s/^/move_expanse_pads /" >> "$g"
 	"$tools/WeaponCheck/Release/WeaponCheck.exe" "$DATA/weaponrec_gym.csv" "$DATA/map_gym.mocl" > "$OUT/weapon.log" 2>&1
 	grep -v '^TIME' "$OUT/weapon.log" | sed 's/^/weapon /' >> "$g"
 	# 근접(컨텐츠 E) — Lyra 연습장 근접 기록(cprobe_e1g3)과 Shared ResolveMelee 대조. 어긋난 줄(DIFF)도 그대로 기준선에 들어가 다르면 잡힌다

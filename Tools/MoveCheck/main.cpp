@@ -1,6 +1,6 @@
 ﻿// 조각 1-c 대조 도구 — Lyra 에 재생한 입력을 Shared/Movement 에 그대로 넣어 위치·속도·이동 모드를 비교한다.
 //
-// 사용: MoveCheck <map.mocl> <move.csv> [--mismatch <out.csv>] [--limit <프레임 수>]
+// 사용: MoveCheck <map.mocl> <move.csv> [--mismatch <out.csv>] [--limit <프레임 수>] [--launchers <launchers.txt>]
 //
 // 입력 파일 = MOBMoveRecordSubsystem 이 쓰는 move_<이름>.csv
 //   #param <이름> <값>      실행값(블루프린트가 덮은 뒤의 값)
@@ -9,13 +9,19 @@
 //   ads(-Ads 기록만) = 이번 프레임에 조준을 누른 상태. 다음 프레임 maxSpeed 가 MaxWalkSpeed × 0.5 인지 센다(GA_ADS — C 조준)
 //   앉기 칸(-Crouch 기록만, 컨텐츠 D) = cev(0 없음 / 1 앉기 키 ToggleCrouch / 2 점프 전 일어서기 UnCrouch) · 사건 전 앉으려 함 · 앉음 ·
 //   캡슐 반높이 · MaxWalkSpeed, 그리고 이동 뒤 앉으려 함 · 앉음 · 반높이. 앞 상태는 사건 전에 잡았으므로 한 프레임 대조도 사건을 넣고 돌린다
+//   점프대 칸(-Pads 기록만, jumppad-plan j-2) = yaw(이동 뒤 몸 요) · pads(이동 뒤 몸이 든 점프대 비트, 차례는 #pad 줄) · cue(쓰지 않음)
 //   어느 칸이 있는지는 머리줄(frame,seg,…)의 이름으로 가린다
 //   ev: 0 없음 / 1 Jump / 2 StopJumping. 모드: 1 걷기 / 3 낙하. ext=1 이면 프레임 사이에 밖에서 위치가 바뀐 것
 //
 // 두 가지를 잰다
 //   한 프레임: 매 프레임 Lyra 상태에서 시작해 한 번만 돌린 차이 — 어느 프레임에서 어긋나는지 본다
 //   이어 달리기: 구간 첫 프레임만 맞추고 끝까지 돌린 차이 — 서버가 실제로 쓰는 방식이다
+// --launchers 가 있으면(점프대 기록 + make_launchers.py 표) 셋을 더 잰다(jumppad-plan j-3)
+//   PAD  : 프레임마다 Lyra 자리로 센 우리 겹침 비트 ↔ 기록 pads · 우리 겹침 시작이 셈한 발사 ↔ 다음 프레임 기록 발사(프레임 · 속도)
+//   RUN  : 이어 달리기가 기록 발사 칸 대신 TickWithLaunchers(우리 겹침 · 우리 셈)로 쏜다. 순간이동(B_Teleport — 범위 밖, D157)이 든 구간은 뺀다
+//   RUNPAD: 그 이어 달리기에서 쏜 프레임 · 속도가 기록과 같은가
 
+#include "JumpPads.h"
 #include "MapCollision.h"
 #include "Movement.h"
 
@@ -47,6 +53,8 @@ namespace
 		int ads = -1;	// -1 = 칸 없음
 		int cev = 0, cwant = 0, crouched = 0, cwantA = 0, crouchedA = 0;
 		float half = 0, walk = 0, halfA = 0;
+		double yaw = 0;
+		int pads = 0, cue = 0;
 	};
 
 	// 머리줄에서 읽은 덧붙은 칸
@@ -54,6 +62,7 @@ namespace
 	{
 		bool ads = false;
 		bool crouch = false;
+		bool pads = false;	// yaw,pads,cue
 	};
 
 	Columns ParseHeader(const char* line)
@@ -66,6 +75,7 @@ namespace
 			{
 				if (name == "ads") c.ads = true;
 				if (name == "cev") c.crouch = true;
+				if (name == "pads") c.pads = true;
 				name.clear();
 				if (*p != ',') break;
 			}
@@ -125,6 +135,10 @@ namespace
 			r.cev = I(); r.cwant = I(); r.crouched = I(); r.half = F(); r.walk = F();
 			r.cwantA = I(); r.crouchedA = I(); r.halfA = F();
 		}
+		if (cols.pads)
+		{
+			r.yaw = D(); r.pads = I(); r.cue = I();
+		}
 		return *s == '\0' || *s == '\r' || *s == '\n';
 	}
 
@@ -161,14 +175,22 @@ namespace
 		sim.RefreshFloor(s);
 	}
 
-	void RunTick(CMoveSim& sim, MoveState& s, const Row& r, const Columns& cols)
+	// launchers 가 비었으면 기록 발사 칸을 넣고, 있으면 우리 겹침 · 우리 셈으로 쏜다(TickWithLaunchers — 서버 · 예측과 같은 함수)
+	LauncherTickResult RunTick(CMoveSim& sim, MoveState& s, const Row& r, const Columns& cols, const LauncherSet& launchers = LauncherSet(), double capsuleRadius = 0)
 	{
 		const bool hasLaunch = r.launch.x != 0 || r.launch.y != 0 || r.launch.z != 0;
 		// maxSpeed 칸은 이동 전 GetMaxSpeed — 앉아 걸을 때 이미 300 이다. 이동 코드는 MaxWalkSpeed 를 받아 그 틱의 앉음으로 고르므로
 		// 앉기 기록은 walk 칸(MaxWalkSpeed)을 준다. 0 이면 이동 금지(Lyra GetMaxSpeed 의 태그 갈래)라 그대로 0
 		s.maxSpeed = (cols.crouch && r.maxSpeed != 0.f) ? r.walk : r.maxSpeed;
+		if (launchers.count) return TickWithLaunchers(sim, s, r.input, r.dt, r.yaw, launchers, capsuleRadius);
 		sim.Tick(s, r.input, r.dt, hasLaunch ? &r.launch : nullptr);
+		return LauncherTickResult();
 	}
+
+	bool IsZeroVec(const Vec3& v) { return v.x == 0 && v.y == 0 && v.z == 0; }
+
+	// 순간이동 이동 — 한 이동(1/60초)에 500cm 넘게 옮긴 것. 정상 이동은 종단 속도로도 못 간다(30,000cm/s 가 필요). B_Teleport 가 이동 안에서 자리를 옮긴다(j-2 기록 구간 둘)
+	bool IsTeleportMove(const Row& r) { return Dist(r.ap, r.p) > 500.0; }
 
 	struct DiffStats
 	{
@@ -286,15 +308,17 @@ int main(int argc, char** argv)
 {
 	if (argc < 3)
 	{
-		std::printf("usage: MoveCheck <map.mocl> <move.csv> [--mismatch <out.csv>] [--limit <frames>]\n");
+		std::printf("usage: MoveCheck <map.mocl> <move.csv> [--mismatch <out.csv>] [--limit <frames>] [--launchers <launchers.txt>]\n");
 		return 2;
 	}
 	const char* mismatchPath = nullptr;
+	const char* launchersPath = nullptr;
 	size_t limit = (size_t)-1;
 	for (int i = 3; i + 1 < argc; i += 2)
 	{
 		if (std::strcmp(argv[i], "--mismatch") == 0) mismatchPath = argv[i + 1];
 		else if (std::strcmp(argv[i], "--limit") == 0) limit = (size_t)std::strtoull(argv[i + 1], nullptr, 10);
+		else if (std::strcmp(argv[i], "--launchers") == 0) launchersPath = argv[i + 1];
 	}
 
 	std::vector<uint8_t> mapBytes;
@@ -329,6 +353,7 @@ int main(int argc, char** argv)
 
 	std::map<std::string, double> values;
 	std::vector<Row> rows;
+	std::vector<std::string> recPadNames;	// 기록 #pad 줄 — pads 비트 차례
 	size_t badRows = 0;
 	Columns cols;
 	static char line[4096];
@@ -339,6 +364,17 @@ int main(int argc, char** argv)
 			char name[128];
 			double value = 0;
 			if (sscanf_s(line + 7, "%127s %lf", name, (unsigned)sizeof(name), &value) == 2) values[name] = value;
+			continue;
+		}
+		if (std::strncmp(line, "#pad ", 5) == 0)
+		{
+			char name[256];
+			int index = -1;
+			if (sscanf_s(line + 5, "%d %255s", &index, name, (unsigned)sizeof(name)) == 2 && index >= 0)
+			{
+				if ((size_t)index >= recPadNames.size()) recPadNames.resize((size_t)index + 1);
+				recPadNames[(size_t)index] = name;
+			}
 			continue;
 		}
 		if (std::strncmp(line, "frame,", 6) == 0)
@@ -459,6 +495,177 @@ int main(int argc, char** argv)
 			compared, adsFrames, changes, ruleDiff, firstBad, lag0Diff, seamTeleport, seamRespawn, seamRespawnHeld, fullSeg);
 	}
 
+	// 점프대(jumppad-plan j-3) — 표를 읽고 기록의 pads 비트 차례(#pad 줄)를 표 차례로 옮긴다. 이름으로 맞춘다
+	std::vector<Launcher> launchers;
+	std::vector<int> recToOurs;		// 기록 #pad 번호 → 표 번호(-1 = 표에 없음)
+	LauncherSet launcherSet;
+	if (launchersPath)
+	{
+		std::vector<char> text;
+		FILE* lf = nullptr;
+		if (fopen_s(&lf, launchersPath, "rb") != 0 || !lf)
+		{
+			std::printf("cannot open %s\n", launchersPath);
+			return 1;
+		}
+		_fseeki64(lf, 0, SEEK_END);
+		text.resize((size_t)_ftelli64(lf));
+		_fseeki64(lf, 0, SEEK_SET);
+		const size_t got = std::fread(text.data(), 1, text.size(), lf);
+		std::fclose(lf);
+		size_t badLine = 0;
+		const ELaunchersLoad lr = got == text.size() ? ParseLaunchers(text.data(), text.size(), launchers, badLine) : ELaunchersLoad::BadLine;
+		if (lr != ELaunchersLoad::Ok)
+		{
+			std::printf("launchers load failed: %s line %zu\n", LaunchersLoadName(lr), badLine);
+			return 1;
+		}
+		// 시험의 시험 — 구 반지름을 일부러 바꿔(cm, 음수 가능) 겹침 · 발사 프레임 대조가 잡는지 본다
+		char* radiusBreak = nullptr;
+		size_t radiusBreakLen = 0;
+		if (_dupenv_s(&radiusBreak, &radiusBreakLen, "MOVECHECK_BREAK_LAUNCHER_RADIUS") == 0 && radiusBreak)
+		{
+			const double add = std::atof(radiusBreak);
+			for (Launcher& l : launchers) l.sphereRadius += add;
+			std::printf("BREAK launcherRadius%+g\n", add);
+			std::free(radiusBreak);
+		}
+		launcherSet.items = launchers.data();
+		launcherSet.count = launchers.size();
+		size_t mapped = 0;
+		recToOurs.assign(recPadNames.size(), -1);
+		for (size_t i = 0; i < recPadNames.size(); ++i)
+		{
+			for (size_t j = 0; j < launchers.size(); ++j)
+			{
+				if (recPadNames[i] == launchers[j].name)
+				{
+					recToOurs[i] = (int)j;
+					++mapped;
+					break;
+				}
+			}
+		}
+		std::printf("PAD launchers=%zu recPads=%zu mapped=%zu padsColumns=%d\n", launchers.size(), recPadNames.size(), mapped, cols.pads ? 1 : 0);
+	}
+
+	// PAD 한 프레임 — Lyra 자리(이동 앞 · 뒤)로 우리 겹침을 세고, 겹침이 시작된 이동의 끝 속도 · 요로 셈한 발사를 다음 프레임 기록 발사와 맞댄다
+	if (launcherSet.count && cols.pads)
+	{
+		const double radius = params.capsuleRadius;
+		size_t maskFrames = 0, maskLyraIn = 0, maskOursIn = 0, maskMismatch = 0;
+		size_t begins = 0, fired = 0, refused = 0, matched = 0, beginNoLaunch = 0, launchNoBegin = 0, beginAtEnd = 0;
+		size_t teleportMoves = 0, teleportLaunch = 0, lyraLaunchRows = 0, launchOrphan = 0, speedOver001 = 0;
+		double speedMax = 0;
+		std::vector<size_t> firedPerPad(launcherSet.count, 0);
+		int printedPad = 0;
+		for (size_t k = 0; k < rows.size(); ++k)
+		{
+			const Row& r = rows[k];
+			const bool consecutivePrev = k > 0 && rows[k - 1].frame + 1 == r.frame && rows[k - 1].seg == r.seg;
+			if (!IsZeroVec(r.launch))
+			{
+				++lyraLaunchRows;
+				if (!consecutivePrev) ++launchOrphan;
+			}
+			const double halfBefore = (cols.crouch && r.crouched) ? params.crouchedHalfHeight : params.capsuleHalfHeight;
+			const double halfAfter = (cols.crouch && r.crouchedA) ? params.crouchedHalfHeight : params.capsuleHalfHeight;
+			const uint8_t after = LauncherMask(launcherSet.items, launcherSet.count, r.ap, radius, halfAfter);
+			uint8_t lyra = 0;
+			for (size_t b = 0; b < recToOurs.size() && b < 31; ++b)
+			{
+				if (((r.pads >> b) & 1) && recToOurs[b] >= 0) lyra |= (uint8_t)(1u << recToOurs[b]);
+			}
+			++maskFrames;
+			if (lyra) ++maskLyraIn;
+			if (after) ++maskOursIn;
+			if (lyra != after)
+			{
+				++maskMismatch;
+				if (printedPad < 20)
+				{
+					++printedPad;
+					std::printf("PAD_MASK_DIFF frame=%d seg=%d lyra=%u mine=%u ap=(%.3f %.3f %.3f)\n", r.frame, r.seg, lyra, after, r.ap.x, r.ap.y, r.ap.z);
+				}
+			}
+			const Row* next = (k + 1 < rows.size() && rows[k + 1].frame == r.frame + 1 && rows[k + 1].seg == r.seg) ? &rows[k + 1] : nullptr;
+			if (IsTeleportMove(r))
+			{
+				// 순간이동 — 범위 밖(D157). 뒤따르는 발사는 B_Teleport 몫이라 따로 센다
+				++teleportMoves;
+				if (next && !IsZeroVec(next->launch)) ++teleportLaunch;
+				continue;
+			}
+			const uint8_t before = LauncherMask(launcherSet.items, launcherSet.count, r.p, radius, halfBefore);
+			const uint8_t began = (uint8_t)(after & ~before);
+			Vec3 expect;
+			bool expectFire = false;
+			int firedPad = -1;
+			for (size_t i = 0; i < launcherSet.count; ++i)
+			{
+				if (!(began & (1u << i))) continue;
+				++begins;
+				Vec3 out;
+				if (LauncherLaunch(launcherSet.items[i], r.av, r.av, r.yaw, out))
+				{
+					expect = out;
+					expectFire = true;
+					firedPad = (int)i;
+				}
+				else
+				{
+					++refused;
+				}
+			}
+			if (expectFire)
+			{
+				++fired;
+				++firedPerPad[(size_t)firedPad];
+			}
+			if (!next)
+			{
+				if (expectFire) ++beginAtEnd;
+				continue;
+			}
+			const bool lyraFire = !IsZeroVec(next->launch);
+			if (expectFire && lyraFire)
+			{
+				++matched;
+				const double d = Dist(expect, next->launch);
+				speedMax = std::max(speedMax, d);
+				if (d > 0.01)
+				{
+					++speedOver001;
+					if (printedPad < 20)
+					{
+						++printedPad;
+						std::printf("PAD_SPEED_DIFF frame=%d pad=%d d=%.5f mine=(%.4f %.4f %.4f) lyra=(%.4f %.4f %.4f)\n", next->frame, firedPad, d,
+							expect.x, expect.y, expect.z, next->launch.x, next->launch.y, next->launch.z);
+					}
+				}
+			}
+			else if (expectFire || lyraFire)
+			{
+				++(expectFire ? beginNoLaunch : launchNoBegin);
+				if (printedPad < 20)
+				{
+					++printedPad;
+					std::printf("PAD_FRAME_DIFF frame=%d seg=%d mineFire=%d lyraFire=%d began=%u before=%u after=%u\n", r.frame, r.seg, expectFire ? 1 : 0, lyraFire ? 1 : 0, began, before, after);
+				}
+			}
+		}
+		std::printf("PAD mask frames=%zu lyraIn=%zu mineIn=%zu mismatch=%zu | begins=%zu fired=%zu refused=%zu matched=%zu beginNoLaunch=%zu launchNoBegin=%zu beginAtEnd=%zu | speedMax=%.6f over0.01=%zu | lyraLaunchRows=%zu teleportMoves=%zu teleportLaunch=%zu orphan=%zu\n",
+			maskFrames, maskLyraIn, maskOursIn, maskMismatch, begins, fired, refused, matched, beginNoLaunch, launchNoBegin, beginAtEnd, speedMax, speedOver001,
+			lyraLaunchRows, teleportMoves, teleportLaunch, launchOrphan);
+		std::printf("PAD_COVER");
+		for (size_t i = 0; i < launcherSet.count; ++i) std::printf(" %s%zu=%zu", LauncherKindName(launcherSet.items[i].kind), i, firedPerPad[i]);
+		std::printf("\n");
+		// 판정 — 겹침 비트가 다 같고, 시작마다 다음 프레임에 같은 속도로 쏘고, 우리가 모르는 발사가 없다(순간이동 몫만 남는다)
+		const bool pass = maskMismatch == 0 && beginNoLaunch == 0 && launchNoBegin == 0 && speedOver001 == 0 && matched > 0 &&
+			lyraLaunchRows == matched + teleportLaunch + launchOrphan && launchOrphan == 0;
+		std::printf("PADCHECK %s\n", pass ? "PASS" : "FAIL");
+	}
+
 	// 한 프레임 — 매번 Lyra 상태에서 시작한다
 	FILE* mismatch = nullptr;
 	if (mismatchPath && fopen_s(&mismatch, mismatchPath, "wb") == 0 && mismatch)
@@ -541,6 +748,19 @@ int main(int argc, char** argv)
 		if (firstOver1At >= 0.f) firstOver1.push_back(firstOver1At);
 	};
 
+	// 점프대 이어 달리기 — 순간이동이 든 구간은 뺀다(우리 이동엔 순간이동이 없어 그 뒤가 다 어긋난다 · 범위 밖 D157)
+	std::vector<int> teleportSegs;
+	if (launcherSet.count)
+	{
+		for (const Row& r : rows)
+		{
+			if (IsTeleportMove(r) && std::find(teleportSegs.begin(), teleportSegs.end(), r.seg) == teleportSegs.end()) teleportSegs.push_back(r.seg);
+		}
+	}
+	size_t runPadMatched = 0, runPadMineOnly = 0, runPadLyraOnly = 0, runPadSpeedOver001 = 0, runPadSkippedRows = 0;
+	double runPadSpeedMax = 0;
+	int runPadPrinted = 0;
+
 	LARGE_INTEGER freq, t0, t1;
 	QueryPerformanceFrequency(&freq);
 	double runSeconds = 0;
@@ -549,6 +769,11 @@ int main(int argc, char** argv)
 	{
 		EMoveMode unused;
 		if (!ToMode(r.modeBefore, unused)) continue;
+		if (std::find(teleportSegs.begin(), teleportSegs.end(), r.seg) != teleportSegs.end())
+		{
+			++runPadSkippedRows;
+			continue;
+		}
 		if (r.seg != currentSeg)
 		{
 			closeSeg();
@@ -559,12 +784,14 @@ int main(int argc, char** argv)
 			segFirstSmallPrinted = false;
 			SyncState(run, r, runSim, cols);
 			if (cols.crouch) ApplyCrouchEvent(runSim, run, r);
+			if (launcherSet.count) ResetLaunchers(run, launcherSet, params.capsuleRadius, runSim.HalfHeightOf(run));
 		}
 		else if (r.ext != 0)
 		{
 			++resyncs;
 			SyncState(run, r, runSim, cols);
 			if (cols.crouch) ApplyCrouchEvent(runSim, run, r);
+			if (launcherSet.count) ResetLaunchers(run, launcherSet, params.capsuleRadius, runSim.HalfHeightOf(run));
 		}
 		else
 		{
@@ -579,11 +806,34 @@ int main(int argc, char** argv)
 			if (cols.crouch && r.cev == 1) ApplyCrouchEvent(runSim, run, r);
 		}
 
+		const bool padPending = run.launchPending;
+		const Vec3 padLaunch = run.pendingLaunch;
 		QueryPerformanceCounter(&t0);
-		RunTick(runSim, run, r, cols);
+		RunTick(runSim, run, r, cols, launcherSet, params.capsuleRadius);
 		QueryPerformanceCounter(&t1);
 		runSeconds += (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
 		++runTicks;
+		if (launcherSet.count)
+		{
+			// 이번 이동 머리에 우리가 넣은 발사 ↔ 기록 발사 칸
+			const bool lyraFire = !IsZeroVec(r.launch);
+			if (padPending && lyraFire)
+			{
+				++runPadMatched;
+				const double d = Dist(padLaunch, r.launch);
+				runPadSpeedMax = std::max(runPadSpeedMax, d);
+				if (d > 0.01) ++runPadSpeedOver001;
+			}
+			else if (padPending || lyraFire)
+			{
+				++(padPending ? runPadMineOnly : runPadLyraOnly);
+				if (runPadPrinted < 20)
+				{
+					++runPadPrinted;
+					std::printf("RUNPAD_FRAME_DIFF frame=%d seg=%d mine=%d lyra=%d\n", r.frame, r.seg, padPending ? 1 : 0, lyraFire ? 1 : 0);
+				}
+			}
+		}
 
 		runStats.Add(run, r);
 		if (cols.crouch) runStats.AddCrouch(runSim, run, r);
@@ -607,6 +857,11 @@ int main(int argc, char** argv)
 	std::printf("RUN segments=%zu over1cm=%zu over10cm=%zu worst=%.3f (seg %d) resync=%zu firstOver1 median=%.2fs\n",
 		segments, segOver1, segOver10, worstSeg, worstSegId, resyncs, firstOver1.empty() ? 0.f : firstOver1[firstOver1.size() / 2]);
 	if (cols.crouch) runStats.PrintCrouch("RUN");
+	if (launcherSet.count)
+	{
+		std::printf("RUNPAD matched=%zu mineOnly=%zu lyraOnly=%zu speedMax=%.6f over0.01=%zu | teleportSegs=%zu skippedRows=%zu\n",
+			runPadMatched, runPadMineOnly, runPadLyraOnly, runPadSpeedMax, runPadSpeedOver001, teleportSegs.size(), runPadSkippedRows);
+	}
 	PrintCounters(runSim.GetCounters());
 	if (cols.crouch) PrintCrouchCounters(runSim.GetCounters());
 	std::printf("TIME tick=%.2fus (ticks=%zu)\n", runTicks ? runSeconds * 1e6 / (double)runTicks : 0.0, runTicks);

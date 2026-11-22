@@ -8,6 +8,7 @@ param(
     [switch]$Stress,
     [switch]$Ads,
     [switch]$Crouch,
+    [switch]$Pads,
     [int]$TimeoutSec = 580
 )
 # Replays a fixed random input on Lyra movement and writes Saved/MOB/move_<Tag>.csv (answer sheet for Tools/MoveCheck).
@@ -27,6 +28,9 @@ if ($Stress) { $a += '-MOBMoveStress' }
 if ($Ads) { $a += '-MOBMoveAds' }
 # -Crouch: presses crouch every 0.2-2.5 s through ToggleCrouch (step D); every third segment starts crouched under a low ceiling. Separate random stream.
 if ($Crouch) { $a += '-MOBMoveCrouch' }
+# -Pads: jump pads (jumppad-plan j-2). Each segment puts the pawn 150-350 cm in front of one launcher (in turn) and walks into it; random input and jumps are off.
+# Use with -MapPath /ShooterMaps/Maps/L_Expanse. Extra columns yaw,pads,cue and '#pad' header lines (MOBMoveRecordSubsystem.h).
+if ($Pads) { $a += '-MOBMovePads' }
 $t0 = Get-Date
 $p = Start-Process -FilePath $ue -ArgumentList $a -PassThru
 if (-not $p.WaitForExit($TimeoutSec * 1000)) { "TIMEOUT after $TimeoutSec s - killing"; Stop-Process -Id $p.Id -Force }

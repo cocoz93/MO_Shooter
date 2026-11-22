@@ -165,6 +165,11 @@ namespace mo
 		RootForceState rootForce;		// 근접 밀기(컨텐츠 E-2-1) · 대시 힘(대시 D-1)
 		Vec3 lastUpdateVelocity;		// LastUpdateVelocity — 지난 이동 끝 속도. 밀기 중에 밖에서 속도를 바꾸면 그 차이를 덧붙이기 전 속도로 옮긴다.
 										// 서버 값으로 속도를 덮을 때는 이 값도 같이 덮는다(ClientAdjustPosition 과 같음 — 그러면 옮길 차이가 없다)
+
+		// 점프대(JumpPads.h — jumppad-plan) — CMoveSim 은 안 건드리고 TickWithLaunchers 가 쓴다. 점프대가 없는 판은 늘 0 · 꺼짐
+		uint8_t launcherMask = 0;		// 지난 이동 끝에 몸 캡슐이 든 점프대 구 칸 비트(점프대 표 차례). 자리로 정해지므로 보정 때 서버 자리로 다시 센다
+		bool launchPending = false;		// PendingLaunchVelocity 가 차 있다 — 지난 이동 끝에 점프대가 쐈다. 다음 이동 머리가 먹는다. 와이어 깃발 STATE_LAUNCH_PENDING
+		Vec3 pendingLaunch;
 	};
 
 	// 다른 사람 캡슐(컨텐츠 F) — 선 캡슐(축이 세로). 이동 쓸기 · 겹침 풀기가 맵과 함께 본다(Lyra 는 밀지 않고 막거나 미끄러뜨린다 — F-1 실측).

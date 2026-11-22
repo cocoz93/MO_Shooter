@@ -32,6 +32,17 @@ move_expanse_crouch COUNT ticks=23584 walkIter=11185 fallIter=12654 | floorSweep
 move_expanse_crouch COUNT perchTry=356 perchOk=344 perchOverride=0 perchFail=12
 move_expanse_crouch COUNT ramp2=0 stepTry=1917 stepOk=861 stepReject=561 slide=2316 twoWall=1352 ledgeFall=16 | landed=146 landedEdge=0 fallWall2=359 fallStuck=0 apex=114 | jump=119 launch=0 | startPen=0 resolveTeleport=0 resolveSweep=0
 move_expanse_crouch CROUCH_COUNT crouchGround=87 crouchAir=0 uncrouchGround=36 lowered=0 uncrouchAir=61 airShifted=56 blocked=457
+move_expanse_pads PAD launchers=8 recPads=8 mapped=8 padsColumns=1
+move_expanse_pads PAD mask frames=15362 lyraIn=198 mineIn=198 mismatch=0 | begins=51 fired=51 refused=0 matched=51 beginNoLaunch=0 launchNoBegin=0 beginAtEnd=0 | speedMax=0.000030 over0.01=0 | lyraLaunchRows=53 teleportMoves=2 teleportLaunch=2 orphan=0
+move_expanse_pads PAD_COVER push0=8 push1=7 push2=8 push3=8 up4=9 up5=8 up6=1 up7=2
+move_expanse_pads PADCHECK PASS
+move_expanse_pads ONE frames=15362 (walk=8444 fall=6918) posMax=3184.2882 p50=0.00000 p99=0.0002 over0.01=17 over0.1=13 over1=2 | velMax=22.255 velOver1=5 | modeMismatch=2
+move_expanse_pads RUN frames=14880 (walk=8256 fall=6624) posMax=33.1808 p50=0.00014 p99=3.1540 over0.01=1110 over0.1=770 over1=177 | velMax=1078.000 velOver1=200 | modeMismatch=10
+move_expanse_pads RUN segments=62 over1cm=2 over10cm=1 worst=33.181 (seg 32) resync=0 firstOver1 median=3.70s
+move_expanse_pads RUNPAD matched=49 mineOnly=0 lyraOnly=0 speedMax=0.001073 over0.01=0 | teleportSegs=2 skippedRows=482
+move_expanse_pads COUNT ticks=14880 walkIter=8272 fallIter=6784 | floorSweep=5560 second=1 line=34 lineWalk=18 supplied=3003 adjust=3344 popOut=0
+move_expanse_pads COUNT perchTry=29 perchOk=6 perchOverride=3 perchFail=23
+move_expanse_pads COUNT ramp2=1 stepTry=4135 stepOk=3015 stepReject=334 slide=4447 twoWall=798 ledgeFall=11 | landed=119 landedEdge=4 fallWall2=72 fallStuck=1 apex=58 | jump=14 launch=49 | startPen=3 resolveTeleport=1 resolveSweep=0
 weapon TABLE   pistol   items=59 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001
 weapon TABLE   rifle    items=68 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001
 weapon TABLE   shotgun  items=65 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001

@@ -4,6 +4,7 @@
 #include "MOBMoveRecordSubsystem.generated.h"
 
 class ACharacter;
+class UPrimitiveComponent;
 class ULyraCharacterMovementComponent;
 
 /**
@@ -22,6 +23,10 @@ class ULyraCharacterMovementComponent;
  *                           점프는 Lyra 점프 능력처럼 일어서기를 먼저 부른다(LyraGameplayAbility_Jump.cpp:55). 앉기도 따로 쓰는 난수라 이동 입력은 그대로.
  *                           셋째 구간마다 천장이 낮은 자리(앉은 캡슐은 들어가고 선 캡슐은 안 들어가는 곳)에서 앉은 채 시작해 일어서기 막힘을 지나간다.
  *                           줄 끝 칸 = cev(0 없음 · 1 앉기 누름 · 2 점프가 부른 일어서기) · 앞 wants · 앞 crouched · 앞 half · walk(MaxWalkSpeed) · 뒤 wants · 뒤 crouched · 뒤 half
+ *   -MOBMovePads            점프대 정답지(jumppad-plan j-2). 구간마다 점프대 하나(구간 차례로 돌림) 앞 바닥에 놓고 그쪽으로 걷는다 — 평소 무작위 입력 · 점프는 끔.
+ *                           넷째 구간 묶음마다 갈래를 바꾼다: 0 점프대를 보고 걸음 · 1 아무 쪽이나 보고 걸음 · 2 아무 쪽이나 보고 점프해 들어감 · 3 반 걸음.
+ *                           점프대 몫은 Lyra 그래프 그대로 돈다(겹침 → LaunchCharacter → 다음 프레임 줄의 lx · ly · lz).
+ *                           줄 끝 칸 = yaw(이동 뒤 몸 방향 — 그래프가 읽는 앞방향) · pads(이동 뒤 몸 캡슐과 겹친 점프대 구 칸 비트, 차례 = 머리 「#pad」 줄) · cue(살아 있는 효과 배우 수)
  * 판정에 쓰는 줄은 「MOB_MOVE」 로 시작한다. 파일 형식은 Tools/MoveCheck 머리 주석이 정본이다.
  */
 UCLASS()
@@ -70,6 +75,25 @@ private:
 	bool bWantsBefore = false, bCrouchedBefore = false;
 	float HalfBefore = 0.f, WalkBefore = 0.f;
 	int32 CrouchPresses = 0, JumpUncrouches = 0, CrouchedFrames = 0, BlockedFrames = 0, FallCrouchedFrames = 0, CrouchChanges = 0;
+
+	// 점프대(-MOBMovePads, 점프대 j-2)
+	struct FPadSpot
+	{
+		TWeakObjectPtr<AActor> Actor;
+		TWeakObjectPtr<UPrimitiveComponent> Sphere;
+		FString Name;
+	};
+	void FindPads();
+	bool PlaceForPad(ULyraCharacterMovementComponent* M, ACharacter* Ch);
+	int32 CountCues() const;
+	bool bPads = false;
+	TArray<FPadSpot> Pads;			// 이름 차례(make_launchers.py 와 같은 차례)
+	FRandomStream PadRng;
+	int32 PadVariant = 0;
+	float PadJumpAt = 0.f;
+	bool bPadJumped = false;
+	int32 PadPlaced = 0, PadMiss = 0, PadLaunchRows = 0, PadOverlapRows = 0, PadCueRows = 0, PadCueSpawns = 0;
+	FDelegateHandle PadSpawnHandle;
 
 	double PawnReadyAt = -1;
 	double HookedRealAt = 0;

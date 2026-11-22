@@ -1,7 +1,8 @@
 param(
     [string]$MapPath = '/ShooterCore/Maps/L_ShooterGym',
     [string]$Tag = 'gym',
-    [int]$TimeoutSec = 180
+    [int]$TimeoutSec = 180,
+    [switch]$Launchers   # jump pads (j-1): launcher actors' blueprint vars + shapes, and the launcher graphs (deep)
 )
 # Dumps runtime weapon numbers, blueprint graphs and character collision bodies to Saved/MOB/weapons_<Tag>.txt
 $proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
@@ -12,6 +13,10 @@ $log  = "$out\weapons_$Tag.log"
 
 $a = @("`"$proj\Lyra.uproject`"", "$MapPath`?NumBots=1", '-game', '-RenderOffScreen', '-ResX=640', '-ResY=360',
        '-unattended', '-nosplash', '-nosound', '-log', "-abslog=`"$log`"", "-MOBWeaponDump=$Tag")
+if ($Launchers) {
+    $a += '-MOBWDLaunchers'
+    $a += '-MOBWDGraph=/ShooterCore/Blueprint/B_Launcher.B_Launcher;/ShooterCore/Blueprint/B_Launcher_Up.B_Launcher_Up;/ShooterCore/Blueprint/B_Launcher_Push.B_Launcher_Push;/ShooterCore/GameplayCues/GCNL_Launcher_Activate.GCNL_Launcher_Activate'
+}
 $t0 = Get-Date
 $p = Start-Process -FilePath $ue -ArgumentList $a -PassThru
 if (-not $p.WaitForExit($TimeoutSec * 1000)) { "TIMEOUT after $TimeoutSec s - killing"; Stop-Process -Id $p.Id -Force }

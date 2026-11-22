@@ -1,8 +1,10 @@
 ﻿#include "MOBWeaponDumpSubsystem.h"
 
 #include "Animation/AnimMontage.h"
+#include "Components/BoxComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/SphereComponent.h"
 #include "Engine/Blueprint.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
@@ -384,6 +386,56 @@ void UMOBWeaponDumpSubsystem::DumpMatch()
 	}
 }
 
+// 점프대 j-1 — 점프대마다 청사진 변수(UpOverride · 대상 · 배율 같은 발사 값)와 칸 모양 · 월드 변환을 적는다. 실행 중 값이라 짓기 그래프가 채운 값까지 보인다.
+// 줄 머리 = MOB_LAUNCHER(배우) · MOB_LAUNCHER_VAR(청사진 변수) · MOB_LAUNCHER_COMP(장면 컴포넌트) — make_launchers.py 가 읽는다
+void UMOBWeaponDumpSubsystem::DumpLaunchers()
+{
+	static const FName LauncherName(TEXT("B_Launcher_C"));
+	int32 Count = 0, Vars = 0, Shapes = 0;
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		AActor* A = *It;
+		bool bLauncher = false;
+		for (const UClass* C = A->GetClass(); C && !bLauncher; C = C->GetSuperClass()) bLauncher = C->GetFName() == LauncherName;
+		if (!bLauncher) continue;
+		++Count;
+		const FTransform T = A->GetActorTransform();
+		const FRotator R = T.Rotator();
+		Out += FString::Printf(TEXT("MOB_LAUNCHER name=%s class=%s loc=%.4f,%.4f,%.4f rot=%.4f,%.4f,%.4f scale=%.4f,%.4f,%.4f\n"), *A->GetName(), *A->GetClass()->GetName(),
+			T.GetLocation().X, T.GetLocation().Y, T.GetLocation().Z, R.Pitch, R.Yaw, R.Roll, T.GetScale3D().X, T.GetScale3D().Y, T.GetScale3D().Z);
+		// 청사진이 더한 변수만 — 네이티브 배우 속성은 장치 동작과 무관하고 양이 많다
+		for (TFieldIterator<FProperty> PIt(A->GetClass()); PIt; ++PIt)
+		{
+			const FProperty* P = *PIt;
+			const UClass* Owner = P->GetOwnerClass();
+			if (!Owner || Owner->HasAnyClassFlags(CLASS_Native)) continue;
+			if (CastField<FObjectPropertyBase>(P) && CastField<FObjectPropertyBase>(P)->PropertyClass->IsChildOf(UActorComponent::StaticClass())) continue;	// 컴포넌트는 아래 줄에서
+			FString V;
+			P->ExportText_InContainer(0, V, A, A, A, PPF_None);
+			Out += FString::Printf(TEXT("MOB_LAUNCHER_VAR name=%s owner=%s var=%s type=%s value=%s\n"), *A->GetName(), *Owner->GetName(), *P->GetName(), *P->GetCPPType(), *V.Replace(TEXT("\n"), TEXT(" ")));
+			++Vars;
+		}
+		TInlineComponentArray<USceneComponent*> Parts(A);
+		for (USceneComponent* S : Parts)
+		{
+			const FTransform W = S->GetComponentTransform();
+			const FRotator WR = W.Rotator();
+			FString Shape = TEXT("-");
+			if (const USphereComponent* Sp = Cast<USphereComponent>(S)) Shape = FString::Printf(TEXT("sphere r=%.4f scaledR=%.4f"), Sp->GetUnscaledSphereRadius(), Sp->GetScaledSphereRadius());
+			else if (const UBoxComponent* Bx = Cast<UBoxComponent>(S)) Shape = FString::Printf(TEXT("box ext=%.4f,%.4f,%.4f scaledExt=%.4f,%.4f,%.4f"), Bx->GetUnscaledBoxExtent().X, Bx->GetUnscaledBoxExtent().Y, Bx->GetUnscaledBoxExtent().Z,
+				Bx->GetScaledBoxExtent().X, Bx->GetScaledBoxExtent().Y, Bx->GetScaledBoxExtent().Z);
+			else if (const UCapsuleComponent* Cp = Cast<UCapsuleComponent>(S)) Shape = FString::Printf(TEXT("capsule r=%.4f hh=%.4f"), Cp->GetScaledCapsuleRadius(), Cp->GetScaledCapsuleHalfHeight());
+			const UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(S);
+			if (Prim && Prim->GetGenerateOverlapEvents()) ++Shapes;
+			Out += FString::Printf(TEXT("MOB_LAUNCHER_COMP name=%s comp=%s class=%s parent=%s overlap=%d profile=%s collision=%d loc=%.4f,%.4f,%.4f rot=%.4f,%.4f,%.4f scale=%.4f,%.4f,%.4f shape=%s\n"),
+				*A->GetName(), *S->GetName(), *S->GetClass()->GetName(), S->GetAttachParent() ? *S->GetAttachParent()->GetName() : TEXT("-"),
+				Prim && Prim->GetGenerateOverlapEvents() ? 1 : 0, Prim ? *Prim->GetCollisionProfileName().ToString() : TEXT("-"), Prim ? (int32)Prim->GetCollisionEnabled() : -1,
+				W.GetLocation().X, W.GetLocation().Y, W.GetLocation().Z, WR.Pitch, WR.Yaw, WR.Roll, W.GetScale3D().X, W.GetScale3D().Y, W.GetScale3D().Z, *Shape);
+		}
+	}
+	UE_LOG(LogMOBWeaponDump, Log, TEXT("MOB_WDUMP launchers=%d vars=%d overlapShapes=%d"), Count, Vars, Shapes);
+}
+
 void UMOBWeaponDumpSubsystem::Tick(float DeltaTime)
 {
 	if (bDone) return;
@@ -410,6 +462,7 @@ void UMOBWeaponDumpSubsystem::Tick(float DeltaTime)
 	DumpPawnBodies(Mine, TEXT("mine"));
 	DumpPawnBodies(Other, TEXT("other"));
 	DumpMatch();
+	if (FParse::Param(FCommandLine::Get(), TEXT("MOBWDLaunchers"))) DumpLaunchers();
 	Finish();
 }
 

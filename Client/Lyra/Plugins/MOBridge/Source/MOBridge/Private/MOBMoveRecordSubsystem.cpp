@@ -1,6 +1,7 @@
 ﻿#include "MOBMoveRecordSubsystem.h"
 
 #include "Components/CapsuleComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Character.h"
@@ -59,9 +60,11 @@ void UMOBMoveRecordSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	bStress = FParse::Param(Cmd, TEXT("MOBMoveStress"));
 	bAds = FParse::Param(Cmd, TEXT("MOBMoveAds"));
 	bCrouch = FParse::Param(Cmd, TEXT("MOBMoveCrouch"));
+	bPads = FParse::Param(Cmd, TEXT("MOBMovePads"));
 	Rng.Initialize(Seed);
 	AdsRng.Initialize(Seed + 1);
 	CrouchRng.Initialize(Seed + 2);
+	PadRng.Initialize(Seed + 4);	// +3 은 낮은 천장 찾기(FindLowSpots)
 	GInstance = this;
 	UE_LOG(LogMOBMove, Log, TEXT("MOB_MOVE_INIT world=%s tag=%s seed=%d segs=%d segSec=%.1f"), *GetNameSafe(GetWorld()), *Tag, Seed, NumSegs, SegSeconds);
 }
@@ -123,10 +126,12 @@ void UMOBMoveRecordSubsystem::BeginRecording(ACharacter* Ch)
 	PlayArea = PlayArea.ExpandBy(FVector(PLAY_AREA_PAD));
 
 	DumpParams(Ch);
+	if (bPads) FindPads();
 	Csv += TEXT("frame,seg,ev,dt,ix,iy,iz,px,py,pz,vx,vy,vz,mode,ext,lx,ly,lz,pressed,was,hold,force,count,countPre,maxSpeed,")
 		TEXT("ax,ay,az,avx,avy,avz,amode,fBlock,fWalk,fLine,fDist,fLineDist,aCount");
 	if (bAds) Csv += TEXT(",ads");
 	if (bCrouch) Csv += TEXT(",cev,cwant,crouched,half,walk,cwantA,crouchedA,halfA");
+	if (bPads) Csv += TEXT(",yaw,pads,cue");
 	Csv += TEXT("\n");
 	if (bCrouch) FindLowSpots(Ch);
 
@@ -232,6 +237,98 @@ void UMOBMoveRecordSubsystem::FindLowSpots(ACharacter* Ch)
 	}
 }
 
+// 점프대 j-2 — 점프대 배우(B_Launcher_C 자식)와 겹침 구 칸(Sphere)을 이름 차례로 모은다. 차례 = make_launchers.py 줄 차례(이름 정렬)
+void UMOBMoveRecordSubsystem::FindPads()
+{
+	static const FName LauncherName(TEXT("B_Launcher_C"));
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		bool bLauncher = false;
+		for (const UClass* C = It->GetClass(); C && !bLauncher; C = C->GetSuperClass()) bLauncher = C->GetFName() == LauncherName;
+		if (!bLauncher) continue;
+		TInlineComponentArray<UPrimitiveComponent*> Prims(*It);
+		for (UPrimitiveComponent* P : Prims)
+		{
+			if (P->GetFName() != TEXT("Sphere") || !P->GetGenerateOverlapEvents()) continue;
+			FPadSpot& S = Pads.AddDefaulted_GetRef();
+			S.Actor = *It;
+			S.Sphere = P;
+			S.Name = It->GetName();
+		}
+	}
+	Pads.Sort([](const FPadSpot& A, const FPadSpot& B) { return A.Name.Compare(B.Name, ESearchCase::CaseSensitive) < 0; });	// 파이썬 sorted 와 같은 대소문자 구별 차례
+	for (int32 I = 0; I < Pads.Num(); ++I)
+	{
+		const FVector C = Pads[I].Sphere->GetComponentLocation();
+		Csv += FString::Printf(TEXT("#pad %d %s %.4f %.4f %.4f\n"), I, *Pads[I].Name, C.X, C.Y, C.Z);
+	}
+	// 효과 배우가 새로 생긴 수 — 효과 배우는 다시 쓰는 통에 들어가므로 처음 한 번만 생긴다. 프레임 칸 cue 는 숨지 않은 효과 배우 수
+	PadSpawnHandle = GetWorld()->AddOnActorSpawnedHandler(FOnActorSpawned::FDelegate::CreateLambda([this](AActor* A)
+	{
+		if (A && A->GetClass()->GetName().Contains(TEXT("GCNL_Launcher"))) ++PadCueSpawns;
+	}));
+	UE_LOG(LogMOBMove, Log, TEXT("MOB_MOVE_PADS found=%d"), Pads.Num());
+}
+
+int32 UMOBMoveRecordSubsystem::CountCues() const
+{
+	int32 N = 0;
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		if (!It->IsHidden() && It->GetClass()->GetName().Contains(TEXT("GCNL_Launcher"))) ++N;
+	}
+	return N;
+}
+
+// 구간 차례로 점프대 하나 — 구 칸 바깥 150~350cm 바닥(점프대 바닥 높이 ±150 안)에 놓고, 몸 방향 · 입력(점프대 쪽 ±15°)을 정한다
+bool UMOBMoveRecordSubsystem::PlaceForPad(ULyraCharacterMovementComponent* M, ACharacter* Ch)
+{
+	if (Pads.Num() == 0) return false;
+	const FPadSpot& Pad = Pads[SegIndex % Pads.Num()];
+	const UPrimitiveComponent* Sphere = Pad.Sphere.Get();
+	const AActor* Actor = Pad.Actor.Get();
+	if (!Sphere || !Actor) return false;
+	PadVariant = (SegIndex / Pads.Num()) % 4;
+	bPadJumped = false;
+	PadJumpAt = PadRng.FRandRange(0.0, 0.3);
+
+	UWorld* World = GetWorld();
+	UCapsuleComponent* Capsule = Ch->GetCapsuleComponent();
+	const float Radius = Capsule->GetScaledCapsuleRadius();
+	const float HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(MOBMovePad), false, Ch);
+	const FCollisionResponseParams Response(Capsule->GetCollisionResponseToChannels());
+	const FVector Center = Sphere->GetComponentLocation();
+	const double PadFloorZ = Actor->GetActorLocation().Z;
+	const double SphereR = Sphere->Bounds.SphereRadius;
+	for (int32 Try = 0; Try < START_TRIES; ++Try)
+	{
+		const double Angle = PadRng.FRandRange(0.0, UE_DOUBLE_TWO_PI);
+		const double Dist = SphereR + PadRng.FRandRange(150.0, 350.0);
+		const double X = Center.X + FMath::Cos(Angle) * Dist;
+		const double Y = Center.Y + FMath::Sin(Angle) * Dist;
+		FHitResult Hit;
+		if (!World->LineTraceSingleByChannel(Hit, FVector(X, Y, PadFloorZ + 400.0), FVector(X, Y, PadFloorZ - 600.0), Capsule->GetCollisionObjectType(), Params, Response)) continue;
+		if (Hit.bStartPenetrating || Hit.ImpactNormal.Z < 0.7 || FMath::Abs(Hit.ImpactPoint.Z - PadFloorZ) > 150.0) continue;
+		const FVector Spot = Hit.ImpactPoint + FVector(0, 0, HalfHeight + START_ABOVE_FLOOR);
+		if (World->OverlapBlockingTestByChannel(Spot, FQuat::Identity, Capsule->GetCollisionObjectType(), FCollisionShape::MakeCapsule(Radius, HalfHeight), Params, Response)) continue;
+
+		M->UpdatedComponent->SetWorldLocation(Spot, false, nullptr, ETeleportType::TeleportPhysics);
+		const double ToPad = FMath::Atan2(Center.Y - Spot.Y, Center.X - Spot.X);
+		const double InputAngle = ToPad + FMath::DegreesToRadians(PadRng.FRandRange(-15.0, 15.0));
+		const double Mag = PadVariant == 3 ? 0.5 : 1.0;
+		CurrentInput = FVector(FMath::Cos(InputAngle) * Mag, FMath::Sin(InputAngle) * Mag, 0.0);
+		// 몸 방향 — 0 은 점프대 쪽, 나머지는 아무 쪽. 밀기 점프대는 이 방향으로 날린다(그래프 Target Method = 몸 앞방향)
+		const double Yaw = PadVariant == 0 ? FMath::RadiansToDegrees(ToPad) : PadRng.FRandRange(-180.0, 180.0);
+		if (APlayerController* PC = Cast<APlayerController>(Ch->GetController())) PC->SetControlRotation(FRotator(0.0, Yaw, 0.0));
+		Ch->SetActorRotation(FRotator(0.0, Yaw, 0.0));
+		++PadPlaced;
+		return true;
+	}
+	++PadMiss;
+	return false;
+}
+
 bool UMOBMoveRecordSubsystem::StartSegment(ULyraCharacterMovementComponent* M, ACharacter* Ch)
 {
 	++SegIndex;
@@ -252,6 +349,11 @@ bool UMOBMoveRecordSubsystem::StartSegment(ULyraCharacterMovementComponent* M, A
 	const FCollisionResponseParams Response(Capsule->GetCollisionResponseToChannels());
 
 	bool bPlaced = false;
+	if (bPads)
+	{
+		bPlaced = PlaceForPad(M, Ch);
+		if (!bPlaced) ++StartMissCount;
+	}
 	// 앉기 기록의 셋째 구간마다 — 낮은 천장 밑에 앉은 채 둔다. 낙하 모드에서 앉혀야 캡슐이 중심 그대로 줄어든다(걷기 모드면 바닥 쪽으로 쓸어 내린다)
 	if (bCrouch && LowSpots.Num() > 0 && (SegIndex % 3) == 2)
 	{
@@ -261,7 +363,7 @@ bool UMOBMoveRecordSubsystem::StartSegment(ULyraCharacterMovementComponent* M, A
 		M->UpdatedComponent->SetWorldLocation(LowSpots[LowSegs++ % LowSpots.Num()], false, nullptr, ETeleportType::TeleportPhysics);
 		bPlaced = true;
 	}
-	for (int32 Try = 0; Try < START_TRIES && !bPlaced; ++Try)
+	for (int32 Try = 0; Try < START_TRIES && !bPlaced && !bPads; ++Try)
 	{
 		const double X = Rng.FRandRange(PlayArea.Min.X, PlayArea.Max.X);
 		const double Y = Rng.FRandRange(PlayArea.Min.Y, PlayArea.Max.Y);
@@ -307,8 +409,8 @@ void UMOBMoveRecordSubsystem::OnPreMove(ULyraCharacterMovementComponent* M, FVec
 		if (!StartSegment(M, Ch)) return;
 	}
 
-	// 입력 — 방향은 0.2~3초마다, 크기는 {1,1,1,0.5,0} 중에서
-	if (SegTime >= NextDirAt)
+	// 입력 — 방향은 0.2~3초마다, 크기는 {1,1,1,0.5,0} 중에서. 점프대 기록은 구간 내내 놓을 때 정한 입력
+	if (!bPads && SegTime >= NextDirAt)
 	{
 		const double Angle = Rng.FRandRange(0.0, UE_DOUBLE_TWO_PI);
 		static const double Mags[] = { 1.0, 1.0, 1.0, 0.5, 0.0 };
@@ -336,6 +438,17 @@ void UMOBMoveRecordSubsystem::OnPreMove(ULyraCharacterMovementComponent* M, FVec
 		{
 			Ch->StopJumping();
 			Ev = 2;
+		}
+	}
+	else if (bPads)
+	{
+		// 점프대 갈래 2 — 구간 처음 0~0.3초에 한 번, 10프레임 눌러 떨어지며 들어간다
+		if (PadVariant == 2 && !bPadJumped && SegTime >= PadJumpAt)
+		{
+			bPadJumped = true;
+			Ch->Jump();
+			Ev = 1;
+			JumpFramesLeft = 10;
 		}
 	}
 	else if (Rng.FRand() < Dt / 1.5f)
@@ -396,6 +509,7 @@ void UMOBMoveRecordSubsystem::OnPreMove(ULyraCharacterMovementComponent* M, FVec
 	const FVector L = M->PendingLaunchVelocity;
 	const bool bExt = bPrevValid && P != PrevAfterLocation;
 	if (bExt) ++ExtCount;
+	if (bPads && !L.IsZero()) ++PadLaunchRows;
 
 	Row = FString::Printf(TEXT("%d,%d,%d,%.9g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%d,%.17g,%.17g,%.17g,%d,%d,%.9g,%.9g,%d,%d,%.9g,"),
 		Frame, SegIndex, Ev, Dt, Input.X, Input.Y, Input.Z, P.X, P.Y, P.Z, V.X, V.Y, V.Z, (int32)M->MovementMode, bExt ? 1 : 0, L.X, L.Y, L.Z,
@@ -429,6 +543,20 @@ void UMOBMoveRecordSubsystem::OnPostMove(ULyraCharacterMovementComponent* M, flo
 		FallCrouchedFrames += (bCrouchedA && M->MovementMode == MOVE_Falling) ? 1 : 0;
 		CrouchChanges += (bCrouchedA != bCrouchedBefore) ? 1 : 0;
 	}
+	if (bPads)
+	{
+		// 이동 뒤 — 겹침 시작은 이동 묶음(FScopedCapsuleMovementUpdate)이 닫힐 때 이미 났다. 그래프가 읽은 앞방향 · 속도가 이 줄의 yaw · avx~avz
+		uint32 Mask = 0;
+		for (int32 I = 0; I < Pads.Num() && I < 32; ++I)
+		{
+			const UPrimitiveComponent* Sphere = Pads[I].Sphere.Get();
+			if (Sphere && Ch && Sphere->IsOverlappingActor(Ch)) Mask |= 1u << I;
+		}
+		const int32 Cues = CountCues();
+		PadOverlapRows += Mask != 0 ? 1 : 0;
+		PadCueRows += Cues > 0 ? 1 : 0;
+		Csv += FString::Printf(TEXT(",%.9g,%u,%d"), Ch ? Ch->GetActorRotation().Yaw : 0.0, Mask, Cues);
+	}
 	Csv += TEXT("\n");
 
 	PrevAfterLocation = P;
@@ -451,6 +579,12 @@ void UMOBMoveRecordSubsystem::Finish()
 	{
 		UE_LOG(LogMOBMove, Log, TEXT("MOB_MOVE_CROUCH presses=%d jumpUncrouch=%d changes=%d crouchedFrames=%d blockedFrames=%d fallCrouchedFrames=%d lowSpots=%d lowSegs=%d"),
 			CrouchPresses, JumpUncrouches, CrouchChanges, CrouchedFrames, BlockedFrames, FallCrouchedFrames, LowSpots.Num(), LowSegs);
+	}
+	if (bPads)
+	{
+		GetWorld()->RemoveOnActorSpawnedHandler(PadSpawnHandle);
+		UE_LOG(LogMOBMove, Log, TEXT("MOB_MOVE_PADS_DONE pads=%d placed=%d miss=%d launchRows=%d overlapRows=%d cueRows=%d cueSpawns=%d"),
+			Pads.Num(), PadPlaced, PadMiss, PadLaunchRows, PadOverlapRows, PadCueRows, PadCueSpawns);
 	}
 	FPlatformMisc::RequestExit(false);
 }
