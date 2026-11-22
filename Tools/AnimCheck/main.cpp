@@ -14,6 +14,11 @@
 //   판정은 pose 와 같은 check_pose.py. --brakeScale / --groundAdd 는 일부러 틀림이다.
 //   --wire 는 상태를 패킷 형식으로 한 번 왕복시킨 값으로 자세를 계산한다 — 패킷 눈금이 언리얼 대비 얼마를 더하는지 잰다.
 //   --wireKeepNew 는 --wire 에서 프로토콜 5 에 더한 칸(몽타주 · 덮기 · 왼손)만 바로 값으로 둔다 — 새 칸의 눈금 몫을 가른다(9단계 조각 4).
+//
+// 사용: AnimCheck fall <clips.bin> [--seconds=초]
+//   묶음마다 1초 서 있다 그 초만큼(기본 12) 떨어지는 입력을 만들어, 갱신마다 쌓기 칸을 패킷 형식으로 한 번 왕복시킨다.
+//   반복 클립 칸이 바로 값과 같은 클립 자리(길이로 감은 시각)를 가리키는지 센다 — stuck 이 0 이 아니면 FAIL(L-13-b4).
+//   기록 낙하는 1초 안이라 패킷 시각 한도(10.9초)에 못 닿아 입력을 만든다. loopRows = 지나간 반복 칸 수(0 이면 못 본 것이라 FAIL)
 
 #include "AnimClips.h"
 #include "AnimPose.h"
@@ -1536,6 +1541,97 @@ namespace
 		}
 		return 0;
 	}
+	// L-13-b4 — 긴 낙하 패킷 왕복(머리 주석 「AnimCheck fall」)
+	int RunFall(int argc, char** argv)
+	{
+		if (argc < 3)
+		{
+			std::printf("사용: AnimCheck fall <clips.bin> [--seconds=초]\n");
+			return 2;
+		}
+		float seconds = 12.f;
+		for (int i = 3; i < argc; ++i)
+		{
+			if (std::strncmp(argv[i], "--seconds=", 10) == 0) seconds = (float)std::atof(argv[i] + 10);
+		}
+		std::vector<char> data;
+		if (!ReadFile(argv[2], data))
+		{
+			std::printf("FALLWIRE FAIL 클립 파일을 못 읽음: %s\n", argv[2]);
+			return 1;
+		}
+		CAnimClips clips;
+		const EClipLoad result = clips.LoadFromMemory(data.data(), data.size());
+		if (result != EClipLoad::Ok)
+		{
+			std::printf("FALLWIRE FAIL result=%s\n", LoadName(result));
+			return 1;
+		}
+		constexpr float kDt = 1.f / 60.f;
+		constexpr int kStandFrames = 60;
+		constexpr float kSlack = 0.001f;		// 패킷 눈금 1/6000초(반올림 몫 1/12000)의 열두 배 — 넘으면 다른 자리
+		const int fallFrames = (int)std::lround(seconds / kDt);
+		bool ok = true;
+		for (const ClipBundle& bundle : clips.Bundles())
+		{
+			CAnimState state;
+			CAnimPoseEvaluator evaluator;
+			if (!state.Init(clips, bundle.name.c_str()) || !evaluator.Init(clips, bundle.name.c_str()))
+			{
+				std::printf("FALLWIRE FAIL 상태 · 계산기를 못 만듦: %s\n", bundle.name.c_str());
+				ok = false;
+				continue;
+			}
+			std::vector<BoneTransform> scratch(evaluator.BoneCount());
+			size_t loopRows = 0, stuck = 0, countDiff = 0;
+			float maxDiff = 0.f, maxTime = 0.f, firstStuck = -1.f;
+			for (int f = 0; f < kStandFrames + fallFrames; ++f)
+			{
+				const bool falling = f >= kStandFrames;
+				AnimMoveInput input;
+				input.deltaSeconds = kDt;
+				input.falling = falling;
+				input.velocity[2] = falling ? -980.0 * (double)(f - kStandFrames) * (double)kDt : 0.0;
+				input.groundDistance = falling ? 100000.f : 0.f;	// 땅까지 1km — 내려앉음 클립으로 안 넘어간다
+				input.airGap = clips.MeshPlacement().p[2] + MoveParams{}.capsuleHalfHeight;
+				state.Update(input, evaluator, scratch.data());
+				AnimPoseInput exact, viaWire;
+				state.ToPoseInput(exact);
+				wire::AnimStateWire onWire{};
+				state.ToWire(onWire);
+				state.FromWire(onWire, exact.pitch, exact.crouched, viaWire);
+				if (viaWire.layerCount != exact.layerCount)
+				{
+					++countDiff;
+					continue;
+				}
+				for (int k = 0; k < exact.layerCount; ++k)
+				{
+					if (exact.layers[k].clip < 0) continue;
+					const AnimClip& clip = bundle.clips[StackClipIndex(exact.layers[k].clip)];
+					if (!clip.loop) continue;
+					++loopRows;
+					const float length = std::max(clip.length, 0.01f);
+					const float a = std::fmod(exact.layers[k].time, length);
+					const float b = std::fmod(viaWire.layers[k].time, length);
+					float d = std::fabs(a - b);
+					d = std::min(d, length - d);		// 길이 끝과 0 은 같은 자리
+					maxDiff = std::max(maxDiff, d);
+					maxTime = std::max(maxTime, exact.layers[k].time);
+					if (d > kSlack)
+					{
+						++stuck;
+						if (firstStuck < 0.f) firstStuck = (float)(f - kStandFrames) * kDt;
+					}
+				}
+			}
+			std::printf("FALLWIRE bundle=%s fallSeconds=%.1f frames=%d loopRows=%zu countDiff=%zu maxLayerTime=%.3f maxDiff=%.6f stuck=%zu firstStuck=%.3f\n",
+				bundle.name.c_str(), seconds, kStandFrames + fallFrames, loopRows, countDiff, maxTime, maxDiff, stuck, firstStuck);
+			if (loopRows == 0 || countDiff > 0 || stuck > 0) ok = false;
+		}
+		std::printf(ok ? "FALLWIRE PASS\n" : "FALLWIRE FAIL\n");
+		return ok ? 0 : 1;
+	}
 }
 
 int main(int argc, char** argv)
@@ -1543,8 +1639,10 @@ int main(int argc, char** argv)
 	if (argc >= 2 && std::strcmp(argv[1], "clips") == 0) return RunClips(argc, argv);
 	if (argc >= 2 && std::strcmp(argv[1], "pose") == 0) return RunPose(argc, argv);
 	if (argc >= 2 && std::strcmp(argv[1], "state") == 0) return RunState(argc, argv);
+	if (argc >= 2 && std::strcmp(argv[1], "fall") == 0) return RunFall(argc, argv);
 	std::printf("사용: AnimCheck clips <clips.bin> [--dump=<out.csv>]\n");
 	std::printf("      AnimCheck pose <clips.bin> <animcmp_<Tag>.csv> <out.csv> [--shift=N] [--swaplr] [--noHandIK]\n");
 	std::printf("      AnimCheck state <clips.bin> <animcmp_<Tag>.csv> <animcmp_<Tag>_moves.csv> <out.csv> [--brakeScale=배율] [--groundAdd=cm] [--wire]\n");
+	std::printf("      AnimCheck fall <clips.bin> [--seconds=초]\n");
 	return 2;
 }

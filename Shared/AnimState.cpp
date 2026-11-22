@@ -1607,7 +1607,15 @@ namespace mo
 		for (int i = 0; i < _count; ++i)
 		{
 			out.layers[i].clip = (int8_t)_stack[i].clip;
-			out.layers[i].time = ToWireTime(_stack[i].time);
+			// 반복 클립은 클립 길이로 감아 싣는다 — 이 객체는 감지 않은 시각을 들고 있어(떨어지는 중이 길면 계속 커짐) 그대로 실으면 kWireTimeMax(10.9초)에서 멈춰
+			// 받는 쪽 · 되감기 판정 자세가 굳는다. 받는 쪽은 반복 클립을 어차피 길이로 감아 그린다(AnimPose.cpp 쌓기 칸) — 같은 자리다(L-13-b4 · AnimCheck fall)
+			float time = _stack[i].time;
+			if (_clips && _stack[i].clip >= 0)
+			{
+				const AnimClip& clip = _clips->Bundles()[(size_t)_bundleIndex].clips[StackClipIndex(_stack[i].clip)];
+				if (clip.loop) time = std::fmod(time, std::max(clip.length, 0.01f));
+			}
+			out.layers[i].time = ToWireTime(time);
 			out.layers[i].fade = ToWireByte(_stack[i].fade);
 		}
 		// 몽타주 · 덮기 · 왼손 — 자세를 만든 값(사건 앞 목록, ToPoseInput 과 같은 것)을 싣는다. 비중이 0 칸으로 반올림되면 받는 쪽에서 비중 0 이라 자세를 안 바꾸므로 뺀다(D51)
