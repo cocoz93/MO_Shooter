@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include "GameProtocol.h"
 #include "MapCollision.h"
 #include "Movement.h"
 
@@ -17,6 +18,8 @@ namespace mo
 {
 	// 겹침 비트가 한 바이트(MoveState::launcherMask)
 	constexpr size_t kMaxLaunchers = 8;
+	// 이름 최대 글자 수 — 와이어 칸(S2C_LAUNCHER)이 0 으로 끝나는 64바이트라서. 넘는 줄은 읽기에서 틀린 줄로 본다
+	constexpr size_t kMaxLauncherName = wire::kLauncherNameBytes - 1;
 
 	enum class ELauncherKind : uint8_t { Up, Push };
 
@@ -80,4 +83,13 @@ namespace mo
 	// (Lyra 는 쓸지 않고 놓을 때도 이동 끝에 겹침을 갱신해 시작을 낸다 — PrimitiveComponent.cpp:3512-3534. 그래도 L_Expanse 부활 자리 20곳은
 	// 가장 가까운 것도 구 칸과 717cm 떨어져 해당이 없고, 점프대 안에 놓는 것은 시험 놓기뿐이다 — 계획 「목표 구조」)
 	void ResetLaunchers(MoveState& state, const LauncherSet& launchers, double capsuleRadius, double capsuleHalfHeight);
+
+	// 받은 상태로 점프대 칸을 다시 세운다(예측 보정 — 서버 자리 · 속도로 MoveState 를 덮은 뒤). 비트는 그 자리로 세고, launchPending(STATE_LAUNCH_PENDING)이면
+	// 그 자리에서 겹친 점프대(여럿이면 표 차례 마지막)에 상태 속도 · 요를 넣어 발사를 다시 셈한다 — 서버는 이동 끝 속도 · 그 입력 요로 셈했고
+	// 상태 패킷의 속도 · 요가 바로 그 값이다(단정밀도로 줄었을 뿐). false = 깃발은 켜졌는데 겹친 점프대가 없거나 그래프가 안 쏘는 값(부른 쪽이 센다). 그때 발사는 지운다
+	bool RestoreLaunchers(MoveState& state, const LauncherSet& launchers, double capsuleRadius, double capsuleHalfHeight, bool launchPending, double yawDegrees);
+
+	// 와이어 한 줄(S2C_LAUNCHER) — 쓰기는 이름이 kMaxLauncherName 을 넘거나 차례가 틀리면 false. 읽기는 종류 · 깃발 · 반지름 · 이름 끝 · 차례가 틀리면 false
+	bool LauncherToWire(const Launcher& launcher, size_t index, size_t count, wire::LauncherInfo& out);
+	bool LauncherFromWire(const wire::LauncherInfo& in, Launcher& out);
 }

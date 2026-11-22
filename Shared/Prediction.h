@@ -10,6 +10,7 @@
 #include "Dash.h"
 #include "GameProtocol.h"
 #include "Grenade.h"
+#include "JumpPads.h"
 #include "Loadout.h"
 #include "MatchRules.h"
 #include "Movement.h"
@@ -17,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 namespace mo
 {
@@ -219,6 +221,20 @@ namespace mo
 			uint64_t replayLost = 0;
 		};
 		const GrenadeCounters& GetGrenadeCounters() const { return _grenadeCounters; }
+
+		// 점프대(jumppad-plan j-6) — 서버가 보낸 표(S2C_LAUNCHER)를 받아 서버 ApplyInput 과 같은 TickWithLaunchers 로 걷는다. 표가 없으면 점프대 없는 걸음 그대로.
+		// 살아 있는 동안 받으면 지금 자리로 비트만 다시 센다(서버는 부활 소식보다 먼저 보내 보통은 부활 전에 다 온다)
+		void SetLaunchers(const std::vector<Launcher>& table, double capsuleRadius);
+		size_t GetLauncherCount() const { return _launcherTable.size(); }
+		struct LaunchCounters
+		{
+			uint64_t fired = 0;			// 내 걸음 끝에 점프대가 쏨(AddInput 때만 센다 — 다시 돌리기는 안 셈)
+			uint64_t applied = 0;		// 지난 걸음이 남긴 발사를 이번 걸음 머리에 넣음(AddInput 때만)
+			uint64_t refused = 0;		// 겹침은 시작했는데 안 쏨(떨어지며 들어옴 — 지금 표 8개는 그 깃발이 다 꺼져 0)
+			uint64_t restored = 0;		// 보정(Reconcile)이 서버 깃발로 발사를 다시 셈
+			uint64_t restoreFails = 0;	// 서버 깃발은 켜졌는데 서버 자리에서 겹친 점프대가 없거나 안 쏘는 값 — 발사를 못 되살림. 0 이어야 한다
+		};
+		const LaunchCounters& GetLaunchCounters() const { return _launchCounters; }
 		// 아직 확인 안 된 번호(AckGrenade 가 본 번호 뒤) 중 서버 소식 없이 내가 던진 칸 — 판이 끝날 때 서버가 돌렸는지 모르는 몫(봇 판정에서 뺀다)
 		uint64_t CountGrenadeThrownUnacked() const;
 		// 대시도 같다 — 아직 확인 안 된 번호(AckDash 가 본 번호 뒤) 중 서버 소식 없이 내가 켠 칸. 판이 끝날 때 서버가 받고 안 돌린 입력의 몫(봇 판정에서 뺀다, L-11-c)
@@ -311,5 +327,10 @@ namespace mo
 		uint32_t _seq = 0;
 		uint32_t _compareFromSeq = 0;
 		double _debugMoveScale = 1.0;
+		std::vector<Launcher> _launcherTable;	// 점프대 표 사본 — _launchers 가 가리킨다
+		LauncherSet _launchers;
+		double _capsuleRadius = 0;
+		LaunchCounters _launchCounters;
+		LauncherTickResult _lastLaunch;		// 마지막 ApplyMove 의 점프대 결과 — AddInput 이 센다
 	};
 }

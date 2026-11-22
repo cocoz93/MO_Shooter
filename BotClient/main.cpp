@@ -11,6 +11,9 @@
 //   --script=crouch [--scriptHold=초] [--scriptWeapon=...] = 앉기 경로(컨텐츠 D-6 나란히 영상). 애니 비교 앉기 경로(-MOBACScript=crouch)와 같은 조각 · 사건 프레임 — 앉기 · 일어서기 · 조준 · 한 발 · 앉은 데서 점프
 //   --script=grenade [--scriptHold=초] [--scriptWeapon=...] = 수류탄 경로(L-6-a) — 안 쏘고 던짐 · 쏘고 0.3초 · 0.1초 뒤 던짐 · 당긴 채 던짐 · 달리며 쏘고 던짐. 애니 비교 쪽 짝 없음
 //     경로 모드는 받은 자기 몽타주 칸을 상태마다 SCRIPTANIM 줄로 찍는다(Tools/LyraPilot/check_script_anim.py 가 Lyra 기록과 견준다)
+//   --script=jumppad [--breakJumpPad=off|value] = 점프대 각본(jumppad-plan j-6). 서버 --debug --launchers= 로 뜬 판에 봇 하나. 받은 점프대 표마다 따로 돌린 예측으로
+//     걸어 들어가 쏘이는 방향(8방향 중 첫 것)을 미리 고르고, 그 자리에 시험 놓기 → 같은 입력을 보내 서버 · 예측 · 미리 돌린 끝 자리를 견준다(JUMPPAD 줄).
+//     --breakJumpPad = 일부러 틀림 — off 예측에 표를 안 줌 · value 예측 표의 발사 값을 1% 키움. 둘 다 서버와 갈려 FAIL 이어야 한다
 //
 // 판정은 하지 않는다 — 입력을 보내고 받은 것을 적어 맞춰 볼 뿐이다.
 // 1. 봇마다 같은 공용 코드(Shared)로 자기 입력을 여기서도 돌려, 돌아온 상태와 위치·속도·탄창까지 비교한다.
@@ -123,6 +126,8 @@ namespace
 	constexpr int kBreakDashServer = 2;		// --breakDash=server — 서버에 안 보냄
 	constexpr int kBreakGrenadePredict = 1;	// --breakGrenade=predict — 예측에 안 넣음
 	constexpr int kBreakGrenadeServer = 2;	// --breakGrenade=server — 서버에 안 보냄
+	constexpr int kBreakJumpPadOff = 1;		// --breakJumpPad=off — 예측에 점프대 표를 안 줌(예측만 안 쏨)
+	constexpr int kBreakJumpPadValue = 2;	// --breakJumpPad=value — 예측 표의 발사 값(위로 · 목표 · 배율)을 1% 키움
 
 	struct Args
 	{
@@ -152,6 +157,7 @@ namespace
 		int breakDash = 0;				// --breakDash=predict|server — 대시 단추를 예측 · 서버 한쪽에만(일부러 틀림)
 		bool grenade = false;			// --grenade — 가끔 수류탄을 누른다(G-3). 꺼져 있으면 기존 시험과 같은 입력
 		int breakGrenade = 0;			// --breakGrenade=predict|server — 수류탄 단추를 예측 · 서버 한쪽에만(일부러 틀림)
+		int breakJumpPad = 0;			// --breakJumpPad=off|value — 점프대 각본의 일부러 틀림(kBreakJumpPadOff · kBreakJumpPadValue)
 		std::string judgeClips;			// 주면 봇이 화면 역할로 탄마다 자기 판정을 남긴다(후보 1, 7단계). measureView 를 함께 켠다
 		std::string judgeLog;
 		bool judgeNoSpread = false;		// 서버 --rewindNoSpread 와 같이 쓴다 — 자세만 본다
@@ -622,7 +628,11 @@ namespace
 				return;
 			}
 			wire::Input input = wire::Input();
-			if (_scripted) ThinkScript(input);
+			if (_jumpPadScript)
+			{
+				if (!ThinkJumpPad(input)) return;	// false = 이 차례는 입력을 안 보낸다 — 시험 놓기를 보냈거나(입력 번호 하나를 그 옮기기에 썼다) 각본이 끝나 연결을 닫았다
+			}
+			else if (_scripted) ThinkScript(input);
 			else Think(input);
 			AssignPressOrder(input);	// 근접 판정(WillMeleeStart)도 실린 차례를 본다 — 그 앞에서
 			_self.SetDebugMoveScale(breakMirror ? 0.999 : 1.0);
@@ -671,6 +681,14 @@ namespace
 		void SetMelee(bool on, bool breakPush) { _meleeNear = on; _breakMelee = breakPush; }
 		void SetDash(bool on, int breakDash) { _dashPress = on; _breakDash = breakDash; }
 		void SetGrenade(bool on, int breakGrenade) { _grenadePress = on; _breakGrenade = breakGrenade; }
+		void SetJumpPadBreak(int breakJumpPad) { _breakJumpPad = breakJumpPad; }
+		const CSelfPrediction::LaunchCounters& GetLaunchFixes() const { return _self.GetLaunchCounters(); }
+		uint64_t GetLauncherInfos() const { return _launcherInfos; }
+		uint64_t GetLauncherInfoBad() const { return _launcherInfoBad; }
+		uint64_t GetLaunchFlagStates() const { return _launchFlagStates; }
+		uint64_t GetLaunchFlagDiff() const { return _launchFlagDiff; }
+		uint64_t GetServerLaunches() const { return _serverLaunches; }
+		size_t GetLauncherCount() const { return _self.GetLauncherCount(); }
 		uint64_t GetGrenadeUnconfirmedPost() const { return _grenadeUnconfirmedPost; }
 		uint64_t GetGrenadeUnacked() const { return _self.CountGrenadeThrownUnacked(); }
 		const DashBotCounts& GetDashCounts() const { return _dashCounts; }
@@ -687,9 +705,15 @@ namespace
 		uint64_t GetFallDiff() const { return _fallDiff; }
 		double GetPawnCorrectSum() const { return _pawnCorrectSum; }
 		double GetPawnCorrectMax() const { return _pawnCorrectMax; }
-		bool IsScriptDone() const { return _scriptStep == (int)_scriptStepCount; }
+		bool IsScriptDone() const { return _jumpPadScript ? (_jumpPadDone && _jumpPadPass) : _scriptStep == (int)_scriptStepCount; }
 		void SetScript(double holdSeconds, uint8_t weapon, const std::string& name)
 		{
+			if (name == "jumppad")
+			{
+				// 점프대 각본은 두뇌 · 경로 모드 밖의 따로 길이다 — 자기 비교(CompareSelf)를 그대로 돌려 서버와 같은지 본다
+				_jumpPadScript = true;
+				return;
+			}
 			_scripted = true;
 			_scriptHoldTicks = (uint32_t)std::lround(holdSeconds * wire::kTickRate);
 			_scriptWeapon = weapon;
@@ -861,6 +885,9 @@ namespace
 			case wire::Msg::S2C_GRENADE_STATE:
 				OnGrenadeState(data, size);
 				break;
+			case wire::Msg::S2C_LAUNCHER:
+				OnLauncher(Copy<wire::LauncherInfo>(data, size), size);
+				break;
 			case wire::Msg::S2C_RESULT:
 				_result = Copy<wire::Result>(data, size);
 				_hasResult = true;
@@ -912,6 +939,7 @@ namespace
 			_stuckTicks = 0;
 			_detourLeft = 0;
 			_scriptPlaced = false;	// 경기 시작이 시작 자리로 돌려놓으면 다시 옮기고 처음부터
+			if (_jumpPadScript && !_jumpPadDone) _jumpPadPlans.clear();	// 점프대 각본도 — 다음 입력이 다시 미리 돌리고 첫 점프대부터
 			_scriptArmed = false;	// 부활은 권총으로 돌려놓는다 — 경로 무기를 다시 든다
 		}
 
@@ -1217,6 +1245,11 @@ namespace
 				if (_measureView) _viewHistory[p.id].Add(p, stateTick, hasAnim ? &anim : nullptr);
 				if (p.id == _welcome.playerId)
 				{
+					// 점프대 — 서버가 쏜 수 = 깃발이 꺼짐 → 켜짐으로 바뀐 상태 수(발사는 다음 입력에 먹어 깃발이 한 입력만 선다. 기다림 판이면 입력마다 상태 하나라 빠짐없이 센다)
+					const bool launchFlag = (p.flags & wire::STATE_LAUNCH_PENDING) != 0;
+					if (launchFlag && !_lastLaunchFlag) ++_serverLaunches;
+					_lastLaunchFlag = launchFlag;
+					if (_jumpPadScript) OnJumpPadState(p);
 					// 경로 모드는 비교하지 않는다 — 자리 옮기기는 걷는 상태로, 봇의 OnSpawn 은 떨어지는 상태로 시작해 처음부터 어긋난다
 					if (!_scripted) CompareSelf(p);
 					selfSeen = true;
@@ -1578,6 +1611,16 @@ namespace
 				if (!_rules.pawnBlock) ++_flagDiff;
 				LogFlagDiff("crouched", p, slot, (p.flags & wire::STATE_CROUCHED) != 0, slot.move.crouched);
 			}
+			// 점프대(j-6) — 이 상태 끝에 쏜 발사가 다음 입력을 기다리나. 이동의 결과지만 표가 같으면 막기 판에서도 같아야 해 flagDiff 에 넣는다. 켜진 줄 수를 같이 센다
+			const bool serverLaunch = (p.flags & wire::STATE_LAUNCH_PENDING) != 0;
+			if (serverLaunch) ++_launchFlagStates;
+			if (serverLaunch != slot.move.launchPending)
+			{
+				++_launchFlagDiff;
+				++_flagDiff;
+				bad = true;
+				LogFlagDiff("launchPending", p, slot, serverLaunch, slot.move.launchPending);
+			}
 			// 가방(W-3) — 줍기 · 부활만 바꾸고 둘 다 경기 끝 단계와 상관없는 길이라 단계와 상관없이 본다. 무기 둘 이상 든 줄 수를 같이 센다(가방 비교가 실제로 돌았나)
 			if (CLoadout::UnpackSlot(p.quickSlots, 1) != kNoWeapon) ++_invMulti;
 			if (p.quickSlots != slot.quickSlots) { ++_invDiff; bad = true; }
@@ -1834,6 +1877,261 @@ namespace
 		}
 
 		// 촬영 시작 자리로 옮긴다. 서버는 자리 옮기기도 입력과 같은 번호 줄에서 받으므로 입력 번호 하나를 받아 쓴다
+		// 점프대 표 한 줄(S2C_LAUNCHER) — count 줄이 다 오면 예측에 넘긴다. 일부러 틀림은 예측 쪽 표만 바꾼다(각본의 미리 돌리기는 받은 표 그대로)
+		void OnLauncher(const wire::LauncherInfo& info, int size)
+		{
+			++_launcherInfos;
+			Launcher row;
+			if (size != (int)sizeof(info) || !LauncherFromWire(info, row))
+			{
+				++_launcherInfoBad;
+				return;
+			}
+			if (_launcherRows.size() != info.count)
+			{
+				_launcherRows.assign(info.count, Launcher());
+				_launcherGot.assign(info.count, false);
+				_launchersReady = false;
+			}
+			_launcherRows[info.index] = row;
+			_launcherGot[info.index] = true;
+			if (_launchersReady || std::find(_launcherGot.begin(), _launcherGot.end(), false) != _launcherGot.end()) return;
+			_launchersReady = true;
+			std::vector<Launcher> forPrediction = _launcherRows;
+			if (_breakJumpPad == kBreakJumpPadOff) forPrediction.clear();
+			if (_breakJumpPad == kBreakJumpPadValue)
+			{
+				for (Launcher& l : forPrediction)
+				{
+					l.upOverride *= 1.01;
+					l.multiplier *= 1.01;
+					l.target = l.target * 1.01;
+				}
+			}
+			_self.SetLaunchers(forPrediction, MakeLyraMoveParams().capsuleRadius);
+			if (_jumpPadScript) std::printf("JUMPPAD table=%zu break=%d\n", _launcherRows.size(), _breakJumpPad);
+		}
+
+		// 점프대 하나를 미리 돌린 결과 — 이 입력을 그대로 보내면 서버도 같은 길을 가야 한다(같은 Shared 코드 · 같은 입력)
+		struct JumpPadPlan
+		{
+			bool ok = false;
+			Vec3 start;				// 시험 놓기 자리 = 미리 돌리기에서 내려앉아 멈춘 자리
+			float yaw = 0.f;		// 몸 방향 = 걸어 들어가는 방향(밀기 점프대는 이 방향으로 쏜다)
+			float moveX = 0.f, moveY = 0.f;
+			uint32_t holdTicks = 0;		// 놓은 뒤 서 있기
+			uint32_t walkTicks = 0;		// 앞으로 — 쏘이고 날아 내려앉을 때까지
+			uint32_t settleTicks = 0;	// 내려앉은 뒤 멈출 때까지 서 있기
+			int fireInput = -1;			// 몇 번째 입력(놓은 뒤 0부터) 끝에 쏘였나
+			Vec3 end;					// 마지막 입력 뒤 자리
+			double topZ = 0;			// 나는 동안 가장 높은 z
+			int dir = -1;				// 고른 방향(0~7, 45도씩)
+		};
+		static constexpr uint32_t kJumpPadHoldTicks = 30;		// 놓은 뒤 0.5초 서 있기 — 멈춘 자리에 놓아 그대로 선다
+		static constexpr uint32_t kJumpPadWalkMax = 300;		// 쏘일 때까지 앞으로 걷는 최대 5초
+		static constexpr uint32_t kJumpPadFlyMax = 600;			// 쏘인 뒤 내려앉을 때까지 최대 10초
+		static constexpr uint32_t kJumpPadSettleMax = 120;		// 내려앉은 뒤 멈출 때까지 최대 2초
+		static constexpr double kJumpPadBackoff = 150.0;		// 구 칸 + 캡슐 반지름 밖으로 더 물러서는 거리(cm)
+
+		wire::Input JumpPadInput(float yaw, float moveX, float moveY, uint8_t weapon) const
+		{
+			wire::Input in = wire::Input();
+			in.yaw = yaw;
+			in.moveX = moveX;
+			in.moveY = moveY;
+			in.weapon = weapon;
+			return in;
+		}
+
+		// 받은 표의 점프대마다 따로 만든 예측으로 미리 돌린다 — 8방향에서 걸어 들어가 보고 쏘이고 내려앉는 첫 방향을 고른다
+		void PlanJumpPads()
+		{
+			const MoveParams params = MakeLyraMoveParams();
+			CMoveSim sim(_map, params);		// 봇들이 나눠 쓰는 sim 의 계수를 안 건드리게 따로(sim 은 틱 사이에 상태를 안 든다)
+			_jumpPadPlans.assign(_launcherRows.size(), JumpPadPlan());
+			for (size_t k = 0; k < _launcherRows.size(); ++k)
+			{
+				const Launcher& pad = _launcherRows[k];
+				JumpPadPlan& plan = _jumpPadPlans[k];
+				for (int d = 0; d < 8 && !plan.ok; ++d)
+				{
+					std::unique_ptr<CSelfPrediction> rehearsal(new CSelfPrediction(sim, _rules, params.maxWalkSpeed));
+					rehearsal->SetLaunchers(_launcherRows, params.capsuleRadius);
+					const float yaw = (float)(d * 45);
+					const double radians = (double)yaw * 3.14159265358979323846 / 180.0;
+					const float moveX = (float)std::cos(radians), moveY = (float)std::sin(radians);
+					const double back = pad.sphereRadius + params.capsuleRadius + kJumpPadBackoff;
+					// 내려앉기 — 구 높이 + 150 에서 떨어뜨려 바닥에 멈춘 자리를 놓을 자리로 쓴다
+					(void)rehearsal->OnPlace(pad.sphereCenter.x - moveX * back, pad.sphereCenter.y - moveY * back, pad.sphereCenter.z + 150.0, 0xFF, 0, 0);
+					const uint8_t weapon = rehearsal->GetWeaponIndex();
+					bool settled = false;
+					for (uint32_t i = 0; i < 180 && !settled; ++i)
+					{
+						wire::Input in = JumpPadInput(yaw, 0.f, 0.f, weapon);
+						rehearsal->AddInput(in);
+						const MoveState& m = rehearsal->GetMove();
+						settled = i >= 30 && m.mode == EMoveMode::Walking && Length(m.velocity) == 0.0;
+					}
+					const Vec3 landed = rehearsal->GetMove().location;
+					if (!settled || rehearsal->GetLaunchCounters().fired != 0 || std::abs(landed.z - pad.sphereCenter.z) > 400.0) continue;
+					// 본 돌리기 — 그 자리에 놓고 서 있기 → 앞으로(쏘이고 내려앉을 때까지) → 멈출 때까지 서 있기
+					(void)rehearsal->OnPlace(landed.x, landed.y, landed.z, 0xFF, 0, 0);
+					const uint64_t firedBefore = rehearsal->GetLaunchCounters().fired;
+					uint32_t walk = 0, settle = 0;
+					int fireInput = -1;
+					bool flew = false, down = false, stopped = false;
+					double topZ = landed.z;
+					for (uint32_t i = 0; i < kJumpPadHoldTicks; ++i)
+					{
+						wire::Input in = JumpPadInput(yaw, 0.f, 0.f, weapon);
+						rehearsal->AddInput(in);
+					}
+					for (; walk < kJumpPadWalkMax + kJumpPadFlyMax && !down; ++walk)
+					{
+						wire::Input in = JumpPadInput(yaw, moveX, moveY, weapon);
+						rehearsal->AddInput(in);
+						const MoveState& m = rehearsal->GetMove();
+						if (fireInput < 0 && rehearsal->GetLaunchCounters().fired != firedBefore) fireInput = (int)(kJumpPadHoldTicks + walk);
+						if (fireInput < 0 && walk >= kJumpPadWalkMax) break;
+						topZ = std::max(topZ, m.location.z);
+						if (m.mode == EMoveMode::Falling) flew = true;
+						if (flew && m.mode == EMoveMode::Walking) down = true;
+					}
+					if (fireInput < 0 || !down) continue;
+					for (; settle < kJumpPadSettleMax && !stopped; ++settle)
+					{
+						wire::Input in = JumpPadInput(yaw, 0.f, 0.f, weapon);
+						rehearsal->AddInput(in);
+						const MoveState& m = rehearsal->GetMove();
+						stopped = m.mode == EMoveMode::Walking && Length(m.velocity) == 0.0;
+					}
+					const MoveState& last = rehearsal->GetMove();
+					if (!stopped || last.location.z < _rules.fallKillZ || rehearsal->GetLaunchCounters().fired - firedBefore != 1) continue;
+					plan.ok = true;
+					plan.start = landed;
+					plan.yaw = yaw;
+					plan.moveX = moveX;
+					plan.moveY = moveY;
+					plan.holdTicks = kJumpPadHoldTicks;
+					plan.walkTicks = walk;
+					plan.settleTicks = settle;
+					plan.fireInput = fireInput;
+					plan.end = last.location;
+					plan.topZ = topZ;
+					plan.dir = d;
+				}
+				std::printf("JUMPPAD plan pad=%zu kind=%s ok=%d dir=%d yaw=%.0f start=(%.2f %.2f %.2f) fireInput=%d walk=%u settle=%u end=(%.2f %.2f %.2f) dz=%.2f topZ=%.2f\n",
+					k, LauncherKindName(pad.kind), plan.ok ? 1 : 0, plan.dir, plan.yaw, plan.start.x, plan.start.y, plan.start.z, plan.fireInput, plan.walkTicks, plan.settleTicks,
+					plan.end.x, plan.end.y, plan.end.z, plan.end.z - plan.start.z, plan.topZ);
+			}
+		}
+
+		// 점프대 각본 한 입력. false = 이 차례는 입력을 안 보낸다(시험 놓기를 보냈다 · 각본이 끝났다)
+		bool ThinkJumpPad(wire::Input& input)
+		{
+			const uint8_t weapon = _self.GetWeaponIndex();
+			input = JumpPadInput(_jumpPadYaw, 0.f, 0.f, weapon);
+			// 경기 중 · 표가 다 왔을 때만 — 경기 시작이 부활로 시작 자리에 돌려놓으므로(OnSpawn 이 각본을 처음부터) 그 뒤에 시작한다
+			if (_jumpPadDone) return false;
+			if (!_launchersReady || _phase != (uint8_t)wire::EMatchPhase::Playing) return true;
+			if (!_welcome.debugAllowed)
+			{
+				std::printf("JUMPPAD 실패 — 서버가 --debug 없이 떴다\n");
+				FinishJumpPad();
+				return false;
+			}
+			if (_jumpPadPlans.empty())
+			{
+				PlanJumpPads();
+				_jumpPadPosDiff0 = _posDiff;
+				_jumpPadVelDiff0 = _velDiff;
+				_jumpPadFlagDiff0 = _flagDiff;
+				_jumpPadServerLaunches0 = _serverLaunches;
+				_jumpPadFired0 = _self.GetLaunchCounters().fired;
+				_jumpPadPad = 0;
+				_jumpPadStage = 0;
+				_jumpPadRan = 0;
+				_jumpPadUp = 0;
+				_jumpPadEndDiffMax = 0;
+			}
+			while (_jumpPadPad < _jumpPadPlans.size() && !_jumpPadPlans[_jumpPadPad].ok) ++_jumpPadPad;		// 못 고른 점프대는 건너뛴다(끝에 FAIL)
+			if (_jumpPadPad >= _jumpPadPlans.size())
+			{
+				FinishJumpPad();
+				return false;
+			}
+			const JumpPadPlan& plan = _jumpPadPlans[_jumpPadPad];
+			if (_jumpPadStage == 0)
+			{
+				// 시험 놓기 — 예측 OnPlace 가 서버 ApplyPlace 와 같은 차례로 걸음을 새로 놓는다(이동 막음 0 · 걷기 · 바닥 다시 찾기 · 점프대 비트만 다시 셈)
+				const uint32_t seq = _self.OnPlace(plan.start.x, plan.start.y, plan.start.z, 0xFF, 0, 0);
+				wire::DebugPlace place = wire::DebugPlace();
+				place.seq = seq;
+				place.x = plan.start.x;
+				place.y = plan.start.y;
+				place.z = plan.start.z;
+				place.hp = 100.f;
+				if (!_net.SendPacket(place, wire::Msg::C2S_DEBUG_PLACE)) _net.Close();
+				_lastSentSeq = seq;
+				_jumpPadYaw = plan.yaw;
+				_jumpPadInput = 0;
+				_jumpPadStage = 1;
+				return false;
+			}
+			if (_jumpPadStage == 1)
+			{
+				const uint32_t i = _jumpPadInput++;
+				const bool walking = i >= plan.holdTicks && i < plan.holdTicks + plan.walkTicks;
+				input = JumpPadInput(plan.yaw, walking ? plan.moveX : 0.f, walking ? plan.moveY : 0.f, weapon);
+				if (_jumpPadInput == plan.holdTicks + plan.walkTicks + plan.settleTicks)
+				{
+					_jumpPadLastSeq = _self.GetSeq() + 1;	// 이 입력이 받을 번호(AddInput 이 다음에 매긴다)
+					_jumpPadStage = 2;
+				}
+				return true;
+			}
+			return true;	// 2 = 서버가 마지막 입력을 돌린 상태를 기다리며 서 있기(OnJumpPadState 가 다음 점프대로)
+		}
+
+		// 각본 중 자기 상태 — 마지막 입력을 돌린 서버 자리를 미리 돌린 끝 자리 · 예측과 견주고 다음 점프대로
+		void OnJumpPadState(const wire::PlayerState& p)
+		{
+			if (_jumpPadStage != 2 || _jumpPadPad >= _jumpPadPlans.size() || p.lastSeq < _jumpPadLastSeq) return;
+			const JumpPadPlan& plan = _jumpPadPlans[_jumpPadPad];
+			const Vec3 server(p.x, p.y, p.z);
+			const Vec3 planEnd((float)plan.end.x, (float)plan.end.y, (float)plan.end.z);
+			const MoveState& mine = _self.GetMove();
+			const Vec3 pred((float)mine.location.x, (float)mine.location.y, (float)mine.location.z);
+			const double planDiff = Length(server - planEnd), predDiff = Length(server - pred);
+			_jumpPadEndDiffMax = std::max(_jumpPadEndDiffMax, std::max(planDiff, predDiff));
+			if (server.z - plan.start.z > 100.0) ++_jumpPadUp;
+			++_jumpPadRan;
+			std::printf("JUMPPAD run pad=%zu seq=%u server=(%.2f %.2f %.2f) planDiff=%.4f predDiff=%.4f dz=%.2f\n", _jumpPadPad, p.lastSeq, server.x, server.y, server.z,
+				planDiff, predDiff, server.z - plan.start.z);
+			++_jumpPadPad;
+			_jumpPadStage = 0;
+		}
+
+		void FinishJumpPad()
+		{
+			if (_jumpPadDone) return;
+			_jumpPadDone = true;
+			size_t planned = 0;
+			for (const JumpPadPlan& plan : _jumpPadPlans) planned += plan.ok ? 1 : 0;
+			const CSelfPrediction::LaunchCounters& lc = _self.GetLaunchCounters();
+			const uint64_t serverLaunches = _serverLaunches - _jumpPadServerLaunches0;
+			const uint64_t predFired = lc.fired - _jumpPadFired0;
+			const uint64_t posDiff = _posDiff - _jumpPadPosDiff0, velDiff = _velDiff - _jumpPadVelDiff0, flagDiff = _flagDiff - _jumpPadFlagDiff0;
+			// 판정 — 표 전부 고름 · 다 돌림 · 서버 쏜 수 = 예측 쏜 수 = 점프대 수 · 상태 비교 어긋남 0 · 끝 자리(서버 ↔ 미리 돌림 · 예측) 1cm 안 · 되살림 실패 0
+			_jumpPadPass = planned == _launcherRows.size() && planned > 0 && _jumpPadRan == planned && serverLaunches == planned && predFired == planned &&
+				posDiff == 0 && velDiff == 0 && flagDiff == 0 && _jumpPadEndDiffMax <= 1.0 && lc.restoreFails == 0;
+			std::printf("JUMPPAD result pads=%zu planned=%zu ran=%zu serverLaunches=%llu predFired=%llu posDiff=%llu velDiff=%llu flagDiff=%llu launchFlagDiff=%llu endDiffMax=%.4f up=%zu restoreFails=%llu %s\n",
+				_launcherRows.size(), planned, _jumpPadRan, (unsigned long long)serverLaunches, (unsigned long long)predFired, (unsigned long long)posDiff,
+				(unsigned long long)velDiff, (unsigned long long)flagDiff, (unsigned long long)_launchFlagDiff, _jumpPadEndDiffMax, _jumpPadUp,
+				(unsigned long long)lc.restoreFails, _jumpPadPass ? "PASS" : "FAIL");
+			_net.Close();
+		}
+
 		void PlaceForScript()
 		{
 			if (!_welcome.debugAllowed)
@@ -2471,6 +2769,26 @@ namespace
 		// 수류탄(G-3)
 		bool _grenadePress = false;		// --grenade
 		int _breakGrenade = 0;			// --breakGrenade — kBreakGrenadePredict · kBreakGrenadeServer
+		// 점프대(jumppad-plan j-6) — 받은 표 · 서버 깃발 셈 · 각본
+		std::vector<Launcher> _launcherRows;	// S2C_LAUNCHER 로 받은 표(count 줄이 다 와야 쓴다)
+		std::vector<bool> _launcherGot;
+		bool _launchersReady = false;
+		uint64_t _launcherInfos = 0, _launcherInfoBad = 0;
+		uint64_t _launchFlagStates = 0;		// 서버 발사 깃발이 켜진 비교 줄
+		uint64_t _launchFlagDiff = 0;		// 그 깃발이 예측과 다른 줄(flagDiff 안에도 든다)
+		uint64_t _serverLaunches = 0;		// 서버 깃발이 꺼짐 → 켜짐으로 바뀐 내 상태 수
+		bool _lastLaunchFlag = false;
+		int _breakJumpPad = 0;				// --breakJumpPad — kBreakJumpPadOff · kBreakJumpPadValue
+		bool _jumpPadScript = false;		// --script=jumppad
+		bool _jumpPadDone = false, _jumpPadPass = false;
+		std::vector<JumpPadPlan> _jumpPadPlans;
+		size_t _jumpPadPad = 0;				// 지금 점프대
+		int _jumpPadStage = 0;				// 0 놓기 · 1 입력 보내기 · 2 마지막 입력의 서버 상태 기다리기
+		uint32_t _jumpPadInput = 0, _jumpPadLastSeq = 0;
+		float _jumpPadYaw = 0.f;
+		size_t _jumpPadRan = 0, _jumpPadUp = 0;
+		double _jumpPadEndDiffMax = 0;
+		uint64_t _jumpPadPosDiff0 = 0, _jumpPadVelDiff0 = 0, _jumpPadFlagDiff0 = 0, _jumpPadServerLaunches0 = 0, _jumpPadFired0 = 0;	// 각본 시작 때 셈(각본 몫만 판정)
 		CSpreadRng _grenadeRng;
 		// 같은 입력 누름 차례(L-5-c) — 섞는 난수 · 둘 이상 누른 입력 수
 		CSpreadRng _pressRng;
@@ -2554,6 +2872,16 @@ namespace
 					return false;
 				}
 			}
+			else if (value("--breakJumpPad=", v))
+			{
+				if (v == "off") out.breakJumpPad = kBreakJumpPadOff;
+				else if (v == "value") out.breakJumpPad = kBreakJumpPadValue;
+				else
+				{
+					std::printf("모르는 점프대 틀림 %s (off · value)\n", v.c_str());
+					return false;
+				}
+			}
 			else if (value("--breakDash=", v))
 			{
 				if (v == "predict") out.breakDash = kBreakDashPredict;
@@ -2581,7 +2909,7 @@ namespace
 				return false;
 			}
 		}
-		if (!out.script.empty() && out.script != "startstop" && out.script != "events" && out.script != "crouch" && out.script != "grenade")
+		if (!out.script.empty() && out.script != "startstop" && out.script != "events" && out.script != "crouch" && out.script != "grenade" && out.script != "jumppad")
 		{
 			std::printf("모르는 경로 %s\n", out.script.c_str());
 			return false;
@@ -2655,6 +2983,7 @@ int main(int argc, char** argv)
 		bots.back()->SetMelee(args.meleeNear, args.breakMelee);
 		bots.back()->SetDash(args.dash, args.breakDash);
 		bots.back()->SetGrenade(args.grenade, args.breakGrenade);
+		bots.back()->SetJumpPadBreak(args.breakJumpPad);
 		bots.back()->SetPush(args.push);
 		bots.back()->SetFireAlways(args.judgeFireAlways);
 		bots.back()->SetPauseAfterSpawn(args.testPauseAfterSpawn);
@@ -2750,6 +3079,27 @@ int main(int argc, char** argv)
 		bot->Close();
 	}
 
+	// 점프대(j-6) — 받은 표 줄 · 서버 깃발 · 예측 셈. 서버가 --launchers= 없이 떴으면 다 0. serverLaunches 는 기다림 판에서만 빠짐없이 센다(입력마다 상태 하나)
+	{
+		uint64_t infos = 0, infoBad = 0, flagStates = 0, flagDiffL = 0, serverLaunches = 0, fired = 0, applied = 0, restored = 0, restoreFails = 0;
+		size_t tables = 0;
+		for (const std::unique_ptr<CBot>& bot : bots)
+		{
+			infos += bot->GetLauncherInfos();
+			infoBad += bot->GetLauncherInfoBad();
+			flagStates += bot->GetLaunchFlagStates();
+			flagDiffL += bot->GetLaunchFlagDiff();
+			serverLaunches += bot->GetServerLaunches();
+			fired += bot->GetLaunchFixes().fired;
+			applied += bot->GetLaunchFixes().applied;
+			restored += bot->GetLaunchFixes().restored;
+			restoreFails += bot->GetLaunchFixes().restoreFails;
+			tables += bot->GetLauncherCount();
+		}
+		std::printf("BOT launch infos=%llu bad=%llu tableRows=%zu serverLaunches=%llu predFired=%llu predApplied=%llu flagStates=%llu flagDiff=%llu restored=%llu restoreFails=%llu\n",
+			(unsigned long long)infos, (unsigned long long)infoBad, tables, (unsigned long long)serverLaunches, (unsigned long long)fired, (unsigned long long)applied,
+			(unsigned long long)flagStates, (unsigned long long)flagDiffL, (unsigned long long)restored, (unsigned long long)restoreFails);
+	}
 	// ─── 부하 시험 — 끝까지 안 가므로 결과 대조는 없다. 도중 값이 서버와 같은지만 ──
 	if (!args.script.empty())
 	{

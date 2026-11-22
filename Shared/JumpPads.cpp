@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 
 namespace mo
 {
@@ -91,7 +92,7 @@ namespace mo
 				l.multiplier = v[5];
 				l.target = Vec3(v[6], v[7], v[8]);
 				l.minVerticalVelocity = v[9];
-				ok = l.sphereRadius > 0;
+				ok = l.sphereRadius > 0 && l.name.size() <= kMaxLauncherName;
 			}
 			if (!ok)
 			{
@@ -239,5 +240,69 @@ namespace mo
 		state.launchPending = false;
 		state.pendingLaunch = Vec3();
 		state.launcherMask = launchers.count ? LauncherMask(launchers.items, launchers.count, state.location, capsuleRadius, capsuleHalfHeight) : 0;
+	}
+
+	bool RestoreLaunchers(MoveState& state, const LauncherSet& launchers, double capsuleRadius, double capsuleHalfHeight, bool launchPending, double yawDegrees)
+	{
+		ResetLaunchers(state, launchers, capsuleRadius, capsuleHalfHeight);
+		if (!launchPending) return true;
+		int pad = -1;
+		for (size_t i = 0; i < launchers.count && i < kMaxLaunchers; ++i)
+		{
+			if (state.launcherMask & (1u << i)) pad = (int)i;
+		}
+		Vec3 out;
+		if (pad < 0 || !LauncherLaunch(launchers.items[pad], state.velocity, state.velocity, yawDegrees, out)) return false;
+		state.launchPending = true;
+		state.pendingLaunch = out;
+		return true;
+	}
+
+	bool LauncherToWire(const Launcher& launcher, size_t index, size_t count, wire::LauncherInfo& out)
+	{
+		if (launcher.name.size() > kMaxLauncherName || index >= count || count > kMaxLaunchers) return false;
+		out = wire::LauncherInfo();
+		out.h.size = (uint16_t)sizeof(out);
+		out.h.type = (uint16_t)wire::Msg::S2C_LAUNCHER;
+		out.index = (uint8_t)index;
+		out.count = (uint8_t)count;
+		out.kind = (uint8_t)launcher.kind;
+		out.flags = (uint8_t)((launcher.useTarget ? wire::LAUNCHER_USE_TARGET : 0) | (launcher.noFallEntry ? wire::LAUNCHER_NO_FALL_ENTRY : 0));
+		out.sphereX = launcher.sphereCenter.x;
+		out.sphereY = launcher.sphereCenter.y;
+		out.sphereZ = launcher.sphereCenter.z;
+		out.sphereRadius = launcher.sphereRadius;
+		out.upOverride = launcher.upOverride;
+		out.multiplier = launcher.multiplier;
+		out.targetX = launcher.target.x;
+		out.targetY = launcher.target.y;
+		out.targetZ = launcher.target.z;
+		out.minVerticalVelocity = launcher.minVerticalVelocity;
+		std::memcpy(out.name, launcher.name.data(), launcher.name.size());	// 나머지는 위 초기화로 0 — 0 으로 끝난다
+		return true;
+	}
+
+	bool LauncherFromWire(const wire::LauncherInfo& in, Launcher& out)
+	{
+		if (in.kind > (uint8_t)ELauncherKind::Push) return false;
+		if ((in.flags & ~(wire::LAUNCHER_USE_TARGET | wire::LAUNCHER_NO_FALL_ENTRY)) != 0) return false;
+		if (in.count == 0 || in.count > kMaxLaunchers || in.index >= in.count) return false;
+		if (!(in.sphereRadius > 0)) return false;
+		size_t nameLength = 0;
+		while (nameLength < sizeof(in.name) && in.name[nameLength] != '\0') ++nameLength;
+		if (nameLength == 0 || nameLength == sizeof(in.name)) return false;
+		Launcher l;
+		l.kind = (ELauncherKind)in.kind;
+		l.name.assign(in.name, nameLength);
+		l.sphereCenter = Vec3(in.sphereX, in.sphereY, in.sphereZ);
+		l.sphereRadius = in.sphereRadius;
+		l.upOverride = in.upOverride;
+		l.multiplier = in.multiplier;
+		l.useTarget = (in.flags & wire::LAUNCHER_USE_TARGET) != 0;
+		l.target = Vec3(in.targetX, in.targetY, in.targetZ);
+		l.minVerticalVelocity = in.minVerticalVelocity;
+		l.noFallEntry = (in.flags & wire::LAUNCHER_NO_FALL_ENTRY) != 0;
+		out = l;
+		return true;
 	}
 }

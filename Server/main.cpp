@@ -2,7 +2,7 @@
 //
 //   Server --map=<파일.mocl> [--port=7791] [--seed=20261102] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일]
 //          [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=1] [--maxSessions=64]
-//          [--measureFrom=초 --measureSeconds=초] [--clips=파일] [--pads=파일]
+//          [--measureFrom=초 --measureSeconds=초] [--clips=파일] [--pads=파일] [--launchers=파일]
 //
 // --debug 는 시험 클라가 위치·체력을 정할 수 있게 한다. 사람이 하는 판에서는 켜지 않는다.
 // --warmup·--matchSeconds·--targetScore 는 시험에서 Lyra 값을 줄일 때만 쓴다.
@@ -68,6 +68,7 @@ namespace
 		double measureSeconds = 0;
 		mo::RewindOptions rewind;
 		std::string clipsPath;
+		std::string launchersPath;	// 점프대(jumppad-plan j-4) — 리포 밖 파일(Tools/LyraPilot/make_launchers.py). 없으면 점프대 없는 판
 		std::string padsPath;		// 받침(체력 · 무기, 컨텐츠 B · W-1) — 리포 밖 파일(Tools/LyraPilot/make_pads.py). 없으면 받침 없는 판
 		mo::AnimOptions anim;
 		mo::PickupOptions pickups;	// 받침 목록은 main 이 들고 있다 — 방은 가리키기만
@@ -90,6 +91,7 @@ namespace
 			else if (value("--port=", v)) out.port = std::atoi(v.c_str());
 			else if (value("--clips=", v)) out.clipsPath = v;
 			else if (value("--pads=", v)) out.padsPath = v;
+			else if (value("--launchers=", v)) out.launchersPath = v;
 			else if (value("--seed=", v)) out.seed = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
 			else if (value("--duration=", v)) out.durationSeconds = std::atof(v.c_str());
 			else if (value("--record=", v)) out.recordPath = v;
@@ -523,7 +525,7 @@ int main(int argc, char** argv)
 	Args args;
 	if (!ParseArgs(argc, argv, args))
 	{
-		std::printf("쓰는 법: Server --map=<파일.mocl> [--port=7791] [--seed=N] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일] [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=N] [--maxSessions=N] [--clips=파일] [--pads=파일]\n");
+		std::printf("쓰는 법: Server --map=<파일.mocl> [--port=7791] [--seed=N] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일] [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=N] [--maxSessions=N] [--clips=파일] [--pads=파일] [--launchers=파일]\n");
 		return 2;
 	}
 
@@ -579,6 +581,33 @@ int main(int argc, char** argv)
 		const mo::PickupPad& pad = pads[i];
 		std::printf("PAD %zu kind=%s name=%s at=(%.3f,%.3f,%.3f) r=%.1f hh=%.1f heal=%g respawn=%g recheck=%g\n", i, mo::PadKindName(pad.kind), pad.name.c_str(),
 			pad.location.x, pad.location.y, pad.location.z, pad.radius, pad.halfHeight, pad.heal, pad.respawnSeconds, pad.recheckSeconds);
+	}
+
+	// 점프대 — 받침과 같은 규칙: 틀린 줄이 하나라도 있으면 시작하지 않는다(점프대 하나 빠진 판은 Lyra 와 다른 맵)
+	std::vector<mo::Launcher> launchers;	// 서버가 멈출 때까지 방들이 읽는다
+	if (!args.launchersPath.empty())
+	{
+		std::vector<char> data;
+		if (!ReadFile(args.launchersPath, data))
+		{
+			std::printf("[오류] 점프대 파일을 읽지 못함: %s\n", args.launchersPath.c_str());
+			return 1;
+		}
+		size_t badLine = 0;
+		const mo::ELaunchersLoad loaded = mo::ParseLaunchers(data.data(), data.size(), launchers, badLine);
+		if (loaded != mo::ELaunchersLoad::Ok)
+		{
+			std::printf("[오류] 점프대 파일이 틀림: %s — %s (줄 %zu)\n", args.launchersPath.c_str(), mo::LaunchersLoadName(loaded), badLine);
+			return 1;
+		}
+	}
+	if (!launchers.empty()) args.pickups.launchers = &launchers;
+	std::printf("LAUNCHERS count=%zu file=%s\n", launchers.size(), args.launchersPath.empty() ? "-" : args.launchersPath.c_str());
+	for (size_t i = 0; i < launchers.size(); ++i)
+	{
+		const mo::Launcher& l = launchers[i];
+		std::printf("LAUNCHER %zu kind=%s name=%s sphere=(%.3f,%.3f,%.3f) r=%.2f up=%g mul=%g target=%d(%.3f,%.3f,%.3f) noFallEntry=%d minVz=%g\n", i, mo::LauncherKindName(l.kind), l.name.c_str(),
+			l.sphereCenter.x, l.sphereCenter.y, l.sphereCenter.z, l.sphereRadius, l.upOverride, l.multiplier, l.useTarget ? 1 : 0, l.target.x, l.target.y, l.target.z, l.noFallEntry ? 1 : 0, l.minVerticalVelocity);
 	}
 
 	CMatchServer server(args, map, params);
@@ -809,6 +838,11 @@ int main(int argc, char** argv)
 	}
 	std::printf("SERVER pickups=%llu fromRecheck=%llu fullHealth=%llu padRespawns=%llu padRechecks=%llu\n", (unsigned long long)room.pickups, (unsigned long long)room.pickupsFromRecheck,
 		(unsigned long long)room.pickupsFullHealth, (unsigned long long)room.padRespawns, (unsigned long long)room.padRechecks);
+	// 점프대(jumppad-plan j-4) — queued = 쏨 · applied = 다음 이동 머리에 넣음(차 = 그 사이 죽거나 놓임) · refused = 떨어지며 들어와 안 쏨 · infos = 보낸 S2C_LAUNCHER(들어온 사람 × 점프대 수) · byPad = 표 차례 쏜 수
+	std::printf("SERVER launch begins=%llu queued=%llu applied=%llu refused=%llu infos=%llu byPad=", (unsigned long long)room.launchBegins, (unsigned long long)room.launchesQueued,
+		(unsigned long long)room.launchesApplied, (unsigned long long)room.launchRefused, (unsigned long long)room.launcherInfosSent);
+	for (size_t i = 0; i < mo::kMaxLaunchers; ++i) std::printf("%s%llu", i ? "," : "", (unsigned long long)room.launchesByPad[i]);
+	std::printf("\n");
 	// failMsgs = 예비 가득 실패로 집으려던 사람에게 보낸 소식(판 14 · L-4) — full 과 같아야 한다
 	std::printf("SERVER weaponPickups new=%llu noSwitch=%llu ammo=%llu full=%llu noSlot=%llu postGame=%llu fromRecheck=%llu switchRejected=%llu debugAmmoSets=%llu debugKills=%llu failMsgs=%llu\n",
 		(unsigned long long)room.weaponPickupsNew, (unsigned long long)room.weaponPickupsNoSwitch, (unsigned long long)room.weaponPickupsAmmo, (unsigned long long)room.weaponPickupsFull,

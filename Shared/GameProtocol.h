@@ -11,7 +11,7 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 17;		// 17 = 애니 꼬리 걷기 자리 나누기(L-13-a) — 쌓기 칸 번호 -2(서기 자리) · 바탕 자리 baseSlot · weights 방향 넷이 움직임 자리 방향 비중 · 16 =상태 꼬리 장치 발 높이 footLift · 장치 알파 plantAlpha(L-12-e) · 15 = 상태 꼬리 다리 IK 비중 legIKAlpha(L-12-c) · 14 = 몽타주 칸 빼기 진행 blendOut · 입력 끝 누름 차례 pressOrder · 받침 까닭 PICKUP_FAIL_FULL(L-4)
+		constexpr uint32_t kProtocolVersion = 18;		// 18 = 점프대 표 S2C_LAUNCHER · 상태 STATE_LAUNCH_PENDING(jumppad-plan j-5) · 17 = 애니 꼬리 걷기 자리 나누기(L-13-a) — 쌓기 칸 번호 -2(서기 자리) · 바탕 자리 baseSlot · weights 방향 넷이 움직임 자리 방향 비중 · 16 =상태 꼬리 장치 발 높이 footLift · 장치 알파 plantAlpha(L-12-e) · 15 = 상태 꼬리 다리 IK 비중 legIKAlpha(L-12-c) · 14 = 몽타주 칸 빼기 진행 blendOut · 입력 끝 누름 차례 pressOrder · 받침 까닭 PICKUP_FAIL_FULL(L-4)
 														// 13 = 수류탄 단추 BUTTON_GRENADE 를 보냄 · 입력 끝 카메라 거리 camBack · 수류탄 소식 S2C_GRENADE · 수류탄 상태 S2C_GRENADE_STATE(컨텐츠 G-3)
 														// 12 = 대시 단추 BUTTON_DASH 를 보냄 · 대시 소식 S2C_DASH(컨텐츠 D-3)
 														// 11 = 상태의 빠른 칸 quickSlots · 받침 소식의 종류 · 줍기 결과 · 무기 · 칸 · 탄 · 입력 번호 · 시험 입력의 탄 정하기 · 죽음(컨텐츠 W-2 · W-3)
@@ -46,6 +46,7 @@ namespace mo
 			S2C_DASH = 110,			// 잃으면 안 됨 — 대시 켬. 서버가 대시를 켤 때마다 방 전원에게. 켠 사람 화면은 이것으로 제 대시 예측(켬 · 방향 · 힘)을 고친다(컨텐츠 D-3)
 			S2C_GRENADE = 111,		// 잃으면 안 됨 — 수류탄 던짐 · 터짐(EGrenadeEvent). 방 전원에게. 던진 사람 화면은 던짐으로 제 쿨다운 예측을 고친다(컨텐츠 G-3)
 			S2C_GRENADE_STATE = 112,	// 잃어도 됨 — 산 수류탄마다 자리 · 회전 · 이번 틱 부딪힘. 산 수류탄이 있는 틱에만 상태 패킷 바로 뒤에(다음 틱이 덮는다)
+			S2C_LAUNCHER = 113,		// 잃으면 안 됨 — 점프대 표 한 줄(LauncherInfo). 들어올 때 점프대마다 하나. 표는 판 동안 안 바뀐다(jumppad-plan j-5)
 		};
 
 		enum EButton : uint8_t
@@ -79,6 +80,8 @@ namespace mo
 			STATE_IMMUNE = 1 << 3,		// 경기 전 대기·부활 직후·경기 끝 — 맞아도 피해 없음
 			STATE_MOVE_LOCKED = 1 << 4,	// 부활 직후 — 이동 입력을 안 받는다
 			STATE_ADS = 1 << 5,			// 조준 능력이 켜져 있다(GA_ADS) — 걸음 속도 · 퍼짐 · 조준 자세가 이 값을 따른다
+			STATE_LAUNCH_PENDING = 1 << 7,	// 이 상태의 이동 끝에 점프대가 쐈다 — 발사는 다음 입력의 이동 머리에 먹는다(PendingLaunchVelocity). 받는 쪽 예측은 이 깃발 · 상태 자리 · 속도 · 요로
+										// 발사를 다시 셈한다(Shared/JumpPads RestoreLaunchers). 남의 몸은 점프대 효과를 이 깃발로 낸다
 			STATE_CROUCHED = 1 << 6,	// 앉아 있다(bIsCrouched) — 캡슐 반높이 · 앉은 걸음 · 퍼짐 · 앉은 자세 · 메시 올림이 이 값을 따른다. 받는 쪽 애니도 앉음을 여기서 읽는다(D62 8)
 		};
 
@@ -404,6 +407,28 @@ namespace mo
 			uint8_t team;				// 던질 때 팀
 		};
 
+		// 점프대 표 한 줄(S2C_LAUNCHER) — 점프대 파일(--launchers=)은 서버만 읽는다. 셈에 쓰는 값은 double 그대로 실어 예측이 서버와 같은 수로 셈한다
+		// (쓰기 · 읽기 = Shared/JumpPads LauncherToWire · LauncherFromWire). 이름은 다리가 맵의 점프대 액터를 찾는 데 쓴다
+		inline constexpr size_t kLauncherNameBytes = 64;	// 0 으로 끝남 — 서버는 63자 넘는 이름을 읽기에서 거른다(ParseLaunchers)
+		enum ELauncherInfoFlag : uint8_t
+		{
+			LAUNCHER_USE_TARGET = 1 << 0,
+			LAUNCHER_NO_FALL_ENTRY = 1 << 1,
+		};
+		struct LauncherInfo
+		{
+			Header h;
+			uint8_t index;			// 표 차례 = 서버 점프대 파일의 줄 차례(겹침 비트 차례)
+			uint8_t count;			// 서버 점프대 수 — 받는 쪽은 count 줄이 다 와야 표를 쓴다
+			uint8_t kind;			// ELauncherKind(JumpPads.h) 숫자 — 0 위로 · 1 밀기
+			uint8_t flags;			// ELauncherInfoFlag
+			double sphereX, sphereY, sphereZ, sphereRadius;
+			double upOverride, multiplier;
+			double targetX, targetY, targetZ;
+			double minVerticalVelocity;
+			char name[kLauncherNameBytes];
+		};
+
 		// S2C_GRENADE_STATE 의 칸 깃발
 		enum EGrenadeStateFlag : uint8_t
 		{
@@ -478,6 +503,7 @@ namespace mo
 		static_assert(sizeof(GrenadeStateEntry) == 41 && sizeof(GrenadeStateHead) == 9, "수류탄 상태 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 		inline constexpr size_t kMaxGrenadeStatePacketSize = sizeof(GrenadeStateHead) + sizeof(GrenadeStateEntry) * kMaxPlayersInRoom;
 		static_assert(kMaxGrenadeStatePacketSize <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
+		static_assert(sizeof(LauncherInfo) == 152, "점프대 표 소식 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 		static_assert(sizeof(Input) == 51, "입력 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드(판 번호를 올린다)");
 
 		// 한 입력 안 누름 차례(L-4 · 판 14). 근접 · 대시 · 수류탄 · 재장전은 넷 다 누른 입력 하나에만 켜지는 단추라 한 입력에 둘 이상 켜질 수 있다.

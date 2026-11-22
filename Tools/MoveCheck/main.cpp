@@ -499,6 +499,7 @@ int main(int argc, char** argv)
 	std::vector<Launcher> launchers;
 	std::vector<int> recToOurs;		// 기록 #pad 번호 → 표 번호(-1 = 표에 없음)
 	LauncherSet launcherSet;
+	bool launcherWirePass = true;	// 아래 PAD_WIRE — PADCHECK 판정에 같이 든다
 	if (launchersPath)
 	{
 		std::vector<char> text;
@@ -547,6 +548,49 @@ int main(int argc, char** argv)
 			}
 		}
 		std::printf("PAD launchers=%zu recPads=%zu mapped=%zu padsColumns=%d\n", launchers.size(), recPadNames.size(), mapped, cols.pads ? 1 : 0);
+
+		// 와이어 왕복(j-5) — 표 → S2C_LAUNCHER → 표가 칸마다 같은가(셈 값은 double 그대로 실어 == 로 같아야 한다).
+		// 거름 = 틀린 소식을 받아들이면 bad — 하나씩 칸을 틀리게 만든다. 이름 63자는 받고 64자는 쓰기에서 거른다
+		size_t wireOk = 0, wireBad = 0, rejectTried = 0, rejectOk = 0;
+		const auto sameLauncher = [](const Launcher& a, const Launcher& b)
+		{
+			return a.kind == b.kind && a.name == b.name && a.sphereCenter.x == b.sphereCenter.x && a.sphereCenter.y == b.sphereCenter.y && a.sphereCenter.z == b.sphereCenter.z &&
+				a.sphereRadius == b.sphereRadius && a.upOverride == b.upOverride && a.multiplier == b.multiplier && a.useTarget == b.useTarget &&
+				a.target.x == b.target.x && a.target.y == b.target.y && a.target.z == b.target.z && a.minVerticalVelocity == b.minVerticalVelocity && a.noFallEntry == b.noFallEntry;
+		};
+		for (size_t i = 0; i < launchers.size(); ++i)
+		{
+			wire::LauncherInfo info;
+			Launcher back;
+			const bool ok = LauncherToWire(launchers[i], i, launchers.size(), info) && info.h.size == sizeof(info) && info.h.type == (uint16_t)wire::Msg::S2C_LAUNCHER &&
+				info.index == i && info.count == launchers.size() && LauncherFromWire(info, back) && sameLauncher(launchers[i], back);
+			++(ok ? wireOk : wireBad);
+		}
+		if (!launchers.empty())
+		{
+			const size_t n = launchers.size();
+			const auto expectReject = [&](bool accepted) { ++rejectTried; if (!accepted) ++rejectOk; };
+			wire::LauncherInfo base;
+			Launcher back;
+			LauncherToWire(launchers[0], 0, n, base);
+			Launcher named = launchers[0];
+			named.name.assign(kMaxLauncherName, 'a');
+			wire::LauncherInfo info;
+			if (!(LauncherToWire(named, 0, n, info) && LauncherFromWire(info, back) && back.name == named.name)) ++wireBad;	// 63자는 지나간다
+			named.name.assign(kMaxLauncherName + 1, 'a');
+			expectReject(LauncherToWire(named, 0, n, info));
+			expectReject(LauncherToWire(launchers[0], n, n, info));
+			info = base; info.kind = (uint8_t)ELauncherKind::Push + 1; expectReject(LauncherFromWire(info, back));
+			info = base; info.flags = 1 << 2; expectReject(LauncherFromWire(info, back));
+			info = base; info.index = info.count; expectReject(LauncherFromWire(info, back));
+			info = base; info.count = 0; info.index = 0; expectReject(LauncherFromWire(info, back));
+			info = base; info.count = (uint8_t)(kMaxLaunchers + 1); info.index = 0; expectReject(LauncherFromWire(info, back));
+			info = base; info.sphereRadius = 0; expectReject(LauncherFromWire(info, back));
+			info = base; std::memset(info.name, 'a', sizeof(info.name)); expectReject(LauncherFromWire(info, back));	// 0 으로 안 끝남
+			info = base; std::memset(info.name, 0, sizeof(info.name)); expectReject(LauncherFromWire(info, back));	// 빈 이름
+		}
+		launcherWirePass = wireBad == 0 && wireOk == launchers.size() && rejectOk == rejectTried && rejectTried > 0;
+		std::printf("PAD_WIRE size=%zu ok=%zu bad=%zu reject=%zu/%zu\n", sizeof(wire::LauncherInfo), wireOk, wireBad, rejectOk, rejectTried);
 	}
 
 	// PAD 한 프레임 — Lyra 자리(이동 앞 · 뒤)로 우리 겹침을 세고, 겹침이 시작된 이동의 끝 속도 · 요로 셈한 발사를 다음 프레임 기록 발사와 맞댄다
@@ -558,6 +602,8 @@ int main(int argc, char** argv)
 		size_t teleportMoves = 0, teleportLaunch = 0, lyraLaunchRows = 0, launchOrphan = 0, speedOver001 = 0;
 		double speedMax = 0;
 		std::vector<size_t> firedPerPad(launcherSet.count, 0);
+		size_t restoreTried = 0, restoreFail = 0, restoreMaskDiff = 0;	// 보정 되살림(j-6) — 아래 PAD_RESTORE
+		double restoreMax = 0;
 		int printedPad = 0;
 		for (size_t k = 0; k < rows.size(); ++k)
 		{
@@ -621,6 +667,18 @@ int main(int argc, char** argv)
 			{
 				++fired;
 				++firedPerPad[(size_t)firedPad];
+				// 보정 되살림(j-6) — 상태 패킷처럼 이동 끝 자리 · 속도 · 요를 단정밀도로 줄여 RestoreLaunchers 가 같은 점프대 · 같은 발사를 다시 세나(D159 의 오차를 잰다)
+				MoveState s;
+				s.location = Vec3((float)r.ap.x, (float)r.ap.y, (float)r.ap.z);
+				s.velocity = Vec3((float)r.av.x, (float)r.av.y, (float)r.av.z);
+				s.crouched = cols.crouch && r.crouchedA;
+				++restoreTried;
+				if (!RestoreLaunchers(s, launcherSet, radius, halfAfter, true, (double)(float)r.yaw) || !s.launchPending) ++restoreFail;
+				else
+				{
+					restoreMax = std::max(restoreMax, Dist(s.pendingLaunch, expect));
+					if (s.launcherMask != after) ++restoreMaskDiff;
+				}
 			}
 			if (!next)
 			{
@@ -657,12 +715,14 @@ int main(int argc, char** argv)
 		std::printf("PAD mask frames=%zu lyraIn=%zu mineIn=%zu mismatch=%zu | begins=%zu fired=%zu refused=%zu matched=%zu beginNoLaunch=%zu launchNoBegin=%zu beginAtEnd=%zu | speedMax=%.6f over0.01=%zu | lyraLaunchRows=%zu teleportMoves=%zu teleportLaunch=%zu orphan=%zu\n",
 			maskFrames, maskLyraIn, maskOursIn, maskMismatch, begins, fired, refused, matched, beginNoLaunch, launchNoBegin, beginAtEnd, speedMax, speedOver001,
 			lyraLaunchRows, teleportMoves, teleportLaunch, launchOrphan);
+		std::printf("PAD_RESTORE tried=%zu fail=%zu maskDiff=%zu maxDiff=%.6f\n", restoreTried, restoreFail, restoreMaskDiff, restoreMax);
 		std::printf("PAD_COVER");
 		for (size_t i = 0; i < launcherSet.count; ++i) std::printf(" %s%zu=%zu", LauncherKindName(launcherSet.items[i].kind), i, firedPerPad[i]);
 		std::printf("\n");
 		// 판정 — 겹침 비트가 다 같고, 시작마다 다음 프레임에 같은 속도로 쏘고, 우리가 모르는 발사가 없다(순간이동 몫만 남는다)
 		const bool pass = maskMismatch == 0 && beginNoLaunch == 0 && launchNoBegin == 0 && speedOver001 == 0 && matched > 0 &&
-			lyraLaunchRows == matched + teleportLaunch + launchOrphan && launchOrphan == 0;
+			lyraLaunchRows == matched + teleportLaunch + launchOrphan && launchOrphan == 0 && launcherWirePass &&
+			restoreTried == fired && restoreFail == 0 && restoreMaskDiff == 0 && restoreMax <= 0.01;
 		std::printf("PADCHECK %s\n", pass ? "PASS" : "FAIL");
 	}
 

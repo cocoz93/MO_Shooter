@@ -141,6 +141,11 @@ namespace mo
 		: _map(map), _params(params), _rules(rules), _allowDebug(allowDebug), _sender(sender), _roomId(roomId), _rewind(rewind), _anim(anim), _pickups(pickups), _moveSim(map, _params), _spawnRng(seed + 1)
 	{
 		_padStates.resize(PadCount());
+		if (_pickups.launchers)
+		{
+			_launchers.items = _pickups.launchers->data();
+			_launchers.count = _pickups.launchers->size();
+		}
 		if (_anim.clips)
 		{
 			// main 이 시작할 때 같은 초기화로 확인했으므로 여기서 실패하지 않는다
@@ -239,6 +244,7 @@ namespace mo
 		}
 		added.padOverlap.assign(PadCount(), 0);
 		for (size_t i = 0; i < PadCount(); ++i) SendPad(i, wire::PICKUP_SYNC, nullptr, 0.f, &added);	// 늦게 들어와도 꺼진 받침 · 남은 대기를 안다
+		SendLaunchers(added);	// 부활(S2C_SPAWN)보다 먼저 — 받는 쪽 예측이 첫 입력부터 점프대를 안다
 		SpawnPlayer(added);
 
 		if (_phase == wire::EMatchPhase::Waiting)
@@ -562,6 +568,7 @@ namespace mo
 		spawn.startIndex = (uint8_t)startIndex;
 		SendToAll(&spawn, (int)sizeof(spawn));
 		UpdatePadOverlaps(player);	// 새 몸이 받침 안에 서면 겹침 시작이다
+		ResetLaunchers(player.move, _launchers, _params.capsuleRadius, _moveSim.HalfHeightOf(player.move));	// 부활 자리 20곳은 점프대와 717cm 넘게 떨어져 비트가 늘 0(JumpPads.h)
 	}
 
 	void CRoom::TickRespawns()
@@ -792,6 +799,18 @@ namespace mo
 		else SendToAll(&msg, (int)sizeof(msg));
 	}
 
+	void CRoom::SendLaunchers(const Player& to)
+	{
+		for (size_t i = 0; i < _launchers.count; ++i)
+		{
+			wire::LauncherInfo msg;
+			// 이름 길이 · 수는 main 이 ParseLaunchers 로 거른 표라 실패하지 않는다. 실패하면 받는 쪽 표가 모자라 예측이 점프대를 안 쓴다(count 줄이 다 와야 쓴다)
+			if (!LauncherToWire(_launchers.items[i], i, _launchers.count, msg)) continue;
+			_sender.SendToSession(to.session, &msg, (int)sizeof(msg));
+			++_stats.launcherInfosSent;
+		}
+	}
+
 	// ─── 입력 ──────────────────────────────────────────────
 	// 시험용 — 사망·부활 대기·무적·이동 막음을 모두 지운다
 	void CRoom::ApplyPlace(Player& player, const wire::DebugPlace& place)
@@ -811,6 +830,7 @@ namespace mo
 		player.moveLockInputs = 0;
 		player.lastSeq = place.seq;
 		UpdatePadOverlaps(player);	// 순간이동(SetActorLocation)도 겹침을 다시 본다 — 0-3 pads2 는 이렇게 올라서서 그 프레임에 집었다
+		ResetLaunchers(player.move, _launchers, _params.capsuleRadius, _moveSim.HalfHeightOf(player.move));	// 점프대는 놓은 자리에서 비트만 다시 센다 — 놓아서는 안 쏜다(JumpPads.h ResetLaunchers)
 		if (_animReady)
 		{
 			// 순간이동 + 멈춤 = 판 시작과 같다 — 자세를 든 무기 묶음으로 처음부터(경로 봇이 무기를 든 뒤 옮기면 서기 시계가 옮긴 틱에서 시작).
@@ -1085,7 +1105,18 @@ namespace mo
 		_moveSim.SetStandables(_standableScratch.data(), _standableScratch.size());
 		const uint64_t standableHitsBefore = _moveSim.GetCounters().standableHits;
 		const uint64_t liftoffsBefore = _moveSim.GetCounters().rootForceLiftoffs;
-		_moveSim.Tick(player.move, moveInput, kTickSeconds);
+		// 점프대 — 지난 이동 끝 겹침 시작이 남긴 발사를 이번 이동 머리에 넣고, 이동 끝 자리로 겹침 시작을 본다(Shared/JumpPads — 예측 · MoveCheck 와 같은 함수).
+		// 몸 방향 = 이 입력의 요 — Lyra 는 조종 회전을 이동 전에 받아 몸이 그 요로 돈 채 움직인다(bUseControllerRotationYaw). 점프대가 사람 · 봇을 가리지 않는다 —
+		// Lyra 는 AI 조종 몸을 안 쏘지만(B_Launcher 바탕 그래프) 우리 봇은 입력을 보내는 원격 사람 자리다(제 판단, jumppad-plan)
+		const LauncherTickResult launch = TickWithLaunchers(_moveSim, player.move, moveInput, kTickSeconds, input.yaw, _launchers, _params.capsuleRadius);
+		if (launch.launchedThisTick) ++_stats.launchesApplied;
+		_stats.launchBegins += (uint64_t)launch.begins;
+		_stats.launchRefused += (uint64_t)launch.refused;
+		if (launch.fired >= 0)
+		{
+			++_stats.launchesQueued;
+			++_stats.launchesByPad[launch.fired];
+		}
 		_stats.dashLiftoffs += _moveSim.GetCounters().rootForceLiftoffs - liftoffsBefore;	// 위아래를 더하는 힘은 대시뿐이다(근접 밀기는 위아래 무시)
 		_moveSim.SetStandables(nullptr, 0);
 		_stats.grenadeWalkHits += _moveSim.GetCounters().standableHits - standableHitsBefore;
@@ -1897,6 +1928,9 @@ namespace mo
 		target.respawnTick = _tick + SecondsToTicks(_rules.respawnSeconds);
 		target.move.velocity = Vec3();
 		std::fill(target.padOverlap.begin(), target.padOverlap.end(), (uint8_t)0);	// 죽으면 충돌이 꺼져 겹침이 끝난다
+		target.move.launcherMask = 0;		// 점프대 겹침도 끝나고, 아직 안 먹은 발사는 버린다(죽은 몸은 안 움직인다 — 부활이 새 MoveState 로 시작)
+		target.move.launchPending = false;
+		target.move.pendingLaunch = Vec3();
 
 		// B_ShooterGameScoring_Base — 다른 팀이 죽였을 때만 죽은 쪽 죽음 · 처치 · 팀 점수 +1. 처치자 없는 자기 파괴(떨어짐 · 디버그 처치) · 자기 수류탄 · 같은 팀 처치는 셋 다 안 센다
 		// (그래프 원본. Lyra 기록 G-0-b2 — 스스로 죽음 둘 · 자기 수류탄 처치 하나 모두 죽음 0). 봇 집계(BotClient OnKill)도 같은 규칙을 따로 적는다
@@ -2529,6 +2563,7 @@ namespace mo
 			if (player->moveLockInputs > 0) out.flags |= wire::STATE_MOVE_LOCKED;
 			if (player->ads.active) out.flags |= wire::STATE_ADS;
 			if (player->move.crouched) out.flags |= wire::STATE_CROUCHED;
+			if (player->move.launchPending) out.flags |= wire::STATE_LAUNCH_PENDING;	// 이 상태 자리 · 속도 · 요로 쏜 발사가 다음 이동을 기다린다(받는 쪽 RestoreLaunchers)
 			out.weapon = player->weapon;
 			out.quickSlots = player->loadout.PackSlots();
 			out.team = player->team;
