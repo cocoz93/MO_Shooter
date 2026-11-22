@@ -235,6 +235,8 @@ namespace mo
 			uint64_t restoreFails = 0;	// 서버 깃발은 켜졌는데 서버 자리에서 겹친 점프대가 없거나 안 쏘는 값 — 발사를 못 되살림. 0 이어야 한다
 		};
 		const LaunchCounters& GetLaunchCounters() const { return _launchCounters; }
+		// 마지막 걸음이 쏜 점프대 번호(-1 = 안 쏨). AddInput 바로 뒤에만 그 입력 몫이다 — 보정의 다시 돌리기가 덮는다(다리가 내 몸 효과를 낼 점프대를 고른다)
+		int GetLastLaunchPad() const { return _lastLaunch.fired; }
 		// 아직 확인 안 된 번호(AckGrenade 가 본 번호 뒤) 중 서버 소식 없이 내가 던진 칸 — 판이 끝날 때 서버가 돌렸는지 모르는 몫(봇 판정에서 뺀다)
 		uint64_t CountGrenadeThrownUnacked() const;
 		// 대시도 같다 — 아직 확인 안 된 번호(AckDash 가 본 번호 뒤) 중 서버 소식 없이 내가 켠 칸. 판이 끝날 때 서버가 받고 안 돌린 입력의 몫(봇 판정에서 뺀다, L-11-c)

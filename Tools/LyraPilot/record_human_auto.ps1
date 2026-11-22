@@ -24,6 +24,7 @@ $here   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = "$proj\Saved\MOB"
 $map    = "$outDir\map_expanse.mocl"
 $pads   = "$outDir\pads_expanse.txt"
+$launchers = "$outDir\launchers_expanse.txt"   # jump pads (jumppad-plan j-1, make_launchers.py) - outside the repo like the map; no file = server without jump pads
 $base   = "$outDir\hauto_$Tag"
 $log    = "$base.log"
 $resX, $resY = $Res -split 'x'
@@ -36,6 +37,7 @@ if ($Only -ne 'pads') {
     # C shots and E repeat rifle / shotgun FAIL). The bots get it too so their predicted bag matches the server
     $srvArgs = @("--map=`"$map`"", "--port=$Port", '--exitWhenEmpty', '--warmup=5', "--matchSeconds=$MatchSeconds", '--testStartAllWeapons')
     if (Test-Path -LiteralPath $pads) { $srvArgs += "--pads=`"$pads`"" }
+    if (Test-Path -LiteralPath $launchers) { $srvArgs += "--launchers=`"$launchers`"" }
     $srv = Start-Process -FilePath "$repo\build\Server\Release\Server.exe" -ArgumentList $srvArgs -RedirectStandardOutput "${base}_server.txt" -RedirectStandardError "${base}_server_err.txt" -PassThru -WindowStyle Hidden
     $null = $srv.Handle
     Start-Sleep -Milliseconds 800

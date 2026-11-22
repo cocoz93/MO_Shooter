@@ -247,6 +247,7 @@ namespace
 	const TCHAR* const kGrenadeActorClassPath = TEXT("/ShooterCore/Weapon/Grenade/B_Grenade.B_Grenade_C");
 	const TCHAR* const kGrenadeImpactSoundPath = TEXT("/Game/Audio/MetaSounds/sfx_Weapon_GrenadeImpact_nl_meta.sfx_Weapon_GrenadeImpact_nl_meta");
 	const TCHAR* const kGrenadeImpactAttenuationPath = TEXT("/Game/Audio/AttenuationPresets/ATT_Projectile.ATT_Projectile");
+	const TCHAR* const kLauncherCueTag = TEXT("GameplayCue.World.Launcher.Activate");	// B_Launcher 변수 Gameplay Tag(원본 기준 weapons_launchers.txt — 점프대 8개 다 같은 값)
 	const TCHAR* const kGrenadeDetonateCueTag = TEXT("GameplayCue.Weapon.Grenade.Detonate");	// B_Grenade 변수 Gameplay Tag(원본 기준 B_Grenade_cdo.t3d)
 	void KeepBridgeCrouch(ULyraCharacterMovementComponent* Self, FVector&, float)
 	{
@@ -356,6 +357,10 @@ struct FMOBCore
 	mo::CMoveSim Sim;
 	mo::MatchRules Rules;
 	mo::CSelfPrediction Prediction;
+	// 점프대 표(S2C_LAUNCHER, j-7) — 서버가 보낸 줄. 다 오면 예측에 넘기고, 남의 깃발 때 겹친 점프대를 찾는 데도 쓴다
+	std::vector<mo::Launcher> LauncherRows;
+	std::vector<bool> LauncherGot;
+	bool bLaunchersReady = false;
 
 	// 사람끼리 막기(D83) — 내 예측이 볼 남 캡슐. 마지막으로 받은 상태의 산 사람만(서버 · 봇 SetPawnsForPrediction 과 같은 식).
 	// 남 자리는 받은 최신 상태라 서버가 내 입력을 굴린 순간의 자리와 다르다 — 그 차이는 Reconcile 보정으로 나온다
@@ -515,6 +520,11 @@ void UMOBridgeSubsystem::Deinitialize()
 		if (UGameplayCueManager* GCM = UAbilitySystemGlobals::Get().GetGameplayCueManager()) GCM->OnGameplayCueRouted().Remove(GrenadeCueRouteHandle);
 		GrenadeCueRouteHandle.Reset();
 	}
+	if (LaunchCueRouteHandle.IsValid())
+	{
+		if (UGameplayCueManager* GCM = UAbilitySystemGlobals::Get().GetGameplayCueManager()) GCM->OnGameplayCueRouted().Remove(LaunchCueRouteHandle);
+		LaunchCueRouteHandle.Reset();
+	}
 	if (FailMsgHandle.IsValid()) FailMsgHandle.Unregister();
 	Super::Deinitialize();
 }
@@ -573,6 +583,22 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bBreakCrouchBlock = FParse::Param(Cmd, TEXT("MOBBreakCrouchBlock"));
 	bBreakMeleeBlock = FParse::Param(Cmd, TEXT("MOBBreakMeleeBlock"));
 	bBreakDevices = FParse::Param(Cmd, TEXT("MOBBreakDevices"));
+	bDeviceFxOff = FParse::Param(Cmd, TEXT("MOBDeviceFxOff"));
+	bBreakJumpPad = FParse::Param(Cmd, TEXT("MOBBreakJumpPad"));
+	{
+		FString PadWalkText;
+		if (FParse::Value(Cmd, TEXT("MOBPadWalk="), PadWalkText, false))
+		{
+			const TArray<float> V = ParseFloats(PadWalkText);
+			if (V.Num() == 4)
+			{
+				bPadWalk = true;
+				PadWalkAt = FVector(V[0], V[1], V[2]);
+				PadWalkYaw = V[3];
+			}
+			else UE_LOG(LogMOB, Error, TEXT("MOB_PADWALK_BAD text=%s (x,y,z,yaw)"), *PadWalkText);
+		}
+	}
 	bAutoMeleeOn = FParse::Param(Cmd, TEXT("MOBAutoMelee"));
 	bBreakDashBlock = FParse::Param(Cmd, TEXT("MOBBreakDashBlock"));
 	bBreakDashDir = FParse::Param(Cmd, TEXT("MOBBreakDashDir"));
@@ -706,6 +732,7 @@ void UMOBridgeSubsystem::Tick(float DeltaTime)
 	TickSelfVisual(Now, DeltaTime);
 	TickRemotes(Now);
 	TickRemoteDashCues();
+	TickRemoteLaunchCues();
 	TickGrenadeVisuals();
 	TickPickups(Now);
 	TickDevices(Now);
@@ -1031,6 +1058,12 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 		HandleKill(M);
 		break;
 	}
+	case wire::Msg::S2C_LAUNCHER:
+	{
+		wire::LauncherInfo M = wire::LauncherInfo(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
+		HandleLauncher(M, Size);
+		break;
+	}
 	case wire::Msg::S2C_PICKUP:
 	{
 		wire::Pickup M = wire::Pickup(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
@@ -1133,6 +1166,10 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 		const bool bServerCrouch = (P.flags & wire::STATE_CROUCHED) != 0;
 		if (bServerCrouch) ++CrouchComparedOn;
 		if (bServerCrouch != S->move.crouched) ++CrouchFlagDiff;
+		// 점프대(j-6 · j-7) — 이 상태 끝에 쏜 발사가 다음 입력을 기다리나. 표가 같으면 같아야 한다(봇 CompareSelf 와 같은 식)
+		const bool bServerLaunch = (P.flags & wire::STATE_LAUNCH_PENDING) != 0;
+		if (bServerLaunch) ++LaunchComparedOn;
+		if (bServerLaunch != S->move.launchPending) ++LaunchFlagDiff;
 		// 가방 · 탄(W-4) — 봇 CompareSelf 와 같은 식. 가방은 줍기 · 부활만 바꾸고 둘 다 경기 끝 단계와 상관없어 늘 본다(무기 둘 이상 든 줄을 같이 센다).
 		// 탄 · 든 무기도 늘 본다 — 서버가 경기 끝 단계에도 사격 입력을 돌린다(L-3-b. 그 전엔 지워서 끝 단계 앞까지만 봤다)
 		++InvCompared;
@@ -1324,6 +1361,35 @@ void UMOBridgeSubsystem::AddRemoteSnapshot(const wire::PlayerState& P, uint32 Se
 	S.MoveY = P.moveY;
 	S.bFalling = (P.flags & wire::STATE_FALLING) != 0;
 	S.bCrouched = (P.flags & wire::STATE_CROUCHED) != 0;
+	// 남의 점프대(j-7) — 깃발이 새로 선 상태 = 그 틱 이동 끝에 쏠 점프대에 들었다. 어느 점프대인지는 그 자리 겹침으로 찾는다(여럿이면 마지막 — 서버 발사는 덮어쓴다,
+	// JumpPads.h RestoreLaunchers 와 같다). 효과는 화면 시점이 그 틱에 닿을 때(TickRemoteLaunchCues) — 받자마자 내면 보간 지연만큼 앞서 난다
+	const bool bLaunchFlag = (P.flags & wire::STATE_LAUNCH_PENDING) != 0;
+	if (bLaunchFlag && !R.bLaunchFlag && Core && Core->bLaunchersReady)
+	{
+		++LaunchRemoteFlags;
+		mo::MoveState Shape;
+		Shape.crouched = S.bCrouched;
+		const uint8_t Mask = mo::LauncherMask(Core->LauncherRows.data(), Core->LauncherRows.size(), mo::Vec3(P.x, P.y, P.z), Core->Params.capsuleRadius, Core->Sim.HalfHeightOf(Shape));
+		int32 Pad = -1;
+		for (int32 k = 0; k < (int32)Core->LauncherRows.size(); ++k)
+		{
+			if (Mask & (1u << k)) Pad = k;
+		}
+		if (Pad < 0) ++LaunchRemoteNoPad;
+		else
+		{
+			if (PendingLaunchCues.Num() >= 32)
+			{
+				PendingLaunchCues.RemoveAt(0);	// 화면 시계가 안 가는 동안 쌓인 것 — 남의 대시 효과와 같은 상한(제 판단)
+				++LaunchCueDropped;
+			}
+			FMOBPendingLaunchCue& Cue = PendingLaunchCues.AddDefaulted_GetRef();
+			Cue.Player = P.id;
+			Cue.Tick = ServerTick;
+			Cue.Pad = Pad;
+		}
+	}
+	R.bLaunchFlag = bLaunchFlag;
 	++R.SnapCount;
 	R.Weapon = P.weapon;
 
@@ -1926,12 +1992,40 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	}
 
 	// Lyra 입력은 AddMovementInput 을 앞·옆 따로 불러 대각선이면 길이가 1 을 넘는다. 서버 입력은 길이 1 이하가 약속이다
+	// 점프대 걷기 시험(-MOBPadWalk, j-7) — 경기 중 8초마다 정한 자리로 옮긴다. 내 예측도 서버 ApplyPlace 와 같은 차례로 옮긴다(OnPlace 가 그 번호를 준다)
+	if (bPadWalk && MatchPhase == (uint8)wire::EMatchPhase::Playing && Now >= NextPadWalkAt)
+	{
+		NextPadWalkAt = Now + 8.0;
+		wire::DebugPlace Place = wire::DebugPlace();
+		Place.h.size = sizeof(Place);
+		Place.h.type = (uint16)wire::Msg::C2S_DEBUG_PLACE;
+		Place.seq = Core->Prediction.OnPlace(PadWalkAt.X, PadWalkAt.Y, PadWalkAt.Z, 0xFF, 0, 0);
+		Place.x = PadWalkAt.X;
+		Place.y = PadWalkAt.Y;
+		Place.z = PadWalkAt.Z;
+		Place.hp = 100.f;
+		Seq = Place.seq;
+		QueuePacket(&Place, sizeof(Place));
+		SelfCur = ToFVector(Core->Prediction.GetMove().location);
+		SelfPrev = SelfCur;
+		VisualError = FVector::ZeroVector;
+		PadWalkPlacedAt = Now;
+		++PadWalkPlaces;
+		UE_LOG(LogMOB, Log, TEXT("MOB_PADWALK place=%d seq=%u at=(%.1f,%.1f,%.1f) yaw=%.1f"), PadWalkPlaces, Place.seq, PadWalkAt.X, PadWalkAt.Y, PadWalkAt.Z, PadWalkYaw);
+	}
+	const bool bPadWalking = bPadWalk && PadWalkPlacedAt > 0;
 	FVector Move = Ch->GetLastMovementInputVector();
 	Move.Z = 0;
 	const FVector RawMove = Move;	// 대시(D-5) — 다음 대시의 「앞 입력 이동」으로 Lyra 능력에 넣을 날 값(TickAbilityDash)
 	InputRawMax = FMath::Max(InputRawMax, Move.Size());
 	if (FMath::Abs(Move.X) > 0.01 && FMath::Abs(Move.Y) > 0.01) ++InputsDiagonal;
 	if (Move.SizeSquared() > 1.0) Move.Normalize();
+	if (bPadWalking)
+	{
+		// 놓은 뒤 0.5초는 서고, 그 뒤 정한 요로 앞으로(사람 키 대신)
+		const double Rad = FMath::DegreesToRadians((double)PadWalkYaw);
+		Move = Now - PadWalkPlacedAt >= 0.5 ? FVector(FMath::Cos(Rad), FMath::Sin(Rad), 0.0) : FVector::ZeroVector;
+	}
 	InputSentMax = FMath::Max(InputSentMax, (double)FVector2f((float)Move.X, (float)Move.Y).Size());
 
 	const FRotator Control = PC->GetControlRotation();
@@ -2089,7 +2183,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		In.h.type = (uint16)wire::Msg::C2S_INPUT;
 		In.moveX = (float)Move.X;
 		In.moveY = (float)Move.Y;
-		In.yaw = FRotator::NormalizeAxis(Control.Yaw);
+		In.yaw = bPadWalking ? PadWalkYaw : FRotator::NormalizeAxis(Control.Yaw);
 		In.pitch = FRotator::NormalizeAxis(Control.Pitch);
 		In.aimX = (float)Aim.X;
 		In.aimY = (float)Aim.Y;
@@ -2140,12 +2234,15 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		if (bMeleeStarts) MeleeGuess = JudgeMelee(MeleePush);
 		const uint64 DashStartedBefore = Core->Prediction.GetDashCounters().started;
 		const uint64 GrenadeThrownBefore = Core->Prediction.GetGrenadeCounters().thrown;
+		const uint64 LaunchFiredBefore = Core->Prediction.GetLaunchCounters().fired;
 		{
 			const FMOBCore::FPawnScope PawnScope(*Core);	// 화면 판정(JudgeMelee) 뒤에 넘긴다 — 봇과 같은 차례
 			Core->Prediction.AddInput(In, bMeleeStarts && MeleeGuess.Kind == wire::MELEE_HIT ? &MeleePush : nullptr);
 		}
 		Seq = In.seq;
 		MeleeYaw = In.yaw;
+		// 점프대(j-7) — 이 입력 걸음 끝에 예측이 쏠 점프대에 들었으면 그 걸음에 효과(그래프도 겹침 시작에서 낸다 — 발사는 다음 걸음 머리)
+		if (Core->Prediction.GetLaunchCounters().fired != LaunchFiredBefore) PlayLauncherCue(Ch, Core->Prediction.GetLastLaunchPad(), true);
 		if (!PressText.IsEmpty() && PressLinesLeft > 0)
 		{
 			--PressLinesLeft;
@@ -2930,6 +3027,105 @@ void UMOBridgeSubsystem::TickRemoteDashCues()
 			DashCueWaitMax = FMath::Max(DashCueWaitMax, Wait);
 		}
 		PendingDashCues.RemoveAt(i);
+	}
+}
+
+// 서버 점프대 표 한 줄(판 18 S2C_LAUNCHER, jumppad-plan j-7) — 줄 수(count)가 다 오면 내 예측에 넘긴다(봇 OnLauncher 와 같다). 서버는 들어올 때 부활 소식보다 먼저 보낸다
+void UMOBridgeSubsystem::HandleLauncher(const wire::LauncherInfo& M, int32 Size)
+{
+	++LauncherInfos;
+	mo::Launcher Row;
+	if (!Core || Size != (int32)sizeof(M) || !mo::LauncherFromWire(M, Row))
+	{
+		++LauncherInfoBad;
+		return;
+	}
+	if (Core->LauncherRows.size() != M.count)
+	{
+		Core->LauncherRows.assign(M.count, mo::Launcher());
+		Core->LauncherGot.assign(M.count, false);
+		Core->bLaunchersReady = false;
+	}
+	Core->LauncherRows[M.index] = Row;
+	Core->LauncherGot[M.index] = true;
+	if (Core->bLaunchersReady) return;
+	for (const bool bGot : Core->LauncherGot)
+	{
+		if (!bGot) return;
+	}
+	Core->bLaunchersReady = true;
+	if (!bBreakJumpPad) Core->Prediction.SetLaunchers(Core->LauncherRows, Core->Params.capsuleRadius);
+	// 이 다리가 낸 점프대 효과가 실제로 신호 관리자 길에 들어갔나(수류탄 터짐과 같은 식 — 길 알림은 출시 빌드가 아닐 때만 온다)
+	if (!LaunchCueRouteHandle.IsValid())
+	{
+		if (UGameplayCueManager* GCM = UAbilitySystemGlobals::Get().GetGameplayCueManager())
+		{
+			const FGameplayTag CueTag = FGameplayTag::RequestGameplayTag(kLauncherCueTag, false);
+			LaunchCueRouteHandle = GCM->OnGameplayCueRouted().AddWeakLambda(this, [this, CueTag](AActor*, FGameplayTag Routed, EGameplayCueEvent::Type Event, const FGameplayCueParameters&, EGameplayCueExecutionOptions)
+			{
+				if (Event == EGameplayCueEvent::Executed && CueTag.IsValid() && Routed == CueTag && bLaunchCueCalling) ++LaunchCueRouted;
+			});
+		}
+	}
+	for (int32 k = 0; k < (int32)Core->LauncherRows.size(); ++k)
+	{
+		const mo::Launcher& L = Core->LauncherRows[k];
+		UE_LOG(LogMOB, Log, TEXT("MOB_LAUNCHER %d kind=%s name=%s at=(%.0f,%.0f,%.0f) r=%.2f"), k, UTF8_TO_TCHAR(mo::LauncherKindName(L.kind)), UTF8_TO_TCHAR(L.name.c_str()),
+			L.sphereCenter.x, L.sphereCenter.y, L.sphereCenter.z, L.sphereRadius);
+	}
+	UE_LOG(LogMOB, Log, TEXT("MOB_LAUNCHERS rows=%d fxOff=%d breakPredict=%d"), (int32)Core->LauncherRows.size(), bDeviceFxOff ? 1 : 0, bBreakJumpPad ? 1 : 0);
+}
+
+// 점프대 효과 — B_Launcher 그래프와 같은 값(원본 기준 weapons_launchers.txt 2891~2908줄): 대상 = 겹친 몸 · 태그 = 변수 Gameplay Tag(8개 다
+// GameplayCue.World.Launcher.Activate) · 자리 = 장치 액터 자리 · 일으킨 것 = 장치 · 효과 · 능력 단계 1, 나머지 핀은 기본값. 장치는 서버 표 이름으로 찾는다
+void UMOBridgeSubsystem::PlayLauncherCue(APawn* Target, int32 Pad, bool bSelf)
+{
+	if (bDeviceFxOff) return;
+	static const FGameplayTag LauncherCueTag = FGameplayTag::RequestGameplayTag(kLauncherCueTag, false);
+	AActor* Device = nullptr;
+	if (Core && Pad >= 0 && Pad < (int32)Core->LauncherRows.size())
+	{
+		const FString Name(UTF8_TO_TCHAR(Core->LauncherRows[Pad].name.c_str()));
+		for (const FMOBDevice& D : Devices)
+		{
+			AActor* A = D.Actor.Get();
+			if (A && !D.bTeleport && A->GetName() == Name) Device = A;
+		}
+	}
+	if (!Device || !Target)
+	{
+		++LaunchCueNoActor;
+		return;
+	}
+	if (!LauncherCueTag.IsValid())
+	{
+		++LaunchCueNoTag;
+		return;
+	}
+	const FGameplayCueParameters Params = UAbilitySystemBlueprintLibrary::MakeGameplayCueParameters(0.f, 0.f, FGameplayEffectContextHandle(), FGameplayTag(), FGameplayTag(),
+		FGameplayTagContainer(), FGameplayTagContainer(), Device->GetActorLocation(), FVector::ZeroVector, nullptr, Device, nullptr, nullptr, 1, 1, nullptr, false);
+	bLaunchCueCalling = true;	// 신호 길 알림은 이 부름 안에서 바로 온다(수류탄 터짐과 같다)
+	UGameplayCueFunctionLibrary::ExecuteGameplayCueOnActor(Target, LauncherCueTag, Params);
+	bLaunchCueCalling = false;
+	++(bSelf ? LaunchCuesSelf : LaunchCuesRemote);
+	// -MOBEventShots — 효과 직후 · 나는 중 사진(사람 확인 표의 빛 · 날아오름을 미리 보려고)
+	RequestEventShot(bSelf ? TEXT("launch_self") : TEXT("launch_remote"), 0.15, 3);
+	RequestEventShot(bSelf ? TEXT("launch_self_air") : TEXT("launch_remote_air"), 0.6, 3);
+}
+
+// 남의 점프대 효과 — 시점 = 그 몸을 보간하는 화면 틱이 깃발 선 틱의 앞 틱을 넘은 첫 프레임(남의 대시 효과 TickRemoteDashCues 와 같은 규칙)
+void UMOBridgeSubsystem::TickRemoteLaunchCues()
+{
+	for (int32 i = 0; i < PendingLaunchCues.Num();)
+	{
+		const FMOBPendingLaunchCue& C = PendingLaunchCues[i];
+		if (ShownRenderTick < 1.0 || ShownRenderTick <= (double)C.Tick - 1.0)
+		{
+			++i;
+			continue;
+		}
+		PlayLauncherCue(FindPlayerPawn(C.Player), C.Pad, false);
+		PendingLaunchCues.RemoveAt(i);
 	}
 }
 
@@ -4600,6 +4796,14 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 		UE_LOG(LogMOB, Log, TEXT("MOB_DEVICES found=%d launchers=%d teleports=%d shapesOff=%d lightsOff=%d glowOff=%d sounds=%d fx=%d break=%d insideSelf=%lld insideRemote=%lld overlapSelf=%lld overlapRemote=%lld"),
 			Devices.Num(), Devices.Num() - Teleports, Teleports, DeviceShapesOff, DeviceLightsOff, DeviceGlowOff, DeviceSounds, DeviceFx, bBreakDevices ? 1 : 0, DeviceInsideSelf, DeviceInsideRemote, DeviceOverlapSelf, DeviceOverlapRemote);
 	}
+	{
+		// 점프대(j-7) — 표 · 예측 발사 · 내 상태 깃발 비교 · 효과. 효과 수 = 예측이 쏜 수(내 몸) + 남의 깃발 선 수(남의 몸, 판 끝에 아직 화면 시점이 안 닿은 것은 pending)
+		const mo::CSelfPrediction::LaunchCounters LC = Core ? Core->Prediction.GetLaunchCounters() : mo::CSelfPrediction::LaunchCounters();
+		UE_LOG(LogMOB, Log, TEXT("MOB_LAUNCH rows=%d infos=%lld bad=%lld predFired=%llu predApplied=%llu predRefused=%llu restored=%llu restoreFails=%llu comparedOn=%lld flagDiff=%lld cuesSelf=%lld cuesRemote=%lld routed=%lld noActor=%lld noTag=%lld dropped=%lld pending=%d remoteFlags=%lld remoteNoPad=%lld padWalkPlaces=%d fxOff=%d"),
+			Core ? (int32)Core->LauncherRows.size() : 0, LauncherInfos, LauncherInfoBad, (unsigned long long)LC.fired, (unsigned long long)LC.applied, (unsigned long long)LC.refused,
+			(unsigned long long)LC.restored, (unsigned long long)LC.restoreFails, LaunchComparedOn, LaunchFlagDiff, LaunchCuesSelf, LaunchCuesRemote, LaunchCueRouted, LaunchCueNoActor,
+			LaunchCueNoTag, LaunchCueDropped, PendingLaunchCues.Num(), LaunchRemoteFlags, LaunchRemoteNoPad, PadWalkPlaces, bDeviceFxOff ? 1 : 0);
+	}
 	// fails = 예비 가득 실패 소식(판 14 · L-4) · failBad = 그중 남 이름 · give ≠ Full(기대 0)
 	UE_LOG(LogMOB, Log, TEXT("MOB_PADS pads=%d msgs=%lld takes=%lld readies=%lld syncs=%lld badIndex=%lld noActor=%lld bound=%lld heals=%lld healBeforeFix=%lld healMismatch=%lld healNoPawn=%lld stateChecks=%lld stateDiff=%lld lastStateTick=%u fails=%lld failBad=%lld"),
 		Pads.Num(), PadMsgs, PadTakes, PadReadies, PadSyncs, PadBadIndex, PadNoActor, PadBound, PadHeals, PadHealBeforeFix, PadHealMismatch, PadHealNoPawn, PadStateChecks, PadStateDiff, LastStateTick, PadFails, PadFailBad);
@@ -4929,10 +5133,10 @@ void UMOBridgeSubsystem::FindDevices()
 			P->UpdateOverlaps();
 			++DeviceShapesOff;
 		}
-		// 점프대 겉모습도 끈다(사용자 「노란불빛 기능 이펙트 소리같은거 다 꺼」, 11-18). 노란 빛 = 바닥 조명(PointLight) + 발판 빛 재질
-		// (MI_InternalShapeGlow 의 Intensity · Color — 청사진 짓기 그래프가 Light Color · Glow Intensity 로 채움, 에셋 이름표 기준).
-		// 밟을 때 소리 · 번쩍임은 GameplayCue.World.Launcher.Activate 에서만 나서 위에서 겹침을 끈 것으로 이미 안 난다
-		if (!D.bTeleport && !bBreakDevices)
+		// 점프대 겉모습 — -MOBDeviceFxOff 일 때만 끈다(옛 사용자 「노란불빛 기능 이펙트 소리같은거 다 꺼」, 11-18 — 장치가 아무 일도 안 할 때였다. D157 로 다시 쏘므로
+		// 기본은 켜 둔다, jumppad-plan j-7 제 판단). 노란 빛 = 바닥 조명(PointLight) + 발판 빛 재질(MI_InternalShapeGlow 의 Intensity · Color — 청사진 짓기 그래프가
+		// Light Color · Glow Intensity 로 채움, 에셋 이름표 기준). 밟을 때 소리 · 번쩍임은 GameplayCue.World.Launcher.Activate 에서만 나고, 겹침을 꺼서 그래프 대신 다리가 낸다(PlayLauncherCue)
+		if (!D.bTeleport && !bBreakDevices && bDeviceFxOff)
 		{
 			static const FName GlowParam(TEXT("Intensity"));
 			TInlineComponentArray<UActorComponent*> Parts(A);

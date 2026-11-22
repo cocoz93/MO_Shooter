@@ -22,7 +22,7 @@ class ULyraAbilitySystemComponent;
 struct FGameplayTag;
 struct FLyraAbilitySimpleFailureMessage;
 
-namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; struct Grenade; } struct Vec3; }
+namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; struct Grenade; struct LauncherInfo; } struct Vec3; }
 
 // 남의 캐릭터 — 서버 상태를 틱 번호와 함께 쌓아 0.1초 뒤 시점을 보여 준다
 struct FMOBSnapshot
@@ -48,6 +48,7 @@ struct FMOBRemote
 	uint32 SnapCount = 0;
 	bool bSpawnFailed = false;
 	bool bHasSet = false;
+	bool bLaunchFlag = false;	// 지난 상태의 STATE_LAUNCH_PENDING — 꺼짐 → 켜짐이 남의 점프대 효과(j-7)
 	FVector LastSet = FVector::ZeroVector;
 	float LastSetYaw = 0;
 
@@ -82,6 +83,14 @@ struct FMOBPendingDashCue
 	uint32 Tick = 0;			// 서버가 그 대시 입력을 돌린 틱
 	FVector Force = FVector::ZeroVector;
 	double ReceivedAt = 0;		// 받은 때(FPlatformTime) — 효과까지 기다린 시간을 잰다
+};
+
+// 남의 점프대 효과 하나(jumppad-plan j-7) — 서버 상태에 발사 깃발이 새로 선 틱을 받아 두었다가 화면 시점이 그 틱에 닿을 때 그 몸에 낸다(남의 대시 효과와 같은 규칙)
+struct FMOBPendingLaunchCue
+{
+	uint32 Player = 0;
+	uint32 Tick = 0;			// 깃발이 선 상태의 틱 — 그 틱 이동 끝에 쏠 점프대에 들었다
+	int32 Pad = -1;				// 서버 점프대 표 번호
 };
 
 // 겉모습 수류탄의 한 틱(G-5-b) — 던짐 소식(던진 틱 − 1 칸 = 생긴 자리) · 상태 소식(그 틱 걸음 뒤) · 터짐 소식(터진 틱 걸음 뒤)
@@ -148,6 +157,9 @@ struct FMOBGrenadeVisual
  *   -MOBStandAt=x,y,z           촬영 전용 — 내 입력을 보내지 않고 서버에 이 자리에 서 있겠다고만 알린다. 서버 --debug 필요(MOBRemoteShotSubsystem.h)
  *   -MOBStandLyra               -MOBStandAt 시험 전용 — 내 Lyra 몸도 그 자리에 둔다(평소엔 서버 몸만 옮겨지고 Lyra 몸은 시작 자리에 남는다). 점프대 · 순간이동 겹침을 내 몸으로 세려고(D91)
  *   -MOBStandHp=N               -MOBStandAt 의 부활 뒤 첫 자리 옮김 체력(받침 시험 — 다친 채 받침 위에 선다). 준 때만 그 뒤 20초마다 알림은 서버가 본 지금 체력으로 보낸다(조용히 체력을 바꾸지 않게)
+ *   -MOBDeviceFxOff             점프대 겉모습을 옛날처럼 끈다(불빛 · 빛 재질 끔 · 밟을 때 효과 안 냄, D91). 없으면 점프대가 서버로 다시 쏘므로(D157) 켜 둔다(jumppad-plan j-7)
+ *   -MOBPadWalk=x,y,z,yaw       시험 전용 — 경기 중 8초마다 내 몸을 그 자리에 옮기고(서버 --debug 필요) 0.5초 뒤 그 요로 앞으로 걷는다. 점프대 효과 · 예측을 내 몸으로 보려고(j-7)
+ *   -MOBBreakJumpPad            일부러 틀리기 — 받은 점프대 표를 내 예측에 안 넘긴다. MOB_LAUNCH flagDiff 가 서버가 쏜 수만큼 서야 한다(j-7)
  *   -MOBAutoMelee               자동 입력에 근접을 더한다 — 적이 4m 안이면 누르고 있고, 아니면 6초마다 0.1초 누른다. -MOBAutoAim 과 같이 켜면 적이 10m 안에 보여도 다가간다(6초 중 4초). 없으면 기존 자동 입력 그대로
  *   -MOBBreakMeleeBlock         일부러 틀리기 — Lyra 근접 능력의 입력 표식을 안 떼어 Lyra 가 키로 혼자 근접을 켠다(MOB_MELEE lyraSelf 가 늘어야 한다)
  *   -MOBAutoDash                자동 입력에 대시를 더한다 — 3.6초마다 두 번: 걷는 방향이 바뀌는 프레임(누른 입력의 이동 ≠ 앞 입력 이동) · 1.8초 뒤 한 방향 걷기 구간의 한가운데.
@@ -243,6 +255,9 @@ private:
 	void TickGrenadeVisuals();		// 매 프레임(TickRemoteDashCues 뒤) — 화면 시점으로 겉모습 수류탄을 만들고 · 옮기고 · 소리 · 터짐 신호 · 지우기(G-5-b)
 	void SpawnGrenadeVisual(FMOBGrenadeVisual& G);
 	void TickRemoteDashCues();		// 매 프레임(TickRemotes 뒤) — 받아 둔 남의 대시 효과 중 화면 시점이 닿은 것을 낸다
+	void HandleLauncher(const mo::wire::LauncherInfo& M, int32 Size);	// 서버 점프대 표 한 줄(판 18, j-7) — 줄이 다 오면 내 예측에 넘긴다
+	void PlayLauncherCue(APawn* Target, int32 Pad, bool bSelf);	// 점프대 효과 — B_Launcher 그래프의 Execute GameplayCue On Actor 와 같은 값
+	void TickRemoteLaunchCues();	// 매 프레임(TickRemoteDashCues 뒤) — 받아 둔 남의 점프대 효과 중 화면 시점이 닿은 것을 낸다
 	ALyraWeaponSpawner* BindPad(int32 Index);
 	void ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects);
 	float ApplyPadHeal(const mo::wire::Pickup& M, ALyraWeaponSpawner* Actor);
@@ -426,8 +441,8 @@ private:
 	bool bNamedSelf = false;
 	double NextPickupCheckAt = 0;
 	int32 PickupsHidden = 0;
-	// 점프대(B_Launcher_*) · 순간이동(B_Teleport) — 서버에 안 넣고 Lyra 동작만 끈다(사용자 결정 11-18, design-decisions.md D91).
-	// 장치 그래프는 겹침 시작에서만 돈다(LaunchCharacter · K2_TeleportTo · 효과 큐) → 장치 쪽 겹침을 끄면 안 돈다. 바닥 · 불빛 · 막는 충돌은 그대로
+	// 점프대(B_Launcher_*) · 순간이동(B_Teleport) — Lyra 장치 그래프는 끈다. 그래프는 겹침 시작에서만 돈다(LaunchCharacter · K2_TeleportTo · 효과 신호) → 장치 쪽 겹침을 끄면 안 돈다.
+	// 순간이동은 서버에도 안 넣는다(사용자 결정 11-18, D91 · D157). 점프대는 서버가 쏘고(D157, jumppad-plan) 내 몸은 예측이 같은 셈으로 쏜다 — 효과만 다리가 낸다(PlayLauncherCue)
 	struct FMOBDevice
 	{
 		TWeakObjectPtr<AActor> Actor;
@@ -446,6 +461,23 @@ private:
 	int64 DeviceInsideRemote = 0;	// 남의 몸 — 같은 셈(몸 하나 × 프레임)
 	int64 DeviceOverlapSelf = 0;	// 그중 Lyra 가 겹침으로 본 프레임 — 끈 판은 0 이어야 한다
 	int64 DeviceOverlapRemote = 0;
+	// 점프대 겉모습(j-7) — 장치가 다시 쏘므로(D157) 불빛 · 빛 재질을 그대로 두고, 밟을 때 효과는 다리가 낸다. -MOBDeviceFxOff = 옛 꺼 둠(불빛 · 빛 재질 끔 · 효과 안 냄)
+	bool bDeviceFxOff = false;
+	bool bBreakJumpPad = false;		// -MOBBreakJumpPad — 일부러 틀림: 받은 점프대 표를 내 예측에 안 넘긴다(MOB_LAUNCH flagDiff 가 서버 쏜 수만큼 서야 한다)
+	// 점프대 표(S2C_LAUNCHER) · 효과 셈 — 받은 줄 · 틀린 줄 / 낸 효과(내 몸 · 남의 몸) · 장치 액터나 몸을 못 찾음 · 태그 없음 · 신호 길에 들어감(이 다리가 낸 것) · 쌓여 버림
+	int64 LauncherInfos = 0, LauncherInfoBad = 0;
+	int64 LaunchCuesSelf = 0, LaunchCuesRemote = 0, LaunchCueNoActor = 0, LaunchCueNoTag = 0, LaunchCueRouted = 0, LaunchCueDropped = 0;
+	int64 LaunchRemoteFlags = 0, LaunchRemoteNoPad = 0;	// 남의 깃발이 새로 선 수 · 그 자리에서 겹친 점프대를 못 찾은 수
+	int64 LaunchComparedOn = 0, LaunchFlagDiff = 0;		// 내 상태 — 서버 발사 깃발이 켜진 비교 줄 · 예측과 다른 줄(0 이어야 한다)
+	TArray<FMOBPendingLaunchCue> PendingLaunchCues;
+	FDelegateHandle LaunchCueRouteHandle;
+	bool bLaunchCueCalling = false;
+	// -MOBPadWalk=x,y,z,yaw — 시험 전용(j-7). 경기 중 8초마다 내 몸을 그 자리에 옮기고(서버 --debug) 0.5초 서 있다가 그 요로 앞으로 걷는다
+	bool bPadWalk = false;
+	FVector PadWalkAt = FVector::ZeroVector;
+	float PadWalkYaw = 0.f;
+	double NextPadWalkAt = 0, PadWalkPlacedAt = 0;
+	int32 PadWalkPlaces = 0;
 	// 체력 받침(B-3) — 칸 = 서버 받침 번호. 상태는 서버 소식 그대로, 액터는 자리로 찾아 묶는다
 	struct FMOBPad
 	{

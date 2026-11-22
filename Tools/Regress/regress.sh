@@ -3,7 +3,7 @@
 # - 왜: 빌드 대상을 골라 돌리다 대조 도구가 옛 빌드로 남은 적이 있어, 전부 한 명령으로 묶는다.
 #
 #   Tools/Regress/regress.sh [--bin <빌드 폴더>] [--out <출력 폴더>] [--only checks|play|multi] [--break]
-#     --break  일부러 틀림 — 대조 도구 입력을 잘라 기준선과 어긋나게 하고 봇에 --breakMirror 를 준다(대시 판 봇엔 --breakDash=predict, 수류탄 판 봇엔 --breakGrenade=predict).
+#     --break  일부러 틀림 — 대조 도구 입력을 잘라 기준선과 어긋나게 하고 봇에 --breakMirror 를 준다(대시 판 봇엔 --breakDash=predict, 수류탄 판 봇엔 --breakGrenade=predict, 점프대 판 봇엔 --breakJumpPad=off).
 #              이때 FAIL 이 나와야 맞다(시험의 시험).
 # 판정은 개수·바이트만 본다. 시간 값은 안 쓰므로 PC 가 바빠도 돌릴 수 있다.
 # 기준선 = golden_checks.txt. 이동·충돌·무기 코드를 일부러 고쳤을 때만 갱신한다.
@@ -29,6 +29,7 @@ mkdir -p "$OUT"
 DATA="C:/Users/USER/Desktop/MyGit/MO_Shooter/Client/Lyra/Saved/MOB"
 MAP="$DATA/map_expanse.mocl"
 PADS="$DATA/pads_expanse.txt"	# 받침 자료(컨텐츠 B) — Epic 맵 값이라 맵처럼 리포 밖
+LAUNCHERS="$DATA/launchers_expanse.txt"	# 점프대 표(jumppad-plan j-1, make_launchers.py) — 같은 까닭으로 리포 밖
 # 세 무기로 부활(시험 전용 --testStartAllWeapons, 무기 줍기 W-2)은 프로브 넷(경기규칙 · 재생 · 권위 · 되감기)의 서버에만 준다.
 # 옵션 없이 회귀 한 벌을 돌려(W-5) 그 넷만 갈렸다 — 각본이 무기를 바꾸는데 권총 하나면 서버가 거절한다(switchRejected 2 · 39 · 94 · 1).
 # 나머지 판은 Lyra 규칙(권총 하나로 부활)대로 돈다
@@ -61,7 +62,8 @@ run_checks() {
 	# 점프대(jumppad-plan j-3) — Lyra 점프대 기록(move_expanse_pads, 64구간)과 make_launchers.py 표로 겹침 비트 · 발사 프레임 · 발사 속도를 프레임마다 대조하고,
 	# 이어 달리기는 기록 발사 칸 대신 우리 셈(TickWithLaunchers)으로 쏜다. 순간이동 구간 둘은 범위 밖이라 뺀다(D157)
 	"$tools/MoveCheck/Release/MoveCheck.exe" "$DATA/map_expanse.mocl" "$DATA/move_expanse_pads.csv" $limit --launchers "$DATA/launchers_expanse.txt" > "$OUT/move_expanse_pads.log" 2>&1
-	grep -E '^(ONE frames|RUN frames|RUN segments|COUNT |PAD |PAD_COVER|PADCHECK|RUNPAD )' "$OUT/move_expanse_pads.log" | sed "s/^/move_expanse_pads /" >> "$g"
+	# PAD_WIRE = 점프대 표 와이어 왕복(j-5) · PAD_RESTORE = 보정 때 발사 대기 되살림(j-6)
+	grep -E '^(ONE frames|RUN frames|RUN segments|COUNT |PAD |PAD_COVER|PADCHECK|RUNPAD |PAD_WIRE |PAD_RESTORE )' "$OUT/move_expanse_pads.log" | sed "s/^/move_expanse_pads /" >> "$g"
 	"$tools/WeaponCheck/Release/WeaponCheck.exe" "$DATA/weaponrec_gym.csv" "$DATA/map_gym.mocl" > "$OUT/weapon.log" 2>&1
 	grep -v '^TIME' "$OUT/weapon.log" | sed 's/^/weapon /' >> "$g"
 	# 근접(컨텐츠 E) — Lyra 연습장 근접 기록(cprobe_e1g3)과 Shared ResolveMelee 대조. 어긋난 줄(DIFF)도 그대로 기준선에 들어가 다르면 잡힌다
@@ -420,6 +422,32 @@ run_grenade() {
 	verdict 봇수류탄 $ok "봇 rc=$brc 서버 rc=$src 봇 $nb 던짐=$thrown 신관=$timer 맞음=$hit 피해·자기·처치=${hurt[*]} 봇=${bhit[*]} 사건=$ev 버림=$dr 튼수=$st$(echo "$sg" | grep -oE ' (noHit|whileDash|melee|reload|wall|alive|ownerLeft)=[0-9]+' | tr -d '\n')$(echo "$bg" | grep -oE ' (grenadeDiff|startMismatches|unconfirmed|unconfirmedPost)=[0-9]+' | tr -d '\n') 몸부위$(echo "$sb" | grep -oE ' (poses|parts|bodyHits|capsuleHits)=[0-9]+' | tr -d '\n') 걸음몸$(echo "$swk" | grep -oE ' (moves|ownIgnored|ignoreMismatch|hits|floors)=[0-9]+' | tr -d '\n') 봇$(echo "$bwk" | grep -oE ' (stale|standableHits)=[0-9]+' | tr -d '\n')$press_note"
 }
 
+# 점프대(jumppad-plan j-6 · j-8) — 봇 각본 jumppad 가 노란 점프대 여덟 개를 하나씩 탄다(서버 --debug 자리 옮김 → 걸어 들어감 → 날아 내려앉음).
+# 봇 JUMPPAD PASS = 점프대마다 서버 쏨 · 예측 쏨 한 번 · 위치 · 속도 · 깃발 · 발사 깃발 차이 0 · 끝 자리 차 0.
+# 여기서 더 보는 것 = 서버 쏨(queued = applied = 8 · refused 0 · 점프대마다 1) = 봇이 본 발사 깃발(serverLaunches) = 예측이 쏜 수(predFired) · 받은 표 8줄(bad 0) · 되살림 실패 0.
+# 막기는 끄고(--testNoPawnBlock) 틱을 맞춘다(--testLockstep) — j-6 실물 판과 같은 조건. --break 이면 예측에 표를 안 넘겨(--breakJumpPad=off) 어긋나야 한다
+run_jumppad() {
+	local break_arg=""
+	[ "$BREAK" = 1 ] && break_arg="--breakJumpPad=off"
+	"$SRV" "--map=$MAP" --port=7970 --exitWhenEmpty --warmup=2 --matchSeconds=300 --seed=21 "--pads=$PADS" "--launchers=$LAUNCHERS" --debug --testNoPawnBlock --testLockstep=1 > "$OUT/jumppad_srv.log" 2>&1 &
+	local spid=$!
+	"$BOT" "--map=$MAP" --port=7970 --bots=1 --seed=21 --script=jumppad --testNoPawnBlock --testLockstep $break_arg > "$OUT/jumppad_bot.log" 2>&1
+	local brc=$?
+	wait $spid
+	local src=$? ok=1 sl bl jr
+	[ $brc = 0 ] && [ $src = 0 ] || ok=0
+	# 봇 로그는 줄 끝이 CRLF(서버는 LF)라 CR 을 떼고 끝을 맞춘다
+	sl="$(grep -a '^SERVER launch ' "$OUT/jumppad_srv.log" | tr -d '\r')"
+	bl="$(grep -a '^BOT launch ' "$OUT/jumppad_bot.log" | tr -d '\r')"
+	jr="$(grep -a '^JUMPPAD result ' "$OUT/jumppad_bot.log" | tr -d '\r')"
+	[ "${jr##* }" = PASS ] || ok=0
+	[ "$(num "$sl" queued)" = 8 ] && [ "$(num "$sl" applied)" = 8 ] && [ "$(num "$sl" refused)" = 0 ] || ok=0
+	echo "$sl" | grep -q ' byPad=1,1,1,1,1,1,1,1$' || ok=0
+	[ "$(num "$bl" serverLaunches)" = 8 ] && [ "$(num "$bl" predFired)" = 8 ] && [ "$(num "$bl" tableRows)" = 8 ] || ok=0
+	[ "$(num "$bl" bad)" = 0 ] && [ "$(num "$bl" flagDiff)" = 0 ] && [ "$(num "$bl" restoreFails)" = 0 ] || ok=0
+	verdict 봇점프대 $ok "봇 rc=$brc 서버 rc=$src 서버$(echo "$sl" | grep -oE ' (queued|applied|refused|byPad)=[0-9,]+' | tr -d '\n') 봇$(echo "$bl" | grep -oE ' (tableRows|serverLaunches|predFired|flagDiff|restoreFails)=[0-9]+' | tr -d '\n')$(echo "$jr" | grep -oE ' (ran|posDiff|launchFlagDiff|endDiffMax)=[0-9.]+' | tr -d '\n')"
+}
+
 # 사람끼리 막기 대조(컨텐츠 F-1) — Lyra 연습장에서 두 사람이 부딪힌 기록을 Shared 이동으로 다시 돌려 위치 · 속도가 0.01 안이어야 한다.
 # 기록 = F-1 에서 PASS(cells=40)를 낸 네 벌 그대로(f1a · f1b · f1c · f1e)
 run_bump() {
@@ -658,6 +686,7 @@ else
 		run_pause
 		run_dash
 		run_grenade
+		run_jumppad
 		run_rules
 		run_grenade_leave
 		run_press_order

@@ -33,7 +33,9 @@ move_expanse_crouch COUNT perchTry=356 perchOk=344 perchOverride=0 perchFail=12
 move_expanse_crouch COUNT ramp2=0 stepTry=1917 stepOk=861 stepReject=561 slide=2316 twoWall=1352 ledgeFall=16 | landed=146 landedEdge=0 fallWall2=359 fallStuck=0 apex=114 | jump=119 launch=0 | startPen=0 resolveTeleport=0 resolveSweep=0
 move_expanse_crouch CROUCH_COUNT crouchGround=87 crouchAir=0 uncrouchGround=36 lowered=0 uncrouchAir=61 airShifted=56 blocked=457
 move_expanse_pads PAD launchers=8 recPads=8 mapped=8 padsColumns=1
+move_expanse_pads PAD_WIRE size=152 ok=8 bad=0 reject=10/10
 move_expanse_pads PAD mask frames=15362 lyraIn=198 mineIn=198 mismatch=0 | begins=51 fired=51 refused=0 matched=51 beginNoLaunch=0 launchNoBegin=0 beginAtEnd=0 | speedMax=0.000030 over0.01=0 | lyraLaunchRows=53 teleportMoves=2 teleportLaunch=2 orphan=0
+move_expanse_pads PAD_RESTORE tried=51 fail=0 maskDiff=0 maxDiff=0.000433
 move_expanse_pads PAD_COVER push0=8 push1=7 push2=8 push3=8 up4=9 up5=8 up6=1 up7=2
 move_expanse_pads PADCHECK PASS
 move_expanse_pads ONE frames=15362 (walk=8444 fall=6918) posMax=3184.2882 p50=0.00000 p99=0.0002 over0.01=17 over0.1=13 over1=2 | velMax=22.255 velOver1=5 | modeMismatch=2
