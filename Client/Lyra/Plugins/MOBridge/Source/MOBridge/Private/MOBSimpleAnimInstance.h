@@ -27,6 +27,7 @@ struct FMOBServerAnimResult
 	int32 AdsLayers = 0;		// 받은 쌓기 층 중 조준 전환이라 같은 차례의 허리 전환으로 바꿔 튼 수(C-5)
 	int32 CrouchLayers = 0;		// 받은 쌓기 층 중 앉은 전환이라 같은 차례의 허리 전환으로 바꿔 튼 수(D-3)
 	int32 StanceLayers = 0;		// 받은 쌓기 층 중 서기 안 앉기 · 일어서기 전환이라 걷기 · 서기 자리로 돌린 수(D-3)
+	int32 IdleSlotLayers = 0;	// 받은 쌓기 층 중 서기 자리(-2, 판 17 · L-13-a)라 걷기 · 서기 자리로 돌린 수 — 이 경로는 걷기 자리가 하나다
 	int32 BadLayers = 0;		// 바꿔도 칸 밖이라 걷기 · 서기 자리로 돌린 층 수 — 0 이어야 한다
 };
 

@@ -602,13 +602,19 @@ void FMOBSimpleAnimProxy::SetServerFrame(const mo::AnimPoseInput& Input, int32 W
 	// 같은 차례의 허리 전환으로 튼다 — 이 경로가 보여 주는 것은 판정 밖 뼈(손가락 · 비틀림 뼈)뿐이고 판정 뼈는 ApplyServerBones 가 덮는다.
 	// 그대로 넣으면 JumpClips 밖을 읽는다(C-5 조준 봇 판 `c5vp1` 에서 ApplyJump 가 멈춤)
 	// 29~40 앉은 전환도 같은 차례의 허리 전환으로, 41 · 42 서기 안 앉기 · 일어서기 전환은 허리 쪽 짝이 없어 걷기 · 서기 자리로 돌린다(D62 4)
+	// -2 서기 자리(판 17 · L-13-a — 서버는 걷기 자리를 움직임 · 서기 둘로 나눈다)도 이 경로의 걷기 · 서기 자리 하나로 돌린다 — 판정 뼈는 ApplyServerBones 가 나눈 자세로 덮는다
 	static_assert(kStackClips == mo::kStackHipClips && kStackClips + kTransitions == mo::kStackAdsEnd && mo::kStackAdsEnd + kTransitions + 2 == mo::kStackClipCount,
 		"조준 전환 = 허리 전환 + kTransitions, 앉은 전환 = 조준 전환 + kTransitions, 그 뒤 서기 안 전환 둘 차례여야 한다");
 	JumpCount = FMath::Min(Input.layerCount, kJumpStack);
 	for (int32 I = 0; I < JumpCount; ++I)
 	{
 		int32 Clip = Input.layers[I].clip;
-		if (Clip >= mo::kStackAdsEnd + kTransitions && Clip < mo::kStackClipCount)
+		if (Clip == mo::kAnimSlotIdle)
+		{
+			Clip = JUMP_NONE;
+			++Out.IdleSlotLayers;
+		}
+		else if (Clip >= mo::kStackAdsEnd + kTransitions && Clip < mo::kStackClipCount)
 		{
 			Clip = JUMP_NONE;
 			++Out.StanceLayers;

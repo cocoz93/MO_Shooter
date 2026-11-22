@@ -1370,6 +1370,8 @@ namespace
 				std::printf("TRACE pass=%d frame=%d state=%s ads=%d moveAds=%d adsBlend=%.4f crouch=%d moveCrouch=%d crouchBlend=%.4f lyra=%s/%s layers=", row.pass, row.frame, state.MoveStateName(), adsIn ? 1 : 0, state.MoveAds() ? 1 : 0, state.AdsBlend(),
 					crouchIn ? 1 : 0, state.MoveCrouch() ? 1 : 0, state.CrouchBlend(), lyra ? lyra->locomotion.c_str() : "-", lyra ? lyra->idleStance.c_str() : "-");
 				for (int k = 0; k < got.layerCount; ++k) std::printf("%d@%.4f*%.3f ", got.layers[k].clip, got.layers[k].time, got.layers[k].fade);
+				// 걷기 자리 나누기(L-13-a) — 바탕 자리 · 움직임 자리 비중(서기 · 앞 · 뒤 · 왼 · 오른 — 서기는 늘 0 이어야 한다, 섞이면 셈 스크립트가 그 몫을 서기로 센다). 위 쌓기 칸 글꼴(번호@시각*덮음)과 안 겹치게 @ 를 안 쓴다
+				std::printf("base=%d move=%.3f,%.3f,%.3f,%.3f,%.3f ", got.baseSlot, got.moveWeights[0], got.moveWeights[1], got.moveWeights[2], got.moveWeights[3], got.moveWeights[4]);
 				std::printf("walk=");
 				for (int k = 0; k < kAnimWalkClips; ++k)
 				{
@@ -1408,9 +1410,11 @@ namespace
 			plant.Add(ref.plantOffset[2], got.plantOffset[2], i);
 			layerCount.Add((float)ref.layerCount, (float)got.layerCount, i);
 			const int common = std::min(ref.layerCount, got.layerCount);
+			// 기준(다리 단순 재생 기록)은 걷기 자리가 하나(-1)다 — 나눈 서기 자리(-2, L-13-a)도 -1 로 견준다
+			const auto refSlot = [](int clip) { return clip < 0 ? -1 : clip; };
 			for (int k = 0; k < common; ++k)
 			{
-				layerClip.Add((float)ref.layers[k].clip, (float)got.layers[k].clip, i);
+				layerClip.Add((float)ref.layers[k].clip, (float)refSlot(got.layers[k].clip), i);
 				layerTime.Add(ref.layers[k].time, got.layers[k].time, i);
 				layerFade.Add(ref.layers[k].fade, got.layers[k].fade, i);
 			}
@@ -1424,7 +1428,7 @@ namespace
 				if (std::fabs(ref.weights[heaviestRef] - ref.weights[heaviestGot]) <= 1e-4f) ++tieWalk;
 				else ++realWalk;
 			}
-			const bool top = ref.layerCount == got.layerCount && (ref.layerCount == 0 || ref.layers[ref.layerCount - 1].clip == got.layers[got.layerCount - 1].clip);
+			const bool top = ref.layerCount == got.layerCount && (ref.layerCount == 0 || ref.layers[ref.layerCount - 1].clip == refSlot(got.layers[got.layerCount - 1].clip));
 			if (walk) ++sameWalk;
 			if (top) ++sameTop;
 			if (walk && top) ++sameBoth;
@@ -1467,8 +1471,13 @@ namespace
 		const auto poseUs = [&](int kind) { return poseKindRows[kind] > 0 ? poseKindSeconds[kind] * 1e6 / (double)poseKindRows[kind] : 0.0; };
 		std::printf("STATEPOSETIME montageUs=%.2f rows=%zu overrideOnlyUs=%.2f rows=%zu plainUs=%.2f rows=%zu\n", poseUs(0), poseKindRows[0], poseUs(1), poseKindRows[1], poseUs(2), poseKindRows[2]);
 		unsigned long long montageMisses = 0, trackOutside = 0, legSolves = 0, legStraight = 0, legUnreachable = 0, plantSolves = 0, plantStretched = 0, plantExtended = 0;
+		unsigned long long splitPoses = 0, splitMove = 0, splitIdle = 0, mixedPoses = 0;
 		for (const CAnimPoseEvaluator& evaluator : evaluators)
 		{
+			splitPoses += evaluator.SplitPoses();
+			splitMove += evaluator.SplitMovePoses();
+			splitIdle += evaluator.SplitIdlePoses();
+			mixedPoses += evaluator.MixedPoses();
 			montageMisses += evaluator.MontageMisses();
 			trackOutside += evaluator.TrackOutside();
 			legSolves += evaluator.LegIKSolves();
@@ -1483,6 +1492,8 @@ namespace
 		std::printf("STATELEGIK rows=%zu partialRows=%zu solves=%llu straight=%llu unreachable=%llu\n", rows.size(), poseLegRows, legSolves, legStraight, legUnreachable);
 		// 장치 다리 몫(L-12-e) — 장치가 켜진 줄 · 알파가 0 과 1 사이인 줄 · 다리를 고친 수(셈마다 다리 하나씩, 발 높이 셈 몫은 안 돈다) · 닿는 비율이 늘리기 시작을 넘은 수 · 다리가 곧아 굽힘 쪽을 무릎 조절점으로 잡은 수
 		std::printf("STATEPLANTLEG rows=%zu plantRows=%zu partialRows=%zu solves=%llu stretched=%llu extended=%llu length=%.6f/%.6f\n", rows.size(), posePlantRows, posePlantPartialRows, plantSolves, plantStretched, plantExtended, evaluators[0].PlantLegLength(0), evaluators[0].PlantLegLength(1));
+		// 걷기 자리 나누기(L-13-a) — 나눈 길로 셈한 자세 · 그중 움직임 자리 · 서기 자리를 그린 수(둘 다면 양쪽) · 옛 길(--poseTest=4096 이면 상태 자세가 다 이쪽). 발 붙이기 장치의 발 높이 셈 몫까지
+		std::printf("STATESLOT split=%llu move=%llu idle=%llu mixed=%llu\n", splitPoses, splitMove, splitIdle, mixedPoses);
 		double bound = 0;
 		for (CAnimPoseEvaluator& evaluator : evaluators) bound = std::max(bound, evaluator.ComputeBoundRadius(kCrouchMeshLiftZ));
 		std::printf("STATEBOUND reach=%.3f bound=%.3f wire=%d\n", maxReach, bound, useWire ? (wireKeepNew ? 2 : 1) : 0);

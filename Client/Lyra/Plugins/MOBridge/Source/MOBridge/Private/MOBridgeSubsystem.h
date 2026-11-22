@@ -707,6 +707,7 @@ private:
 	int64 AnimSetChanges = 0, AnimSetMisses = 0, AnimBadWeapon = 0;
 	int64 AnimAdsLayers = 0, AnimBadLayers = 0;	// 언리얼 경로에서 조준 전환 층을 허리 전환으로 바꿔 튼 수 · 칸 밖이라 버린 층 수(C-5)
 	int64 AnimCrouchLayers = 0, AnimStanceLayers = 0;	// 같은 경로에서 앉은 전환 층을 허리 전환으로 바꿔 튼 수 · 서기 안 전환 층을 걷기 · 서기 자리로 돌린 수(D-3)
+	int64 AnimIdleSlotLayers = 0;	// 같은 경로에서 서기 자리 층(-2, 판 17 · L-13-a)을 걷기 · 서기 자리로 돌린 수
 	int64 AnimMontageCellsIn = 0, AnimMontageCells = 0, AnimMontageMisses = 0, AnimMontageFrames = 0, AnimSlotPasses = 0, AnimMontageNoSlot = 0, AnimMaskMissing = 0, AnimWeaponNotifies = 0, AnimWeaponPlaying = 0, AnimSoundNotifies = 0, AnimMontageRestarts = 0, AnimStepStates = 0;	// 몽타주(9단계 5-a)
 	struct FMOBRayStats { int64 Rays = 0, Map = 0, EngHit = 0, Same = 0, EngOnly = 0, MineOnly = 0, Both = 0, BoneSame = 0, EngWeak = 0, WeakLost = 0, WeakGain = 0; };
 	FMOBRayStats RayStats[2][2];		// [선 · 구 5.5][몸 쪽 · 머리 쪽 겨눔]

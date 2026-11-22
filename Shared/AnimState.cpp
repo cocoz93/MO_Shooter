@@ -119,7 +119,9 @@ namespace mo
 		enum { kJumpStart, kJumpStartLoop, kJumpApex, kJumpFallLoop, kJumpLand };
 		enum { kTransitionStart, kTransitionStop, kTransitionPivot };
 		enum { kDirFwd, kDirBwd, kDirLeft, kDirRight };
-		constexpr int kJumpNone = -1;
+		// 쌓기 칸 번호의 걷기 자리 둘(L-13-a · D152, AnimPose.h) — 반복 상태는 움직임 자리, 서기 상태는 서기 자리를 얹는다(자리마다 Lyra 상태 전이로 정함 — 진행 lyra-finish-run 2-a1)
+		constexpr int kJumpMove = kAnimSlotMove;
+		constexpr int kJumpIdle = kAnimSlotIdle;
 
 		float Clamp(float x, float low, float high) { return std::max(low, std::min(x, high)); }
 
@@ -519,6 +521,7 @@ namespace mo
 	void CAnimState::ReinitLocomotion()
 	{
 		_count = 0;
+		_baseSlot = kJumpIdle;
 		_moveState = EMoveState::Idle;
 		_followClip = -1;
 		_beforePivot = false;
@@ -712,12 +715,14 @@ namespace mo
 			_moveState = EMoveState::Idle;
 			_idleTime = 0.f;
 			_count = 0;
+			_baseSlot = kJumpIdle;
 			break;
 		case EMoveState::Start:
 		case EMoveState::Pivot:
 		case EMoveState::Cycle:
 			_moveState = EMoveState::Cycle;
 			_count = 0;
+			_baseSlot = kJumpMove;
 			break;
 		case EMoveState::Air:
 			break;
@@ -844,6 +849,8 @@ namespace mo
 	void CAnimState::Reset()
 	{
 		for (int i = 0; i < kAnimWalkClips; ++i) _weights[i] = i == kClipIdle ? 1.f : 0.f;
+		for (int i = 0; i < kAnimWalkClips; ++i) _moveWeights[i] = i == kClipFwd ? 1.f : 0.f;
+		_baseSlot = kJumpIdle;
 		_step = 0;
 		_stepFrac = 0.f;
 		_timesStep = 0;
@@ -946,6 +953,7 @@ namespace mo
 		if (_count == 0)
 		{
 			_stack[0] = Layer();
+			_stack[0].clip = _baseSlot;
 			_count = 1;
 		}
 		if (_count == kAnimLayerMax)
@@ -985,10 +993,10 @@ namespace mo
 			if (_stanceOutSeconds > 0.f && i == _count - 1)
 			{
 				layer.settled = true;
-				PushJump(kJumpNone, _stanceOutSeconds);
+				PushJump(kJumpIdle, _stanceOutSeconds);
 				return;
 			}
-			layer.clip = kJumpNone;
+			layer.clip = kJumpIdle;
 		}
 	}
 
@@ -1061,7 +1069,7 @@ namespace mo
 	{
 		for (int i = 0; i < _count; ++i)
 		{
-			if (_stack[i].clip != kJumpNone && _stack[i].clip < kAnimJumpClips) return true;
+			if (_stack[i].clip >= 0 && _stack[i].clip < kAnimJumpClips) return true;
 		}
 		return false;
 	}
@@ -1096,7 +1104,7 @@ namespace mo
 		}
 		if (state == EMoveState::Idle) _idleTime = 0.f;
 		_moveState = state;
-		PushJump(kJumpNone, fadeSeconds);
+		PushJump(state == EMoveState::Idle ? kJumpIdle : kJumpMove, fadeSeconds);
 	}
 
 	int CAnimState::StepMarkerAt(int transition, float time) const
@@ -1230,7 +1238,7 @@ namespace mo
 			if (!accelerating && speed < 1.f)
 			{
 				_moveState = EMoveState::Idle;
-				PushJump(kJumpNone, kToStartSeconds);
+				PushJump(kJumpIdle, kToStartSeconds);
 			}
 			else if (!accelerating) enterStop();
 			else if (pivotNeeded) enterPivot();
@@ -1289,7 +1297,7 @@ namespace mo
 	void CAnimState::UpdateJump(bool falling, bool accelerating, float velocityZ, float timeToApex, float groundDistance, float deltaSeconds)
 	{
 		const std::vector<float>& land = *_landDistances;
-		const int topClip = _count > 0 ? _stack[_count - 1].clip : kJumpNone;
+		const int topClip = _count > 0 ? _stack[_count - 1].clip : _baseSlot;
 		const float topTime = _count > 0 ? _stack[_count - 1].time : 0.f;
 		if (falling && !_wasFalling)
 		{
@@ -1318,7 +1326,9 @@ namespace mo
 		}
 		else if (_wasFalling)
 		{
-			PushJump(kJumpNone, accelerating ? kLandedMoveSeconds : kLandedStandSeconds);
+			// 착지 → 가속 중이면 반복(움직임 자리) · 아니면 서기(서기 자리) — Lyra 착지 → 서기 12번 모두 그 프레임 가속 없음(21기록 · 진행 lyra-finish-run 2-a1).
+			// 가속 갈래는 기록에 없어 다리 상수 LANDED_MOVE_SECONDS 주석(땅에 닿은 뒤 달리기로 0.2초, 그때 Lyra 실행값)을 근거로 둔다
+			PushJump(accelerating ? kJumpMove : kJumpIdle, accelerating ? kLandedMoveSeconds : kLandedStandSeconds);
 			_recoveryTime = 0.f;
 			_idleTime = 0.f;
 		}
@@ -1339,7 +1349,12 @@ namespace mo
 			_count -= i;
 			break;
 		}
-		if (_count == 1 && _stack[0].clip == kJumpNone) _count = 0;
+		// 걷기 자리 한 칸만 남으면 쌓기를 비우고 그 번호를 바탕 자리로 든다(L-13-a — 움직임 · 서기 어느 쪽이 바탕인지 자세 입력 baseSlot 으로 나간다)
+		if (_count == 1 && _stack[0].clip < 0)
+		{
+			_baseSlot = _stack[0].clip;
+			_count = 0;
+		}
 
 		if (_recoveryTime >= 0.f)
 		{
@@ -1402,6 +1417,14 @@ namespace mo
 		if (sum > kSmallNumber)
 		{
 			for (float& weight : _weights) weight /= sum;
+		}
+		// 움직임 자리 방향 비중(L-13-a) — 방향 넷을 합 1 로. 넷 다 0 에 닿았으면 앞 값을 든다(같은 따라가기로 줄어드는 동안은 비가 그대로라 마지막 방향이 남는다)
+		float directionSum = 0.f;
+		for (int i = kClipFwd; i <= kClipRight; ++i) directionSum += _weights[i];
+		if (directionSum > kSmallNumber)
+		{
+			_moveWeights[kClipIdle] = 0.f;
+			for (int i = kClipFwd; i <= kClipRight; ++i) _moveWeights[i] = _weights[i] / directionSum;
 		}
 		// 조준 묶음 비중(D60 2) — 같은 따라가기. 끝까지 안 닿는 지수 따라가기라 엔진 비중 문턱 안이면 끝값에 붙인다(허리만 쓰는 판이 조준 전과 같은 수를 내도록)
 		_ads = input.ads;
@@ -1591,7 +1614,11 @@ namespace mo
 
 	void CAnimState::ToWire(wire::AnimStateWire& out) const
 	{
-		for (int i = 0; i < kAnimWalkClips; ++i) out.weights[i] = ToWireByte(_weights[i]);
+		// 서기 칸 = 섞은 서기 비중 · 방향 넷 = 움직임 자리 방향 비중(판 17, L-13-a). 받는 쪽은 섞은 방향을 (1 − 서기) × 움직임 방향으로 되살린다 —
+		// 섞은 방향을 그대로 실으면 방향 넷이 0 바이트로 반올림되는 때(서 있다 바로 벽에 막혀 가속)에 받는 쪽이 든 방향을 모른다
+		out.weights[kClipIdle] = ToWireByte(_weights[kClipIdle]);
+		for (int i = kClipFwd; i <= kClipRight; ++i) out.weights[i] = ToWireByte(_moveWeights[i]);
+		out.baseSlot = (int8_t)_baseSlot;
 		out.step = (uint8_t)_timesStep;
 		out.stepFrac = (uint16_t)std::lround(Clamp(_timesStepFrac, 0.f, 1.f) * 65535.f);
 		out.idleTime = ToWireTime(_timesIdle);
@@ -1639,20 +1666,16 @@ namespace mo
 
 	void CAnimState::FromWire(const wire::AnimStateWire& in, float pitch, bool crouched, AnimPoseInput& out) const
 	{
-		float sum = 0.f;
-		for (int i = 0; i < kAnimWalkClips; ++i)
-		{
-			out.weights[i] = (float)in.weights[i] / 255.f;
-			sum += out.weights[i];
-		}
-		if (sum > kSmallNumber)
-		{
-			for (float& weight : out.weights) weight /= sum;
-		}
-		else
-		{
-			out.weights[kClipIdle] = 1.f;
-		}
+		// 움직임 방향(바이트 넷)을 합 1 로 · 섞은 비중 = 서기 바이트 + (1 − 서기) × 움직임 방향(ToWire 주석). 방향 바이트가 다 0 이면(보내는 쪽은 늘 합 1 이라 안 생긴다) 앞 방향으로 본다
+		float directionSum = 0.f;
+		for (int i = kClipFwd; i <= kClipRight; ++i) directionSum += (float)in.weights[i];
+		out.moveWeights[kClipIdle] = 0.f;
+		for (int i = kClipFwd; i <= kClipRight; ++i) out.moveWeights[i] = directionSum > 0.f ? (float)in.weights[i] / directionSum : i == kClipFwd ? 1.f : 0.f;
+		const float idleWeight = (float)in.weights[kClipIdle] / 255.f;
+		out.weights[kClipIdle] = idleWeight;
+		for (int i = kClipFwd; i <= kClipRight; ++i) out.weights[i] = (1.f - idleWeight) * out.moveWeights[i];
+		out.splitSlots = true;
+		out.baseSlot = in.baseSlot == kJumpIdle ? kJumpIdle : kJumpMove;
 
 		const float idle = FromWireTime(in.idleTime);
 		out.times[kClipIdle] = WrapIdle(idle, _lengths[kClipIdle]);
@@ -1711,10 +1734,13 @@ namespace mo
 		for (int i = 0; i < kAnimWalkClips; ++i)
 		{
 			out.weights[i] = _weights[i];
+			out.moveWeights[i] = _moveWeights[i];
 			out.times[i] = _times[i];
 			out.adsTimes[i] = _adsTimes[i];
 			out.crouchTimes[i] = _crouchTimes[i];
 		}
+		out.splitSlots = true;
+		out.baseSlot = _baseSlot;
 		out.adsBlend = _adsBlend;
 		out.crouchBlend = _crouchBlend;
 		out.crouched = _crouch;

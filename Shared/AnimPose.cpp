@@ -475,6 +475,7 @@ namespace mo
 		_boneCount = clips.Bones().size();
 		_a.resize(_boneCount);
 		_b.resize(_boneCount);
+		_idle.resize(_boneCount);
 		_base.resize(_boneCount);
 		_boneWeights.resize(_boneCount * (kAnimMontageMax + 2));
 		_component.resize(_boneCount);
@@ -482,7 +483,9 @@ namespace mo
 		return true;
 	}
 
-	void CAnimPoseEvaluator::BlendWalk(const AnimPoseInput& input, BoneTransform* pose)
+	// weights = 서기 · 방향 넷 비중. 옛 길은 input.weights(속도로 섞음), 걷기 자리를 나눈 길은 움직임 자리(input.moveWeights) · 서기 자리(서기 1) 하나씩 —
+	// 대기 몸짓은 서기 비중을 따라가므로 움직임 자리에는 안 든다
+	void CAnimPoseEvaluator::BlendWalk(const AnimPoseInput& input, const float* weights, BoneTransform* pose)
 	{
 		const AnimClip& fidgetClip = _bundle->clips[ACLIP_FIDGET];
 		const float fidget = input.fidgetTime < 0.f ? 0.f : Smooth(std::min(input.fidgetTime, fidgetClip.length - input.fidgetTime) / kIdleBreakBlend);
@@ -505,18 +508,18 @@ namespace mo
 		const float ads = adsBlend * stand;
 		for (int i = 0; i < kAnimWalkClips; ++i)
 		{
-			const float weight = i == 0 ? input.weights[i] * hip * (1.f - fidget) : input.weights[i] * hip;
+			const float weight = i == 0 ? weights[i] * hip * (1.f - fidget) : weights[i] * hip;
 			if (weight > kZeroWeight) add(_bundle->clips[(size_t)ACLIP_IDLE + i], input.times[i], weight);
 		}
-		if (input.weights[0] * hip * fidget > kZeroWeight) add(fidgetClip, std::min(input.fidgetTime, fidgetClip.length), input.weights[0] * hip * fidget);
+		if (weights[0] * hip * fidget > kZeroWeight) add(fidgetClip, std::min(input.fidgetTime, fidgetClip.length), weights[0] * hip * fidget);
 		for (int i = 0; i < kAnimWalkClips; ++i)
 		{
-			const float weight = input.weights[i] * ads;
+			const float weight = weights[i] * ads;
 			if (weight > kZeroWeight) add(_bundle->clips[(size_t)ACLIP_ADS_IDLE + i], input.adsTimes[i], weight);
 		}
 		for (int i = 0; i < kAnimWalkClips; ++i)
 		{
-			const float weight = input.weights[i] * crouch;
+			const float weight = weights[i] * crouch;
 			if (weight > kZeroWeight) add(_bundle->clips[(size_t)ACLIP_CROUCH_IDLE + i], input.crouchTimes[i], weight);
 		}
 
@@ -574,6 +577,76 @@ namespace mo
 		}
 		if (baseWeight > kZeroWeight) BlendAccumulate(pose, _b.data(), baseWeight / sum, _boneCount);
 		if (usedCount + (baseWeight > kZeroWeight ? 1 : 0) > 1) NormalizeRotations(pose, _boneCount);
+	}
+
+	// 걷기 자리를 나눈 길(L-13-a · D152) — 바탕 자세를 움직임 자리(-1) · 서기 자리(-2) 둘로 셈한다. 쌓기 칸 비중 · 차례는 ApplyJump 와 같다:
+	// 위 칸부터 남은 몫 × 부드럽게 한 덮음, 문턱 아래 칸은 빼고, 클립 칸을 쌓기 차례로 섞은 뒤 움직임 자리 · 서기 자리를 그 비중으로 더한다(같은 번호 칸은 비중을 모아 한 번)
+	void CAnimPoseEvaluator::ApplySplitSlots(const AnimPoseInput& input, BoneTransform* pose)
+	{
+		static constexpr float kIdleOnly[kAnimWalkClips] = { 1.f, 0.f, 0.f, 0.f, 0.f };
+		if (input.layerCount == 0)
+		{
+			const bool idle = input.baseSlot == kAnimSlotIdle;
+			BlendWalk(input, idle ? kIdleOnly : input.moveWeights, pose);
+			++(idle ? _splitIdlePoses : _splitMovePoses);
+			return;
+		}
+
+		float layerWeights[kAnimLayerMax] = {};
+		float remain = 1.f;
+		for (int i = input.layerCount - 1; i >= 0; --i)
+		{
+			const float alpha = i == 0 ? 1.f : Smooth(input.layers[i].fade);
+			layerWeights[i] = remain * alpha;
+			remain -= layerWeights[i];
+		}
+		int used[kAnimLayerMax];
+		int usedCount = 0;
+		float moveWeight = 0.f;
+		float idleWeight = 0.f;
+		for (int i = 0; i < input.layerCount; ++i)
+		{
+			if (layerWeights[i] <= kZeroWeight) continue;
+			if (input.layers[i].clip == kAnimSlotIdle) idleWeight += layerWeights[i];
+			else if (input.layers[i].clip < 0) moveWeight += layerWeights[i];
+			else used[usedCount++] = i;
+		}
+		const bool move = moveWeight > kZeroWeight;
+		const bool idle = idleWeight > kZeroWeight;
+		if (move)
+		{
+			BlendWalk(input, input.moveWeights, _b.data());
+			++_splitMovePoses;
+		}
+		if (idle)
+		{
+			BlendWalk(input, kIdleOnly, _idle.data());
+			++_splitIdlePoses;
+		}
+
+		float sum = 0.f;
+		for (int n = 0; n < usedCount; ++n) sum += layerWeights[used[n]];
+		if (move) sum += moveWeight;
+		if (idle) sum += idleWeight;
+		int blended = 0;
+		const auto blend = [&](const BoneTransform* source, float weight)
+		{
+			if (blended == 0) BlendOverwrite(pose, source, weight / sum, _boneCount);
+			else BlendAccumulate(pose, source, weight / sum, _boneCount);
+			++blended;
+		};
+		for (int n = 0; n < usedCount; ++n)
+		{
+			const AnimLayer& layer = input.layers[used[n]];
+			const AnimClip& clip = _bundle->clips[StackClipIndex(layer.clip)];
+			const float length = std::max(clip.length, 0.01f);
+			const float time = clip.loop ? std::fmod(layer.time, length) : std::min(layer.time, length);
+			_clips->Sample(*_bundle, clip, time, _a.data());
+			blend(_a.data(), layerWeights[used[n]]);
+		}
+		if (move) blend(_b.data(), moveWeight);
+		if (idle) blend(_idle.data(), idleWeight);
+		if (blended > 1) NormalizeRotations(pose, _boneCount);
 	}
 
 	void CAnimPoseEvaluator::AccumulateAdditive(BoneTransform* pose, const BoneTransform* additive, float weight, uint8_t additiveType)
@@ -1327,8 +1400,17 @@ namespace mo
 
 	void CAnimPoseEvaluator::EvaluateLocal(const AnimPoseInput& input, BoneTransform* outLocal)
 	{
-		BlendWalk(input, outLocal);
-		ApplyJump(input, outLocal);
+		if (input.splitSlots && (_poseTest & kPoseTestNoIdleSlot) == 0)
+		{
+			ApplySplitSlots(input, outLocal);
+			++_splitPoses;
+		}
+		else
+		{
+			BlendWalk(input, input.weights, outLocal);
+			ApplyJump(input, outLocal);
+			++_mixedPoses;
+		}
 		ApplyRecovery(input, outLocal);
 		// 차례 = Lyra ABP_Mannequin_Base AnimGraph 핀 연결(D72 — C:\tmp\mob\e2\graph_chain.py 로 따라감, 원본 기준):
 		//   윗몸 섞기(LayeredBoneBlend_2) → 사격 덧붙임(FullBodyAdditivePreAim) → 조준 층(FullBody_Aiming) → 맞은 쪽 반응(AdditiveHitReact)

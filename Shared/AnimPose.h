@@ -25,6 +25,9 @@ namespace mo
 	inline constexpr int kAnimMontageMax = 3;		// 함께 도는 몽타주 수의 상한 — Lyra 기록 세 무기의 동시 최대(D45)
 
 	// 쌓기 한 칸. clip = 쌓기 칸 번호 0~42(점프 5 · 허리 전환 12 · 조준 전환 12 · 앉은 전환 12 · 서기 안 앉기 · 일어서기 — 묶음 클립 번호는 AnimClips.h StackClipIndex), -1 = 걷기 · 서기 자리
+	// 걷기 자리를 나눈 입력(AnimPoseInput::splitSlots, L-13-a · D152)에선 -1 = 움직임 자리(방향 클립 넷만) · -2 = 서기 자리(서기 클립 · 대기 몸짓만)
+	inline constexpr int kAnimSlotMove = -1;
+	inline constexpr int kAnimSlotIdle = -2;
 	struct AnimLayer
 	{
 		int16_t clip = -1;
@@ -56,6 +59,12 @@ namespace mo
 		float crouchTimes[kAnimWalkClips] = {};
 		bool crouched = false;			// 앉았나 — 쏜 뒤 덮기 자세를 앉은 것으로 고른다(D62 5)
 		float fidgetTime = -1.f;		// -1 = 대기 몸짓 안 함(대기 몸짓은 허리 서기 몫에만 든다)
+		// 걷기 자리 나누기(L-13-a · D152) — Lyra 는 상태마다 자기 재생기를 든다: 반복 상태는 방향 클립만, 서기 상태는 서기 클립 · 대기 몸짓만(앉기 소총 재생 목록 실측).
+		// true 면 쌓기 칸 -1(움직임 자리)은 moveWeights 를, -2(서기 자리)는 서기 클립만 그리고, 쌓기 칸이 없으면 baseSlot 자리를 바탕으로 쓴다.
+		// false 면 옛 길 — 어느 음수 칸이든 weights(서기 · 방향을 속도로 섞음) 하나를 그린다. 상태 객체(CAnimState)를 거치지 않은 입력(다리 단순 재생 기록 · 클립 표본 셈)이 이 길이다
+		bool splitSlots = false;
+		float moveWeights[kAnimWalkClips] = { 0.f, 1.f, 0.f, 0.f, 0.f };	// 움직임 자리 방향 비중(서기 칸 0 · 합 1)
+		int baseSlot = kAnimSlotMove;		// 쌓기 칸이 없을 때 바탕 자리(kAnimSlotMove · kAnimSlotIdle)
 		int layerCount = 0;
 		AnimLayer layers[kAnimLayerMax];
 		float recoveryTime = -1.f;		// -1 = 착지 충격 안 얹음
@@ -130,6 +139,7 @@ namespace mo
 		static constexpr uint32_t kPoseTestNoLegIK = 512;			// 다리 IK 를 끈다(L-12-c 전 실제 경로). L-12-c 앞에 잰 판은 512 를 더한다
 		static constexpr uint32_t kPoseTestNoLegAlpha = 1024;		// 다리 IK 비중을 늘 1 로(곡선 DisableLegIK 를 안 봄)
 		static constexpr uint32_t kPoseTestNoPlantLegs = 2048;		// 발 붙이기 장치의 다리 몫을 끈다(L-12-e 전 실제 경로). L-12-e 앞에 잰 판은 2048 을 더한다
+		static constexpr uint32_t kPoseTestNoIdleSlot = 4096;		// 걷기 자리를 안 나눈다 — 입력의 splitSlots 를 무시하고 옛 길(L-13-a 전 실제 경로). L-13-a 앞에 잰 판은 4096 을 더한다
 		void SetPoseTestFlags(uint32_t flags) { _poseTest = flags; }
 		void SetSlotProfileForTest(int profile) { _slotProfileTest = profile; }			// 비중 표가 있는 끼움 자리(덮기 자리 빼고)를 이 표로(-1 = 파일 그대로)
 		void SetOverrideProfileForTest(int profile) { _overrideProfileTest = profile; }	// 쏜 뒤 덮기 자리를 이 표로(-1 = 파일 그대로)
@@ -147,10 +157,16 @@ namespace mo
 		uint64_t PlantLegStretched() const { return _plantLegStretched; }
 		uint64_t PlantLegExtended() const { return _plantLegExtended; }
 		double PlantLegLength(int i) const { return _plantLegLength[i]; }	// 장치 마디 길이(0 허벅지 → 종아리 · 1 종아리 → 발)
+		// 걷기 자리 나누기(L-13-a) 셈 — 나눈 길로 셈한 자세 수 · 그중 움직임 자리를 그린 수 · 서기 자리를 그린 수(둘 다 그린 자세는 양쪽에 센다) · 옛 길로 셈한 자세 수
+		uint64_t SplitPoses() const { return _splitPoses; }
+		uint64_t SplitMovePoses() const { return _splitMovePoses; }
+		uint64_t SplitIdlePoses() const { return _splitIdlePoses; }
+		uint64_t MixedPoses() const { return _mixedPoses; }
 
 	private:
-		void BlendWalk(const AnimPoseInput& input, BoneTransform* pose);
+		void BlendWalk(const AnimPoseInput& input, const float* weights, BoneTransform* pose);
 		void ApplyJump(const AnimPoseInput& input, BoneTransform* pose);
+		void ApplySplitSlots(const AnimPoseInput& input, BoneTransform* pose);
 		void ApplyRecovery(const AnimPoseInput& input, BoneTransform* pose);
 		void ApplyOverride(const AnimPoseInput& input, BoneTransform* pose);
 		bool ApplySlot(const AnimPoseInput& input, int slot, BoneTransform* pose, bool perBone = true);		// 자세를 바꿨으면 true
@@ -190,12 +206,17 @@ namespace mo
 		uint64_t _plantLegSolves = 0;
 		uint64_t _plantLegStretched = 0;
 		uint64_t _plantLegExtended = 0;
+		uint64_t _splitPoses = 0;
+		uint64_t _splitMovePoses = 0;
+		uint64_t _splitIdlePoses = 0;
+		uint64_t _mixedPoses = 0;
 		uint32_t _poseTest = 0;
 		int _slotProfileTest = -1;
 		int _overrideProfileTest = -1;
 		std::vector<double> _meshRotations;		// 메시 기준 회전 섞기의 작업 공간 — 아래 · 위 · 섞은 회전 × 뼈 수 × 4
 		std::vector<BoneTransform> _a;
 		std::vector<BoneTransform> _b;
+		std::vector<BoneTransform> _idle;		// 걷기 자리를 나눈 길의 서기 자리 자세(움직임 자리는 _b)
 		std::vector<BoneTransform> _base;		// 끼움 자리에 들어온 아래 자세
 		std::vector<float> _boneWeights;		// 빼기 비중 표 길의 뼈별 비중 — (몽타주 칸 수 + 아래 자세 + 일반 줄 합) × 뼈 수
 		std::vector<BoneTransform> _component;

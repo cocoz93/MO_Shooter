@@ -247,6 +247,10 @@ namespace mo
 
 		// 상태
 		float _weights[kAnimWalkClips] = { 1.f, 0.f, 0.f, 0.f, 0.f };
+		// 움직임 자리 방향 비중(L-13-a · D152) — _weights 의 방향 넷을 합 1 로 맞춘 것(서기 칸 0). 방향 넷이 다 0 에 닿으면(서서 오래 있음 · 다시 초기화) 마지막 방향을 든다 —
+		// 벽에 막혀 가속만 있는 반복 상태도 Lyra 는 방향 클립을 돈다(반복 상태 재생기엔 서기 클립이 없다). _weights 는 걸음 진행(Update)이 읽으므로 그대로 둔다
+		float _moveWeights[kAnimWalkClips] = { 0.f, 1.f, 0.f, 0.f, 0.f };
+		int _baseSlot = kAnimSlotIdle;		// 쌓기 칸이 없을 때 바탕 자리 — 쌓기가 그 자리 한 칸으로 줄면 그 번호, 다시 쌓으면 맨 아래 칸이 이 번호
 		float _times[kAnimWalkClips] = {};
 		float _adsTimes[kAnimWalkClips] = {};		// 조준 서기 · 걸음 넷의 시각 — 걸음 번호 · 진행률 · 서기 시계를 같이 쓴다(D60 2)
 		float _adsBlend = 0.f;						// 조준 묶음 비중 — 방향 비중과 같은 따라가기

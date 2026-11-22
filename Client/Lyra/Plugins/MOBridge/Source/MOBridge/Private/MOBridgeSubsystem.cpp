@@ -1649,6 +1649,7 @@ void UMOBridgeSubsystem::ApplyServerAnim(FMOBRemote& R, ACharacter* Ch, const FM
 	AnimBadLayers += Result.BadLayers;
 	AnimCrouchLayers += Result.CrouchLayers;
 	AnimStanceLayers += Result.StanceLayers;
+	AnimIdleSlotLayers += Result.IdleSlotLayers;
 	AnimSlotPasses += Result.SlotPasses;
 	AnimMaskMissing += Result.bMaskMissing ? 1 : 0;
 	AnimWeaponNotifies += Result.WeaponNotifies;
@@ -4571,8 +4572,9 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 		// 무기별(9단계) — 무기별 자세 계산 수의 합 = poseEvals. setChanges = 언리얼 경로 클립 한 벌을 갈아 넣은 수, setMisses = 그 무기 한 벌이 없던 프레임, badWeapon = 모르는 무기 번호로 받은 칸
 		// adsLayers = 언리얼 경로에서 조준 전환 층을 허리 전환으로 바꿔 튼 수, badLayers = 칸 밖이라 버린 층(0 이어야 함, C-5)
 		// crouchLayers = 앉은 전환 층을 허리 전환으로 바꿔 튼 수, stanceLayers = 서기 안 앉기 · 일어서기 전환 층을 걷기 · 서기 자리로 돌린 수(D-3)
-		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_WEAPON poseEvals pistol=%lld rifle=%lld shotgun=%lld setChanges=%lld setMisses=%lld badWeapon=%lld adsLayers=%lld badLayers=%lld crouchLayers=%lld stanceLayers=%lld"),
-			AnimPoseEvalsByWeapon[0], AnimPoseEvalsByWeapon[1], AnimPoseEvalsByWeapon[2], AnimSetChanges, AnimSetMisses, AnimBadWeapon, AnimAdsLayers, AnimBadLayers, AnimCrouchLayers, AnimStanceLayers);
+		// idleSlotLayers = 서기 자리 층(-2)을 걷기 · 서기 자리로 돌린 수(판 17 · L-13-a — 서 있다 움직이는 상대가 있으면 0 보다 커야 한다)
+		UE_LOG(LogMOB, Log, TEXT("MOB_SERVERANIM_WEAPON poseEvals pistol=%lld rifle=%lld shotgun=%lld setChanges=%lld setMisses=%lld badWeapon=%lld adsLayers=%lld badLayers=%lld crouchLayers=%lld stanceLayers=%lld idleSlotLayers=%lld"),
+			AnimPoseEvalsByWeapon[0], AnimPoseEvalsByWeapon[1], AnimPoseEvalsByWeapon[2], AnimSetChanges, AnimSetMisses, AnimBadWeapon, AnimAdsLayers, AnimBadLayers, AnimCrouchLayers, AnimStanceLayers, AnimIdleSlotLayers);
 		// 몽타주(9단계 5-a) — cellsIn = 받은 칸 수의 합(프레임마다), cells = 언리얼 경로에 넣은 칸, misses = 무기 · 자산이 없어 못 넣은 칸(cellsIn = cells + misses).
 		// frames = 칸이 하나라도 든 프레임, noSlot = 칸을 넣었는데 끼움 자리를 하나도 안 거친 프레임, maskMissing = 윗몸 뼈 가림을 못 찾은 프레임.
 		// weaponNotifies = 튼 무기 메시 몽타주 알림(남의 사격 · 재장전 시작마다 하나), weaponPlaying = 그중 튼 직후 무기 메시에 몽타주가 돌던 수, soundNotifies = 튼 소리 알림
