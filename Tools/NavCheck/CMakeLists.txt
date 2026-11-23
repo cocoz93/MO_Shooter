@@ -1,0 +1,6 @@
+add_executable(NavCheck main.cpp)
+target_link_libraries(NavCheck PRIVATE MoShared)
+if(MSVC)
+    target_compile_options(NavCheck PRIVATE /W4 /utf-8)
+    target_compile_definitions(NavCheck PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+endif()
