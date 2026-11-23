@@ -14,7 +14,12 @@ param(
 	[string]$OutDir = "",
 	[string]$Map = "$env:USERPROFILE\Desktop\MyGit\MO_Shooter\Client\Lyra\Saved\MOB\map_expanse.mocl",
 	[switch]$NoPawnBlock,		# 시험 전용 — 사람끼리 막기를 서버 · 더미 둘 다 끈다(--testNoPawnBlock, D83). 위치 어긋남 0 을 엄격히 볼 때
-	[switch]$FireAlways		# 더미 전원 연사(--judgeFireAlways) — 적이 보이든 말든 계속 쏜다. 한계 측정 조건(D95)
+	[switch]$FireAlways,		# 더미 전원 연사(--judgeFireAlways) — 적이 보이든 말든 계속 쏜다. 한계 측정 조건(D95)
+	# 컨텐츠 — 기본은 다 켠다(사용자 11-22 「전부다 넣고」): 서버 받침 · 점프대 + 더미 대시 · 수류탄 · 조준 · 근접 · 앉기(regress.sh run_grenade 의 봇 옵션과 같은 묶음).
+	# 받침 · 점프대 파일은 Epic 맵 값이라 맵처럼 리포 밖(regress.sh PADS · LAUNCHERS 와 같은 파일). 처음 무기는 서버 기본값 권총 하나(D161)
+	[string]$Pads = "$env:USERPROFILE\Desktop\MyGit\MO_Shooter\Client\Lyra\Saved\MOB\pads_expanse.txt",
+	[string]$Launchers = "$env:USERPROFILE\Desktop\MyGit\MO_Shooter\Client\Lyra\Saved\MOB\launchers_expanse.txt",
+	[switch]$NoContent		# 위 컨텐츠를 다 끈다 — 걷기 · 사격만 하는 방. 처음 무기는 그대로 권총 하나라 11-18 판(세 무기로 시작, D97 전)과 같은 조건은 아니다
 )
 $ErrorActionPreference = 'Stop'
 
@@ -25,6 +30,10 @@ $botExe = "$root\build\BotClient\Release\BotClient.exe"
 if ($OutDir -eq "") { $OutDir = "$root\build\load" }
 if ($Tag -eq "") { $Tag = "r{0}_t{1}_{2}" -f $Rooms, $GameThreads, (Get-Date -Format 'HHmmss') }
 $runDir = Join-Path $OutDir $Tag
+# 파일이 없으면 서버가 받침 · 점프대 없이 돌아 컨텐츠 빠진 판을 잰다 — 시작 전에 멈춘다
+if (-not $NoContent) {
+	foreach ($file in @($Pads, $Launchers)) { if (-not (Test-Path -LiteralPath $file)) { throw "컨텐츠 파일 없음 — $file (빼고 재려면 -NoContent)" } }
+}
 New-Item -ItemType Directory -Force $runDir | Out-Null
 
 $serverMask = [IntPtr]0x3FF
@@ -53,6 +62,7 @@ $serverArgs = @(
 	"--measureFrom=$SettleSeconds", "--measureSeconds=$MeasureSeconds"
 )
 if ($NoPawnBlock) { $serverArgs += "--testNoPawnBlock" }
+if (-not $NoContent) { $serverArgs += "`"--pads=$Pads`"", "`"--launchers=$Launchers`"" }
 $server = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -PassThru -WindowStyle Hidden `
 	-RedirectStandardOutput "$runDir\server.txt" -RedirectStandardError "$runDir\server_err.txt"
 $null = $server.Handle
@@ -80,6 +90,7 @@ for ($i = 0; $i -lt $processCount; ++$i) {
 	)
 	if ($NoPawnBlock) { $botArgs += "--testNoPawnBlock" }
 	if ($FireAlways) { $botArgs += "--judgeFireAlways" }
+	if (-not $NoContent) { $botArgs += "--dash", "--grenade", "--ads", "--melee", "--crouch" }
 	$bot = Start-Process -FilePath $botExe -ArgumentList $botArgs -PassThru -WindowStyle Hidden `
 		-RedirectStandardOutput "$runDir\bot$i.txt" -RedirectStandardError "$runDir\bot${i}_err.txt"
 	$null = $bot.Handle
@@ -102,7 +113,7 @@ if (-not $server.WaitForExit(60000)) { $server.Kill(); Write-Output "서버가 �
 # 합치기
 $serverLine = Select-String -Path "$runDir\server.txt" -Pattern '^LOAD ' | Select-Object -First 1
 if (-not $serverLine) { throw "서버 LOAD 줄 없음 — $runDir\server.txt" }
-$row = [ordered]@{ tag = $Tag; requestedRooms = $Rooms; otherCpuPercent = [math]::Round($cpu.otherPercent, 2); mineCpuPercent = [math]::Round($cpu.minePercent, 2); botProcesses = $processCount }
+$row = [ordered]@{ tag = $Tag; requestedRooms = $Rooms; content = [int](-not $NoContent); otherCpuPercent = [math]::Round($cpu.otherPercent, 2); mineCpuPercent = [math]::Round($cpu.minePercent, 2); botProcesses = $processCount }
 $load = Read-KeyValues $serverLine.Line
 foreach ($key in $load.Keys) { $row[$key] = $load[$key] }
 
