@@ -638,7 +638,8 @@ namespace
 		uint64_t badStateId = 0;		// 상태 칸 번호가 받은 던짐 · 터짐으로 본 산 수류탄이 아님(들어온 뒤 던진 것 — 방 안 번호는 1 부터 늘기만 한다)
 		// 걸음이 본 산 수류탄 몸(L-8-b-2) — sets = 몸을 하나라도 넣은 예측 걸기 · bodies = 넣은 몸 합 · ownIgnored = 제 수류탄을 뺀 수(0.16초 서로 무시) ·
 		// 지난 틱 목록이 안 와(그 틱 끝 산 수류탄 없음) 목록을 닫은 수 — ended = 몸이 다 터져 빈 채 · stale = 터짐 소식 없이 몸이 남은 채 · reruns = 목록이 바뀌어 확인 안 된 입력을 다시 돌린 수(rerunsNone = 돌릴 입력 없음)
-		uint64_t walkSets = 0, walkBodies = 0, walkOwnIgnored = 0, walkEnded = 0, walkStale = 0, walkReruns = 0, walkRerunsNone = 0;
+		// fresh = 같은 틱 앞 차례(나보다 번호 작은) 사람이 갓 던진 몸을 던짐 소식으로 넣은 수(D171) · freshDropped = 그 몸을 다음 목록 · 다음 상태가 와서 뺀 수
+		uint64_t walkSets = 0, walkBodies = 0, walkOwnIgnored = 0, walkEnded = 0, walkStale = 0, walkReruns = 0, walkRerunsNone = 0, walkFresh = 0, walkFreshDropped = 0;
 	};
 
 	void AddGrenadeCounts(GrenadeBotCounts& to, const GrenadeBotCounts& from)
@@ -677,6 +678,8 @@ namespace
 		to.walkStale += from.walkStale;
 		to.walkReruns += from.walkReruns;
 		to.walkRerunsNone += from.walkRerunsNone;
+		to.walkFresh += from.walkFresh;
+		to.walkFreshDropped += from.walkFreshDropped;
 	}
 
 	void AddGrenadeFixes(CSelfPrediction::GrenadeCounters& to, const CSelfPrediction::GrenadeCounters& from)
@@ -1323,6 +1326,26 @@ namespace
 					_liveGrenades.insert(grenade.id);
 					_grenadeThrows[grenade.id] = std::make_pair(grenade.thrower, grenade.tick);	// 걸음 몸의 제 수류탄 무시 셈(던진 틱 = 첫 걸음 틱)
 					if (_firstGrenadeId == 0) _firstGrenadeId = grenade.id;
+					// 같은 틱 갓 던진 몸(D171) — 서버는 이 틱에 먼저 돈 사람이 던진 수류탄을 생긴 자리 그대로 뒤 사람 걸음에 넣는다(Room.cpp TickPlayerInputs 걸음 몸).
+					// 서버가 사람을 도는 차례 = _players 차례 = 들어온 차례 = 번호 오름(Room.cpp AddPlayer _nextPlayerId++ · push_back, 나가도 차례 유지) → 나보다 번호가 작으면
+					// 이 틱 내 입력은 그 몸을 봤다. 던짐 소식은 그 입력 처리 안에서 나가 이 틱 상태보다 먼저 오고, 이 틱 내 입력은 아직 확인 전이라 몸을 더해 다시 돌린다.
+					// 자리 · 회전 = 소식 값(서버가 와이어 폭으로 줄여 만든 생긴 몸과 같은 수 — SendGrenadeEvent). 다음 목록 · 다음 상태가 오면 뺀다(OnGrenadeState · OnState)
+					if (grenade.thrower != _welcome.playerId && grenade.thrower < _welcome.playerId && grenade.tick > _newestStateTick)
+					{
+						FreshGrenade fresh;
+						fresh.tick = grenade.tick;
+						fresh.body = wire::GrenadeStateEntry();
+						fresh.body.id = grenade.id;
+						fresh.body.x = grenade.x;
+						fresh.body.y = grenade.y;
+						fresh.body.z = grenade.z;
+						fresh.body.pitch = grenade.pitch;
+						fresh.body.yaw = grenade.yaw;
+						fresh.body.roll = grenade.roll;
+						_freshGrenades.push_back(fresh);
+						++c.walkFresh;
+						RerunForGrenadeBodies();
+					}
 				}
 				break;
 			}
@@ -1379,6 +1402,7 @@ namespace
 				if (_firstGrenadeId == 0 || e.id < _firstGrenadeId) ++c.stateBeforeJoin;
 				else ++c.badStateId;
 			}
+			DropFreshGrenades(head.tick + 1);	// 이 틱까지 갓 던진 몸은 이 목록에 걸은 뒤 자리로 들었다(터졌으면 빠짐) — 다음 틱 입력은 이 목록을 본다(D171)
 			RerunForGrenadeBodies();	// 걸음 몸(L-8-b-2) — 새 목록으로 확인 안 된 입력을 다시 돌린다
 		}
 
@@ -1411,14 +1435,17 @@ namespace
 			_newestStateTick = stateTick;
 			// 걸음 몸(L-8-b-2) — 지난 틱 목록이 안 왔으면 그 틱 끝 산 수류탄이 없었다 → 이 틱 입력은 몸 없이 돌았다. 비우고 다시 돌린 뒤 견준다.
 			// 터짐 소식이 마지막 몸을 이미 뺐어도 돈다(그 전 다시 돌리기는 터진 몸을 넣었다) — 그래서 몸이 남았나가 아니라 목록이 열려 있나로 본다
+			// 갓 던진 몸(D171)도 같다 — 지난 틱 것은 그 틱 목록이 안 왔어도(그 틱 끝 산 수류탄 없음) 이 틱 입력이 안 본다. 이 틱 것은 남겨 이 상태와 견준다
+			bool rerunBodies = DropFreshGrenades(stateTick);
 			if (_grenadeListOpen && _grenadeBodiesTick + 1 < stateTick)
 			{
 				_grenadeListOpen = false;
 				if (!_grenadeBodies.empty()) ++_grenadeCounts.walkStale;	// 터짐 소식 없이 사라진 몸(던진 사람 나감 등)
 				else ++_grenadeCounts.walkEnded;
 				_grenadeBodies.clear();
-				RerunForGrenadeBodies();
+				rerunBodies = true;
 			}
+			if (rerunBodies) RerunForGrenadeBodies();
 			uint8_t count = 0;
 			std::memcpy(&count, data + offsetof(wire::State, count), 1);
 			int tailAt = (int)offsetof(wire::State, players) + (int)sizeof(wire::PlayerState) * count;
@@ -1628,7 +1655,8 @@ namespace
 		// 틱 T 상태를 받은 때 든 목록은 T−1 것 = 서버가 틱 T 입력에 본 것. 목록 틱 + 1 < 받은 상태 틱이면 그 사이 산 수류탄이 없었다 → 비움(OnState).
 		// 목록이 바뀌면(새 소식 · 비움) 확인 안 된 입력을 새 목록으로 다시 돌린다(RerunForGrenadeBodies) — 서버가 틱 T 에 돌리는 입력은 T−1 목록이 온 때 아직 확인 전이라
 		// 마지막으로 돌린 목록이 서버가 쓴 목록과 같다. 움직이는 수류탄을 늦게 알아 생기는 갈림이 이것으로 없어진다(첫 판 갈림 = 떨어지는 수류탄 둘, D139).
-		// 터짐 소식으로 빼는 것은 다시 돌리지 않는다 — 터진 틱의 입력은 터지기 전 몸을 봤다(Room::Tick 차례: 입력 → 수류탄). 같은 틱에 먼저 돈 남이 갓 던진 몸은 못 안다(서버 SERVER grenadeWalk fresh)
+		// 터짐 소식으로 빼는 것은 다시 돌리지 않는다 — 터진 틱의 입력은 터지기 전 몸을 봤다(Room::Tick 차례: 입력 → 수류탄). 같은 틱에 먼저 돈 남이 갓 던진 몸(서버 SERVER grenadeWalk fresh)은
+		// 목록에 아직 없다 — 던짐 소식으로 받아 목록 뒤에 붙인다(_freshGrenades · D171 — 서버 _grenades 도 목록 몸 뒤에 이 틱 던진 몸이 붙는다)
 		// 제 수류탄은 목록 틱 걸음 뒤 launchCleanedUp 전이면 뺀다(GrenadeIgnoresThrower — 서버가 같은 판정을 대조해 센다 SERVER grenadeWalk ignoreMismatch)
 		void SetGrenadeBodiesForPrediction()
 		{
@@ -1649,12 +1677,29 @@ namespace
 				rotation.roll = e.roll;
 				_standableScratch.push_back(GrenadeStandable(Vec3(e.x, e.y, e.z), rotation, params, e.id));
 			}
+			for (const FreshGrenade& fresh : _freshGrenades)
+			{
+				Rotator rotation;
+				rotation.pitch = fresh.body.pitch;
+				rotation.yaw = fresh.body.yaw;
+				rotation.roll = fresh.body.roll;
+				_standableScratch.push_back(GrenadeStandable(Vec3(fresh.body.x, fresh.body.y, fresh.body.z), rotation, params, fresh.body.id));
+			}
 			if (!_standableScratch.empty())
 			{
 				++c.walkSets;
 				c.walkBodies += _standableScratch.size();
 			}
 			_sim.SetStandables(_standableScratch.data(), _standableScratch.size());
+		}
+
+		// 갓 던진 몸(D171) 중 beforeTick 앞 틱 것을 뺀다 — 뺀 게 있으면 true(부르는 쪽이 다시 돌린다)
+		bool DropFreshGrenades(uint32_t beforeTick)
+		{
+			const size_t before = _freshGrenades.size();
+			_freshGrenades.erase(std::remove_if(_freshGrenades.begin(), _freshGrenades.end(), [beforeTick](const FreshGrenade& f) { return f.tick < beforeTick; }), _freshGrenades.end());
+			_grenadeCounts.walkFreshDropped += before - _freshGrenades.size();
+			return _freshGrenades.size() != before;
 		}
 
 		void RerunForGrenadeBodies()
@@ -3638,6 +3683,12 @@ namespace
 		bool _boomSeen = false;
 		GrenadeBotCounts _grenadeCounts;
 		std::vector<wire::GrenadeStateEntry> _grenadeBodies;	// 걸음이 볼 산 수류탄(L-8-b-2) — 마지막 상태 소식 칸 − 그 뒤 터짐
+		struct FreshGrenade
+		{
+			uint32_t tick = 0;					// 던진 틱
+			wire::GrenadeStateEntry body;		// 생긴 자리 · 회전(던짐 소식 값)
+		};
+		std::vector<FreshGrenade> _freshGrenades;	// 같은 틱 앞 차례 사람이 갓 던진 몸(D171) — 다음 목록 · 다음 상태가 오면 뺀다
 		uint32_t _confirmedSeq = 0;							// 마지막 내 상태의 lastSeq — 서버가 돌린 입력 끝
 		uint32_t _grenadeBodiesTick = 0;						// 그 소식의 틱
 		bool _grenadeListOpen = false;							// 받은 목록이 아직 닫히지 않음 — 다음 틱 목록이 안 오면 닫고 몸 없이 다시 돌린다
@@ -4375,7 +4426,7 @@ int main(int argc, char** argv)
 		std::printf("BOT grenadeHits damageMsgs=%llu killMsgs=%llu | mine damage=%llu selfDamage=%llu kills=%llu | bad damage=%llu\n",
 			u(grenade.damageMsgs), u(grenade.killMsgs), u(grenade.damageMine), u(grenade.selfDamageMine), u(grenade.killsMine), u(grenade.badDamage));
 		// 걸음 몸(L-8-b-2) — 예측 걸기마다 넣은 산 수류탄 몸
-		std::printf("BOT grenadeWalk sets=%llu bodies=%llu ownIgnored=%llu ended=%llu stale=%llu reruns=%llu rerunsNone=%llu standableHits=%llu\n", u(grenade.walkSets), u(grenade.walkBodies), u(grenade.walkOwnIgnored), u(grenade.walkEnded), u(grenade.walkStale), u(grenade.walkReruns), u(grenade.walkRerunsNone), u(predCount.standableHits));
+		std::printf("BOT grenadeWalk sets=%llu bodies=%llu ownIgnored=%llu ended=%llu stale=%llu reruns=%llu rerunsNone=%llu standableHits=%llu fresh=%llu freshDropped=%llu\n", u(grenade.walkSets), u(grenade.walkBodies), u(grenade.walkOwnIgnored), u(grenade.walkEnded), u(grenade.walkStale), u(grenade.walkReruns), u(grenade.walkRerunsNone), u(predCount.standableHits), u(grenade.walkFresh), u(grenade.walkFreshDropped));
 		std::printf("BOT grenadeWire msgs=%llu throws=%llu noGrenade=%llu boom timer=%llu hit=%llu state msgs=%llu entries=%llu bounced=%llu beforeJoin=%llu post=%llu | bad kind=%llu state=%llu stateId=%llu dead=%llu\n",
 			u(grenade.msgs), u(grenade.throws), u(grenade.throwsNoGrenade), u(grenade.boomTimer), u(grenade.boomHit), u(grenade.stateMsgs), u(grenade.stateEntries), u(grenade.stateBounced),
 			u(grenade.stateBeforeJoin), u(grenade.post), u(grenade.badKind), u(grenade.badState), u(grenade.badStateId), u(grenade.badDead));
