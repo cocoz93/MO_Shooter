@@ -3,7 +3,8 @@
 # - 왜: 빌드 대상을 골라 돌리다 대조 도구가 옛 빌드로 남은 적이 있어, 전부 한 명령으로 묶는다.
 #
 #   Tools/Regress/regress.sh [--bin <빌드 폴더>] [--out <출력 폴더>] [--only checks|play|multi] [--break]
-#     --break  일부러 틀림 — 대조 도구 입력을 잘라 기준선과 어긋나게 하고 봇에 --breakMirror 를 준다(대시 판 봇엔 --breakDash=predict, 수류탄 판 봇엔 --breakGrenade=predict, 점프대 판 봇엔 --breakJumpPad=off).
+#     --break  일부러 틀림 — 대조 도구 입력을 잘라 기준선과 어긋나게 하고 봇에 --breakMirror 를 준다(대시 판 봇엔 --breakDash=predict, 수류탄 판 봇엔 --breakGrenade=predict, 점프대 판 봇엔 --breakJumpPad=off,
+#              길찾기 판 봇엔 --testNavBreak=edgeyaw · 길 그래프엔 끝 자리를 50cm 옮긴 순간이동 각본 기록을 준다).
 #              이때 FAIL 이 나와야 맞다(시험의 시험).
 # 판정은 개수·바이트만 본다. 시간 값은 안 쓰므로 PC 가 바빠도 돌릴 수 있다.
 # 기준선 = golden_checks.txt. 이동·충돌·무기 코드를 일부러 고쳤을 때만 갱신한다.
@@ -143,6 +144,19 @@ run_checks() {
 		python "$REPO/Tools/LyraPilot/pose_kind.py" "$a" "$OUT_W/anim_$a.csv" "$DATA" 2>&1 | sed "s/^/anim_$a kind /" >> "$g"
 		echo "anim_$a sha $(sha1sum < "$OUT/anim_$a.csv" | cut -c1-40)" >> "$g"
 	done
+	# 봇 길찾기(bot-nav-plan n-1 · n-3 · n-6) — Lyra 길 그물(nav_expanse.monv, dump_nav.ps1)로 Shared/Nav 를 본다.
+	# nav_pairs = 언리얼 FindPathSync 560쌍과 「길 있음 / 없음」 대조(어긋남 0 · 길이 비) · nav_load = 바이트를 망가뜨린 파일 여섯 판이 저마다 맞는 실패로 거절되나 ·
+	# nav_walk = 우리 그래프로 300쌍을 이동 셈으로 걸어 봄(꺾임점 따라 걷기 · 점프대 · 순간이동 · 내려가기 이음 — 쌍마다 닿음 · 걸린 판 시간 · 끝 자리가 기준선에 든다).
+	# 그래프(n-2)는 봇 각본 기록과 견줘야 PASS 라 판 쪽 run_nav 몫이다. --break 이면 대조는 가장 큰 덩어리를 끊고(--break cut)
+	# 걷기는 이음 방향을 90° 틀어(--break-walk edgeyaw) 줄이 어긋나야 한다
+	local nbreak="" wbreak=""
+	[ "$BREAK" = 1 ] && nbreak="--break cut" && wbreak="--break-walk edgeyaw"
+	"$tools/NavCheck/Release/NavCheck.exe" "$DATA/nav_expanse.monv" $nbreak > "$OUT/nav_pairs.log" 2>&1
+	sed 's/^/nav_pairs /' "$OUT/nav_pairs.log" >> "$g"
+	"$tools/NavCheck/Release/NavCheck.exe" "$DATA/nav_expanse.monv" --load-test > "$OUT/nav_load.log" 2>&1
+	sed 's/^/nav_load /' "$OUT/nav_load.log" >> "$g"
+	"$tools/NavCheck/Release/NavCheck.exe" "$DATA/nav_expanse.monv" --walk --map "$MAP" --launchers "$LAUNCHERS" --teleports "$TELEPORTS" $wbreak > "$OUT/nav_walk.log" 2>&1
+	sed 's/^/nav_walk /' "$OUT/nav_walk.log" >> "$g"
 	if cmp -s "$g" "$HERE/golden_checks.txt"; then
 		verdict 대조도구 1 "$(wc -l < "$g")줄 기준선과 같음"
 	else
@@ -480,6 +494,54 @@ run_teleport() {
 	verdict 봇순간이동 $ok "봇 rc=$brc 서버 rc=$src 서버$(echo "$sl" | grep -oE ' (begins|moves|launches|byDevice)=[0-9,]+' | tr -d '\n') 봇$(echo "$bl" | grep -oE ' (tableRows|bad|predTeleported|forcedYaw)=[0-9]+' | tr -d '\n')$(echo "$rr" | grep -oE ' (ran|serverLaunches|posDiff|yawDiff|deviceDiff|endDiffMax)=[0-9.]+' | tr -d '\n')"
 }
 
+# 봇 길찾기(bot-nav-plan n-2 · n-4 · n-6) — 두 판정.
+# ① 길그래프 — NavCheck --graph 가 짓는 우리 그래프(점프대 · 순간이동 · 내려가기 이음을 서버와 같은 이동 셈으로 밟아 봄)의 이음 시작 · 내려앉은 자리가
+#    바로 앞 두 판(run_jumppad · run_teleport)의 봇 각본 줄과 0.01cm 안에서 같고(12줄), 맨 위층이 순간이동으로만 닿고(끄면 0), 이음 수가 걷기 1236 · 내려가기 2 · 순간이동 4 · 점프대 22.
+#    --break 이면 순간이동 각본 줄의 끝 자리 x 를 50cm 옮긴 사본을 줘 같은 줄이 12 보다 적어야 한다
+# ② 봇길찾기 — 봇 10명이 --nav 로 40초(기다림 판 --testLockstep — 같은 빌드면 기록 · 셈이 바이트째 같다, n-6 에서 두 번 돌려 확인). 서버 규칙은 그대로라
+#    봇 RESULT PASS · 기록 바이트 같음 · 기다림 한도 0, 봇 그래프 줄 이음 수가 ① 과 같고, 이음 놓침(점프대 · 순간이동 · 내려가기) 0 · 막힘 다시 찾기 0 · 포기 0 ·
+#    점프대 · 순간이동을 한 번 이상 탐. 탄 수 · 떨어짐 등은 값만 적는다(봇 목표 고르기를 고치면 바뀐다). --break 이면 이음 방향을 90° 틀어(--testNavBreak=edgeyaw) 놓침이 나야 한다
+run_nav() {
+	local nav="$DATA/nav_expanse.monv" tplans="$OUT/teleport_bot.log" gl ge gp gt ok=1
+	if [ "$BREAK" = 1 ]; then
+		tplans="$OUT/teleport_plans_broken.log"
+		awk '/^TELEPORT plan / { i = index($0, " end=("); if (i) { r = substr($0, i + 6); split(r, a, " "); $0 = substr($0, 1, i + 5) (a[1] + 50) substr(r, length(a[1]) + 1) } } { print }' "$OUT/teleport_bot.log" > "$tplans"
+	fi
+	"$BIN/Tools/NavCheck/Release/NavCheck.exe" "$nav" --graph --map "$MAP" --launchers "$LAUNCHERS" --teleports "$TELEPORTS" --pad-plans "$OUT/jumppad_bot.log" --teleport-plans "$tplans" > "$OUT/nav_graph.log" 2>&1
+	local grc=$?
+	gl="$(grep -a '^NAVGRAPH teleports=' "$OUT/nav_graph.log" | tr -d '\r')"
+	ge="$(grep -a '^NAVGRAPH edges ' "$OUT/nav_graph.log" | tr -d '\r')"
+	gp="$(grep -a '^NAVGRAPH plans ' "$OUT/nav_graph.log" | tr -d '\r')"
+	gt="$(grep -a '^NAVGRAPH control ' "$OUT/nav_graph.log" | tr -d '\r')"
+	[ $grc = 0 ] && [ "${gl##* }" = PASS ] || ok=0
+	[ "$(num "$ge" walk)" = 1236 ] && [ "$(num "$ge" drop)" = 2 ] && [ "$(num "$ge" teleport)" = 4 ] && [ "$(num "$ge" pad)" = 22 ] || ok=0
+	[ "$(num "$gp" compared)" = 12 ] && [ "$(num "$gp" same)" = 12 ] || ok=0
+	verdict 길그래프 $ok "rc=$grc$(echo "$ge" | grep -oE ' (walk|drop|teleport|pad)=[0-9]+' | tr -d '\n') 각본$(echo "$gp" | grep -oE ' (compared|same|maxGap)=[0-9.]+' | tr -d '\n')$(echo "$gl" | grep -oE ' (reachable|top)=[0-9]+' | tr -d '\n') 순간이동끔$(echo "$gt" | grep -oE ' top=[0-9]+' | head -1)"
+
+	local break_arg=""
+	[ "$BREAK" = 1 ] && break_arg="--testNavBreak=edgeyaw"
+	"$SRV" "--map=$MAP" --port=7976 --exitWhenEmpty "--record=$OUT_W/nav_srv.csv" --warmup=2 --matchSeconds=40 --seed=21 "--pads=$PADS" "--launchers=$LAUNCHERS" "--teleports=$TELEPORTS" --testNoPawnBlock --testLockstep=10 > "$OUT/nav_srv.log" 2>&1 &
+	local spid=$!
+	"$BOT" "--map=$MAP" --port=7976 "--record=$OUT_W/nav_bot.csv" --seed=21 --testNoPawnBlock --testLockstep "--nav=$nav" $break_arg > "$OUT/nav_bot.log" 2>&1
+	local brc=$?
+	wait $spid
+	local src=$? bg bp sl bl k
+	ok=1
+	[ $brc = 0 ] && [ $src = 0 ] || ok=0
+	cmp -s "$OUT/nav_srv.csv" "$OUT/nav_bot.csv" || ok=0
+	grep -q '^RESULT PASS' "$OUT/nav_bot.log" || ok=0
+	# 봇 로그는 줄 끝이 CRLF(서버는 LF)라 CR 을 떼고 끝을 맞춘다
+	bg="$(grep -a '^BOT nav graph ' "$OUT/nav_bot.log" | tr -d '\r')"
+	bp="$(grep -a '^BOT nav paths=' "$OUT/nav_bot.log" | tr -d '\r')"
+	sl="$(grep -a '^SERVER lockstep' "$OUT/nav_srv.log" | tr -d '\r')"
+	bl="$(grep -a '^BOT lockstep' "$OUT/nav_bot.log" | tr -d '\r')"
+	[ "$(num "$sl" timeouts)" = 0 ] && [ "$(num "$bl" timeouts)" = 0 ] && [ "$(num "$bl" on)" = 1 ] || ok=0
+	[ "$(num "$bg" walk)" = 1236 ] && [ "$(num "$bg" drop)" = 2 ] && [ "$(num "$bg" teleport)" = 4 ] && [ "$(num "$bg" pad)" = 22 ] || ok=0
+	for k in padMisses teleMisses dropMisses stuckRepaths gaveUps; do [ "$(num "$bp" $k)" = 0 ] || ok=0; done
+	[ "$(num "$bp" padLinks)" -gt 0 ] 2>/dev/null && [ "$(num "$bp" teleLinks)" -gt 0 ] 2>/dev/null || ok=0
+	verdict 봇길찾기 $ok "봇 rc=$brc 서버 rc=$src$(echo "$bp" | grep -oE ' (paths|noPath|stuckRepaths|padLinks|padMisses|teleLinks|teleMisses|drops|dropMisses|unplannedFalls|gaveUps)=[0-9]+' | tr -d '\n')"
+}
+
 # 사람끼리 막기 대조(컨텐츠 F-1) — Lyra 연습장에서 두 사람이 부딪힌 기록을 Shared 이동으로 다시 돌려 위치 · 속도가 0.01 안이어야 한다.
 # 기록 = F-1 에서 PASS(cells=40)를 낸 네 벌 그대로(f1a · f1b · f1c · f1e)
 run_bump() {
@@ -720,6 +782,7 @@ else
 		run_grenade
 		run_jumppad
 		run_teleport
+		run_nav
 		run_rules
 		run_grenade_leave
 		run_press_order

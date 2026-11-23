@@ -7,7 +7,8 @@ param(
     [string]$BotArgs = '',   # extra BotClient arguments, e.g. '--ads' so remote bodies aim on screen (content C-5)
     [int]$Port = 7791,
     [string]$Res = '1280x720',
-    [string]$LyraExtra = ''
+    [string]$LyraExtra = '',
+    [switch]$NoNav   # bots walk straight (old brain) instead of following the nav graph (bot-nav-plan n-5)
 )
 # One human game: match server + windowed Lyra (keyboard and mouse) + bots. Bots join once Lyra is welcomed.
 # Results: Saved\MOB\game_<Tag>_*. Ends when the Lyra window is closed.
@@ -20,6 +21,7 @@ $map    = "$outDir\map_expanse.mocl"
 $pads   = "$outDir\pads_expanse.txt"   # health pads (content B, make_pads.py) - outside the repo like the map; no file = server without pads
 $launchers = "$outDir\launchers_expanse.txt"   # jump pads (jumppad-plan j-1, make_launchers.py) - outside the repo like the map; no file = server without jump pads
 $teleports = "$outDir\teleports_expanse.txt"   # teleports (teleport-plan t-1, make_teleports.py) - outside the repo like the map; no file = server without teleports
+$nav    = "$outDir\nav_expanse.monv"   # bot nav floors (Unreal navmesh dump, dump_nav.ps1 / MOBNavDumpSubsystem, D42) - outside the repo like the map; no file = bots walk straight
 $base   = "$outDir\game_$Tag"
 $log    = "${base}_lyra.log"
 
@@ -42,7 +44,9 @@ $bot = $null
 while (-not $lyra.HasExited) {
     if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'MOB_WELCOME' -Quiet)) {
         "welcomed at $(Get-Date -Format 'HH:mm:ss')"
-        $bot = Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList (@("--map=`"$map`"", "--port=$Port", "--bots=$Bots") + ($BotArgs -split ' ' | Where-Object { $_ })) -RedirectStandardOutput "${base}_bots.txt" -PassThru -WindowStyle Hidden
+        $botArgList = @("--map=`"$map`"", "--port=$Port", "--bots=$Bots") + ($BotArgs -split ' ' | Where-Object { $_ })
+        if (-not $NoNav -and (Test-Path -LiteralPath $nav)) { $botArgList += "--nav=`"$nav`"" }
+        $bot = Start-Process -FilePath "$repo\build\BotClient\Release\BotClient.exe" -ArgumentList $botArgList -RedirectStandardOutput "${base}_bots.txt" -PassThru -WindowStyle Hidden
         break
     }
     Start-Sleep -Milliseconds 500

@@ -41,6 +41,10 @@
 //     쿨다운이 비면 한 번 더 누른다(서버 「안 맞음」 · 「맞아 터짐」 갈래). 서버 수류탄 소식(S2C_GRENADE)으로 예측을 고치고
 //     고친 수(BOT grenade grenadeDiff)와 무기 4 피해 · 처치(BOT grenadeHits)를 센다. 기본 꺼짐
 //   --breakGrenade=predict|server(--grenade 와 함께) — 수류탄 단추를 서버에만 · 예측에만 보낸다. grenadeDiff 가 서야 한다(startMismatches · unconfirmed)
+//   --nav=<nav_expanse.monv> [--testNavBreak=edgeyaw] = 봇 길찾기(bot-nav-plan n-4 · D167). 첫 봇이 부활할 때까지 받은 점프대 · 순간이동 표로 우리 그래프(Shared/Nav)를
+//     한 번 짓고, 이동 목표(길 거리로 가장 가까운 적 · 다쳤으면 체력 받침 · 무기 받침 — 층 제한 없음)를 0.5초마다 다시 골라 따라 걷기(CNavFollower)로 걷는다.
+//     길이 없거나 · 도착했거나 · 포기하면 지금처럼 곧장. BOT nav 줄을 낸다. --testNavBreak=edgeyaw = 일부러 틀림 — 점프대 · 순간이동 이음을 90° 틀린 쪽으로 걸어
+//     놓침(padMisses · teleMisses)이 서야 한다
 // 판정 대조(후보 1, 7단계): --judgeClips=<클립 파일> --judgeLog=<파일> [--judgeNoSpread] 면 봇이 화면 역할을 한다.
 //   받은 상태로 서버와 같은 식의 몸 자세를 만들어 탄마다 자기 판정을 남긴다. 서버 --rewindBulletLog 줄과 Tools/Regress/check_bot_hits.py 로 견준다
 //   --judgeFireAlways 면 적이 안 보여도 방아쇠를 놓지 않는다(10명 전원 연사 비용 측정) — 판정 대조 밖(부하 판)에서도 먹는다(D95)
@@ -53,6 +57,7 @@
 #include "MapCollision.h"
 #include "MatchRules.h"
 #include "Movement.h"
+#include "Nav.h"
 #include "NetClient.h"
 #include "Pickups.h"
 #include "Prediction.h"
@@ -69,6 +74,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -107,6 +113,17 @@ namespace
 	constexpr float kPadSeekHp = 75.f;
 	// 같은 층으로 치는 높이 차 — 봇은 곧게만 걸어 다른 층 받침은 못 간다. Expanse 받침 층 사이 높이 차(가장 작은 것 약 750)의 절반 아래
 	constexpr double kPadSameFloorZ = 300.0;
+	// 봇 길찾기(n-4) — 이동 목표 다시 고르기 · 다시 찾기 간격(플랜 「0.5초마다」)
+	constexpr int kNavRefreshTicks = wire::kTickRate / 2;
+	// 쫓는 적의 바닥이 바뀌었나 보는 간격 — 다시 찾기 간격의 1/5 = 0.1초(바닥 찾기는 바닥 노드를 다 훑는다 — 틱마다 볼 만큼 바닥이 자주 안 바뀐다고 봤다. 제 판단)
+	constexpr int kNavGoalFloorCheckTicks = 6;
+	// 따라 걷기가 포기한 뒤 곧장 걷기(옛 돌아가기 포함)로 버티다 같은 목표를 다시 해 보는 때 — 옛 돌아가기 한 번(60틱)의 두 배(제 판단)
+	constexpr int kNavRetryTicks = 120;
+	constexpr int kNavBreakEdgeYaw = 1;		// --testNavBreak=edgeyaw — 이음 걷는 방향을 90° 돌림(NavFollowParams::edgeYawOffset)
+	// 이음 시작 자리가 이 안이면 대시를 안 누른다 — 대시 탄력이 남은 채 이음에 들면 리허설(걷는 몸)과 다른 자리로 가 놓친다(n-4 단추 섞은 판 — 추적을 켠 한 판의 놓침 4건이 다 이음에 들기 8 ~ 16입력 전 대시).
+	// 값 = 대시가 다른 행동을 막는 입력 동안 갈 거리 — 힘 구간(1850 × 0.25초 = 462cm) + 남은 입력(32 − 15)을 힘이 끝날 때 자른 속도 1000 으로(283cm) = 746cm.
+	// 그 뒤 걷기 속도로 돌아오는 동안은 안 셌다(제 판단 — 단추 섞은 판 놓침으로 잰다)
+	constexpr double kNavDashQuietCm = (double)kDashStrength * kDashForceDuration + (double)kDashClampOnFinish * (kDashActiveInputs - kDashForceDuration * wire::kTickRate) / wire::kTickRate;
 
 	double Length(const Vec3& v)
 	{
@@ -124,6 +141,104 @@ namespace
 		const size_t read = std::fread(data.data(), 1, data.size(), file);
 		std::fclose(file);
 		return read == data.size() && map.LoadFromMemory(data.data(), data.size()) == EMapLoad::Ok;
+	}
+
+	// 봇 길찾기 재료(n-4) — 한 프로세스에 하나. 봇마다 따라 걷기(CNavFollower)가 참조로 읽기만 한다(봇은 한 스레드에서 돈다)
+	struct NavWorld
+	{
+		NavMesh mesh;
+		NavGraph graph;
+		NavGraphReport report;
+		std::vector<uint32_t> groups;	// NavWalkGroups — 바닥마다 걷기 덩어리 번호(groupMoves 셈에 쓴다)
+		NavFollowParams params;
+		double halfHeight = 0;
+	};
+
+	// 언리얼 바닥 파일 + 서버가 보낸 점프대 · 순간이동 표(예측이 받는 것과 같은 줄)로 NavCheck --graph 와 같은 차례의 그래프를 짓는다.
+	// 리허설 이동 셈은 따로 둔다 — 봇이 나눠 쓰는 sim 의 셈(BOT pawn 줄)에 리허설 몫이 섞이지 않게
+	bool BuildNavWorld(const std::string& path, const CMapCollision& map, const MoveParams& params, const MatchRules& rules, const std::vector<Launcher>& launchers,
+		const std::vector<Teleporter>& teleports, double meshBaseZ, NavWorld& out)
+	{
+		FILE* file = std::fopen(path.c_str(), "rb");
+		if (!file)
+		{
+			std::printf("BOT nav load file=%s FAIL\n", path.c_str());
+			return false;
+		}
+		std::fseek(file, 0, SEEK_END);
+		std::vector<char> data((size_t)std::ftell(file));
+		std::fseek(file, 0, SEEK_SET);
+		const bool read = std::fread(data.data(), 1, data.size(), file) == data.size();
+		std::fclose(file);
+		const ENavLoad loaded = read ? ParseNav(data.data(), data.size(), out.mesh) : ENavLoad::Truncated;
+		if (loaded != ENavLoad::Ok)
+		{
+			std::printf("BOT nav load parse=%s FAIL\n", NavLoadName(loaded));
+			return false;
+		}
+		CMoveSim sim(map, params);
+		NavRehearsal rehearsal;
+		rehearsal.sim = &sim;
+		rehearsal.capsuleRadius = params.capsuleRadius;
+		rehearsal.capsuleHalfHeight = params.capsuleHalfHeight;
+		rehearsal.walkSpeed = params.maxWalkSpeed;
+		rehearsal.killZ = rules.fallKillZ;
+		rehearsal.launchers.items = launchers.data();
+		rehearsal.launchers.count = launchers.size();
+		rehearsal.teleports.items = teleports.data();
+		rehearsal.teleports.count = teleports.size();
+		rehearsal.teleports.meshBaseZ = meshBaseZ;
+		if (!BuildNavGraph(out.mesh, rehearsal, out.graph, out.report))
+		{
+			std::printf("BOT nav graph ground nodes not first FAIL\n");
+			return false;
+		}
+		out.groups = NavWalkGroups(out.graph);
+		out.halfHeight = params.capsuleHalfHeight;
+		return true;
+	}
+
+	// 봇이 쫓는 것(n-4) — 다쳤으면 체력 받침 → 원하는 무기 받침(가장 가까운 적보다 길이 짧거나 같을 때만 — n-5) → 적
+	enum class ENavGoal : uint8_t { None, Enemy, Heal, Weapon };
+
+	// 봇 길찾기 셈(BOT nav 줄) — 따라 걷기 셈(NavFollowCounters)과 따로, 봇 쪽 갈래만
+	struct NavBotCounts
+	{
+		uint64_t refreshes = 0;		// 다시 고르기 뒤 다시 찾기(SetGoal) — BOT nav repaths
+		uint64_t floorChanges = 0;	// 쫓는 적의 바닥이 바뀌어 다시 찾음
+		uint64_t goalChanges = 0;	// 목표(적 · 받침)가 바뀜 — 막힘 셈을 0 으로
+		uint64_t goals[4] = {};		// 다시 고를 때 고른 목표(ENavGoal 차례 — None = 고를 것 없음)
+		uint64_t goalUnreachable = 0;	// 고른 목표가 길 거리 무한(바닥 못 찾음 · 이음 없음) — 따라 걷기가 길 없음이면 곧장
+		uint64_t pathCloser = 0;	// 길 거리로 고른 적이 곧은 거리로 가장 가까운 적과 다름
+		uint64_t weaponYields = 0;	// 원하는 무기 받침이 있는데 가장 가까운 적의 길이 더 짧아 적을 고름(n-5)
+		uint64_t myNoFloor = 0;		// 다시 고를 때 내 바닥을 못 찾음(공중 등) — 앞 길 거리 그대로
+		uint64_t followTicks = 0, straightTicks = 0, strafeTicks = 0;	// 따라 걷기 입력 · 곧장 걷기(도착 · 길 없음 · 포기 · 목표 없음) · 옆걸음(싸움 — 따라 걷기 쉼)
+		uint64_t gaveUps = 0, retries = 0;
+		uint64_t groupMoves = 0;	// 다시 고를 때 선 바닥의 걷기 덩어리가 앞과 다름(다른 층 · 섬으로 옮겨 감. 부활은 안 셈)
+		uint64_t resets = 0;		// 부활 · 옆걸음 뒤 처음부터 찾기
+		uint64_t dashQuietTicks = 0;	// --dash 이고 이음 시작 자리가 kNavDashQuietCm 안이라 대시 갈래를 건너뛴 틱(누를 차례였는지는 안 가림)
+		uint64_t thinkNs = 0, selectNs = 0, stepNs = 0;	// 길찾기에 쓴 벽시계 시간 — 목표 고르기 · 다시 찾기(NavThinkGoal 전체 · 그중 NavSelect) · 따라 걷기(StepNav)
+		uint64_t selects = 0;		// NavSelect 부른 수
+	};
+
+	void AddNavFollow(NavFollowCounters& to, const NavFollowCounters& a)
+	{
+		to.plans += a.plans;
+		to.noFloor += a.noFloor;
+		to.farFloor += a.farFloor;
+		to.noPath += a.noPath;
+		to.stuckRepaths += a.stuckRepaths;
+		to.landRepaths += a.landRepaths;
+		to.edgeTimeouts += a.edgeTimeouts;
+		to.unplannedEvents += a.unplannedEvents;
+		to.unplannedFalls += a.unplannedFalls;
+		to.flyTimeouts += a.flyTimeouts;
+		for (int k = 0; k < 4; ++k)
+		{
+			to.edges[k] += a.edges[k];
+			to.edgeMisses[k] += a.edgeMisses[k];
+		}
+		to.portalMiss += a.portalMiss;
 	}
 
 	constexpr int kBreakDashPredict = 1;	// --breakDash=predict — 예측에 안 넣음
@@ -165,6 +280,9 @@ namespace
 		int breakGrenade = 0;			// --breakGrenade=predict|server — 수류탄 단추를 예측 · 서버 한쪽에만(일부러 틀림)
 		int breakJumpPad = 0;			// --breakJumpPad=off|value — 점프대 각본의 일부러 틀림(kBreakJumpPadOff · kBreakJumpPadValue)
 		int breakTeleport = 0;			// --breakTeleport=off|value — 순간이동 각본의 일부러 틀림(kBreakTeleportOff · kBreakTeleportValue)
+		std::string navPath;			// --nav=<monv> — 봇 길찾기(n-4). 비면 지금처럼 곧장 걷는다
+		int navBreak = 0;				// --testNavBreak=edgeyaw — kNavBreakEdgeYaw
+		std::string navTracePath;		// --testNavTrace=파일 — g_navTrace
 		std::string judgeClips;			// 주면 봇이 화면 역할로 탄마다 자기 판정을 남긴다(후보 1, 7단계). measureView 를 함께 켠다
 		std::string judgeLog;
 		bool judgeNoSpread = false;		// 서버 --rewindNoSpread 와 같이 쓴다 — 자세만 본다
@@ -341,6 +459,8 @@ namespace
 	std::vector<float>* g_stateGapsMs = nullptr;
 	// --traceInputs(시험 전용, L-0-c) — 입력마다 「그때 받아 둔 최신 상태 틱」, 자기 상태마다 「서버가 적용한 입력 번호」. 같은 빌드 두 판이 어디서 갈리나를 줄로 본다
 	FILE* g_traceInputs = nullptr;
+	// --testNavTrace=파일(시험 전용, n-4) — 따라 걷기 상태가 바뀌거나 셈(막힘 · 길에 없는 떨어짐 · 사건 · 내려앉음)이 는 틱 · 처음부터 찾기마다 한 줄
+	FILE* g_navTrace = nullptr;
 
 	double ProcessCpuSeconds()
 	{
@@ -641,6 +761,9 @@ namespace
 			}
 			else if (_scripted) ThinkScript(input);
 			else Think(input);
+			if (g_navTrace)
+				for (int b = 0; b < 8; ++b)
+					if (input.buttons & (1u << b)) _navPressSeq[b] = _self.GetSeq();
 			AssignPressOrder(input);	// 근접 판정(WillMeleeStart)도 실린 차례를 본다 — 그 앞에서
 			_self.SetDebugMoveScale(breakMirror ? 0.999 : 1.0);
 			// 근접(E-3) — 이 입력이 근접을 켜면 넣기 전에 화면 판정을 해, 맞음이면 밀기를 같이 넣는다(Lyra 화면도 능력 프레임 이동부터 민다)
@@ -690,6 +813,23 @@ namespace
 		void SetGrenade(bool on, int breakGrenade) { _grenadePress = on; _breakGrenade = breakGrenade; }
 		void SetJumpPadBreak(int breakJumpPad) { _breakJumpPad = breakJumpPad; }
 		void SetTeleportBreak(int breakTeleport) { _breakTeleport = breakTeleport; }
+		// 봇 길찾기(n-4) — world 는 main 이 들고 있고 봇은 읽기만 한다
+		void SetNav(const NavWorld* world, int navBreak)
+		{
+			_navWorld = world;
+			NavFollowParams params = world->params;
+			if (navBreak == kNavBreakEdgeYaw) params.edgeYawOffset = 90.0;
+			_nav.reset(new CNavFollower(world->mesh, world->graph, world->halfHeight, params));
+			_navNeedReset = true;
+		}
+		bool HasSpawn() const { return _hasSpawn; }
+		const std::vector<Launcher>& GetLauncherRows() const { return _launcherRows; }		// GetLaunchersReady 일 때만 다 온 표
+		bool GetLaunchersReady() const { return _launchersReady; }
+		const std::vector<Teleporter>& GetTeleportRows() const { return _teleportRows; }	// GetTeleportsReady 일 때만 다 온 표
+		bool GetTeleportsReady() const { return _teleportsReady; }
+		double GetTeleportMeshBaseZ() const { return _teleportMeshBaseZ; }
+		const NavBotCounts& GetNavCounts() const { return _navCounts; }
+		NavFollowCounters GetNavFollowCounters() const { return _nav ? _nav->Counters() : NavFollowCounters(); }
 		const CSelfPrediction::TeleportCounters& GetTeleportFixes() const { return _self.GetTeleportCounters(); }
 		const CSelfPrediction::LaunchCounters& GetLaunchFixes() const { return _self.GetLaunchCounters(); }
 		uint64_t GetLauncherInfos() const { return _launcherInfos; }
@@ -955,6 +1095,9 @@ namespace
 			_stuckCheckAt = Vec3(spawn.x, spawn.y, spawn.z);
 			_stuckTicks = 0;
 			_detourLeft = 0;
+			_navNeedReset = true;		// 길찾기(n-4) — 부활 자리에서 처음부터 고르고 찾는다(부활 옮김은 덩어리 옮김으로 안 센다)
+			_navLastGroup = -1;
+			_navRefreshLeft = 0;
 			_scriptPlaced = false;	// 경기 시작이 시작 자리로 돌려놓으면 다시 옮기고 처음부터
 			if (_jumpPadScript && !_jumpPadDone) _jumpPadPlans.clear();	// 점프대 각본도 — 다음 입력이 다시 미리 돌리고 첫 점프대부터
 			_scriptArmed = false;	// 부활은 권총으로 돌려놓는다 — 경로 무기를 다시 든다
@@ -2456,7 +2599,271 @@ namespace
 			std::printf("SCRIPT event=%d tick=%u weapon=%u\n", (int)ev, _scriptTick - 1, (unsigned)_scriptCurWeapon);
 		}
 
-		// 두뇌 — 가장 가까운 산 적을 보고 쏘며 다가간다. 길찾기가 없어 막히면 무작위로 돌아간다
+		// ── 봇 길찾기(n-4) ──
+		double NavCost(int floor) const
+		{
+			return floor >= 0 && (size_t)floor < _navDist.size() ? _navDist[(size_t)floor] : std::numeric_limits<double>::infinity();
+		}
+
+		// 받침 바닥 — 받침 자리 = 닿음 캡슐(반높이 80) 중심 = 액터 자리(Pickups.h PickupPad). L_Expanse 받침 15개가 다 언리얼 바닥보다 71 ~ 83cm 위라
+		// 선 사람 캡슐 중심(바닥 + 90)처럼 보고 따라 걷기와 같은 FloorOf 로 찾는다(목표 자리도 받침 자리 그대로 — Plan 이 같은 바닥을 찾는다). 받침은 안 움직여 한 번만
+		int NavPadFloor(size_t index)
+		{
+			if (_navPadFloor.size() < _pads.size()) _navPadFloor.resize(_pads.size(), -2);
+			if (_navPadFloor[index] == -2) _navPadFloor[index] = _nav->FloorOf(_pads[index].at);
+			return _navPadFloor[index];
+		}
+
+		// 찾아갈 받침인가 — 체력 = 켜진 체력 받침, 무기 = NearestWantedWeaponPad 와 같은 거르기(같은 층 제한만 뺌)
+		bool NavPadWanted(const Pad& pad, bool heal, const wire::PlayerState* self) const
+		{
+			if (!pad.known || !pad.available) return false;
+			if (heal) return pad.kind == (uint8_t)EPadKind::Heal;
+			const uint8_t weapon = PadWeapon(pad.kind);
+			if (weapon == kNoWeapon || !self) return false;
+			bool owned = false;
+			for (size_t s = 0; s < kQuickSlotCount; ++s) owned = owned || CLoadout::UnpackSlot(self->quickSlots, s) == weapon;
+			const bool outOfSpare = weapon == self->weapon && self->spare <= 0;
+			return !owned || outOfSpare;
+		}
+
+		// 길 거리가 가장 짧은 받침(같으면 수평 거리). 길로 못 가는 받침은 안 고른다. 없으면 -1
+		int NavBestPad(const Vec3& at, bool heal, const wire::PlayerState* self)
+		{
+			int best = -1;
+			double bestCost = 0, bestD = 0;
+			for (size_t i = 0; i < _pads.size(); ++i)
+			{
+				if (!NavPadWanted(_pads[i], heal, self)) continue;
+				const double cost = NavCost(NavPadFloor(i));
+				if (cost == std::numeric_limits<double>::infinity()) continue;
+				const double dx = _pads[i].at.x - at.x, dy = _pads[i].at.y - at.y;
+				const double d = dx * dx + dy * dy;
+				if (best < 0 || cost < bestCost || (cost == bestCost && d < bestD))
+				{
+					best = (int)i;
+					bestCost = cost;
+					bestD = d;
+				}
+			}
+			return best;
+		}
+
+		// 길찾기를 돌리는 단계 — 경기 끝 단계부터는 서버가 무기 받침 줍기를 거절해(Room.cpp TryWeaponPickup PostGame) 받침 위에 선 채 옛 돌아가기 점프를
+		// 되풀이한다(n-4 run3 — 계획에 없던 떨어짐 50건 중 23건이 경기 끝 뒤 받침 위). 그 단계는 지금처럼 곧장
+		bool NavPhase() const
+		{
+			switch ((wire::EMatchPhase)_phase)
+			{
+			case wire::EMatchPhase::Waiting:
+			case wire::EMatchPhase::Warmup:
+			case wire::EMatchPhase::Playing:
+				return true;
+			case wire::EMatchPhase::PostGame:
+			case wire::EMatchPhase::Finished:
+				return false;
+			}
+			return false;
+		}
+
+		const Pad* NavGoalPad(ENavGoal kind) const
+		{
+			return _navGoalKind == kind && _navGoalId < _pads.size() ? &_pads[_navGoalId] : nullptr;
+		}
+
+		// 이동 목표를 다시 고른다 — 내 바닥에서 바닥마다 길 거리(NavFloorDistances)를 새로 재고, 갈래(체력 · 무기 · 적)마다 길 거리가 가장 짧은 것.
+		// 무기 받침은 가장 가까운 적보다 길이 짧거나 같을 때만(n-5 — 층 제한이 풀리자 무기 받침이 늘 적을 이겨 만남이 줄었다. 곧장 걷기는 같은 층 제한이 그 몫을 했다).
+		// 목표가 바뀌면 막힘 셈을 0 으로, 같으면 같은 목표를 지금 자리에서 다시 찾는다(포기한 같은 목표는 kNavRetryTicks 뒤 — StepNav)
+		void NavSelect(const Vec3& at, const std::map<uint32_t, wire::PlayerState>& seen, bool hurt, const wire::PlayerState* self)
+		{
+			const auto from = Clock::now();
+			++_navCounts.selects;
+			NavSelectBody(at, seen, hurt, self);
+			_navCounts.selectNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - from).count();
+		}
+
+		void NavSelectBody(const Vec3& at, const std::map<uint32_t, wire::PlayerState>& seen, bool hurt, const wire::PlayerState* self)
+		{
+			const int myFloor = _nav->FloorOf(at);
+			if (myFloor >= 0)
+			{
+				NavFloorDistances(_navWorld->graph, (uint32_t)myFloor, _navDist);
+				const int group = (int)_navWorld->groups[(size_t)myFloor];
+				if (_navLastGroup >= 0 && group != _navLastGroup) ++_navCounts.groupMoves;
+				_navLastGroup = group;
+			}
+			else ++_navCounts.myNoFloor;
+			_navHurt = hurt;
+			ENavGoal kind = ENavGoal::None;
+			uint32_t id = 0;
+			int floor = -1;
+			Vec3 goal;
+			const int heal = hurt ? NavBestPad(at, true, self) : -1;
+			const int weapon = heal < 0 ? NavBestPad(at, false, self) : -1;
+			// 적 — 길 거리가 가장 짧은 산 적(같으면 곧은 거리). 체력 받침을 찾아가면 안 본다
+			const wire::PlayerState* best = nullptr;
+			const wire::PlayerState* closest = nullptr;
+			double bestCost = 0, bestD = 0, closestD = 0;
+			int bestFloor = -1;
+			if (heal < 0)
+			{
+				for (const auto& entry : seen)
+				{
+					const wire::PlayerState& p = entry.second;
+					if (p.team == _welcome.team || (p.flags & wire::STATE_DEAD)) continue;
+					const Vec3 pos(p.x, p.y, p.z);
+					const double d = Length(pos - at);
+					if (!closest || d < closestD)
+					{
+						closest = &p;
+						closestD = d;
+					}
+					const int f = _nav->FloorOf(pos);
+					const double cost = NavCost(f);
+					if (!best || cost < bestCost || (cost == bestCost && d < bestD))
+					{
+						best = &p;
+						bestCost = cost;
+						bestD = d;
+						bestFloor = f;
+					}
+				}
+			}
+			// 무기 받침은 적보다 길이 짧거나 같을 때만(적이 없거나 길로 못 가면 받침). 둘 다 바닥까지의 길 거리(NavCost)로 견준다
+			const bool weaponFirst = weapon >= 0 && (!best || NavCost(NavPadFloor((size_t)weapon)) <= bestCost);
+			if (weapon >= 0 && !weaponFirst) ++_navCounts.weaponYields;
+			if (heal >= 0 || weaponFirst)
+			{
+				kind = heal >= 0 ? ENavGoal::Heal : ENavGoal::Weapon;
+				id = (uint32_t)(heal >= 0 ? heal : weapon);
+				floor = NavPadFloor(id);
+				goal = _pads[id].at;	// 캡슐 중심으로 본다(NavPadFloor 와 같은 가정)
+			}
+			else if (best)
+			{
+				kind = ENavGoal::Enemy;
+				id = best->id;
+				floor = bestFloor;
+				goal = Vec3(best->x, best->y, best->z);
+				if (best != closest) ++_navCounts.pathCloser;
+			}
+			++_navCounts.goals[(size_t)kind];
+			if (kind != ENavGoal::None && NavCost(floor) == std::numeric_limits<double>::infinity()) ++_navCounts.goalUnreachable;
+			const bool changed = kind != _navGoalKind || id != _navGoalId;
+			if (changed) ++_navCounts.goalChanges;
+			_navGoalKind = kind;
+			_navGoalId = id;
+			_navGoalFloor = floor;
+			_navGoal = goal;
+			if (kind == ENavGoal::None) return;
+			if (!changed && _nav->State() == ENavFollow::GaveUp) return;
+			++_navCounts.refreshes;
+			_nav->SetGoal(goal, changed);
+		}
+
+		// 틱마다 — 목표가 사라졌으면(적 죽음 · 나감 · 받침 꺼짐 · 다침이 바뀜) 바로, 아니면 0.5초마다 다시 고른다. 쫓는 적의 바닥이 바뀌면 그 자리로 다시 찾는다
+		void NavThinkGoal(const Vec3& at, const std::map<uint32_t, wire::PlayerState>& seen, bool hurt, const wire::PlayerState* self)
+		{
+			bool invalid = hurt != _navHurt;
+			switch (_navGoalKind)
+			{
+			case ENavGoal::Enemy:
+			{
+				const auto it = seen.find(_navGoalId);
+				invalid = invalid || it == seen.end() || it->second.team == _welcome.team || (it->second.flags & wire::STATE_DEAD) != 0;
+				break;
+			}
+			case ENavGoal::Heal:
+			case ENavGoal::Weapon:
+				invalid = invalid || _navGoalId >= _pads.size() || !NavPadWanted(_pads[_navGoalId], _navGoalKind == ENavGoal::Heal, self);
+				break;
+			case ENavGoal::None:
+				break;
+			}
+			if (invalid || --_navRefreshLeft <= 0)
+			{
+				NavSelect(at, seen, hurt, self);
+				_navRefreshLeft = kNavRefreshTicks;
+				_navFloorCheckLeft = kNavGoalFloorCheckTicks;
+				return;
+			}
+			if (_navGoalKind != ENavGoal::Enemy || --_navFloorCheckLeft > 0) return;
+			_navFloorCheckLeft = kNavGoalFloorCheckTicks;
+			const wire::PlayerState& p = seen.find(_navGoalId)->second;
+			const Vec3 pos(p.x, p.y, p.z);
+			const int floor = _nav->FloorOf(pos);
+			if (floor < 0 || floor == _navGoalFloor) return;	// 공중(뛰는 중)이면 앞 바닥 그대로
+			++_navCounts.floorChanges;
+			_navGoalFloor = floor;
+			_navGoal = pos;
+			if (_nav->State() != ENavFollow::GaveUp) _nav->SetGoal(pos, false);
+		}
+
+		// 한 틱 따라 걷기 — 관측은 예측 결과(앞 입력을 서버 ApplyInput 과 같은 TickWithLaunchers 로 돌린 것 — NavCheck --walk 가 보는 것과 같은 셈).
+		// true = 이 틱 입력을 따라 걷기 명령으로. false = 곧장 걷기(목표 없음 · 도착 · 길 없음 · 포기) 또는 옆걸음(싸움 — 따라 걷기를 쉬고 끝나면 처음부터)
+		bool StepNav(const Vec3& at, bool strafe, NavCommand& cmd)
+		{
+			NavObserve o;
+			o.location = at;
+			o.mode = _self.GetMove().mode;
+			const uint32_t seq = _self.GetSeq();
+			o.fired = seq != _navSeenSeq ? _self.GetLastLaunchPad() : -1;	// 앞 입력 몫만 — 새 입력이 없는데 남은 값을 두 번 보지 않게
+			_navSeenSeq = seq;
+			const CSelfPrediction::TeleportEvent& teleport = _self.GetLastTeleport();
+			o.teleported = teleport.seq != 0 && teleport.seq != _navTeleportSeq ? teleport.device : -1;
+			_navTeleportSeq = teleport.seq;
+			if (_navGoalKind == ENavGoal::None)
+			{
+				++_navCounts.straightTicks;
+				return false;
+			}
+			if (strafe)
+			{
+				_navStrafed = true;
+				++_navCounts.strafeTicks;
+				return false;
+			}
+			if (_navNeedReset || _navStrafed)
+			{
+				if (g_navTrace) std::fprintf(g_navTrace, "R %u seq=%u why=%s at=%.1f,%.1f,%.1f mode=%d\n", _welcome.playerId, seq, _navNeedReset ? "spawn" : "strafe", at.x, at.y, at.z, (int)o.mode);
+				_navNeedReset = _navStrafed = false;
+				_nav->Reset(_navGoal);
+				++_navCounts.resets;
+			}
+			const ENavFollow before = _nav->State();
+			if (before == ENavFollow::GaveUp && --_navRetryLeft <= 0)
+			{
+				_nav->SetGoal(_navGoal, true);
+				++_navCounts.retries;
+			}
+			const NavFollowCounters was = g_navTrace ? _nav->Counters() : NavFollowCounters();
+			const ENavFollow state = _nav->Step(o, cmd);
+			if (g_navTrace)
+			{
+				const NavFollowCounters& now = _nav->Counters();
+				uint64_t missed = 0;
+				for (int k = 0; k < 4; ++k) missed += now.edgeMisses[k] - was.edgeMisses[k];
+				// 단추별로 몇 입력 전에 눌렀나(-1 = 안 누름) — 놓침 · 떨어짐 앞에 대시 · 근접 · 수류탄 · 점프가 있었나
+				const auto ago = [&](int bit) { return _navPressSeq[bit] == 0 ? -1 : (int)(seq - _navPressSeq[bit]); };
+				if (state != before || missed != 0 || now.unplannedFalls != was.unplannedFalls || now.stuckRepaths != was.stuckRepaths || now.unplannedEvents != was.unplannedEvents || now.landRepaths != was.landRepaths)
+					std::fprintf(g_navTrace, "N %u seq=%u %s>%s at=%.1f,%.1f,%.1f mode=%d fired=%d tele=%d goal=%d:%u %.1f,%.1f,%.1f points=%zu fall=%llu stuck=%llu unplanned=%llu land=%llu miss=%llu ago jump=%d melee=%d dash=%d grenade=%d\n",
+						_welcome.playerId, seq, NavFollowName(before), NavFollowName(state), at.x, at.y, at.z, (int)o.mode, o.fired, o.teleported, (int)_navGoalKind, _navGoalId,
+						_navGoal.x, _navGoal.y, _navGoal.z, _nav->Points().size(), (unsigned long long)(now.unplannedFalls - was.unplannedFalls),
+						(unsigned long long)(now.stuckRepaths - was.stuckRepaths), (unsigned long long)(now.unplannedEvents - was.unplannedEvents), (unsigned long long)(now.landRepaths - was.landRepaths),
+						(unsigned long long)missed, ago(0), ago(5), ago(6), ago(7));
+			}
+			if (state == ENavFollow::GaveUp && before != ENavFollow::GaveUp)
+			{
+				++_navCounts.gaveUps;
+				_navRetryLeft = kNavRetryTicks;
+			}
+			const bool follow = state == ENavFollow::Walking || state == ENavFollow::Edge || state == ENavFollow::Flying;
+			if (follow) ++_navCounts.followTicks;
+			else ++_navCounts.straightTicks;
+			return follow;
+		}
+
+		// 두뇌 — 가장 가까운 산 적을 보고 쏘며 다가간다. 길찾기가 없어 막히면 무작위로 돌아간다(--nav 면 이동은 길찾기 목표 · 따라 걷기 — n-4)
 		void Think(wire::Input& input)
 		{
 			const Vec3 at = _self.GetMove().location;
@@ -2518,7 +2925,16 @@ namespace
 			// 받침 갈래(컨텐츠 B-4) — 다쳤으면 이동만 같은 층에서 가장 가까운 켜진 받침 쪽. 겨눔 · 사격은 그대로, 옆걸음은 안 한다
 			const auto selfState = _players.find(_welcome.playerId);
 			const bool hurt = selfState != _players.end() && !(selfState->second.flags & wire::STATE_DEAD) && selfState->second.hp <= kPadSeekHp;
-			const Pad* padTarget = hurt ? NearestOpenPad(at) : nullptr;
+			// 봇 길찾기(n-4) — 이동 목표를 길 거리로 골라 둔다(받침 두 갈래도 그 목표를 쓴다 — 층 제한 없음). --push 는 몸을 부딪히는 것이 목적이라 안 쓴다
+			// 부활 직후 이동 막힘(IsLocked — SpawnMoveLockInputs) 동안은 쉰다 — 안 움직이는 틱이 막힘 셈에 쌓인다(run3 막힘 다시 찾기 30건이 다 부활 자리)
+			const bool navActive = _nav && !_push && selfState != _players.end() && !(selfState->second.flags & wire::STATE_DEAD) && !_self.IsWaitingSpawn() && !_self.IsLocked() && NavPhase();
+			if (navActive)
+			{
+				const auto from = Clock::now();
+				NavThinkGoal(at, seen, hurt, &selfState->second);
+				_navCounts.thinkNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - from).count();
+			}
+			const Pad* padTarget = hurt ? (navActive ? NavGoalPad(ENavGoal::Heal) : NearestOpenPad(at)) : nullptr;
 			if (padTarget)
 			{
 				const double dx = padTarget->at.x - at.x, dy = padTarget->at.y - at.y;
@@ -2530,7 +2946,7 @@ namespace
 			_padSeeking = padTarget != nullptr;
 			// 무기 받침 갈래(W-5) — 체력 받침을 찾아가지 않을 때만(체력이 낮으면 체력 받침이 먼저). 이동만 바꾸는 것은 체력 갈래와 같다
 			const bool alive = selfState != _players.end() && !(selfState->second.flags & wire::STATE_DEAD);
-			const Pad* weaponTarget = !padTarget && alive ? NearestWantedWeaponPad(at, selfState->second) : nullptr;
+			const Pad* weaponTarget = !padTarget && alive ? (navActive ? NavGoalPad(ENavGoal::Weapon) : NearestWantedWeaponPad(at, selfState->second)) : nullptr;
 			if (alive && selfState->second.spare <= 0) ++_spareOutTicks;	// 든 무기 예비가 바닥난 틱 — 예비 찾아가기가 0 일 때 「안 바닥남」 · 「같은 층에 받침 없음」을 가른다
 			if (weaponTarget)
 			{
@@ -2545,6 +2961,17 @@ namespace
 				++_weaponSeekTicks;
 			}
 			_weaponSeeking = weaponTarget != nullptr;
+			// 길찾기 목표가 적이면 곧장 걷기(도착 · 길 없음 · 포기)도 그 적 쪽 — 겨눔 · 사격은 그대로 곧은 거리로 가장 가까운 적
+			if (navActive && _navGoalKind == ENavGoal::Enemy)
+			{
+				const auto it = seen.find(_navGoalId);
+				if (it != seen.end())
+				{
+					const double dx = it->second.x - at.x, dy = it->second.y - at.y;
+					const double horizontal = std::sqrt(dx * dx + dy * dy);
+					if (horizontal > 1.0) toward = Vec3(dx / horizontal, dy / horizontal, 0);
+				}
+			}
 			// --push(F-2) — 팀 상관없이 가장 가까운 산 사람 쪽으로 곧장 걷는다. 부딪힘 · 미끄러짐이 계속 일어나야 보정 양을 잴 수 있다
 			if (_push)
 			{
@@ -2569,13 +2996,26 @@ namespace
 				}
 			}
 			// --melee 는 옆걸음 없이 곧장 다가간다 — 근접 거리까지 붙어야 근접 갈래가 경기 중에 돈다(옆걸음이면 거의 경기 끝 단계에서만 붙었다)
-			const bool strafe = !_push && canShoot && nearest < kStrafeRange && !_padSeeking && !_weaponSeeking && !_meleeNear;
+			// 점프대 · 순간이동 이음을 타는 중(n-4) — 옆걸음 · 몸을 옮기거나 걷기 속도를 바꾸는 단추를 안 누른다(리허설대로 걸어야 리허설 자리에 내린다)
+			const bool navBusy = navActive && _nav->Busy();
+			const bool strafe = !_push && canShoot && nearest < kStrafeRange && !_padSeeking && !_weaponSeeking && !_meleeNear && !navBusy;
+			NavCommand navCmd;
+			bool navFollow = false;
+			if (navActive)
+			{
+				const auto from = Clock::now();
+				navFollow = StepNav(at, strafe, navCmd);
+				_navCounts.stepNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - from).count();
+			}
+			const bool navEdge = navFollow && _nav->Busy();
+			const bool navDashQuiet = navFollow && !navEdge && _nav->EdgeStartDistance(at) < kNavDashQuietCm;
+			if (navDashQuiet && _dashPress) ++_navCounts.dashQuietTicks;
 
 			// 막힘 — 30틱에 30cm 도 못 가면 돌아간다(--push 는 막히는 것이 목적이라 안 돌아간다)
 			if (++_stuckTicks >= 30)
 			{
 				const Vec3 moved = at - _stuckCheckAt;
-				if (!_push && !(_self.IsLocked()) && moved.x * moved.x + moved.y * moved.y < 30.0 * 30.0 && _detourLeft <= 0 && !strafe)
+				if (!_push && !(_self.IsLocked()) && moved.x * moved.x + moved.y * moved.y < 30.0 * 30.0 && _detourLeft <= 0 && !strafe && !navFollow)
 				{
 					const double angle = _rng.NextFloat() * 2.0 * kPi;
 					_detourDir = Vec3(std::cos(angle), std::sin(angle), 0);
@@ -2586,9 +3026,10 @@ namespace
 				_stuckTicks = 0;
 			}
 
-			Vec3 move = toward;
+			Vec3 move = navFollow ? Vec3(navCmd.moveX, navCmd.moveY, 0) : toward;
 			bool jump = false;
-			if (_detourLeft > 0)
+			if (navFollow) _detourLeft = 0;		// 따라 걷기가 막힘을 맡는다(다시 찾기) — 곧장 걷기 때 시작한 돌아가기는 버린다
+			else if (_detourLeft > 0)
 			{
 				--_detourLeft;
 				move = _detourDir;
@@ -2606,7 +3047,7 @@ namespace
 
 			input.moveX = (float)move.x;
 			input.moveY = (float)move.y;
-			input.yaw = yaw;
+			input.yaw = navFollow && _nav->SteersYaw() ? (float)navCmd.yaw : yaw;	// 점프대는 몸 앞(입력 요)으로 쏜다(JumpPads.cpp LauncherLaunch) — 이음을 타는 동안은 리허설 요
 			input.pitch = pitch;
 			input.aimX = (float)eye.x;
 			input.aimY = (float)eye.y;
@@ -2629,14 +3070,14 @@ namespace
 			// 죽어 있어도 방아쇠를 놓지 않는다 — 서버가 거절하는지 보려고. 대기 중에도 쏜다 — 피해 0 인지 보려고
 			if (!_push && (canShoot || _self.IsWaitingSpawn() || _fireAlways)) input.buttons |= wire::BUTTON_FIRE;	// --push 는 안 쏜다(아무도 안 죽어야 계속 부딪힌다)
 			// --ads — 적이 보이면 겨눈다(사람이 쏠 때 누르는 꼴). 시선은 네 틱마다 다시 보므로 켜고 끄는 일이 잦아 덜 섞인 채 풀기까지 지난다. 난수는 안 쓴다 — 끈 판과 경로가 같다
-			if (_adsWhenShooting && canShoot)
+			if (_adsWhenShooting && canShoot && !navEdge)	// 조준은 걷기 속도를 줄인다(AdsWalkSpeed) — 이음 중엔 안 누른다
 			{
 				input.buttons |= wire::BUTTON_ADS;
 				++_adsInputs;
 			}
 			// --crouch — 정해 둔 간격마다 앉기 키를 한 번 누른다(누른 입력 하나에만). 간격은 따로 쓰는 난수라 두뇌 난수(_rng)를 안 건드린다.
 			// 0.2~2.5초 = D-1 Lyra 기록기의 앉기 누름 간격과 같다. 부활을 기다리는 동안은 세지 않는다(서버가 그 입력을 안 쓴다)
-			if (_crouchToggle && !_self.IsWaitingSpawn() && --_crouchWait <= 0)
+			if (_crouchToggle && !_self.IsWaitingSpawn() && !navEdge && --_crouchWait <= 0)
 			{
 				_crouchWait = 12 + (int)(_crouchRng.NextFloat() * 138.f);
 				input.buttons |= wire::BUTTON_CROUCH;
@@ -2644,7 +3085,7 @@ namespace
 			}
 			// --melee — 적이 4m 안에 보이면 근접 단추를 누른다(누르고 있는 꼴 — 켜지는 것은 능력 간격마다). 앉기 키와 같은 입력엔 안 누른다:
 			// 서버는 앉기를 근접보다 먼저 처리해 손 높이가 바뀌는데, 화면 판정은 넣기 전 상태로 한다
-			if (_meleeNear && enemy && _hasSight && nearest < kMeleeRange && !_self.IsWaitingSpawn() && (input.buttons & wire::BUTTON_CROUCH) == 0)
+			if (_meleeNear && enemy && _hasSight && nearest < kMeleeRange && !_self.IsWaitingSpawn() && (input.buttons & wire::BUTTON_CROUCH) == 0 && !navEdge)
 			{
 				input.buttons |= wire::BUTTON_MELEE;
 				++_meleeCounts.presses;
@@ -2654,7 +3095,7 @@ namespace
 			// 방향은 능력이 앞 입력의 이동 · 몸 요로 고르므로(SelectDashDir) 누르기 한 입력 앞에서 이동을 그 입력 요 기준 0 · 180 · −90 · +90° 로 놓는다(갈래마다 한가운데).
 			// 위 · 아래 보고 앞은 누른 입력의 피치를 +40 · −30 으로(앞 대시 힘은 카메라 앞이다. D-0 기록은 피치 +20 · +45 · 아래). 부활 기다리는 중엔 안 누른다 —
 			// 서버는 죽은 사람 입력을 대시 앞에서 버린다(dead 로만 센다). 경기 끝 단계엔 누른다 — 서버 · 다리 모두 끝 단계에도 켠다(L-3-b)
-			if (_dashPress && !_self.IsWaitingSpawn())
+			if (_dashPress && !_self.IsWaitingSpawn() && !navEdge && !navDashQuiet)
 			{
 				--_dashWait;
 				if (_dashWait == 1)
@@ -2701,7 +3142,7 @@ namespace
 			// (G-3-c 파일럿 두 판 — 살아 누른 하늘 16번 전부 맞음 · MapCheck 로 잼). 그래서 서버와 같은 겨눔 선(사람 몸 뺌)을 내 맵에 대 보고 열렸고 쿨다운이 비었으면
 			// 하늘을 한 번 누른다 — 서버 「안 맞음」 갈래(플랜 177줄 「0 이면 각본을 더한다」). 누른 뒤 kGrenadeSkyGap 입력은 다시 안 본다.
 			// 가까운 적 각본 — 간격 누름의 「그대로」는 적이 멀어(25m 안) 몸에 바로 맞는 일이 드물다(두 판 0). kGrenadeNearRange 안에 보이면 몸 가운데를 앞 겨눔으로 보고 한 번 누른다 — 서버 「맞아 터짐」 갈래
-			if (_grenadePress)
+			if (_grenadePress && !navEdge)	// 가까운 적 던짐은 요를 바꾼다 — 이음 중엔 안 누른다
 			{
 				const bool waiting = _self.IsWaitingSpawn();
 				const bool post = _phase == (uint8_t)wire::EMatchPhase::PostGame;
@@ -3005,6 +3446,23 @@ namespace
 		std::vector<float> _teleportPlanEndYaw;	// 장치마다 미리 돌린 마지막 입력 요
 		uint32_t _teleportPlaceSeq = 0;		// 지금 장치 시험 놓기 번호 — 그 뒤 옮김만 이 장치 몫
 		uint64_t _teleportPred0 = 0, _teleportYawDiff = 0, _teleportDeviceDiff = 0;
+		// 봇 길찾기(n-4) — --nav 일 때만(_nav 가 비면 지금처럼 곧장)
+		const NavWorld* _navWorld = nullptr;
+		std::unique_ptr<CNavFollower> _nav;
+		ENavGoal _navGoalKind = ENavGoal::None;
+		uint32_t _navGoalId = 0;			// 적 번호 · 받침 차례
+		int _navGoalFloor = -1;
+		Vec3 _navGoal;						// 캡슐 중심
+		bool _navHurt = false;				// 고를 때의 다침 — 바뀌면 바로 다시 고른다(체력 받침 갈래가 먼저)
+		int _navRefreshLeft = 0, _navFloorCheckLeft = 0, _navRetryLeft = 0;
+		bool _navNeedReset = false;			// 부활 — 다음 따라 걷기가 처음부터
+		bool _navStrafed = false;			// 옆걸음으로 따라 걷기를 쉼 — 끝나면 처음부터
+		uint32_t _navSeenSeq = 0, _navTeleportSeq = 0;
+		uint32_t _navPressSeq[8] = {};		// --testNavTrace — 단추 비트마다 마지막으로 누른 때의 예측 입력 번호
+		int _navLastGroup = -1;
+		std::vector<double> _navDist;		// 마지막으로 다시 고를 때 내 바닥에서 바닥마다 길 거리
+		std::vector<int> _navPadFloor;		// 받침마다 바닥(-2 = 아직 안 셈 · -1 = 없음)
+		NavBotCounts _navCounts;
 		CSpreadRng _grenadeRng;
 		// 같은 입력 누름 차례(L-5-c) — 섞는 난수 · 둘 이상 누른 입력 수
 		CSpreadRng _pressRng;
@@ -3118,6 +3576,17 @@ namespace
 					return false;
 				}
 			}
+			else if (value("--nav=", v)) out.navPath = v;
+			else if (value("--testNavTrace=", v)) out.navTracePath = v;
+			else if (value("--testNavBreak=", v))
+			{
+				if (v == "edgeyaw") out.navBreak = kNavBreakEdgeYaw;
+				else
+				{
+					std::printf("모르는 길찾기 틀림 %s (edgeyaw)\n", v.c_str());
+					return false;
+				}
+			}
 			else if (s == "--testNoPawnBlock") out.pawnBlock = false;
 			else if (s == "--testStartAllWeapons") out.startAllWeapons = true;
 			else if (value("--testGodPlayer=", v)) out.testGodPlayer = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
@@ -3224,7 +3693,37 @@ int main(int argc, char** argv)
 		}
 	}
 
+	// 봇 길찾기(n-4) — 점프대 · 순간이동 표는 부활 소식보다 먼저 온다(서버가 들어올 때 보냄). 첫 봇이 부활할 때까지 받기만 하고, 그 봇이 받은 표로 그래프를 한 번 짓는다.
+	// 기다림 · 짓기는 판 시계(start) 앞이다 — 입력 보내기 · 부하 측정 구간에 안 든다
+	NavWorld navWorld;
+	if (!args.navPath.empty())
+	{
+		const auto waitFrom = Clock::now();
+		while (!bots.front()->HasSpawn() && bots.front()->IsOpen() && Clock::now() - waitFrom < std::chrono::seconds(10))
+		{
+			for (const std::unique_ptr<CBot>& bot : bots) bot->Pump();
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		const CBot& first = *bots.front();
+		const std::vector<Launcher> noLaunchers;
+		const std::vector<Teleporter> noTeleports;
+		const std::vector<Launcher>& launchers = first.GetLaunchersReady() ? first.GetLauncherRows() : noLaunchers;
+		const std::vector<Teleporter>& teleports = first.GetTeleportsReady() ? first.GetTeleportRows() : noTeleports;
+		const auto buildFrom = Clock::now();
+		if (!first.HasSpawn() || !BuildNavWorld(args.navPath, map, params, rules, launchers, teleports, first.GetTeleportMeshBaseZ(), navWorld))
+		{
+			std::printf("BOT nav spawn=%d FAIL\n", first.HasSpawn() ? 1 : 0);
+			return 2;
+		}
+		const NavGraphReport& r = navWorld.report;
+		std::printf("BOT nav graph floors=%zu walk=%zu drop=%zu teleport=%zu pad=%zu launchers=%zu teleporters=%zu waitMs=%.0f buildMs=%.0f break=%d\n", navWorld.graph.ground,
+			r.walkEdges, r.dropEdges, r.teleportEdges, r.padEdges, launchers.size(), teleports.size(), std::chrono::duration<double, std::milli>(buildFrom - waitFrom).count(),
+			std::chrono::duration<double, std::milli>(Clock::now() - buildFrom).count(), args.navBreak);
+		for (const std::unique_ptr<CBot>& bot : bots) bot->SetNav(&navWorld, args.navBreak);
+	}
+
 	if (!args.traceInputsPath.empty()) g_traceInputs = std::fopen(args.traceInputsPath.c_str(), "wb");
+	if (!args.navTracePath.empty()) g_navTrace = std::fopen(args.navTracePath.c_str(), "wb");
 	timeBeginPeriod(1);
 	const auto start = Clock::now();
 	uint64_t sentTicks = 0;
@@ -3298,6 +3797,7 @@ int main(int argc, char** argv)
 	}
 	timeEndPeriod(1);
 	if (g_traceInputs) std::fclose(g_traceInputs);
+	if (g_navTrace) std::fclose(g_navTrace);
 	g_traceInputs = nullptr;
 	size_t botsOpen = 0;
 	for (const std::unique_ptr<CBot>& bot : bots)
@@ -3341,6 +3841,51 @@ int main(int argc, char** argv)
 		}
 		std::printf("BOT teleport infos=%llu bad=%llu tableRows=%zu predTeleported=%llu forcedYaw=%llu\n", (unsigned long long)infos, (unsigned long long)infoBad, tables,
 			(unsigned long long)predTeleported, (unsigned long long)forcedYaw);
+	}
+	// 봇 길찾기(n-4) — --nav 일 때만. paths = 길을 찾은 계획 · noPath = 바닥 · 길을 못 찾은 계획 · repaths = 다시 고르기 뒤 다시 찾기 · stuckRepaths = 막혀 다시 찾기 ·
+	// padLinks · teleLinks = 탄 이음 · Misses = 타려다 놓침(NavFollowCounters::edgeMisses) · floorChanges = 쫓는 적의 바닥이 바뀌어 다시 찾기. 봇 합
+	if (!args.navPath.empty())
+	{
+		NavFollowCounters f;
+		NavBotCounts c;
+		for (const std::unique_ptr<CBot>& bot : bots)
+		{
+			AddNavFollow(f, bot->GetNavFollowCounters());
+			const NavBotCounts& a = bot->GetNavCounts();
+			c.refreshes += a.refreshes;
+			c.floorChanges += a.floorChanges;
+			c.goalChanges += a.goalChanges;
+			for (int k = 0; k < 4; ++k) c.goals[k] += a.goals[k];
+			c.goalUnreachable += a.goalUnreachable;
+			c.pathCloser += a.pathCloser;
+			c.weaponYields += a.weaponYields;
+			c.myNoFloor += a.myNoFloor;
+			c.followTicks += a.followTicks;
+			c.straightTicks += a.straightTicks;
+			c.strafeTicks += a.strafeTicks;
+			c.gaveUps += a.gaveUps;
+			c.retries += a.retries;
+			c.groupMoves += a.groupMoves;
+			c.resets += a.resets;
+			c.dashQuietTicks += a.dashQuietTicks;
+			c.thinkNs += a.thinkNs;
+			c.selectNs += a.selectNs;
+			c.stepNs += a.stepNs;
+			c.selects += a.selects;
+		}
+		const auto u = [](uint64_t v) { return (unsigned long long)v; };
+		const int pad = (int)ENavEdge::Pad, tele = (int)ENavEdge::Teleport, drop = (int)ENavEdge::Drop;
+		std::printf("BOT nav paths=%llu noPath=%llu repaths=%llu stuckRepaths=%llu padLinks=%llu padMisses=%llu teleLinks=%llu teleMisses=%llu floorChanges=%llu | drops=%llu dropMisses=%llu "
+			"landRepaths=%llu unplanned=%llu unplannedFalls=%llu edgeTimeouts=%llu flyTimeouts=%llu gaveUps=%llu retries=%llu groupMoves=%llu goals enemy=%llu heal=%llu weapon=%llu none=%llu "
+			"goalChanges=%llu unreachable=%llu pathCloser=%llu weaponYields=%llu myNoFloor=%llu farFloor=%llu portalMiss=%zu ticks follow=%llu straight=%llu strafe=%llu resets=%llu dashQuiet=%llu\n",
+			u(f.plans - f.noFloor - f.noPath), u(f.noFloor + f.noPath), u(c.refreshes), u(f.stuckRepaths), u(f.edges[pad]), u(f.edgeMisses[pad]), u(f.edges[tele]), u(f.edgeMisses[tele]),
+			u(c.floorChanges), u(f.edges[drop]), u(f.edgeMisses[drop]), u(f.landRepaths), u(f.unplannedEvents), u(f.unplannedFalls), u(f.edgeTimeouts), u(f.flyTimeouts), u(c.gaveUps),
+			u(c.retries), u(c.groupMoves), u(c.goals[(int)ENavGoal::Enemy]), u(c.goals[(int)ENavGoal::Heal]), u(c.goals[(int)ENavGoal::Weapon]), u(c.goals[(int)ENavGoal::None]),
+			u(c.goalChanges), u(c.goalUnreachable), u(c.pathCloser), u(c.weaponYields), u(c.myNoFloor), u(f.farFloor), f.portalMiss, u(c.followTicks), u(c.straightTicks), u(c.strafeTicks), u(c.resets), u(c.dashQuietTicks));
+		// 시간 — 봇 합 · 한 번 평균. StepNav 부른 틱 = follow + straight + strafe(옆걸음 · 목표 없음은 Step 전에 돌아간다)
+		const double stepTicks = (double)(c.followTicks + c.straightTicks + c.strafeTicks);
+		std::printf("BOT nav time thinkMs=%.1f selectMs=%.1f selects=%llu selectUs=%.1f stepMs=%.1f stepTicks=%.0f stepUs=%.2f\n", c.thinkNs / 1e6, c.selectNs / 1e6, u(c.selects),
+			c.selects ? c.selectNs / 1e3 / (double)c.selects : 0.0, c.stepNs / 1e6, stepTicks, stepTicks > 0 ? c.stepNs / 1e3 / stepTicks : 0.0);
 	}
 	// ─── 부하 시험 — 끝까지 안 가므로 결과 대조는 없다. 도중 값이 서버와 같은지만 ──
 	if (!args.script.empty())

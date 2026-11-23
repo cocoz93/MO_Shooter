@@ -758,6 +758,30 @@ namespace mo
 		return true;
 	}
 
+	void NavFloorDistances(const NavGraph& graph, uint32_t from, std::vector<double>& out)
+	{
+		const double inf = std::numeric_limits<double>::infinity();
+		out.assign(graph.ground, inf);
+		if (from >= graph.ground) return;
+		using Item = std::pair<double, uint32_t>;
+		std::priority_queue<Item, std::vector<Item>, std::greater<Item>> open;
+		out[from] = 0;
+		open.push(Item(0.0, from));
+		while (!open.empty())
+		{
+			const Item top = open.top();
+			open.pop();
+			if (top.first > out[top.second]) continue;
+			for (const NavEdge& e : graph.edges[top.second])
+			{
+				const double cost = top.first + e.cost;
+				if (cost >= out[e.to]) continue;
+				out[e.to] = cost;
+				open.push(Item(cost, e.to));
+			}
+		}
+	}
+
 	bool NavPortal(const NavNode& a, const NavNode& b, Vec3& outLeft, Vec3& outRight)
 	{
 		// 언리얼 이웃 바닥은 테두리 한 변을 나눠 갖는다(타일 경계에선 한 변의 일부). 같은 선 위(수평 2cm 안)에 겹친 몫이 1cm 넘는 변 짝 중 가장 긴 겹침
@@ -905,16 +929,42 @@ namespace mo
 	}
 
 	CNavFollower::CNavFollower(const NavMesh& mesh, const NavGraph& graph, double halfHeight, const NavFollowParams& params)
-		: _mesh(mesh), _graph(graph), _halfHeight(halfHeight), _p(params)
+		: _mesh(mesh), _graph(graph), _halfHeight(halfHeight), _p(params), _groups(NavWalkGroups(graph))
 	{
 	}
 
-	void CNavFollower::SetGoal(const Vec3& goal)
+	void CNavFollower::SetGoal(const Vec3& goal, bool resetStuck)
 	{
 		_goal = goal;
+		if (resetStuck) _stucks = 0;
+		if (Busy()) return;		// 내려앉으면 Flying 이 다시 찾기를 건다
+		// 걷던 중 같은 목표 다시 찾기 — 막힘 틱 셈을 이어 가야 0.5초 갱신 아래서도 1초 막힘이 난다. 막힘 · 내려앉음으로 이미 다시 찾기가 걸렸으면 그쪽 대로(0 부터)
+		_keepProgress = !resetStuck && _state == ENavFollow::Walking && !_needPlan;
 		_state = ENavFollow::Walking;
 		_needPlan = true;
+	}
+
+	void CNavFollower::Reset(const Vec3& goal)
+	{
+		_goal = goal;
 		_stucks = 0;
+		_keepProgress = false;
+		_flyEdgeTo = -1;
+		_state = ENavFollow::Walking;
+		_needPlan = true;
+	}
+
+	int CNavFollower::FloorOf(const Vec3& capsuleCenter) const
+	{
+		const Vec3 feet = capsuleCenter - Vec3(0, 0, _halfHeight);
+		const int floor = FindNavFloor(_mesh, feet, _p.floorDz, _p.floorOutside);
+		return floor >= 0 ? floor : FindNavFloor(_mesh, feet, _p.floorFarDz, _p.floorFarOutside);
+	}
+
+	double CNavFollower::EdgeStartDistance(const Vec3& at) const
+	{
+		if (_state != ENavFollow::Walking || _needPlan || _edgeIndex < 0 || _points.empty()) return std::numeric_limits<double>::infinity();
+		return DistanceXY(at, _points.back());
 	}
 
 	void CNavFollower::Plan(const NavObserve& o)
@@ -927,7 +977,8 @@ namespace mo
 		_index = 0;
 		_edgeFloor = _edgeIndex = -1;
 		_bestDistance = std::numeric_limits<double>::infinity();
-		_progressTicks = 0;
+		if (!_keepProgress) _progressTicks = 0;
+		_keepProgress = false;
 		_state = ENavFollow::Walking;
 		if (_p.straight)
 		{
@@ -983,6 +1034,7 @@ namespace mo
 		_state = ENavFollow::Flying;
 		_flyInput = input;
 		_flyTicks = 0;
+		_flyEdgeTo = -1;
 		_flew = o.mode == EMoveMode::Falling;
 	}
 
@@ -1029,6 +1081,11 @@ namespace mo
 				return _state;
 			}
 			++_counters.landRepaths;
+			if (_flyEdgeTo >= 0)
+			{
+				const int floor = FloorOf(o.location);
+				if (floor < 0 || (uint32_t)floor >= _graph.ground || _groups[floor] != _groups[_flyEdgeTo]) ++_counters.edgeMisses[(uint32_t)_flyEdgeKind];
+			}
 			_needPlan = true;
 		}
 		if (_needPlan) Plan(o);
@@ -1077,8 +1134,7 @@ namespace mo
 				const double distance = DistanceXY(o.location, _points[_index]);
 				if (_bestDistance == std::numeric_limits<double>::infinity())
 				{
-					_bestDistance = distance;
-					_progressTicks = 0;
+					_bestDistance = distance;	// 틱 셈은 Plan · 꺾임점 넘김이 0 으로 둔다(봇의 0.5초 다시 찾기는 이어 간다)
 				}
 				else if (distance < _bestDistance - _p.stuckDistance)
 				{
@@ -1109,18 +1165,22 @@ namespace mo
 			++_counters.edges[(uint32_t)edge.kind];
 			_stucks = 0;
 			EnterFlying(edge.kind == ENavEdge::Pad ? EFlyInput::Edge : EFlyInput::None, o);
+			_flyEdgeTo = (int)edge.to;
+			_flyEdgeKind = edge.kind;
 			if (_flyInput == EFlyInput::Edge) SteerYaw(edge.moveYaw + _p.edgeYawOffset, out);
 			return _state;
 		}
 		if (event || o.mode == EMoveMode::Falling)
 		{
 			++_counters.unplannedEvents;
+			++_counters.edgeMisses[(uint32_t)edge.kind];
 			EnterFlying(EFlyInput::None, o);
 			return _state;
 		}
 		if (++_edgeTicks > _p.edgeWalkMax)
 		{
 			++_counters.edgeTimeouts;
+			++_counters.edgeMisses[(uint32_t)edge.kind];
 			if (++_stucks > _p.giveUpStucks)
 			{
 				_state = ENavFollow::GaveUp;

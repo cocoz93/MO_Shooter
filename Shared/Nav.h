@@ -156,6 +156,8 @@ namespace mo
 
 	// 우리 그래프에서 이음 비용 합이 가장 작은 길(다익스트라). 못 가면 false · outHops 비움 · outCost 0
 	bool FindGraphPath(const NavGraph& graph, uint32_t from, uint32_t to, std::vector<NavHop>& outHops, double& outCost);
+	// from 에서 바닥마다 이음 비용 합이 가장 작은 값(못 가면 무한) — 봇이 길 거리로 가장 가까운 목표를 고른다(n-4)
+	void NavFloorDistances(const NavGraph& graph, uint32_t from, std::vector<double>& out);
 
 	// 이웃 바닥 a → b 가 맞닿은 선분(수평으로 겹친 테두리 중 가장 긴 것). outLeft · outRight = a 쪽에서 맞닿은 선을 볼 때 x → y 로 도는 쪽 끝 · 반대쪽 끝.
 	// 못 찾으면 false(L_Expanse 걷기 이음 1,236 은 다 찾는다 — NavCheck --walk 「portals」 줄)
@@ -218,17 +220,30 @@ namespace mo
 		uint64_t plans = 0, noFloor = 0, farFloor = 0, noPath = 0;
 		uint64_t stuckRepaths = 0, landRepaths = 0, edgeTimeouts = 0, unplannedEvents = 0, unplannedFalls = 0, flyTimeouts = 0;
 		uint64_t edges[4] = {};			// 탄 걷기 밖 이음(ENavEdge 차례 — Walk 칸은 안 씀)
+		uint64_t edgeMisses[4] = {};	// 이음을 타려다 놓침 — 사건 없이 edgeWalkMax 지남 · 다른 장치 · 떨어짐 이음이 아닌데 걷다 떨어짐 · 내려앉은 바닥이 이음 끝 바닥과 다른 걷기 덩어리
 		size_t portalMiss = 0;
 	};
 
 	class CNavFollower
 	{
+		enum class EFlyInput : uint8_t { None, Edge, Toward };
+
 	public:
 		CNavFollower(const NavMesh& mesh, const NavGraph& graph, double halfHeight, const NavFollowParams& params);
 
-		// 목표 = 캡슐 중심 자리. 다음 Step 이 지금 자리에서 길을 찾는다
-		void SetGoal(const Vec3& goal);
+		// 목표 = 캡슐 중심 자리. 다음 Step 이 지금 자리에서 길을 찾는다. resetStuck = 막힘 셈을 0 으로(새 목표). false = 같은 목표를 다시 찾기(봇의 0.5초 갱신 —
+		// 막힘이 거듭되면 그대로 포기까지 간다. 걷던 중이면 막힘 틱 셈도 이어 간다). 이음을 타는 중(Edge · Flying)이면 목표만 바꾸고 내려앉은 뒤 찾는다
+		void SetGoal(const Vec3& goal, bool resetStuck = true);
+		// 몸이 길 밖에서 옮겨졌다(부활) · 따라 걷기를 쉬었다(봇 옆걸음) — 타던 이음 · 날기를 버리고 다음 Step 이 지금 자리에서 찾는다. 셈은 그대로
+		void Reset(const Vec3& goal);
 		ENavFollow Step(const NavObserve& o, NavCommand& out);
+		// 캡슐 중심 자리 → 바닥(Plan 과 같은 두 단 허용 · 셈 안 함). 없으면 -1
+		int FloorOf(const Vec3& capsuleCenter) const;
+		// 이음을 타는 중 — 부르는 쪽이 요를 out.yaw 로 두고(밀기 점프대는 몸 방향으로 쏜다) 몸을 옮기는 다른 단추를 안 누른다
+		bool SteersYaw() const { return _state == ENavFollow::Edge || (_state == ENavFollow::Flying && _flyInput == EFlyInput::Edge); }
+		bool Busy() const { return _state == ENavFollow::Edge || _state == ENavFollow::Flying; }
+		// 걷는 중이고 이 길이 이음으로 끝나면 이음 시작 자리(마지막 꺾임점)까지 수평 거리, 아니면 무한 — 부르는 쪽이 이음 앞에서 몸을 옮기는 단추를 거두게(봇 대시, n-4)
+		double EdgeStartDistance(const Vec3& at) const;
 
 		ENavFollow State() const { return _state; }
 		const std::vector<Vec3>& Points() const { return _points; }		// 지금 걷는 꺾임점(마지막 = 목표 또는 이음 시작 자리)
@@ -237,8 +252,6 @@ namespace mo
 		const NavFollowCounters& Counters() const { return _counters; }
 
 	private:
-		enum class EFlyInput : uint8_t { None, Edge, Toward };
-
 		void Plan(const NavObserve& o);
 		void EnterFlying(EFlyInput input, const NavObserve& o);
 		void Steer(const Vec3& from, const Vec3& to, NavCommand& out);
@@ -248,9 +261,11 @@ namespace mo
 		const NavGraph& _graph;
 		double _halfHeight;
 		NavFollowParams _p;
+		std::vector<uint32_t> _groups;			// NavWalkGroups — 이음 놓침(내려앉은 덩어리) 가르기
 
 		ENavFollow _state = ENavFollow::NoPath;
 		bool _needPlan = false;
+		bool _keepProgress = false;				// SetGoal(…, false) 로 걷던 중 다시 찾기 — Plan 이 막힘 틱 셈(_progressTicks)을 이어 간다
 		Vec3 _goal, _planStart;
 		std::vector<uint32_t> _corridor;
 		std::vector<Vec3> _points;
@@ -259,6 +274,8 @@ namespace mo
 		double _bestDistance = 0;
 		uint32_t _progressTicks = 0, _stucks = 0, _edgeTicks = 0, _flyTicks = 0;
 		EFlyInput _flyInput = EFlyInput::None;
+		int _flyEdgeTo = -1;					// 지금 날고 있는 이음의 끝 바닥(길에 없는 사건 · 떨어짐이면 -1)
+		ENavEdge _flyEdgeKind = ENavEdge::Walk;
 		bool _flew = false;
 		double _yaw = 0;
 		NavFollowCounters _counters;

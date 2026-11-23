@@ -718,7 +718,11 @@ namespace
 			total.unplannedFalls += c.unplannedFalls;
 			total.flyTimeouts += c.flyTimeouts;
 			total.portalMiss += c.portalMiss;
-			for (int k = 0; k < 4; ++k) total.edges[k] += c.edges[k];
+			for (int k = 0; k < 4; ++k)
+			{
+				total.edges[k] += c.edges[k];
+				total.edgeMisses[k] += c.edgeMisses[k];
+			}
 			std::printf("NAVWALK pair=%zu kind=%s from=%u to=%u need=%s%s%s result=%s seconds=%.2f plans=%llu stuck=%llu edges=%llu/%llu/%llu unplanned=%llu pullOutside=%zu end=(%.1f %.1f %.1f) floor=%d\n", i,
 				p.kind, p.from, p.to, p.usesTeleport ? "T" : "-", p.usesPad ? "P" : "-", p.usesDrop ? "D" : "-", result, s, (unsigned long long)c.plans,
 				(unsigned long long)c.stuckRepaths, (unsigned long long)c.edges[(int)mo::ENavEdge::Teleport], (unsigned long long)c.edges[(int)mo::ENavEdge::Pad],
@@ -727,10 +731,11 @@ namespace
 		const size_t walked = pairs.size() - notSettled;
 		std::printf("NAVWALK need teleport=%zu pad=%zu drop=%zu | reached teleport=%zu pad=%zu drop=%zu\n", needTeleport, needPad, needDrop, reachedTeleport, reachedPad, reachedDrop);
 		std::printf("NAVWALK follow plans=%llu stuckRepaths=%llu landRepaths=%llu edgeTimeouts=%llu unplannedEvents=%llu unplannedFalls=%llu flyTimeouts=%llu noFloor=%llu farFloor=%llu noPath=%llu "
-			"portalMiss=%zu edges teleport=%llu pad=%llu drop=%llu\n", (unsigned long long)total.plans, (unsigned long long)total.stuckRepaths, (unsigned long long)total.landRepaths,
+			"portalMiss=%zu edges teleport=%llu pad=%llu drop=%llu misses teleport=%llu pad=%llu drop=%llu\n", (unsigned long long)total.plans, (unsigned long long)total.stuckRepaths, (unsigned long long)total.landRepaths,
 			(unsigned long long)total.edgeTimeouts, (unsigned long long)total.unplannedEvents, (unsigned long long)total.unplannedFalls, (unsigned long long)total.flyTimeouts,
 			(unsigned long long)total.noFloor, (unsigned long long)total.farFloor, (unsigned long long)total.noPath, total.portalMiss, (unsigned long long)total.edges[(int)mo::ENavEdge::Teleport],
-			(unsigned long long)total.edges[(int)mo::ENavEdge::Pad], (unsigned long long)total.edges[(int)mo::ENavEdge::Drop]);
+			(unsigned long long)total.edges[(int)mo::ENavEdge::Pad], (unsigned long long)total.edges[(int)mo::ENavEdge::Drop], (unsigned long long)total.edgeMisses[(int)mo::ENavEdge::Teleport],
+			(unsigned long long)total.edgeMisses[(int)mo::ENavEdge::Pad], (unsigned long long)total.edgeMisses[(int)mo::ENavEdge::Drop]);
 		std::printf("NAVWALK pull samples=%zu outside=%zu | walkTicks=%llu walkSlides=%llu\n", pullSamples, pullOutside, (unsigned long long)walkTicks, (unsigned long long)walkSlides);
 		const bool ok = pairs.size() == pairCount && notSettled == 0 && reached * 100 >= walked * 95 && pullOutside == 0 && portalFound == portalEdges;
 		std::printf("NAVWALK pairs=%zu reached=%zu stuck=%zu noPath=%zu timeout=%zu died=%zu wrongPlace=%zu notSettled=%zu meanSeconds=%.2f worstSeconds=%.2f margin=%.1f break=%s %s\n",
