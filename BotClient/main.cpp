@@ -3891,6 +3891,7 @@ int main(int argc, char** argv)
 	timeBeginPeriod(1);
 	const auto start = Clock::now();
 	uint64_t sentTicks = 0;
+	uint64_t catchUpCuts = 0, catchUpSkipped = 0;	// 벽시계 판 — 밀린 틱 입력을 잘라 낸 횟수 · 안 만든 틱 수(아래 kMaxCatchUpInputs · D170)
 	uint64_t lockstepSends = 0;		// 기다림 판에서 부른 SendNextInput 수(봇 합)
 	uint64_t lastReportSecond = 0;
 	bool allDone = false;
@@ -3942,7 +3943,17 @@ int main(int argc, char** argv)
 			// --testInputBurst — 반복이 8 틱 넘게 멈췄으면 밀린 틱 입력을 만들지 않는다. 만들면 한꺼번에 가서 그만큼 서버 줄에 계속 밀려 있다(서버는 줄이 차 있으면
 			// 틱마다 하나만 꺼내고 한도는 굶을 때만 쌓인다 — Room.cpp TickPlayerInputs). 그러면 쥐기 규칙이 만든 묶음도 한 틱에 안 돈다(device-event e-4 d1 — Lyra 판에서
 			// 봇 첫 입력이 23개 한꺼번에 · 그 뒤 서버가 틱마다 하나씩 · midTick 0). 몰림은 쥐기 규칙만 만든다
+			// 그 밖엔 밀린 틱 입력을 8 개까지만 만든다 — 다리 kMaxCatchUpInputs 와 같은 규칙(D170). 서버는 굶는 동안 한도를 8 까지만 쌓으므로 그보다 많이 보내면
+			// 넘는 몫이 서버 줄에 남아 접속 내내 그만큼 늦게 돈다(device-event e-6 — Lyra 같이 판 봇 첫 입력 22~23개 · 서버 줄 평균 약 12). 멈칫의 값은 멈칫한 클라가 치른다
+			constexpr uint64_t kMaxCatchUpInputs = 8;
+			const uint64_t before = sentTicks;
 			if (args.testInputBurst > 1 && target > sentTicks + 8) sentTicks = target - 1;
+			else if (target > sentTicks + kMaxCatchUpInputs) sentTicks = target - kMaxCatchUpInputs;
+			if (sentTicks != before)
+			{
+				++catchUpCuts;
+				catchUpSkipped += sentTicks - before;
+			}
 			while (sentTicks < target)
 			{
 				for (const std::unique_ptr<CBot>& bot : bots) bot->SendNextInput(args.breakMirror);
@@ -3964,6 +3975,7 @@ int main(int argc, char** argv)
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	timeEndPeriod(1);
+	std::printf("BOT catchUp cuts=%llu skippedTicks=%llu\n", (unsigned long long)catchUpCuts, (unsigned long long)catchUpSkipped);	// 벽시계 판 밀린 틱 입력 자름(D170) — 각본 판도 찍게 반복 바로 뒤(각본 판은 아래 끝 줄 앞에서 끝난다)
 	if (g_traceInputs) std::fclose(g_traceInputs);
 	if (g_navTrace) std::fclose(g_navTrace);
 	g_traceInputs = nullptr;
