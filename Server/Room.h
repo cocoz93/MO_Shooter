@@ -73,6 +73,10 @@ namespace mo
 		const std::vector<Launcher>* launchers = nullptr;
 		// 순간이동(teleport-plan t-4) — main 이 --teleports= 로 읽어 든다(같은 맵 장치 표라 같이 넘긴다). 없으면 순간이동 없는 판(TickWithLaunchers 가 안 본다)
 		const TeleportTable* teleports = nullptr;
+		// 시험 전용 --testQueueStats(device-event-plan e-6 · ④) — 사람마다 입력 줄에 남은 수 · 한 틱 사이에 받은 수를 재서 나갈 때 SERVER queue 줄로 낸다.
+		// 끝 줄을 바꾸지 않게(회귀 기준선) 켤 때만 낸다. 받침 · 장치 표와 상관없지만 방이 받는 시험 인자 자리가 여기라 같이 둔다(testBreakDeviceEvent 와 같다)
+		bool testQueueStats = false;
+		bool testBreakDeviceEvent = false;	// 시험 전용 --testBreakDeviceEvent — 장치 소식(S2C_DEVICE)을 안 보낸다(일부러 틀림 — 봇 · 다리 대조가 걸려야 한다, D169)
 	};
 
 	// 시점 입력의 네 갈래. 값을 돌려주는 함수로 두어 시험이 갈래를 전수로 볼 수 있게 한다
@@ -149,6 +153,9 @@ namespace mo
 		uint64_t teleportLaunches = 0;		// 옮기며 뒤따르는 발사를 남김(LaunchOnTeleport) — 다음 이동 머리에 넣으면 launchesApplied 에 센다
 		uint64_t teleportsByDevice[kMaxTeleports] = {};	// 들어간 장치 — 순간이동 표 차례
 		uint64_t teleportInfosSent = 0;		// 보낸 S2C_TELEPORT — 들어온 사람 수 × 장치 수여야 한다(t-5)
+		// 장치 소식(device-event-plan e-1 · D169) — 보낸 S2C_DEVICE. 세는 자리를 따로 둬 보내는 길이 빠졌는지 가린다(--testBreakDeviceEvent 면 둘 다 0)
+		uint64_t deviceTeleportMsgs = 0;	// 순간이동 — teleports 와 같아야 한다
+		uint64_t deviceLaunchMsgs = 0;		// 점프대 — launchesQueued 와 같아야 한다
 		// 무기 받침(W-2) — 위 pickups · pickupsFromRecheck 는 체력 받침만 센다(회귀 「받침갈래」가 체력 회복 수와 맞춰 본다). 대기 · 다시 검사는 같은 규칙이라 위 둘이 같이 센다
 		uint64_t weaponPickupsNew = 0;			// 없던 무기를 넣고 바로 듦
 		uint64_t weaponPickupsNoSwitch = 0;		// 없던 무기 — 재장전 중이라 넣기만(IgnorePickUpWhenReload)
@@ -434,6 +441,15 @@ namespace mo
 			std::array<QueuedInput, kInputQueueSize> queue;
 			int queueHead = 0;
 			int queueCount = 0;
+			// --testQueueStats(device-event e-6) — 틱 머리에서 본 「지난 틱에 꺼내고 남은 수」(= 지금 줄 − 이번에 받은 수)와 한 틱 사이에 받은 수
+			struct QueueStats
+			{
+				int arrivedSinceTick = 0;	// PushQueue 가 넣은 수(입력 · 시험 놓기) — 틱 머리에서 0 으로
+				uint64_t samples = 0, sumLeft = 0, ge4 = 0, ge8 = 0;
+				int maxLeft = 0, maxArrive = 0;
+				uint32_t firstTick = 0, maxLeftTick = 0, maxArriveTick = 0, firstGe4Tick = 0, firstGe8Tick = 0;
+				std::vector<uint8_t> series;	// 60 틱(1초)마다 남은 수 — 언제부터 쌓였나
+			} queueStats;
 			std::array<RewindSample, kRewindLimitTicks + 1> rewindHistory;	// 틱 % 크기 자리. 한도 18틱 + 보간용 1칸
 			CAnimState anim;
 			uint8_t animWeapon = 0;			// anim 이 쓰는 자세 묶음. 무기를 바꾼 틱의 UpdateAnimStates 에서 weapon 을 따라간다
@@ -539,6 +555,9 @@ namespace mo
 		bool TryMelee(Player& player, const wire::Input& input);	// 부르기 전에 melee.NextInput — 대시가 끊을지를 이번 입력 값으로 보려고 ApplyInput 이 앞에서 센다
 		void CountDash(EDashResult result);
 		void StartDash(Player& player, const DashStart& dash, uint32_t seq);	// seq = 켠 입력 번호(S2C_DASH 에 싣는다)
+		void NoteQueueStats(Player& player);			// --testQueueStats — TickPlayerInputs 머리
+		void PrintQueueStats(const Player& player) const;	// --testQueueStats — RemovePlayer
+		void SendDeviceEvent(const Player& player, uint32_t seq, wire::EDeviceEvent kind, int device);	// 순간이동 · 점프대 발사마다 방 전원에게(D169)
 		void CountGrenade(EGrenadeResult result);
 		// 던진 입력 — 근접 끊기 · 겨눔 선 · 던짐 계산 · 목록에 넣기. 걸음 앞에서 부른다(놓을 자리 = 이번 입력 걸음 전 몸, 짐작 4).
 		// camBack = 카메라에서 입력 시작점까지 시선 방향 거리(와이어 칸은 G-3)

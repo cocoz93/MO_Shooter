@@ -272,6 +272,7 @@ namespace mo
 		// 측정 전용 — 나간 뒤 도착한 탄은 그 몸이 없어 뒤 벽에 맞는다. 봇 판정 대조가 이 줄 뒤의 탄을 DEADSKIP 처럼 뺀다(C-5:
 		// 판 끝에 봇이 한꺼번에 끊으면 중계가 쏜 쪽 마지막 입력을 흔들림만큼 붙든 사이 맞은 쪽이 먼저 나간다)
 		if (_rewind.bulletLog) std::printf("LEAVE id=%u tick=%u\n", player->id, _tick);
+		if (_pickups.testQueueStats) PrintQueueStats(*player);
 		// 도움 기록에서 뺀다 — AssistProcessor 는 나간 사람의 PlayerState 가 비어 건너뛴다(AssistProcessor.cpp:49)
 		for (const std::unique_ptr<Player>& other : _players)
 		{
@@ -309,6 +310,7 @@ namespace mo
 		}
 		player.queue[(player.queueHead + player.queueCount) % kInputQueueSize] = item;
 		++player.queueCount;
+		++player.queueStats.arrivedSinceTick;
 		player.lastQueuedSeq = seq;
 		return true;
 	}
@@ -1148,6 +1150,9 @@ namespace mo
 			++_stats.teleportsByDevice[launch.teleported];
 			if (_teleports.items[launch.teleported].launchOnTeleport) ++_stats.teleportLaunches;
 		}
+		// 장치 소식(D169) — 받는 쪽 효과는 이 소식으로 낸다. 차례 = TickWithLaunchers 차례(옮김 → 옮긴 자리로 점프대). 대시 소식처럼 입력 처리 안이라 이 틱 상태보다 먼저 간다
+		if (launch.teleported >= 0) SendDeviceEvent(player, input.seq, wire::DEVICE_TELEPORT, launch.teleported);
+		if (launch.fired >= 0) SendDeviceEvent(player, input.seq, wire::DEVICE_LAUNCH, launch.fired);
 		_stats.dashLiftoffs += _moveSim.GetCounters().rootForceLiftoffs - liftoffsBefore;	// 위아래를 더하는 힘은 대시뿐이다(근접 밀기는 위아래 무시)
 		_moveSim.SetStandables(nullptr, 0);
 		_stats.grenadeWalkHits += _moveSim.GetCounters().standableHits - standableHitsBefore;
@@ -1279,6 +1284,26 @@ namespace mo
 		case EDashResult::Dead: ++_stats.dashDead; break;
 		}
 		++_stats.dashPresses;
+	}
+
+	// 장치 소식(S2C_DEVICE · device-event-plan e-1 · D169) — 서버가 순간이동시키거나 점프대가 쏠 때마다 방 전원에게. 자리 = 이 이동 끝 몸 자리(옮겼으면 옮긴 자리).
+	// 효과를 받는 쪽이 상태로 짐작하면 서버가 한 틱에 그 사람 입력 여럿을 돌릴 때 빗나간다(teleport-nav-progress 미결 ② — Lyra 관전 판 cE 2/6)
+	void CRoom::SendDeviceEvent(const Player& player, uint32_t seq, wire::EDeviceEvent kind, int device)
+	{
+		if (_pickups.testBreakDeviceEvent) return;	// 일부러 틀림 — 안 보내고 안 센다(끝 줄 SERVER device 가 teleport moves · launch queued 와 어긋난다)
+		wire::DeviceEvent msg = wire::DeviceEvent();
+		msg.h.size = (uint16_t)sizeof(msg);
+		msg.h.type = (uint16_t)wire::Msg::S2C_DEVICE;
+		msg.tick = _tick;
+		msg.player = player.id;
+		msg.seq = seq;
+		msg.x = (float)player.move.location.x;
+		msg.y = (float)player.move.location.y;
+		msg.z = (float)player.move.location.z;
+		msg.kind = (uint8_t)kind;
+		msg.device = (uint8_t)device;
+		SendToAll(&msg, (int)sizeof(msg));
+		++(kind == wire::DEVICE_TELEPORT ? _stats.deviceTeleportMsgs : _stats.deviceLaunchMsgs);
 	}
 
 	// 대시가 켜진 입력 — 끊기(Ability.Type.Action) → 일어서기 → 힘. DashCheck 이동 대조(D-1)와 같은 차례: 근접 밀기 지우기 → 일어서기 → 대시 힘.
@@ -1902,8 +1927,38 @@ namespace mo
 		return start;
 	}
 
+	// --testQueueStats(device-event-plan e-6 · ④) — 줄 밀림을 가른다: 서버 줄에 남아 기다린 몫(여기서 잼)과 상태가 클라에 늦게 닿은 몫(봇 쪽 차에서 이것을 뺀 나머지)
+	void CRoom::NoteQueueStats(Player& player)
+	{
+		Player::QueueStats& q = player.queueStats;
+		const int arrived = q.arrivedSinceTick;
+		q.arrivedSinceTick = 0;
+		if (player.lastQueuedSeq == 0) return;	// 아직 입력이 안 왔다
+		const int left = player.queueCount - arrived;
+		if (q.samples == 0) q.firstTick = _tick;
+		if (q.samples % 60 == 0 && q.series.size() < 1200) q.series.push_back((uint8_t)std::min(left, 255));
+		++q.samples;
+		q.sumLeft += (uint64_t)left;
+		if (left > q.maxLeft) { q.maxLeft = left; q.maxLeftTick = _tick; }
+		if (left >= 4) { ++q.ge4; if (q.firstGe4Tick == 0) q.firstGe4Tick = _tick; }
+		if (left >= 8) { ++q.ge8; if (q.firstGe8Tick == 0) q.firstGe8Tick = _tick; }
+		if (arrived > q.maxArrive) { q.maxArrive = arrived; q.maxArriveTick = _tick; }
+	}
+
+	void CRoom::PrintQueueStats(const Player& player) const
+	{
+		const Player::QueueStats& q = player.queueStats;
+		std::printf("SERVER queue player=%u firstTick=%u leaveTick=%u samples=%llu meanLeft=%.2f maxLeft=%d maxLeftTick=%u ge4=%llu ge8=%llu firstGe4Tick=%u firstGe8Tick=%u maxArrive=%d maxArriveTick=%u\n",
+			player.id, q.firstTick, _tick, (unsigned long long)q.samples, q.samples ? (double)q.sumLeft / (double)q.samples : 0.0, q.maxLeft, q.maxLeftTick,
+			(unsigned long long)q.ge4, (unsigned long long)q.ge8, q.firstGe4Tick, q.firstGe8Tick, q.maxArrive, q.maxArriveTick);
+		std::printf("SERVER queueSeries player=%u every=60 left=", player.id);
+		for (size_t i = 0; i < q.series.size(); ++i) std::printf(i ? ",%u" : "%u", (unsigned)q.series[i]);
+		std::printf("\n");
+	}
+
 	void CRoom::TickPlayerInputs(Player& player)
 	{
+		if (_pickups.testQueueStats) NoteQueueStats(player);
 		player.tokens = std::min(player.tokens + 1, kMaxInputTokens);
 
 		bool applied = false;

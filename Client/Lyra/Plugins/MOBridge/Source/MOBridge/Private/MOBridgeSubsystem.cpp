@@ -1087,6 +1087,12 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 		HandleTeleport(M, Size);
 		break;
 	}
+	case wire::Msg::S2C_DEVICE:
+	{
+		wire::DeviceEvent M = wire::DeviceEvent(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
+		HandleDeviceEvent(M, Size);
+		break;
+	}
 	case wire::Msg::S2C_PICKUP:
 	{
 		wire::Pickup M = wire::Pickup(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
@@ -1216,8 +1222,8 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 	}
 	// 순간이동(t-7) — 예측이 옮긴 입력 S 를 서버 상태로 맞춘다: S 를 지난 첫 비교에서 서버 자리 ↔ 같은 번호 예측 자리 차가 200cm 안이면 맞음(옮긴 쪽 · 안 옮긴 쪽은
 	// 장치 사이 2,000cm 넘게 갈린다), 넘으면 못 맞춤. 상태 자리가 옮긴 자리 그대로인지는 안 본다 — 서버가 한 틱에 입력 여럿을 돌리면 상태가 옮긴 입력을 지나 있다
-	// (t-7 판 tA: 옮긴 입력 125 → 다음 상태 입력 127). 예측이 안 옮긴 범위에서 200cm 넘게 갈렸고 서버 자리가 어느 장치의 옮긴 자리면 서버만 옮겼다 — 효과만
-	// 지금 낸다(D164 — Lyra 도 효과는 서버 것이 오고 소리 · 시점 돌림은 제 겹침에서만). 옮긴 자리가 아니면(옮긴 뒤 걸음이 더 돌았거나 · 다른 까닭) 따로 센다
+	// (t-7 판 tA: 옮긴 입력 125 → 다음 상태 입력 127). 예측이 안 옮긴 범위에서 200cm 넘게 갈린 수를 센다 — 서버만 옮긴 효과는 장치 소식이 낸다(HandleDeviceEvent · D169 —
+	// D164 그대로 효과만 · 소리 · 시점 돌림은 제 겹침에서만). 여기선 옛 짐작(서버 자리가 어느 장치의 옮긴 자리인가)을 견주기로만 센다 — 맞으면 lateGuess, 아니면 bigNoExit
 	if (R.compared && Core->bTeleportsReady)
 	{
 		bool bPredictedInRange = false;
@@ -1236,14 +1242,9 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 		if (!bPredictedInRange && R.posDiff >= wire::kRemoteTeleportDistance)
 		{
 			const int32 Exit = mo::MatchTeleportExit(Core->Teleports, mo::Vec3(P.x, P.y, P.z), Core->Params.capsuleRadius, mo::kTeleportExitTolerance);
-			if (Exit >= 0)
-			{
-				++TeleportSelfLate;
-				const APlayerController* SelfPC = GetWorld()->GetFirstPlayerController();
-				PlayTeleportCue(SelfPC ? SelfPC->GetPawn() : nullptr, Exit, FVector(P.x, P.y, P.z), true, false);
-			}
+			if (Exit >= 0) ++TeleportSelfLateGuess;
 			else ++TeleportSelfBigNoExit;
-			UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_LATE seq=%u device=%d posDiff=%.1f server=(%.1f,%.1f,%.1f)"), P.lastSeq, Exit, R.posDiff, P.x, P.y, P.z);
+			UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_SELF_JUMP seq=%u device=%d posDiff=%.1f server=(%.1f,%.1f,%.1f)"), P.lastSeq, Exit, R.posDiff, P.x, P.y, P.z);
 		}
 	}
 	if (R.compared)
@@ -1416,10 +1417,10 @@ void UMOBridgeSubsystem::AddRemoteSnapshot(const wire::PlayerState& P, uint32 Se
 	S.MoveY = P.moveY;
 	S.bFalling = (P.flags & wire::STATE_FALLING) != 0;
 	S.bCrouched = (P.flags & wire::STATE_CROUCHED) != 0;
-	// 남의 점프대(j-7) — 깃발이 새로 선 상태 = 그 틱 이동 끝에 쏠 점프대에 들었다. 어느 점프대인지는 그 자리 겹침으로 찾는다(여럿이면 마지막 — 서버 발사는 덮어쓴다,
-	// JumpPads.h RestoreLaunchers 와 같다). 효과는 화면 시점이 그 틱에 닿을 때(TickRemoteLaunchCues) — 받자마자 내면 보간 지연만큼 앞서 난다
-	// 남의 순간이동(t-7) — 앞 상태에서 200cm 넘게 뛰었고 그 자리가 어느 장치의 옮긴 자리면 그 틱 이동 끝에 옮겨졌다(남의 몸엔 예측이 없어 앞 상태와 견준다). 효과 때는 점프대와 같다.
-	// 못 잡는 것 — 서버가 옮긴 입력 뒤에 같은 틱에서 입력을 더 돌리면 상태 자리가 옮긴 자리를 지나 있다(t-7 판 tA 내 상태 79 · 115cm) — 진행 파일 미결
+	// 남의 점프대 · 남의 순간이동 효과는 장치 소식이 낸다(HandleDeviceEvent · D169 — 화면 시점이 그 틱에 닿을 때 TickRemoteLaunchCues). 아래 둘은 옛 짐작을 견주기로만 센다(효과 안 냄):
+	// 점프대 = 발사 깃발이 새로 선 상태(어느 점프대인지는 그 자리 겹침 — 여럿이면 마지막, JumpPads.h RestoreLaunchers 와 같다). 서버가 한 틱에 그 사람 입력 여럿을 돌리면
+	// 같은 틱 다음 입력이 깃발을 먹어 빠진다. 순간이동 = 앞 상태에서 200cm 넘게 뛰었고 그 자리가 어느 장치의 옮긴 자리(remoteExits) — 같은 까닭으로 상태가 옮긴 자리를
+	// 지나 있으면 remoteNoExit(t-7 판 tA 내 상태 79 · 115cm · 11-23 원인 확인 cE 6번 중 4번)
 	// 화면은 이미 있는 규칙(200cm 넘는 두 상태는 섞지 않음, TickRemotes)으로 건너뛴다 — 지켜보기가 실물로 센다
 	int32 TeleDevice = -1;
 	if (Core && Core->bTeleportsReady && R.SnapCount > 0)
@@ -1439,19 +1440,7 @@ void UMOBridgeSubsystem::AddRemoteSnapshot(const wire::PlayerState& P, uint32 Se
 			{
 				++TeleportRemoteExits;
 				TeleportRemoteJumpMin = TeleportRemoteJumpMin < 0.0 ? Jump : FMath::Min(TeleportRemoteJumpMin, Jump);
-				if (PendingLaunchCues.Num() >= 32)
-				{
-					PendingLaunchCues.RemoveAt(0);	// 점프대 효과와 같은 상한
-					++LaunchCueDropped;
-				}
-				FMOBPendingLaunchCue& Cue = PendingLaunchCues.AddDefaulted_GetRef();
-				Cue.Player = P.id;
-				Cue.Tick = ServerTick;
-				Cue.Pad = TeleDevice;
-				Cue.bTeleport = true;
-				Cue.Entry = Prev.Pos;
-				Cue.Dest = S.Pos;
-				UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_REMOTE player=%u tick=%u device=%d jump=%.1f at=(%.1f,%.1f,%.1f)"), P.id, ServerTick, TeleDevice, Jump, P.x, P.y, P.z);
+				UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_REMOTE_GUESS player=%u tick=%u device=%d jump=%.1f at=(%.1f,%.1f,%.1f)"), P.id, ServerTick, TeleDevice, Jump, P.x, P.y, P.z);
 			}
 		}
 	}
@@ -1467,19 +1456,7 @@ void UMOBridgeSubsystem::AddRemoteSnapshot(const wire::PlayerState& P, uint32 Se
 		{
 			if (Mask & (1u << k)) Pad = k;
 		}
-		if (Pad < 0) ++(TeleDevice >= 0 ? LaunchRemoteTeleport : LaunchRemoteNoPad);	// 순간이동 뒤따르는 발사 깃발 — 점프대 효과가 아니다
-		else
-		{
-			if (PendingLaunchCues.Num() >= 32)
-			{
-				PendingLaunchCues.RemoveAt(0);	// 화면 시계가 안 가는 동안 쌓인 것 — 남의 대시 효과와 같은 상한(제 판단)
-				++LaunchCueDropped;
-			}
-			FMOBPendingLaunchCue& Cue = PendingLaunchCues.AddDefaulted_GetRef();
-			Cue.Player = P.id;
-			Cue.Tick = ServerTick;
-			Cue.Pad = Pad;
-		}
+		if (Pad < 0) ++(TeleDevice >= 0 ? LaunchRemoteTeleport : LaunchRemoteNoPad);	// 순간이동 뒤따르는 발사 깃발 — 점프대 효과가 아니다(Pad >= 0 = 옛 짐작이 효과를 냈을 점프대)
 	}
 	R.bLaunchFlag = bLaunchFlag;
 	++R.SnapCount;
@@ -2680,6 +2657,61 @@ void UMOBridgeSubsystem::HandleMelee(const wire::Melee& M)
 	}
 }
 
+// 장치 소식(S2C_DEVICE · device-event-plan e-3 · D169) — 남의 순간이동 · 남의 점프대 효과와 예측이 놓친 내 순간이동 효과를 이 소식으로 낸다.
+// 상태 자리 · 발사 깃발로 짐작하지 않는다 — 서버가 한 틱에 그 사람 입력 여럿을 돌리면 상태가 옮긴 입력을 지나 있고 깃발은 같은 틱 다음 입력이 먹는다(teleport-nav-progress 미결 ②).
+// 남의 것은 효과 줄에 넣어 화면 시점이 그 틱에 닿을 때 낸다(TickRemoteLaunchCues — 짐작 때와 같은 때). 들어간 자리 = 그 사람의 마지막 받은 상태(소식은 같은 틱 상태보다 먼저 온다),
+// 옮긴 자리 = 소식 자리(서버가 옮긴 그대로 — 문 포털은 들어간 자리 차이를 더해 표의 나갈 자리와 다르다)
+void UMOBridgeSubsystem::HandleDeviceEvent(const wire::DeviceEvent& M, int32 Size)
+{
+	++DeviceEventRecv;
+	const bool bTeleport = M.kind == wire::DEVICE_TELEPORT;
+	const int32 Rows = !Core ? 0 : bTeleport ? (int32)Core->TeleportRows.size() : (int32)Core->LauncherRows.size();
+	if (Size < (int32)sizeof(M) || M.kind > wire::DEVICE_LAUNCH || (int32)M.device >= Rows)
+	{
+		++DeviceEventBad;
+		return;
+	}
+	const FVector At(M.x, M.y, M.z);
+	if (M.player == PlayerId)
+	{
+		++DeviceEventSelf;
+		if (!bTeleport)
+		{
+			++DeviceEventSelfLaunch;	// 내 점프대 효과는 예측이 쏜 걸음에서 낸다(j-7) — 셈만
+			return;
+		}
+		// 예측이 같은 입력에서 옮겼으면 효과는 그 걸음에 이미 났다. 아니면 서버만 옮겼다 — 효과만 지금(D164 — 소리 · 시점 돌림은 제 겹침에서만)
+		if (PendingSelfTeleportSeqs.Contains(M.seq))
+		{
+			++DeviceEventSelfPredicted;
+			return;
+		}
+		++TeleportSelfLate;
+		const APlayerController* SelfPC = GetWorld()->GetFirstPlayerController();
+		PlayTeleportCue(SelfPC ? SelfPC->GetPawn() : nullptr, M.device, At, true, false);
+		UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_LATE seq=%u device=%u tick=%u at=(%.1f,%.1f,%.1f)"), M.seq, (uint32)M.device, M.tick, M.x, M.y, M.z);
+		return;
+	}
+	++DeviceEventRemote;
+	if (PendingLaunchCues.Num() >= 32)
+	{
+		PendingLaunchCues.RemoveAt(0);	// 화면 시계가 안 가는 동안 쌓인 것 — 남의 대시 효과와 같은 상한(제 판단)
+		++LaunchCueDropped;
+	}
+	FMOBPendingLaunchCue& Cue = PendingLaunchCues.AddDefaulted_GetRef();
+	Cue.Player = M.player;
+	Cue.Tick = M.tick;
+	Cue.Pad = M.device;
+	Cue.bTeleport = bTeleport;
+	if (bTeleport)
+	{
+		const FMOBRemote* R = Remotes.Find(M.player);
+		Cue.Entry = R && R->SnapCount > 0 ? R->Snaps[(R->SnapCount - 1) % FMOBRemote::kSnapshots].Pos : At;
+		Cue.Dest = At;
+	}
+	UE_LOG(LogMOB, Log, TEXT("MOB_DEVICE_REMOTE player=%u tick=%u seq=%u kind=%u device=%u at=(%.1f,%.1f,%.1f)"), M.player, M.tick, M.seq, (uint32)M.kind, (uint32)M.device, M.x, M.y, M.z);
+}
+
 // 서버 대시 소식(D-3) — 내 것이면 예측을 서버 값으로 고친다(다르면 그 입력부터 대시를 다시 고르고 걸음을 다시 돌린다). 남의 것은 세기만 — 남의 몸 효과는 D-5
 void UMOBridgeSubsystem::HandleDash(const wire::Dash& M)
 {
@@ -3342,7 +3374,7 @@ void UMOBridgeSubsystem::PlayTeleportCue(APawn* Target, int32 Device, const FVec
 	RequestEventShot(bSelf ? TEXT("teleport_self_after") : TEXT("teleport_remote_after"), 0.6, 3);
 }
 
-// 남의 점프대 효과 — 시점 = 그 몸을 보간하는 화면 틱이 깃발 선 틱의 앞 틱을 넘은 첫 프레임(남의 대시 효과 TickRemoteDashCues 와 같은 규칙)
+// 남의 점프대 효과 — 시점 = 그 몸을 보간하는 화면 틱이 장치 소식 틱(D169 — 그 틱 상태와 같은 틱)의 앞 틱을 넘은 첫 프레임(남의 대시 효과 TickRemoteDashCues 와 같은 규칙)
 // 남의 순간이동도 같은 때(화면 몸은 아직 들어간 쪽 — 그래프도 Teleport 앞에 낸다). 낸 뒤 그 몸이 한 번에 건너뛰나 지켜본다
 void UMOBridgeSubsystem::TickRemoteLaunchCues()
 {
@@ -5092,6 +5124,10 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 			TeleportSounds2D, TeleportSounds3D, TeleportSoundMissing, TeleportRemoteJumps, TeleportRemoteExits, TeleportRemoteNoExit, TeleportRemoteJumpMin, LaunchRemoteTeleport,
 			TeleportRemoteSnapped, TeleportRemoteMidFrames, TeleportRemoteSnapTimeout, TeleportWatchLost, TelePending, bDeviceFxOff ? 1 : 0, bBreakTeleport ? 1 : 0);
 	}
+	// 장치 소식(D169 · device-event-plan e-3) — recv = 받음 · bad = 크기 · 종류 · 장치 번호 틀림 · self = 내 것 · selfPredicted = 그중 예측이 같은 입력에서 옮김 ·
+	// late = 예측 없이 서버만 옮겨 소식으로 낸 내 늦은 효과(MOB_TELEPORT late 와 같은 칸) · lateGuess = 옛 짐작(상태 자리)이 냈을 수 · selfLaunch = 내 점프대(셈만) · remote = 남의 것(효과 줄에 넣음)
+	UE_LOG(LogMOB, Log, TEXT("MOB_DEVICE_EVENT recv=%lld bad=%lld self=%lld selfPredicted=%lld late=%lld lateGuess=%lld selfLaunch=%lld remote=%lld"), DeviceEventRecv, DeviceEventBad,
+		DeviceEventSelf, DeviceEventSelfPredicted, TeleportSelfLate, TeleportSelfLateGuess, DeviceEventSelfLaunch, DeviceEventRemote);
 	// fails = 예비 가득 실패 소식(판 14 · L-4) · failBad = 그중 남 이름 · give ≠ Full(기대 0)
 	UE_LOG(LogMOB, Log, TEXT("MOB_PADS pads=%d msgs=%lld takes=%lld readies=%lld syncs=%lld badIndex=%lld noActor=%lld bound=%lld heals=%lld healBeforeFix=%lld healMismatch=%lld healNoPawn=%lld stateChecks=%lld stateDiff=%lld lastStateTick=%u fails=%lld failBad=%lld"),
 		Pads.Num(), PadMsgs, PadTakes, PadReadies, PadSyncs, PadBadIndex, PadNoActor, PadBound, PadHeals, PadHealBeforeFix, PadHealMismatch, PadHealNoPawn, PadStateChecks, PadStateDiff, LastStateTick, PadFails, PadFailBad);

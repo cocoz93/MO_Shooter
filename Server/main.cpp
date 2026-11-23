@@ -110,6 +110,8 @@ namespace
 			else if (s == "--debug") out.debug = true;
 			else if (s == "--testNoPawnBlock") out.rules.pawnBlock = false;	// 시험 전용 — 사람끼리 막기를 끈다(MatchRules.h · 봇도 같이 줘야 한다)
 			else if (s == "--testStartAllWeapons") out.rules.startAllWeapons = true;	// 시험 전용 — 세 무기로 부활(무기 줍기 전 동작, MatchRules.h · 봇도 같이 줘야 한다)
+			else if (s == "--testBreakDeviceEvent") out.pickups.testBreakDeviceEvent = true;	// 시험 전용 — 장치 소식을 안 보낸다(일부러 틀림, D169 · device-event-plan e-1)
+			else if (s == "--testQueueStats") out.pickups.testQueueStats = true;	// 시험 전용 — 사람마다 입력 줄 길이를 나갈 때 SERVER queue 줄로(device-event-plan e-6 · ④)
 			else if (value("--testGodPlayer=", v)) out.rules.testGodPlayerId = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);	// 시험 전용 — 그 번호 사람 무적(MatchRules.h · 봇도 같이 줘야 한다)
 			else if (s == "--rewindShadow") out.rewind.shadow = true;
 			else if (s == "--rewindLog") out.rewind.log = true;
@@ -898,6 +900,8 @@ int main(int argc, char** argv)
 		(unsigned long long)room.teleportLaunches, (unsigned long long)room.teleportInfosSent);
 	for (size_t i = 0; i < mo::kMaxTeleports; ++i) std::printf("%s%llu", i ? "," : "", (unsigned long long)room.teleportsByDevice[i]);
 	std::printf("\n");
+	// 장치 소식(D169 · device-event-plan e-1) — 보낸 S2C_DEVICE. teleportMsgs = 위 teleport moves · launchMsgs = 위 launch queued 와 같아야 한다(--testBreakDeviceEvent 면 0)
+	std::printf("SERVER device teleportMsgs=%llu launchMsgs=%llu\n", (unsigned long long)room.deviceTeleportMsgs, (unsigned long long)room.deviceLaunchMsgs);
 	// failMsgs = 예비 가득 실패로 집으려던 사람에게 보낸 소식(판 14 · L-4) — full 과 같아야 한다
 	std::printf("SERVER weaponPickups new=%llu noSwitch=%llu ammo=%llu full=%llu noSlot=%llu postGame=%llu fromRecheck=%llu switchRejected=%llu debugAmmoSets=%llu debugKills=%llu failMsgs=%llu\n",
 		(unsigned long long)room.weaponPickupsNew, (unsigned long long)room.weaponPickupsNoSwitch, (unsigned long long)room.weaponPickupsAmmo, (unsigned long long)room.weaponPickupsFull,

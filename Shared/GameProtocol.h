@@ -11,7 +11,7 @@ namespace mo
 {
 	namespace wire
 	{
-		constexpr uint32_t kProtocolVersion = 19;		// 19 = 순간이동 표 S2C_TELEPORT(teleport-plan t-5) · 18 = 점프대 표 S2C_LAUNCHER · 상태 STATE_LAUNCH_PENDING(jumppad-plan j-5) · 17 = 애니 꼬리 걷기 자리 나누기(L-13-a) — 쌓기 칸 번호 -2(서기 자리) · 바탕 자리 baseSlot · weights 방향 넷이 움직임 자리 방향 비중 · 16 =상태 꼬리 장치 발 높이 footLift · 장치 알파 plantAlpha(L-12-e) · 15 = 상태 꼬리 다리 IK 비중 legIKAlpha(L-12-c) · 14 = 몽타주 칸 빼기 진행 blendOut · 입력 끝 누름 차례 pressOrder · 받침 까닭 PICKUP_FAIL_FULL(L-4)
+		constexpr uint32_t kProtocolVersion = 20;		// 20 = 장치 소식 S2C_DEVICE(device-event-plan e-1 · D169) · 19 = 순간이동 표 S2C_TELEPORT(teleport-plan t-5) · 18 = 점프대 표 S2C_LAUNCHER · 상태 STATE_LAUNCH_PENDING(jumppad-plan j-5) · 17 = 애니 꼬리 걷기 자리 나누기(L-13-a) — 쌓기 칸 번호 -2(서기 자리) · 바탕 자리 baseSlot · weights 방향 넷이 움직임 자리 방향 비중 · 16 =상태 꼬리 장치 발 높이 footLift · 장치 알파 plantAlpha(L-12-e) · 15 = 상태 꼬리 다리 IK 비중 legIKAlpha(L-12-c) · 14 = 몽타주 칸 빼기 진행 blendOut · 입력 끝 누름 차례 pressOrder · 받침 까닭 PICKUP_FAIL_FULL(L-4)
 														// 13 = 수류탄 단추 BUTTON_GRENADE 를 보냄 · 입력 끝 카메라 거리 camBack · 수류탄 소식 S2C_GRENADE · 수류탄 상태 S2C_GRENADE_STATE(컨텐츠 G-3)
 														// 12 = 대시 단추 BUTTON_DASH 를 보냄 · 대시 소식 S2C_DASH(컨텐츠 D-3)
 														// 11 = 상태의 빠른 칸 quickSlots · 받침 소식의 종류 · 줍기 결과 · 무기 · 칸 · 탄 · 입력 번호 · 시험 입력의 탄 정하기 · 죽음(컨텐츠 W-2 · W-3)
@@ -48,6 +48,7 @@ namespace mo
 			S2C_GRENADE_STATE = 112,	// 잃어도 됨 — 산 수류탄마다 자리 · 회전 · 이번 틱 부딪힘. 산 수류탄이 있는 틱에만 상태 패킷 바로 뒤에(다음 틱이 덮는다)
 			S2C_LAUNCHER = 113,		// 잃으면 안 됨 — 점프대 표 한 줄(LauncherInfo). 들어올 때 점프대마다 하나. 표는 판 동안 안 바뀐다(jumppad-plan j-5)
 			S2C_TELEPORT = 114,		// 잃으면 안 됨 — 순간이동 표 한 줄(TeleportInfo). 들어올 때 장치마다 하나(점프대 표 바로 뒤). 표는 판 동안 안 바뀐다(teleport-plan t-5)
+			S2C_DEVICE = 115,		// 잃으면 안 됨 — 장치 소식(DeviceEvent). 서버가 순간이동시키거나 점프대가 쏠 때마다 방 전원에게. 그 입력 처리 안에서 보내 이 틱 상태보다 먼저 간다(D169)
 		};
 
 		enum EButton : uint8_t
@@ -82,7 +83,7 @@ namespace mo
 			STATE_MOVE_LOCKED = 1 << 4,	// 부활 직후 — 이동 입력을 안 받는다
 			STATE_ADS = 1 << 5,			// 조준 능력이 켜져 있다(GA_ADS) — 걸음 속도 · 퍼짐 · 조준 자세가 이 값을 따른다
 			STATE_LAUNCH_PENDING = 1 << 7,	// 이 상태의 이동 끝에 점프대가 쐈다 — 발사는 다음 입력의 이동 머리에 먹는다(PendingLaunchVelocity). 받는 쪽 예측은 이 깃발 · 상태 자리 · 속도 · 요로
-										// 발사를 다시 셈한다(Shared/JumpPads RestoreLaunchers). 남의 몸은 점프대 효과를 이 깃발로 낸다
+										// 발사를 다시 셈한다(Shared/JumpPads RestoreLaunchers). 남의 몸 점프대 효과는 이 깃발이 아니라 장치 소식(S2C_DEVICE)으로 낸다 — 한 틱에 입력 여럿이면 깃발이 상태에 안 실린다(D169)
 			STATE_CROUCHED = 1 << 6,	// 앉아 있다(bIsCrouched) — 캡슐 반높이 · 앉은 걸음 · 퍼짐 · 앉은 자세 · 메시 올림이 이 값을 따른다. 받는 쪽 애니도 앉음을 여기서 읽는다(D62 8)
 		};
 
@@ -456,6 +457,27 @@ namespace mo
 			char name[kTeleportNameBytes];
 		};
 
+		// S2C_DEVICE 의 종류
+		enum EDeviceEvent : uint8_t
+		{
+			DEVICE_TELEPORT = 0,	// 순간이동 장치에 들어가 옮겨짐 — device = 들어간 장치(TeleportInfo 차례)
+			DEVICE_LAUNCH = 1,		// 점프대 겹침 시작으로 발사를 남김(다음 이동 머리에 넣는다) — device = 점프대(LauncherInfo 차례)
+		};
+
+		// 장치 소식 하나(device-event-plan e-1 · D169) — 받는 쪽은 남의 몸 · 예측이 놓친 내 몸의 장치 효과를 이 소식으로 낸다.
+		// 상태 자리 · 발사 깃발(STATE_LAUNCH_PENDING)로 짐작하지 않는 까닭 — 서버가 굶은 뒤 그 사람 입력 여럿을 한 틱에 돌리면 상태가 옮긴 입력을 지나 있고
+		// 깃발은 같은 틱 다음 입력이 먹는다(teleport-nav-progress 미결 ② 원인 확인). 한 이동에 둘 다 나면 순간이동 먼저 · 옮긴 자리에서 쏜 점프대 다음(TickWithLaunchers 차례)
+		struct DeviceEvent
+		{
+			Header h;
+			uint32_t tick;
+			uint32_t player;
+			uint32_t seq;				// 그 사람 입력 번호 — 이 입력의 이동 끝에 일어났다
+			float x, y, z;				// 그 이동 끝 몸 자리(옮겼으면 옮긴 자리 — 문 포털은 들어간 자리 차이를 더해 장치 표의 나갈 자리와 다르다). 소리 자리 · 지켜보기에 쓴다
+			uint8_t kind;				// EDeviceEvent
+			uint8_t device;				// 장치 차례(kind 에 따라 순간이동 표 · 점프대 표)
+		};
+
 		// S2C_GRENADE_STATE 의 칸 깃발
 		enum EGrenadeStateFlag : uint8_t
 		{
@@ -532,6 +554,7 @@ namespace mo
 		static_assert(kMaxGrenadeStatePacketSize <= 1458, "ServerCore 패킷 한계(MAX_PACKET_SIZE) 안");
 		static_assert(sizeof(LauncherInfo) == 152, "점프대 표 소식 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 		static_assert(sizeof(TeleportInfo) == 288, "순간이동 표 소식 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
+		static_assert(sizeof(DeviceEvent) == 30, "장치 소식 크기, 칸을 바꾸면 다리 · 봇도 같이 다시 빌드");
 		static_assert(sizeof(Input) == 51, "입력 크기 — 칸을 바꾸면 다리 · 봇도 같이 다시 빌드(판 번호를 올린다)");
 
 		// 한 입력 안 누름 차례(L-4 · 판 14). 근접 · 대시 · 수류탄 · 재장전은 넷 다 누른 입력 하나에만 켜지는 단추라 한 입력에 둘 이상 켜질 수 있다.

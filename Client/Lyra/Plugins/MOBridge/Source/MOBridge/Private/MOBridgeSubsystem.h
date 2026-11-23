@@ -22,7 +22,7 @@ class ULyraAbilitySystemComponent;
 struct FGameplayTag;
 struct FLyraAbilitySimpleFailureMessage;
 
-namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; struct Grenade; struct LauncherInfo; struct TeleportInfo; } struct Vec3; }
+namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; struct Grenade; struct LauncherInfo; struct TeleportInfo; struct DeviceEvent; } struct Vec3; }
 
 // 남의 캐릭터 — 서버 상태를 틱 번호와 함께 쌓아 0.1초 뒤 시점을 보여 준다
 struct FMOBSnapshot
@@ -90,10 +90,10 @@ struct FMOBPendingDashCue
 struct FMOBPendingLaunchCue
 {
 	uint32 Player = 0;
-	uint32 Tick = 0;			// 깃발이 선 상태의 틱 — 그 틱 이동 끝에 쏠 점프대에 들었다
+	uint32 Tick = 0;			// 장치 소식의 틱(D169) — 그 틱 이동 끝에 쏠 점프대에 들었다 · 옮겨졌다(같은 틱 상태의 틱)
 	int32 Pad = -1;				// 서버 점프대 표 번호(bTeleport 면 들어간 순간이동 장치 표 번호)
 	bool bTeleport = false;
-	FVector Entry = FVector::ZeroVector;	// 순간이동 — 앞 상태 자리(들어간 쪽) · 그 틱 상태 자리(옮긴 자리 = 그래프 Teleport 의 DestLocation)
+	FVector Entry = FVector::ZeroVector;	// 순간이동 — 소식 받을 때 그 사람 마지막 상태 자리(들어간 쪽) · 소식 자리(옮긴 자리 = 그래프 Teleport 의 DestLocation)
 	FVector Dest = FVector::ZeroVector;
 };
 
@@ -275,6 +275,7 @@ private:
 	void PlayLauncherCue(APawn* Target, int32 Pad, bool bSelf);	// 점프대 효과 — B_Launcher 그래프의 Execute GameplayCue On Actor 와 같은 값
 	void TickRemoteLaunchCues();	// 매 프레임(TickRemoteDashCues 뒤) — 받아 둔 남의 점프대 효과 중 화면 시점이 닿은 것을 낸다(순간이동 효과 · 지켜보기도)
 	void HandleTeleport(const mo::wire::TeleportInfo& M, int32 Size);	// 서버 순간이동 표 한 줄(판 19, t-7) — 줄이 다 오면 내 예측에 넘긴다
+	void HandleDeviceEvent(const mo::wire::DeviceEvent& M, int32 Size);	// 장치 소식(판 20 · D169) — 남의 순간이동 · 점프대 효과와 예측이 놓친 내 순간이동 효과
 	void PlayTeleportCue(APawn* Target, int32 Device, const FVector& Dest, bool bSelf, bool bSound);	// 순간이동 효과 · 소리 — B_Teleport 그래프와 같은 값
 	ALyraWeaponSpawner* BindPad(int32 Index);
 	void ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects);
@@ -486,7 +487,7 @@ private:
 	// 점프대 표(S2C_LAUNCHER) · 효과 셈 — 받은 줄 · 틀린 줄 / 낸 효과(내 몸 · 남의 몸) · 장치 액터나 몸을 못 찾음 · 태그 없음 · 신호 길에 들어감(이 다리가 낸 것) · 쌓여 버림
 	int64 LauncherInfos = 0, LauncherInfoBad = 0;
 	int64 LaunchCuesSelf = 0, LaunchCuesRemote = 0, LaunchCueNoActor = 0, LaunchCueNoTag = 0, LaunchCueRouted = 0, LaunchCueDropped = 0;
-	int64 LaunchRemoteFlags = 0, LaunchRemoteNoPad = 0;	// 남의 깃발이 새로 선 수 · 그 자리에서 겹친 점프대를 못 찾은 수
+	int64 LaunchRemoteFlags = 0, LaunchRemoteNoPad = 0;	// 남의 깃발이 새로 선 수 · 그 자리에서 겹친 점프대를 못 찾은 수(견주기 — 효과는 장치 소식, D169)
 	int64 LaunchComparedOn = 0, LaunchFlagDiff = 0;		// 내 상태 — 서버 발사 깃발이 켜진 비교 줄 · 예측과 다른 줄(0 이어야 한다)
 	TArray<FMOBPendingLaunchCue> PendingLaunchCues;
 	FDelegateHandle LaunchCueRouteHandle;
@@ -504,10 +505,13 @@ private:
 	int64 TeleportSelfYaw = 0;		// 내 시점을 나갈 방향으로 돌린 수(예측이 옮긴 입력 중 bForceDirection 장치)
 	// 예측이 옮긴 입력을 서버 상태로 맞춤(그 입력을 지난 첫 비교의 자리 차 200cm 안) · 못 맞춤 / 예측이 안 옮긴 범위에서 200cm 넘게 갈림 — 서버 자리가 옮긴 자리(효과만 늦게, D164) · 아님
 	int64 TeleportSelfConfirmed = 0, TeleportSelfUnconfirmed = 0, TeleportSelfLate = 0, TeleportSelfBigNoExit = 0;
+	// 장치 소식(S2C_DEVICE · D169 · device-event-plan e-3) — 받음 · 틀림 · 내 것 · 그중 예측이 같은 입력에서 옮김 · 내 점프대(셈만) · 남의 것.
+	// 위 TeleportSelfLate 는 이제 소식이 낸 내 늦은 효과. TeleportSelfLateGuess = 옛 짐작(상태 자리가 옮긴 자리)이 냈을 수 · TeleportSelfBigNoExit 도 견주기용
+	int64 DeviceEventRecv = 0, DeviceEventBad = 0, DeviceEventSelf = 0, DeviceEventSelfPredicted = 0, DeviceEventSelfLaunch = 0, DeviceEventRemote = 0, TeleportSelfLateGuess = 0;
 	TArray<uint32> PendingSelfTeleportSeqs;	// 예측이 옮긴 입력 번호 — 서버 상태로 맞출 때까지
 	int64 TeleportCuesSelf = 0, TeleportCuesRemote = 0, TeleportCueNoActor = 0, TeleportCueNoTag = 0, TeleportCueRouted = 0;
 	int64 TeleportSounds2D = 0, TeleportSounds3D = 0, TeleportSoundMissing = 0;
-	int64 TeleportRemoteJumps = 0, TeleportRemoteExits = 0, TeleportRemoteNoExit = 0, LaunchRemoteTeleport = 0;	// 남의 상태 200cm 넘는 뜀 · 그중 옮긴 자리 · 아님(부활 · 시험 놓기) / 발사 깃발이 순간이동 몫
+	int64 TeleportRemoteJumps = 0, TeleportRemoteExits = 0, TeleportRemoteNoExit = 0, LaunchRemoteTeleport = 0;	// 남의 상태 200cm 넘는 뜀 · 그중 옮긴 자리 · 아님(부활 · 시험 놓기) / 발사 깃발이 순간이동 몫 — 다 견주기(효과는 장치 소식, D169)
 	double TeleportRemoteJumpMin = -1.0;
 	TArray<FMOBTeleportWatch> TeleportWatches;
 	int64 TeleportRemoteSnapped = 0, TeleportRemoteMidFrames = 0, TeleportRemoteSnapTimeout = 0, TeleportWatchLost = 0;	// 들어간 자리를 떠난 첫 프레임이 곧은 선 밖이거나 옮긴 쪽 끝 5%(건너뜀) · 선 안쪽 프레임 수(미끄러짐) / 1초 안에 못 가름 · 몸 없음

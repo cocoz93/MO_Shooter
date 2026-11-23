@@ -29,6 +29,12 @@
 //   --breakCrouch(--crouch 와 함께)는 앉기 키를 서버에만 보내고 여기 예측엔 안 넣는다 — 앉음 비교(BOT crouch diff)가 실패해야 한다
 //   --testNoPawnBlock(서버도 같이)은 사람끼리 막기를 끈다(시험 전용, D83) — 서버 ↔ 같은 코드 위치 차이 0 을 엄격히 본다. 안 주면 막기를 켜고 남 캡슐로 예측 · 보정한다
 //   --testPauseAfterSpawn=N 은 부활 직후 N 틱 동안 입력을 만들지도 보내지도 않는다(클라가 멈칫한 꼴 — 서버가 빈 입력으로 움직인다). 이동 막음 비교(BOT moveLock diff)는 0 이어야 한다
+//   --testInputBurst=N 은 클라가 멈칫한 꼴 — 입력은 틱마다 만들되 쥐고 있다가, 서버가 보낸 입력을 다 돌린 뒤(내 상태 lastSeq = 마지막으로 보낸 번호) 쥔 입력이 N 개가 되면 한꺼번에 보낸다.
+//     서버 줄에 입력이 남아 있으면 틱마다 꺼낼 한도가 1 이라(Room.cpp TickPlayerInputs) 몰아 보내도 한 틱에 하나씩 돌아 몰림이 숨는다 — 줄이 빈 뒤 굶는 동안 한도가 쌓여야
+//     받은 묶음을 한 틱에 돌린다(한도 끝 8 — N 은 8 이하로). 순간이동 원인 확인(11-23) — 남의 몸 효과가 「한 틱에 입력 여럿」 상태에서 빠지는지 본다.
+//     줄이 빈 걸 보기 전에 쥔 입력도 묶음에 센다 — 처음 규칙(빈 걸 본 뒤 N 틱 더 쥠)은 빈 걸 보기까지 쥔 몫이 얹혀 묶음이 커지고 서버 줄(kInputQueueSize 32)을 넘은 판이 있었다
+//     (11-23 device-event e-2 점프대 판 droppedFull=1 — 버린 입력이 묶음 끝이라 lastSeq 가 마지막 보낸 번호에 못 닿아 멈춤).
+//     시험 놓기를 보내기 전엔 쥔 입력을 먼저 보낸다(서버 차례 그대로). --testLockstep 과 같이 쓰지 않는다(서버가 틱마다 입력을 기다린다)
 //   --melee = 적이 4m 안에 보이면 근접 단추를 누른다(E-3). 근접이 켜지는 입력마다 서버와 같은 식으로 화면 판정해 밀기를 예측에 넣고,
 //     서버 근접 결과(S2C_MELEE)로 고친다. 받은 근접 소식의 규칙도 본다(BOT melee · meleeFix · meleeRules 줄). 기본 꺼짐
 //   --breakMelee(--melee 와 함께)는 화면 판정 밀기를 반으로 넣는다 — 서버 결과로 고친 수(meleeFix forceFixes)가 화면 맞음 수만큼 늘어야 한다
@@ -262,6 +268,7 @@ namespace
 		bool breakMirror = false;
 		bool breakCrouch = false;		// --breakCrouch — 앉기 키를 예측에 안 넣는다(일부러 틀림)
 		int testPauseAfterSpawn = 0;		// --testPauseAfterSpawn=N — 부활 직후 N 틱 동안 입력을 안 만듦(빈 입력 이동은 16 틱째부터)
+		int testInputBurst = 0;			// --testInputBurst=N — 클라 멈칫 흉내: 서버 줄이 빈 뒤 쥔 입력이 N 개면 한꺼번에 보냄(2 이상일 때만)
 		double seconds = 0;				// 0 이 아니면 부하 시험
 		double measureFromSeconds = 0;
 		double measureSeconds = 0;
@@ -785,6 +792,7 @@ namespace
 				input.seq = mine.seq;
 			}
 			else _self.AddInput(input, pushArg);
+			NotePredictedDevices(input.seq);
 			if (_breakDash == kBreakDashServer) input.buttons &= (uint8_t)~wire::BUTTON_DASH;	// 일부러 틀림 — 예측엔 넣고 서버엔 안 보냄
 			if (_breakGrenade == kBreakGrenadeServer) input.buttons &= (uint8_t)~wire::BUTTON_GRENADE;
 			ClearPawns();
@@ -799,8 +807,30 @@ namespace
 			if (g_traceInputs)
 				std::fprintf(g_traceInputs, "I %u seq=%u st=%u mv=%.6g,%.6g aim=%.6g,%.6g b=%u w=%u at=%.3f,%.3f,%.3f\n", _welcome.playerId, input.seq, _newestStateTick,
 					input.moveX, input.moveY, input.yaw, input.pitch, (unsigned)input.buttons, (unsigned)input.weapon, _self.GetMove().location.x, _self.GetMove().location.y, _self.GetMove().location.z);
-			if (!_net.SendPacket(input, wire::Msg::C2S_INPUT)) _net.Close();
+			if (_inputBurst > 1)
+			{
+				_heldInputs.push_back(input);
+				if (_confirmedSeq >= _flushedSeq) _serverCaughtUp = true;	// 서버가 지난 묶음을 다 돌렸다 — 줄이 비어 굶는 동안 꺼낼 한도가 쌓인다
+				if (_serverCaughtUp && (int)_heldInputs.size() >= _inputBurst) FlushHeldInputs();
+			}
+			else if (!_net.SendPacket(input, wire::Msg::C2S_INPUT)) _net.Close();
 			_lastSentSeq = input.seq;
+		}
+
+		// --testInputBurst — 쥔 입력을 만든 차례대로 보낸다. 시험 놓기 앞에서도 부른다(놓기가 앞 입력을 앞지르면 서버 차례가 틀어진다)
+		void FlushHeldInputs()
+		{
+			for (wire::Input& held : _heldInputs)
+			{
+				if (!_net.SendPacket(held, wire::Msg::C2S_INPUT))
+				{
+					_net.Close();
+					break;
+				}
+				_flushedSeq = held.seq;
+			}
+			_heldInputs.clear();
+			_serverCaughtUp = false;
 		}
 
 		void Close() { _net.Close(); }
@@ -840,6 +870,14 @@ namespace
 		uint64_t GetLaunchFlagStates() const { return _launchFlagStates; }
 		uint64_t GetLaunchFlagDiff() const { return _launchFlagDiff; }
 		uint64_t GetServerLaunches() const { return _serverLaunches; }
+		uint64_t GetFlagLaunches() const { return _flagLaunches; }
+		uint64_t GetDeviceBad() const { return _deviceBad; }
+		uint64_t GetDeviceSelf(int kind) const { return _deviceSelf[kind]; }
+		uint64_t GetDevicePredicted(int kind) const { return _devicePredicted[kind]; }
+		uint64_t GetDeviceDiff() const { return _deviceDiff; }
+		uint64_t GetDeviceMidTick() const { return _deviceMidTick; }
+		uint64_t GetDeviceOthers() const { return _deviceOthers; }
+		uint64_t GetDevicePredDropped() const { return _devicePredDropped; }
 		size_t GetLauncherCount() const { return _self.GetLauncherCount(); }
 		uint64_t GetGrenadeUnconfirmedPost() const { return _grenadeUnconfirmedPost; }
 		uint64_t GetGrenadeUnacked() const { return _self.CountGrenadeThrownUnacked(); }
@@ -852,6 +890,7 @@ namespace
 		void SetPush(bool on) { _push = on; }
 		void SetFireAlways(bool on) { _fireAlways = on; }
 		void SetPauseAfterSpawn(int ticks) { _pauseAfterSpawn = ticks; }
+		void SetInputBurst(int count) { _inputBurst = count; }
 		uint64_t GetPawnReconciles() const { return _pawnReconciles; }
 		uint64_t GetPawnCorrected() const { return _pawnCorrected; }
 		uint64_t GetFallDiff() const { return _fallDiff; }
@@ -1044,6 +1083,9 @@ namespace
 				break;
 			case wire::Msg::S2C_TELEPORT:
 				OnTeleport(Copy<wire::TeleportInfo>(data, size), size);
+				break;
+			case wire::Msg::S2C_DEVICE:
+				OnDeviceEvent(Copy<wire::DeviceEvent>(data, size), size);
 				break;
 			case wire::Msg::S2C_RESULT:
 				_result = Copy<wire::Result>(data, size);
@@ -1405,9 +1447,10 @@ namespace
 				if (_measureView) _viewHistory[p.id].Add(p, stateTick, hasAnim ? &anim : nullptr);
 				if (p.id == _welcome.playerId)
 				{
-					// 점프대 — 서버가 쏜 수 = 깃발이 꺼짐 → 켜짐으로 바뀐 상태 수(발사는 다음 입력에 먹어 깃발이 한 입력만 선다. 기다림 판이면 입력마다 상태 하나라 빠짐없이 센다)
+					// 점프대 — 발사 깃발이 꺼짐 → 켜짐으로 바뀐 상태 수(flagLaunches). 판정의 서버 발사 수(serverLaunches)는 장치 소식으로 센다(OnDeviceEvent · D169) — 깃발은 다음 입력 하나에만 서서
+					// 서버가 한 틱에 내 입력 여럿을 돌리면 같은 틱 다음 입력이 먹어 상태에 안 실린다(벽시계 판 · 몰아 보내기 판에서 빠짐, 기다림 판이면 입력마다 상태 하나라 빠짐없음)
 					const bool launchFlag = (p.flags & wire::STATE_LAUNCH_PENDING) != 0;
-					if (launchFlag && !_lastLaunchFlag) ++_serverLaunches;
+					if (launchFlag && !_lastLaunchFlag) ++_flagLaunches;
 					_lastLaunchFlag = launchFlag;
 					if (_jumpPadScript) OnJumpPadState(p);
 					// 경로 모드는 비교하지 않는다 — 자리 옮기기는 걷는 상태로, 봇의 OnSpawn 은 떨어지는 상태로 시작해 처음부터 어긋난다
@@ -1415,6 +1458,7 @@ namespace
 					selfSeen = true;
 					selfState = p;
 					_confirmedSeq = p.lastSeq;	// 걸음 몸 다시 돌리기(L-8-b-2)의 시작 앞 번호
+					CheckDeviceAcks(p.lastSeq, stateTick);
 					const uint32_t ackLag = _self.GetSeq() - p.lastSeq;
 					_ackLagSum += ackLag;
 					++_ackLagSamples;
@@ -2072,6 +2116,95 @@ namespace
 			if (_jumpPadScript && !_teleportScript) std::printf("JUMPPAD table=%zu break=%d\n", _launcherRows.size(), _breakJumpPad);
 		}
 
+		// 장치 소식(S2C_DEVICE · D169 · device-event-plan e-2) — 서버가 순간이동시키거나 점프대가 쏠 때마다 방 전원에게 온다. 내 것은 예측 사건과 입력 번호 · 종류 · 장치로 맞춰 보고,
+		// 판정의 서버 발사 수(serverLaunches)를 센다(발사를 남긴 소식 = 점프대 · 뒤따르는 발사가 있는 순간이동 장치 — 깃발 꺼짐 → 켜짐 수와 같은 뜻)
+		void OnDeviceEvent(const wire::DeviceEvent& m, int size)
+		{
+			if (size < (int)sizeof(m) || m.kind > wire::DEVICE_LAUNCH)
+			{
+				++_deviceBad;
+				return;
+			}
+			if (g_traceInputs)
+				std::fprintf(g_traceInputs, "D %u tick=%u seq=%u kind=%u device=%u at=%.3f,%.3f,%.3f\n", m.player, m.tick, m.seq, (unsigned)m.kind, (unsigned)m.device, (double)m.x,
+					(double)m.y, (double)m.z);
+			if (m.player != _welcome.playerId)
+			{
+				++_deviceOthers;
+				return;
+			}
+			++_deviceSelf[m.kind];
+			if (m.kind == wire::DEVICE_LAUNCH || (m.device < _teleportRows.size() && _teleportRows[m.device].launchOnTeleport)) ++_serverLaunches;
+			bool matched = false;
+			for (PredictedDevice& pd : _predictedDevices)
+			{
+				if (pd.matched || pd.seq != m.seq || pd.kind != m.kind) continue;
+				pd.matched = true;
+				matched = pd.device == (int)m.device;
+				break;
+			}
+			if (!matched)
+			{
+				++_deviceDiff;
+				std::printf("BOT device diff server seq=%u kind=%u device=%u — 같은 번호 예측 사건이 없거나 장치가 다름\n", m.seq, (unsigned)m.kind, (unsigned)m.device);
+			}
+			_deviceMidChecks.push_back({m.tick, m.seq});
+		}
+
+		// 예측 사건 적기 — 입력을 예측에 넣은 바로 뒤에 부른다(GetLastLaunchPad 는 그 입력 몫일 때만 맞다). 차례는 서버 소식과 같다(옮김 → 옮긴 자리에서 쏜 점프대)
+		void NotePredictedDevices(uint32_t seq)
+		{
+			const CSelfPrediction::TeleportEvent& tp = _self.GetLastTeleport();
+			const int pad = _self.GetLastLaunchPad();
+			for (int k = 0; k < 2; ++k)
+			{
+				const int device = k == 0 ? (tp.seq == seq && seq != 0 ? tp.device : -1) : pad;
+				if (device < 0) continue;
+				if (_predictedDevices.size() >= 64)
+				{
+					_predictedDevices.erase(_predictedDevices.begin());
+					++_devicePredDropped;
+				}
+				PredictedDevice pd;
+				pd.seq = seq;
+				pd.kind = (uint8_t)(k == 0 ? wire::DEVICE_TELEPORT : wire::DEVICE_LAUNCH);
+				pd.device = device;
+				_predictedDevices.push_back(pd);
+				++_devicePredicted[k];
+			}
+		}
+
+		// 내 상태마다 — 서버가 돌린 입력(lastSeq 까지)의 예측 사건에 소식이 없었으면 어긋남(소식은 입력 처리 안에서 보내 같은 틱 상태보다 먼저 온다).
+		// 틱 중간 사건 = 소식의 틱 상태 lastSeq 가 소식 seq 보다 큼 — 서버가 그 입력 뒤로 같은 틱에 내 입력을 더 돌려 상태 자리가 사건 자리를 지나 있다(teleport-nav-progress 미결 ②)
+		void CheckDeviceAcks(uint32_t lastSeq, uint32_t stateTick)
+		{
+			for (size_t i = 0; i < _predictedDevices.size();)
+			{
+				const PredictedDevice& pd = _predictedDevices[i];
+				if (pd.seq > lastSeq)
+				{
+					++i;
+					continue;
+				}
+				if (!pd.matched)
+				{
+					++_deviceDiff;
+					std::printf("BOT device diff predicted seq=%u kind=%u device=%d — 서버가 그 입력을 돌렸는데(lastSeq=%u) 소식이 없음\n", pd.seq, (unsigned)pd.kind, pd.device, lastSeq);
+				}
+				_predictedDevices.erase(_predictedDevices.begin() + (std::ptrdiff_t)i);
+			}
+			for (size_t i = 0; i < _deviceMidChecks.size();)
+			{
+				if (_deviceMidChecks[i].tick > stateTick)
+				{
+					++i;
+					continue;
+				}
+				if (_deviceMidChecks[i].tick == stateTick && lastSeq > _deviceMidChecks[i].seq) ++_deviceMidTick;
+				_deviceMidChecks.erase(_deviceMidChecks.begin() + (std::ptrdiff_t)i);
+			}
+		}
+
 		// 순간이동 표 한 줄(S2C_TELEPORT, 판 19) — count 줄이 다 와야 표로 본다. 몸 메시 높이(meshBaseZ)는 줄마다 같아야 한다(다르면 그 줄을 틀린 줄로 센다)
 		void OnTeleport(const wire::TeleportInfo& info, int size)
 		{
@@ -2378,6 +2511,7 @@ namespace
 				place.y = plan.start.y;
 				place.z = plan.start.z;
 				place.hp = 100.f;
+				FlushHeldInputs();
 				if (!_net.SendPacket(place, wire::Msg::C2S_DEBUG_PLACE)) _net.Close();
 				_lastSentSeq = seq;
 				_jumpPadYaw = plan.yaw;
@@ -2450,7 +2584,7 @@ namespace
 			const uint64_t posDiff = _posDiff - _jumpPadPosDiff0, velDiff = _velDiff - _jumpPadVelDiff0, flagDiff = _flagDiff - _jumpPadFlagDiff0;
 			if (_teleportScript)
 			{
-				// 판정 — 표 전부 고름 · 다 돌림 · 서버 발사 깃발이 선 수 = 예측 옮긴 수 = 장치 수(장치 6개 다 뒤따르는 발사가 있다 — 서버 옮긴 수는 서버 줄 SERVER teleport 로 따로 본다) ·
+				// 판정 — 표 전부 고름 · 다 돌림 · 서버 발사 소식 수(D169 — 전엔 발사 깃발이 선 수) = 예측 옮긴 수 = 장치 수(장치 6개 다 뒤따르는 발사가 있다 — 서버 옮긴 수는 서버 줄 SERVER teleport 로 따로 본다) ·
 				// 상태 비교 어긋남 0 · 끝 자리 1cm 안 · 끝 요 · 옮긴 장치 맞음 · 위층 도착 = 나갈 자리가 위층인 장치 수(> 0) · 되살림 실패 0
 				size_t upExpected = 0, launching = 0;
 				for (const Teleporter& d : _teleportRows)
@@ -2495,6 +2629,7 @@ namespace
 			place.y = kScriptHome.y;
 			place.z = kScriptHome.z;
 			place.hp = 100.f;
+			FlushHeldInputs();
 			if (!_net.SendPacket(place, wire::Msg::C2S_DEBUG_PLACE))
 			{
 				_net.Close();
@@ -3386,6 +3521,10 @@ namespace
 		bool _crouchToggle = false;		// --crouch
 		bool _breakCrouch = false;		// --breakCrouch
 		int _pauseAfterSpawn = 0, _pauseLeft = 0;	// --testPauseAfterSpawn — 부활마다 쉴 틱 수 · 남은 수
+		int _inputBurst = 0;					// --testInputBurst — 한 번에 보낼 묶음 크기(서버 줄이 빈 뒤)
+		std::vector<wire::Input> _heldInputs;	// 아직 안 보낸 입력(만든 차례 그대로)
+		uint32_t _flushedSeq = 0;				// 마지막으로 실제 보낸 입력 번호 — 내 상태 lastSeq 가 이만큼 오면 서버 줄이 비었다
+		bool _serverCaughtUp = false;			// 지난 묶음을 서버가 다 돌렸다(내 상태 lastSeq ≥ _flushedSeq) — 묶음을 보내면 다시 거짓
 		CSpreadRng _crouchRng;
 		int _crouchWait = 0;
 		// 근접(E-3)
@@ -3427,7 +3566,30 @@ namespace
 		uint64_t _teleportInfos = 0, _teleportInfoBad = 0;
 		uint64_t _launchFlagStates = 0;		// 서버 발사 깃발이 켜진 비교 줄
 		uint64_t _launchFlagDiff = 0;		// 그 깃발이 예측과 다른 줄(flagDiff 안에도 든다)
-		uint64_t _serverLaunches = 0;		// 서버 깃발이 꺼짐 → 켜짐으로 바뀐 내 상태 수
+		uint64_t _serverLaunches = 0;		// 발사를 남긴 내 장치 소식 수 — 점프대 · 뒤따르는 발사가 있는 순간이동(D169 — 전엔 깃발이 선 상태 수)
+		uint64_t _flagLaunches = 0;			// 서버 깃발이 꺼짐 → 켜짐으로 바뀐 내 상태 수(한 틱에 입력 여럿을 돌리면 빠진다 — 견주기용)
+		// 장치 소식(S2C_DEVICE · D169 · device-event-plan e-2)
+		struct PredictedDevice
+		{
+			uint32_t seq = 0;
+			uint8_t kind = 0;		// wire::EDeviceEvent
+			int device = -1;
+			bool matched = false;	// 같은 번호 · 같은 종류 서버 소식이 왔다
+		};
+		struct DeviceMidCheck
+		{
+			uint32_t tick = 0;
+			uint32_t seq = 0;
+		};
+		std::vector<PredictedDevice> _predictedDevices;	// 예측이 옮기거나 쏜 입력 중 서버가 아직 안 돌린 것(내 상태 lastSeq 가 지나면 지운다)
+		std::vector<DeviceMidCheck> _deviceMidChecks;	// 받은 내 소식 중 같은 틱 상태를 아직 못 본 것
+		uint64_t _deviceBad = 0;				// 크기 · 종류가 틀린 소식
+		uint64_t _deviceSelf[2] = {};			// 받은 내 소식 — [0] 순간이동 · [1] 점프대
+		uint64_t _devicePredicted[2] = {};		// 예측 사건(AddInput 몫) — 같은 칸
+		uint64_t _deviceDiff = 0;				// 예측 사건 없는 내 소식 + 장치가 다른 것 + 서버가 그 입력을 돌렸는데 소식이 없는 예측 사건
+		uint64_t _deviceMidTick = 0;			// 소식 입력 뒤로 같은 틱에 내 입력이 더 돎(같은 틱 상태 lastSeq > 소식 seq) — 시험이 몰림을 정말 만들었나
+		uint64_t _deviceOthers = 0;			// 받은 남의 소식
+		uint64_t _devicePredDropped = 0;		// 예측 사건 줄이 차 버린 것(상태가 안 와 lastSeq 가 안 지날 때만 — 0 이어야 한다)
 		bool _lastLaunchFlag = false;
 		int _breakJumpPad = 0;				// --breakJumpPad — kBreakJumpPadOff · kBreakJumpPadValue
 		bool _jumpPadScript = false;		// --script=jumppad
@@ -3598,6 +3760,7 @@ namespace
 			else if (s == "--testLockstep") out.lockstep = true;
 			else if (s == "--breakCrouch") out.breakCrouch = true;
 			else if (s.rfind("--testPauseAfterSpawn=", 0) == 0) out.testPauseAfterSpawn = std::atoi(s.c_str() + 22);
+			else if (s.rfind("--testInputBurst=", 0) == 0) out.testInputBurst = std::atoi(s.c_str() + 17);
 			else
 			{
 				std::printf("모르는 인자 %s\n", s.c_str());
@@ -3683,6 +3846,7 @@ int main(int argc, char** argv)
 		bots.back()->SetPush(args.push);
 		bots.back()->SetFireAlways(args.judgeFireAlways);
 		bots.back()->SetPauseAfterSpawn(args.testPauseAfterSpawn);
+		bots.back()->SetInputBurst(args.testInputBurst);
 		if (args.lockstep) bots.back()->SetSeedByPlayerId(args.seed + 100);
 		bots.back()->SetJudge(judging ? &judge : nullptr);
 		if (!args.script.empty()) bots.back()->SetScript(args.scriptHoldSeconds, args.scriptWeapon, args.script);
@@ -3775,6 +3939,10 @@ int main(int argc, char** argv)
 		else
 		{
 			const uint64_t target = (uint64_t)(elapsed * wire::kTickRate) + (uint64_t)args.lead;
+			// --testInputBurst — 반복이 8 틱 넘게 멈췄으면 밀린 틱 입력을 만들지 않는다. 만들면 한꺼번에 가서 그만큼 서버 줄에 계속 밀려 있다(서버는 줄이 차 있으면
+			// 틱마다 하나만 꺼내고 한도는 굶을 때만 쌓인다 — Room.cpp TickPlayerInputs). 그러면 쥐기 규칙이 만든 묶음도 한 틱에 안 돈다(device-event e-4 d1 — Lyra 판에서
+			// 봇 첫 입력이 23개 한꺼번에 · 그 뒤 서버가 틱마다 하나씩 · midTick 0). 몰림은 쥐기 규칙만 만든다
+			if (args.testInputBurst > 1 && target > sentTicks + 8) sentTicks = target - 1;
 			while (sentTicks < target)
 			{
 				for (const std::unique_ptr<CBot>& bot : bots) bot->SendNextInput(args.breakMirror);
@@ -3841,6 +4009,28 @@ int main(int argc, char** argv)
 		}
 		std::printf("BOT teleport infos=%llu bad=%llu tableRows=%zu predTeleported=%llu forcedYaw=%llu\n", (unsigned long long)infos, (unsigned long long)infoBad, tables,
 			(unsigned long long)predTeleported, (unsigned long long)forcedYaw);
+	}
+	// 장치 소식(D169 · device-event-plan e-2) — self = 받은 내 소식(순간이동 · 점프대) · pred = 예측 사건 · diff = 예측 ↔ 서버 어긋남(0 이어야) · midTick = 틱 중간 사건 ·
+	// flagLaunches = 발사 깃발이 선 상태 수(한 틱에 입력 여럿이면 빠진다 — serverLaunches 와 견주기용) · others = 남의 소식 · bad = 틀린 소식. 봇 합
+	{
+		uint64_t bad = 0, selfT = 0, selfL = 0, predT = 0, predL = 0, diff = 0, mid = 0, others = 0, dropped = 0, flagLaunches = 0, serverLaunches = 0;
+		for (const std::unique_ptr<CBot>& bot : bots)
+		{
+			bad += bot->GetDeviceBad();
+			selfT += bot->GetDeviceSelf(0);
+			selfL += bot->GetDeviceSelf(1);
+			predT += bot->GetDevicePredicted(0);
+			predL += bot->GetDevicePredicted(1);
+			diff += bot->GetDeviceDiff();
+			mid += bot->GetDeviceMidTick();
+			others += bot->GetDeviceOthers();
+			dropped += bot->GetDevicePredDropped();
+			flagLaunches += bot->GetFlagLaunches();
+			serverLaunches += bot->GetServerLaunches();
+		}
+		std::printf("BOT device bad=%llu selfTeleport=%llu selfLaunch=%llu predTeleport=%llu predLaunch=%llu diff=%llu midTick=%llu others=%llu predDropped=%llu serverLaunches=%llu flagLaunches=%llu\n",
+			(unsigned long long)bad, (unsigned long long)selfT, (unsigned long long)selfL, (unsigned long long)predT, (unsigned long long)predL, (unsigned long long)diff,
+			(unsigned long long)mid, (unsigned long long)others, (unsigned long long)dropped, (unsigned long long)serverLaunches, (unsigned long long)flagLaunches);
 	}
 	// 봇 길찾기(n-4) — --nav 일 때만. paths = 길을 찾은 계획 · noPath = 바닥 · 길을 못 찾은 계획 · repaths = 다시 고르기 뒤 다시 찾기 · stuckRepaths = 막혀 다시 찾기 ·
 	// padLinks · teleLinks = 탄 이음 · Misses = 타려다 놓침(NavFollowCounters::edgeMisses) · floorChanges = 쫓는 적의 바닥이 바뀌어 다시 찾기. 봇 합

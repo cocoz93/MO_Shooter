@@ -4,7 +4,7 @@
 #
 #   Tools/Regress/regress.sh [--bin <빌드 폴더>] [--out <출력 폴더>] [--only checks|play|multi] [--break]
 #     --break  일부러 틀림 — 대조 도구 입력을 잘라 기준선과 어긋나게 하고 봇에 --breakMirror 를 준다(대시 판 봇엔 --breakDash=predict, 수류탄 판 봇엔 --breakGrenade=predict, 점프대 판 봇엔 --breakJumpPad=off,
-#              길찾기 판 봇엔 --testNavBreak=edgeyaw · 길 그래프엔 끝 자리를 50cm 옮긴 순간이동 각본 기록을 준다).
+#              길찾기 판 봇엔 --testNavBreak=edgeyaw · 길 그래프엔 끝 자리를 50cm 옮긴 순간이동 각본 기록을 준다 · 봇몰림 판 서버엔 --testBreakDeviceEvent).
 #              이때 FAIL 이 나와야 맞다(시험의 시험).
 # 판정은 개수·바이트만 본다. 시간 값은 안 쓰므로 PC 가 바빠도 돌릴 수 있다.
 # 기준선 = golden_checks.txt. 이동·충돌·무기 코드를 일부러 고쳤을 때만 갱신한다.
@@ -446,6 +446,7 @@ run_grenade() {
 # 봇 JUMPPAD PASS = 점프대마다 서버 쏨 · 예측 쏨 한 번 · 위치 · 속도 · 깃발 · 발사 깃발 차이 0 · 끝 자리 차 0.
 # 여기서 더 보는 것 = 서버 쏨(queued = applied = 8 · refused 0 · 점프대마다 1) = 봇이 본 발사 깃발(serverLaunches) = 예측이 쏜 수(predFired) · 받은 표 8줄(bad 0) · 되살림 실패 0.
 # 막기는 끄고(--testNoPawnBlock) 틱을 맞춘다(--testLockstep) — j-6 실물 판과 같은 조건. --break 이면 예측에 표를 안 넘겨(--breakJumpPad=off) 어긋나야 한다
+# 장치 소식(device-event e-5 · D169) — 서버 소식 8 = 봇이 받은 내 점프대 소식 8 · 예측 사건과 어긋남 0
 run_jumppad() {
 	local break_arg=""
 	[ "$BREAK" = 1 ] && break_arg="--breakJumpPad=off"
@@ -454,7 +455,7 @@ run_jumppad() {
 	"$BOT" "--map=$MAP" --port=7970 --bots=1 --seed=21 --script=jumppad --testNoPawnBlock --testLockstep $break_arg > "$OUT/jumppad_bot.log" 2>&1
 	local brc=$?
 	wait $spid
-	local src=$? ok=1 sl bl jr
+	local src=$? ok=1 sl bl jr sd bd
 	[ $brc = 0 ] && [ $src = 0 ] || ok=0
 	# 봇 로그는 줄 끝이 CRLF(서버는 LF)라 CR 을 떼고 끝을 맞춘다
 	sl="$(grep -a '^SERVER launch ' "$OUT/jumppad_srv.log" | tr -d '\r')"
@@ -465,13 +466,17 @@ run_jumppad() {
 	echo "$sl" | grep -q ' byPad=1,1,1,1,1,1,1,1$' || ok=0
 	[ "$(num "$bl" serverLaunches)" = 8 ] && [ "$(num "$bl" predFired)" = 8 ] && [ "$(num "$bl" tableRows)" = 8 ] || ok=0
 	[ "$(num "$bl" bad)" = 0 ] && [ "$(num "$bl" flagDiff)" = 0 ] && [ "$(num "$bl" restoreFails)" = 0 ] || ok=0
-	verdict 봇점프대 $ok "봇 rc=$brc 서버 rc=$src 서버$(echo "$sl" | grep -oE ' (queued|applied|refused|byPad)=[0-9,]+' | tr -d '\n') 봇$(echo "$bl" | grep -oE ' (tableRows|serverLaunches|predFired|flagDiff|restoreFails)=[0-9]+' | tr -d '\n')$(echo "$jr" | grep -oE ' (ran|posDiff|launchFlagDiff|endDiffMax)=[0-9.]+' | tr -d '\n')"
+	sd="$(grep -a '^SERVER device ' "$OUT/jumppad_srv.log" | tr -d '\r')"
+	bd="$(grep -a '^BOT device ' "$OUT/jumppad_bot.log" | tr -d '\r')"
+	[ "$(num "$sd" launchMsgs)" = 8 ] && [ "$(num "$bd" selfLaunch)" = 8 ] && [ "$(num "$bd" diff)" = 0 ] && [ "$(num "$bd" bad)" = 0 ] || ok=0
+	verdict 봇점프대 $ok "봇 rc=$brc 서버 rc=$src 서버$(echo "$sl" | grep -oE ' (queued|applied|refused|byPad)=[0-9,]+' | tr -d '\n') 소식$(echo "$sd" | grep -oE ' launchMsgs=[0-9]+')$(echo "$bd" | grep -oE ' (selfLaunch|diff)=[0-9]+' | tr -d '\n') 봇$(echo "$bl" | grep -oE ' (tableRows|serverLaunches|predFired|flagDiff|restoreFails)=[0-9]+' | tr -d '\n')$(echo "$jr" | grep -oE ' (ran|posDiff|launchFlagDiff|endDiffMax)=[0-9.]+' | tr -d '\n')"
 }
 
 # 순간이동(teleport-plan t-6 · t-8) — 봇 각본 teleport 가 장치 여섯 개를 하나씩 탄다(서버 --debug 자리 옮김 → 걸어 들어가거나 상자 면 앞 공중에서 밀어 넣음 → 옮겨져 내려앉음).
 # 봇 TELEPORT PASS = 장치마다 서버 옮김 · 예측 옮김 한 번 · 위치 · 속도 · 깃발 · 요 · 장치 차이 0 · 끝 자리 1cm 안 · 위층 도착 2/2.
 # 여기서 더 보는 것 = 서버 옮김(begins = moves = launches = 6 · 장치마다 1) = 봇이 본 발사 깃발(serverLaunches) = 예측이 옮긴 수(predTeleported) · 받은 표 6줄(bad 0) ·
 # 시점 돌림 4(시점 돌리는 장치 넷). 점프대 판과 같은 조건(--testNoPawnBlock · --testLockstep). --break 이면 예측에 표를 안 넘겨(--breakTeleport=off) 어긋나야 한다
+# 장치 소식(device-event e-5 · D169) — 서버 소식 6 = 봇이 받은 내 순간이동 소식 6 · 예측 사건과 어긋남 0
 run_teleport() {
 	local break_arg=""
 	[ "$BREAK" = 1 ] && break_arg="--breakTeleport=off"
@@ -480,7 +485,7 @@ run_teleport() {
 	"$BOT" "--map=$MAP" --port=7971 --bots=1 --seed=21 --script=teleport --testNoPawnBlock --testLockstep $break_arg > "$OUT/teleport_bot.log" 2>&1
 	local brc=$?
 	wait $spid
-	local src=$? ok=1 sl bl rr
+	local src=$? ok=1 sl bl rr sd bd
 	[ $brc = 0 ] && [ $src = 0 ] || ok=0
 	# 봇 로그는 줄 끝이 CRLF(서버는 LF)라 CR 을 떼고 끝을 맞춘다
 	sl="$(grep -a '^SERVER teleport ' "$OUT/teleport_srv.log" | tr -d '\r')"
@@ -491,7 +496,42 @@ run_teleport() {
 	echo "$sl" | grep -q ' byDevice=1,1,1,1,1,1,0,0$' || ok=0
 	[ "$(num "$rr" serverLaunches)" = 6 ] && [ "$(num "$rr" predTeleported)" = 6 ] && [ "$(num "$rr" restoreFails)" = 0 ] || ok=0
 	[ "$(num "$bl" tableRows)" = 6 ] && [ "$(num "$bl" bad)" = 0 ] && [ "$(num "$bl" predTeleported)" = 6 ] && [ "$(num "$bl" forcedYaw)" = 4 ] || ok=0
-	verdict 봇순간이동 $ok "봇 rc=$brc 서버 rc=$src 서버$(echo "$sl" | grep -oE ' (begins|moves|launches|byDevice)=[0-9,]+' | tr -d '\n') 봇$(echo "$bl" | grep -oE ' (tableRows|bad|predTeleported|forcedYaw)=[0-9]+' | tr -d '\n')$(echo "$rr" | grep -oE ' (ran|serverLaunches|posDiff|yawDiff|deviceDiff|endDiffMax)=[0-9.]+' | tr -d '\n')"
+	sd="$(grep -a '^SERVER device ' "$OUT/teleport_srv.log" | tr -d '\r')"
+	bd="$(grep -a '^BOT device ' "$OUT/teleport_bot.log" | tr -d '\r')"
+	[ "$(num "$sd" teleportMsgs)" = 6 ] && [ "$(num "$bd" selfTeleport)" = 6 ] && [ "$(num "$bd" diff)" = 0 ] && [ "$(num "$bd" bad)" = 0 ] || ok=0
+	verdict 봇순간이동 $ok "봇 rc=$brc 서버 rc=$src 서버$(echo "$sl" | grep -oE ' (begins|moves|launches|byDevice)=[0-9,]+' | tr -d '\n') 소식$(echo "$sd" | grep -oE ' teleportMsgs=[0-9]+')$(echo "$bd" | grep -oE ' (selfTeleport|diff)=[0-9]+' | tr -d '\n') 봇$(echo "$bl" | grep -oE ' (tableRows|bad|predTeleported|forcedYaw)=[0-9]+' | tr -d '\n')$(echo "$rr" | grep -oE ' (ran|serverLaunches|posDiff|yawDiff|deviceDiff|endDiffMax)=[0-9.]+' | tr -d '\n')"
+}
+
+# 봇몰림(device-event e-5 · D169) — 순간이동 · 점프대 각본을 몰아 보내기(--testInputBurst=7)로 돌린다. 기다림 판이 아니라 벽시계 판 — 봇이 입력을 쥐었다가
+# 서버 줄이 빈 뒤 일곱 개씩 보내면 서버는 굶는 동안 쌓인 한도로 한 틱에 여럿 돌린다(Room.cpp TickPlayerInputs). 그러면 옮김 · 발사가 한 틱 중간에 나고
+# 상태 자리 · 발사 깃발로는 못 짐작한다 — 이 판은 장치 소식이 그래도 다 오는지 본다.
+# PASS = 각본 PASS(서버 발사 수는 소식으로 셈) · 서버 소식 6 · 8 = 봇이 받은 내 소식 · 예측 사건과 어긋남 0 · 틱 중간 사건 midTick ≥ 1(시험이 몰림을 정말 만들었나) ·
+# 서버 입력 버림 0. --break 이면 서버가 소식을 안 보내(--testBreakDeviceEvent) 어긋남이 장치 수만큼 나야 한다
+run_burst() {
+	local srv_break=""
+	[ "$BREAK" = 1 ] && srv_break="--testBreakDeviceEvent"
+	local kind port script expect msgs self res brc src ok sd si bd rr
+	for kind in teleport jumppad; do
+		if [ $kind = teleport ]; then port=7972; expect=6; msgs=teleportMsgs; self=selfTeleport; res=TELEPORT
+		else port=7973; expect=8; msgs=launchMsgs; self=selfLaunch; res=JUMPPAD; fi
+		"$SRV" "--map=$MAP" --port=$port --exitWhenEmpty --warmup=2 --matchSeconds=300 --seed=21 "--pads=$PADS" "--launchers=$LAUNCHERS" "--teleports=$TELEPORTS" --debug --testNoPawnBlock $srv_break > "$OUT/burst_${kind}_srv.log" 2>&1 &
+		local spid=$!
+		"$BOT" "--map=$MAP" --port=$port --bots=1 --seed=21 --script=$kind --testNoPawnBlock --testInputBurst=7 > "$OUT/burst_${kind}_bot.log" 2>&1
+		brc=$?
+		wait $spid
+		src=$?
+		ok=1
+		[ $brc = 0 ] && [ $src = 0 ] || ok=0
+		sd="$(grep -a '^SERVER device ' "$OUT/burst_${kind}_srv.log" | tr -d '\r')"
+		si="$(grep -a '^SERVER inputs ' "$OUT/burst_${kind}_srv.log" | tr -d '\r')"
+		bd="$(grep -a '^BOT device ' "$OUT/burst_${kind}_bot.log" | tr -d '\r')"
+		rr="$(grep -a "^$res result " "$OUT/burst_${kind}_bot.log" | tr -d '\r')"
+		[ "${rr##* }" = PASS ] || ok=0
+		[ "$(num "$sd" $msgs)" = $expect ] && [ "$(num "$bd" $self)" = $expect ] && [ "$(num "$bd" diff)" = 0 ] && [ "$(num "$bd" bad)" = 0 ] || ok=0
+		[ -n "$(num "$bd" midTick)" ] && [ "$(num "$bd" midTick)" -ge 1 ] || ok=0
+		[ "$(num "$si" droppedFull)" = 0 ] || ok=0
+		verdict "봇몰림_$kind" $ok "봇 rc=$brc 서버 rc=$src 각본 ${rr##* } 소식$(echo "$sd" | grep -oE " $msgs=[0-9]+")$(echo "$bd" | grep -oE ' (self[A-Za-z]+|diff|midTick|serverLaunches|flagLaunches)=[0-9]+' | tr -d '\n') 서버$(echo "$si" | grep -oE ' droppedFull=[0-9]+')"
+	done
 }
 
 # 봇 길찾기(bot-nav-plan n-2 · n-4 · n-6) — 두 판정.
@@ -782,6 +822,7 @@ else
 		run_grenade
 		run_jumppad
 		run_teleport
+		run_burst
 		run_nav
 		run_rules
 		run_grenade_leave
