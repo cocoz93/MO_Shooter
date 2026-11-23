@@ -2,9 +2,9 @@
 # 회귀 시험 한 벌 — 대조 도구(맵·이동·무기) + 서버 판(봇·규칙·재생·권위·방 여럿).
 # - 왜: 빌드 대상을 골라 돌리다 대조 도구가 옛 빌드로 남은 적이 있어, 전부 한 명령으로 묶는다.
 #
-#   Tools/Regress/regress.sh [--bin <빌드 폴더>] [--out <출력 폴더>] [--only checks|play|multi] [--break]
+#   Tools/Regress/regress.sh [--bin <빌드 폴더>] [--out <출력 폴더>] [--only checks|play|multi|soak] [--break]
 #     --break  일부러 틀림 — 대조 도구 입력을 잘라 기준선과 어긋나게 하고 봇에 --breakMirror 를 준다(대시 판 봇엔 --breakDash=predict, 수류탄 판 봇엔 --breakGrenade=predict, 점프대 판 봇엔 --breakJumpPad=off,
-#              길찾기 판 봇엔 --testNavBreak=edgeyaw · 길 그래프엔 끝 자리를 50cm 옮긴 순간이동 각본 기록을 준다 · 봇몰림 판 서버엔 --testBreakDeviceEvent).
+#              길찾기 판 봇엔 --testNavBreak=edgeyaw · 길 그래프엔 끝 자리를 50cm 옮긴 순간이동 각본 기록을 준다 · 봇몰림 판 서버엔 --testBreakDeviceEvent · 안전성 판 서버엔 --testSoakBreak=leave).
 #              이때 FAIL 이 나와야 맞다(시험의 시험).
 # 판정은 개수·바이트만 본다. 시간 값은 안 쓰므로 PC 가 바빠도 돌릴 수 있다.
 # 기준선 = golden_checks.txt. 이동·충돌·무기 코드를 일부러 고쳤을 때만 갱신한다.
@@ -809,9 +809,25 @@ run_multi() {
 	verdict 틀린기록잡음 $ok "기록 $n벌"
 }
 
+# 안전성 짧은 판(D172 · Tools/Soak/soak.sh) — 3분 동안 봇 둘 묶음(남는 쪽 · 스스로 끊는 쪽)이 접속 · 끊김과 방 생성 · 삭제를 반복시키고
+# 서버 생존 · 다 나간 뒤 0 · 오류 0 · 봇 판정 · 반복 수 · 메모리 · 핸들을 본다. --break 면 서버에 --testSoakBreak=leave(끊긴 접속을 방에서 안 뺌) → 「다 나간 뒤 0」 FAIL.
+# 메모리 오류 검사 빌드는 격리 칸이 메모리를 붙잡아 메모리 · 핸들 문턱을 안 본다(--infoOnly). 긴 판(2시간)은 회귀 밖 — 최적화 전 기준 · 다 끝난 뒤 한 번(D172)
+run_soak() {
+	local more=()
+	[ "$BREAK" = 1 ] && more+=(--break leave)
+	[[ "$BIN" == *asan* ]] && more+=(--infoOnly)
+	bash "$REPO/Tools/Soak/soak.sh" --bin "$BIN" --out "$OUT/soak" --minutes 3 --port 7977 "${more[@]}" > "$OUT/soak.txt" 2>&1
+	local rc=$? ok=1
+	[ $rc = 0 ] || ok=0
+	grep -q '^SOAK RESULT PASS' "$OUT/soak.txt" || ok=0
+	verdict 안전성 $ok "rc=$rc $(grep -E '^(FAIL|PASS) ' "$OUT/soak.txt" | cut -d' ' -f1-2 | tr '\n' ' ')"
+}
+
 echo "출력 $OUT"
 if [ "$ONLY" = multi ]; then
 	run_multi
+elif [ "$ONLY" = soak ]; then
+	run_soak
 else
 	if [ "$ONLY" != play ]; then run_checks; run_bump; fi
 	if [ "$ONLY" != checks ]; then
@@ -836,6 +852,7 @@ else
 		run_weapons
 		run_melee
 		run_multi
+		run_soak
 	fi
 fi
 if [ $FAILS = 0 ]; then echo "REGRESS PASS"; else echo "REGRESS FAIL $FAILS"; exit 1; fi

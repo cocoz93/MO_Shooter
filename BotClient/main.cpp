@@ -2,6 +2,8 @@
 //
 //   BotClient --map=<파일.mocl> [--port=7791] [--bots=10] [--seed=20261102] [--record=파일] [--lead=3] [--breakRecord] [--breakMirror]
 //   BotClient --map=<파일.mocl> --seconds=초 [--measureFrom=초 --measureSeconds=초] ... = 부하 시험. 경기 끝을 기다리지 않고 시간이 되면 끊고 LOADBOT 줄을 낸다.
+//   --rejoin [--rejoinDelay=초] [--churn=T] = 안전성 판(D172 · 부하 판 전용). 접속이 닫힌 봇 자리에 새 봇을 갈아 끼워 다시 접속한다(판 끝에 서버가 끊은 것 포함).
+//     --churn 은 접속마다 T~5T초 뒤 스스로 끊는다(MMO_Zone 에코 더미 DummyClient::ScheduleDisconnect 규칙). 끝 줄 BOT rejoin · LOADBOT 은 갈아 끼운 봇 몫까지 합친다
 //   봇이 많으면 서버가 방을 나눠 앉힌다 — 기록은 같은 방 봇끼리만 맞춰 본다. 방 2부터는 기록 이름 뒤에 .room<번호>
 //   --measureView = 되감기 측정. Lyra 처럼 상태를 쌓아 0.1초 뒤 보간한 자리를 오차 없이 조준하고, 그 시점을 입력에 실어 보낸다. 기본 꺼짐
 //   --ads = 적이 보이면 조준을 누른다(C-4). 서버 조준 상태 ↔ 같은 코드 비교는 이 판에서만 켜진 줄이 생긴다. 기본 꺼짐
@@ -83,6 +85,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <string>
 #include <thread>
@@ -272,6 +275,9 @@ namespace
 		double seconds = 0;				// 0 이 아니면 부하 시험
 		double measureFromSeconds = 0;
 		double measureSeconds = 0;
+		bool rejoin = false;			// --rejoin(부하 판 전용 · D172) — 접속이 닫힌 봇 자리에 새 봇을 갈아 끼워 다시 접속(판 끝에 서버가 끊은 것 포함)
+		double rejoinDelaySeconds = 1;	// --rejoinDelay=초 — 닫힌 뒤 다시 접속까지. 기본 1초 = MMO_Zone 에코 더미 reconnectIntervalMs 기본 1000
+		double churnSeconds = 0;		// --churn=T(--rejoin 과 같이) — 접속마다 T~5T초 뒤 스스로 끊는다(에코 더미 ScheduleDisconnect 규칙). 0 = 안 끊음
 		bool measureView = false;		// 되감기 측정 모드 — 꺼져 있으면 기존 시험과 같은 입력을 보낸다
 		bool adsWhenShooting = false;	// --ads — 적이 보이면 조준을 누른다(C-4). 꺼져 있으면 기존 시험과 같은 입력
 		bool crouchToggle = false;		// --crouch — 앉기 키를 가끔 누른다(D-5). 꺼져 있으면 기존 시험과 같은 입력
@@ -3705,6 +3711,47 @@ namespace
 		double _comparePos = 0, _compareVel = 0;	// 지금 비교 중인 상태의 위치 · 속도 차(CompareSelf) — FLAGDIFF 줄이 깃발 어긋남 때 위치도 갈렸나를 같이 적는다
 	};
 
+	// 부하 판 끝 줄(LOADBOT · BOTLAG)의 봇 합. --rejoin(D172)이면 갈아 끼우기 전에 옛 봇 몫을 여기 더해 두고, 끝에 남은 봇 몫을 더한다
+	struct LoadTotals
+	{
+		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, pawnReconciles = 0, invDiff = 0, crouchDiff = 0, fallDiff = 0;
+		uint64_t ackLagSum = 0, ackLagSamples = 0;
+		uint32_t ackLagMax = 0;
+	};
+
+	void AddLoadTotals(LoadTotals& to, const CBot& bot)
+	{
+		to.compared += bot.GetCompared();
+		to.invDiff += bot.GetInvDiff();
+		to.crouchDiff += bot.GetCrouchDiff();
+		to.fallDiff += bot.GetFallDiff();
+		to.posDiff += bot.GetPosDiff();
+		to.velDiff += bot.GetVelDiff();
+		to.ammoDiff += bot.GetAmmoDiff();
+		to.flagDiff += bot.GetFlagDiff();
+		to.states += bot.GetStates();
+		to.pawnReconciles += bot.GetPawnReconciles();
+		to.ackLagSum += bot.GetAckLagSum();
+		to.ackLagSamples += bot.GetAckLagSamples();
+		to.ackLagMax = std::max(to.ackLagMax, bot.GetAckLagMax());
+	}
+
+	// --rejoin 자리 하나(D172). waiting = 닫혀 다시 접속을 기다림 · closeAt = --churn 이 스스로 끊을 때(안 끊으면 max) · generation = 갈아 끼운 수(새 봇 시드에 섞는다)
+	struct RejoinSlot
+	{
+		bool waiting = false;
+		Clock::time_point closeAt = Clock::time_point::max();
+		Clock::time_point reconnectAt;
+		uint32_t generation = 0;
+	};
+
+	// --rejoin 끝 줄 BOT rejoin. serverClosed = 서버가 끊음(그중 afterResult = 판 결과를 받은 뒤 — 판 끝에 방이 닫힘) · selfClosed = --churn 이 끊음 ·
+	// rejoins = 새 봇으로 다시 접속 · connectFails = 다시 접속 실패(그 자리는 다음에 또 시도)
+	struct RejoinCounts
+	{
+		uint64_t rejoins = 0, serverClosed = 0, afterResult = 0, selfClosed = 0, connectFails = 0;
+	};
+
 	bool ParseArgs(int argc, char** argv, Args& out)
 	{
 		for (int i = 1; i < argc; ++i)
@@ -3727,6 +3774,8 @@ namespace
 			else if (value("--seconds=", v)) out.seconds = std::atof(v.c_str());
 			else if (value("--measureFrom=", v)) out.measureFromSeconds = std::atof(v.c_str());
 			else if (value("--measureSeconds=", v)) out.measureSeconds = std::atof(v.c_str());
+			else if (value("--rejoinDelay=", v)) out.rejoinDelaySeconds = std::atof(v.c_str());
+			else if (value("--churn=", v)) out.churnSeconds = std::atof(v.c_str());
 			else if (value("--judgeClips=", v)) { out.judgeClips = v; out.measureView = true; }
 			else if (value("--judgeLog=", v)) out.judgeLog = v;
 			else if (value("--script=", v)) out.script = v;
@@ -3803,6 +3852,7 @@ namespace
 					return false;
 				}
 			}
+			else if (s == "--rejoin") out.rejoin = true;
 			else if (s == "--testNoPawnBlock") out.pawnBlock = false;
 			else if (s == "--testStartAllWeapons") out.startAllWeapons = true;
 			else if (value("--testGodPlayer=", v)) out.testGodPlayer = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
@@ -3824,6 +3874,17 @@ namespace
 		if (!out.script.empty() && out.script != "startstop" && out.script != "events" && out.script != "crouch" && out.script != "grenade" && out.script != "jumppad" && out.script != "teleport")
 		{
 			std::printf("모르는 경로 %s\n", out.script.c_str());
+			return false;
+		}
+		// 다시 접속은 부하 판(시간이 되면 끝)에서만 — 경로 · 화면 판정 · 기다림 판 · 기록 대조는 한 접속이 판 처음부터 끝까지 있어야 뜻이 있다
+		if (out.rejoin && (out.seconds <= 0 || !out.script.empty() || !out.judgeClips.empty() || out.lockstep || !out.recordPath.empty()))
+		{
+			std::printf("--rejoin 은 부하 판(--seconds) 전용 — --script · --judgeClips · --testLockstep · --record 와 같이 못 씀\n");
+			return false;
+		}
+		if ((out.churnSeconds > 0 && !out.rejoin) || out.churnSeconds < 0 || out.rejoinDelaySeconds < 0)
+		{
+			std::printf("--churn 은 --rejoin 과 같이 · 둘 다 0 이상\n");
 			return false;
 		}
 		return !out.mapPath.empty();
@@ -3885,25 +3946,31 @@ int main(int argc, char** argv)
 		if (!args.judgeLog.empty()) judge.log = std::fopen(args.judgeLog.c_str(), "w");
 	}
 
+	// 봇 하나 — 처음 접속과 --rejoin 의 갈아 끼우기가 같은 설정으로 만든다
+	const auto makeBot = [&](uint32_t seed)
+	{
+		std::unique_ptr<CBot> bot(new CBot(map, sim, rules, seed));
+		bot->SetMeasureView(args.measureView);
+		bot->SetAdsWhenShooting(args.adsWhenShooting);
+		bot->SetCrouchToggle(args.crouchToggle, args.breakCrouch);
+		bot->SetMelee(args.meleeNear, args.breakMelee);
+		bot->SetDash(args.dash, args.breakDash);
+		bot->SetGrenade(args.grenade, args.breakGrenade);
+		bot->SetJumpPadBreak(args.breakJumpPad);
+		bot->SetTeleportBreak(args.breakTeleport);
+		bot->SetPush(args.push);
+		bot->SetFireAlways(args.judgeFireAlways);
+		bot->SetPauseAfterSpawn(args.testPauseAfterSpawn);
+		bot->SetInputBurst(args.testInputBurst);
+		if (args.lockstep) bot->SetSeedByPlayerId(args.seed + 100);
+		bot->SetJudge(judging ? &judge : nullptr);
+		if (!args.script.empty()) bot->SetScript(args.scriptHoldSeconds, args.scriptWeapon, args.script);
+		return bot;
+	};
 	std::vector<std::unique_ptr<CBot>> bots;
 	for (int i = 0; i < args.bots; ++i)
 	{
-		bots.emplace_back(new CBot(map, sim, rules, args.seed + 100 + (uint32_t)i));
-		bots.back()->SetMeasureView(args.measureView);
-		bots.back()->SetAdsWhenShooting(args.adsWhenShooting);
-		bots.back()->SetCrouchToggle(args.crouchToggle, args.breakCrouch);
-		bots.back()->SetMelee(args.meleeNear, args.breakMelee);
-		bots.back()->SetDash(args.dash, args.breakDash);
-		bots.back()->SetGrenade(args.grenade, args.breakGrenade);
-		bots.back()->SetJumpPadBreak(args.breakJumpPad);
-		bots.back()->SetTeleportBreak(args.breakTeleport);
-		bots.back()->SetPush(args.push);
-		bots.back()->SetFireAlways(args.judgeFireAlways);
-		bots.back()->SetPauseAfterSpawn(args.testPauseAfterSpawn);
-		bots.back()->SetInputBurst(args.testInputBurst);
-		if (args.lockstep) bots.back()->SetSeedByPlayerId(args.seed + 100);
-		bots.back()->SetJudge(judging ? &judge : nullptr);
-		if (!args.script.empty()) bots.back()->SetScript(args.scriptHoldSeconds, args.scriptWeapon, args.script);
+		bots.push_back(makeBot(args.seed + 100 + (uint32_t)i));
 		if (!bots.back()->Connect(args.port))
 		{
 			std::printf("BOT %d 접속 실패\n", i);
@@ -3960,6 +4027,21 @@ int main(int argc, char** argv)
 	double cpuBegin = 0, cpuEnd = 0;
 	bool measureOpened = false, measureClosed = false;
 	Clock::time_point lastLoop = start;
+	// --rejoin(D172) — 자리마다 다시 접속 상태. 스스로 끊는 수명은 에코 더미처럼 T~5T 에서 고르게 뽑는다(시드 고정 — 같은 인자면 같은 수명 차례)
+	std::vector<RejoinSlot> rejoinSlots(bots.size());
+	RejoinCounts rejoinCounts;
+	LoadTotals retiredTotals;
+	std::mt19937 churnRng(args.seed);
+	const auto churnLifetime = [&]()
+	{
+		std::uniform_real_distribution<double> seconds(args.churnSeconds, args.churnSeconds * 5);
+		return std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds(churnRng)));
+	};
+	const Clock::duration rejoinDelay = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(args.rejoinDelaySeconds));
+	if (args.churnSeconds > 0)
+	{
+		for (RejoinSlot& slot : rejoinSlots) slot.closeAt = start + churnLifetime();
+	}
 	while (!allDone)
 	{
 		const Clock::time_point loopNow = Clock::now();
@@ -4019,6 +4101,47 @@ int main(int argc, char** argv)
 		{
 			bot->Pump();
 			if (bot->IsOpen() && !bot->HasResult()) allDone = false;
+		}
+		// --rejoin(D172) — 닫힌 자리는 rejoinDelay 뒤 새 봇으로 갈아 끼워 다시 접속한다. 판 끝은 --seconds 뿐이다
+		if (args.rejoin)
+		{
+			allDone = false;
+			for (size_t i = 0; i < bots.size(); ++i)
+			{
+				RejoinSlot& slot = rejoinSlots[i];
+				if (!slot.waiting)
+				{
+					const bool selfClose = bots[i]->IsOpen() && loopNow >= slot.closeAt;
+					if (bots[i]->IsOpen() && !selfClose) continue;
+					if (selfClose)
+					{
+						bots[i]->Close();
+						++rejoinCounts.selfClosed;
+					}
+					else
+					{
+						++rejoinCounts.serverClosed;
+						if (bots[i]->HasResult()) ++rejoinCounts.afterResult;
+					}
+					slot.waiting = true;
+					slot.reconnectAt = loopNow + rejoinDelay;
+					continue;
+				}
+				if (loopNow < slot.reconnectAt) continue;
+				AddLoadTotals(retiredTotals, *bots[i]);
+				++slot.generation;
+				bots[i] = makeBot(args.seed + 100 + (uint32_t)i + 1000u * slot.generation);
+				if (!args.navPath.empty()) bots[i]->SetNav(&navWorld, args.navBreak);
+				if (!bots[i]->Connect(args.port))
+				{
+					++rejoinCounts.connectFails;
+					slot.reconnectAt = Clock::now() + rejoinDelay;
+					continue;
+				}
+				++rejoinCounts.rejoins;
+				slot.waiting = false;
+				slot.closeAt = args.churnSeconds > 0 ? Clock::now() + churnLifetime() : Clock::time_point::max();
+			}
 		}
 		const uint64_t second = (uint64_t)elapsed;
 		if (second >= lastReportSecond + 30)
@@ -4152,19 +4275,21 @@ int main(int argc, char** argv)
 	}
 	if (args.seconds > 0)
 	{
-		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, pawnReconciles = 0, invDiff = 0, crouchDiff = 0, fallDiff = 0;
-		for (const std::unique_ptr<CBot>& bot : bots)
+		// --rejoin 이면 갈아 끼운 봇 몫(retiredTotals)까지 — 위 점프대 · 순간이동 · 장치 · 길찾기 줄은 끝에 남은 봇 몫뿐이다
+		LoadTotals totals = retiredTotals;
+		for (const std::unique_ptr<CBot>& bot : bots) AddLoadTotals(totals, *bot);
+		const uint64_t compared = totals.compared, posDiff = totals.posDiff, velDiff = totals.velDiff, ammoDiff = totals.ammoDiff, flagDiff = totals.flagDiff, states = totals.states;
+		const uint64_t pawnReconciles = totals.pawnReconciles, invDiff = totals.invDiff, crouchDiff = totals.crouchDiff, fallDiff = totals.fallDiff;
+		size_t rejoinWaiting = 0;
+		for (const RejoinSlot& slot : rejoinSlots)
 		{
-			compared += bot->GetCompared();
-			invDiff += bot->GetInvDiff();
-			crouchDiff += bot->GetCrouchDiff();
-			fallDiff += bot->GetFallDiff();
-			posDiff += bot->GetPosDiff();
-			velDiff += bot->GetVelDiff();
-			ammoDiff += bot->GetAmmoDiff();
-			flagDiff += bot->GetFlagDiff();
-			states += bot->GetStates();
-			pawnReconciles += bot->GetPawnReconciles();
+			if (slot.waiting) ++rejoinWaiting;
+		}
+		if (args.rejoin)
+		{
+			std::printf("BOT rejoin slots=%zu rejoins=%llu serverClosed=%llu afterResult=%llu selfClosed=%llu connectFails=%llu waitingAtEnd=%zu churn=%g delay=%g\n", bots.size(),
+				(unsigned long long)rejoinCounts.rejoins, (unsigned long long)rejoinCounts.serverClosed, (unsigned long long)rejoinCounts.afterResult, (unsigned long long)rejoinCounts.selfClosed,
+				(unsigned long long)rejoinCounts.connectFails, rejoinWaiting, args.churnSeconds, args.rejoinDelaySeconds);
 		}
 		if (judging)
 		{
@@ -4183,14 +4308,8 @@ int main(int argc, char** argv)
 			std::printf("JUDGE shots=%llu bullets=%llu noView=%llu noSnap=%llu noAnim=%llu clampedThinks=%llu recvBytesPerBotPerSec=%.0f\n", (unsigned long long)shots, (unsigned long long)bullets, (unsigned long long)noView, (unsigned long long)noSnap, (unsigned long long)noAnim, (unsigned long long)clamped, (double)recvBytes / (double)bots.size() / args.seconds);
 			std::printf("JUDGE bodies %s=%llu %s=%llu %s=%llu\n", GetWeaponDef((EWeapon)0).name, (unsigned long long)judge.bodiesByWeapon[0], GetWeaponDef((EWeapon)1).name, (unsigned long long)judge.bodiesByWeapon[1], GetWeaponDef((EWeapon)2).name, (unsigned long long)judge.bodiesByWeapon[2]);
 		}
-		uint64_t ackLagSum = 0, ackLagSamples = 0;
-		uint32_t ackLagMax = 0;
-		for (const std::unique_ptr<CBot>& bot : bots)
-		{
-			ackLagSum += bot->GetAckLagSum();
-			ackLagSamples += bot->GetAckLagSamples();
-			ackLagMax = std::max(ackLagMax, bot->GetAckLagMax());
-		}
+		const uint64_t ackLagSum = totals.ackLagSum, ackLagSamples = totals.ackLagSamples;
+		const uint32_t ackLagMax = totals.ackLagMax;
 		std::printf("BOTLAG ackLagAvg=%.2f maxAckLag=%u samples=%llu\n", ackLagSamples ? (double)ackLagSum / (double)ackLagSamples : 0.0, ackLagMax, (unsigned long long)ackLagSamples);
 		std::sort(stateGapsMs.begin(), stateGapsMs.end());
 		std::sort(loopGapsMs.begin(), loopGapsMs.end());
@@ -4199,7 +4318,9 @@ int main(int argc, char** argv)
 		// 대신 맞춰 본 줄이 있어야 하고 예측의 이상한 겹침은 0. 막기를 끈 판(--testNoPawnBlock)만 위치 · 속도 차이 0 을 엄격히 본다
 		const MoveCounters& predCount = sim.GetCounters();
 		const bool moveOk = args.pawnBlock ? (pawnReconciles > 0 && predCount.pawnOddSimplex == 0) : (posDiff == 0 && velDiff == 0);
-		const bool pass = compared > 0 && moveOk && ammoDiff == 0 && flagDiff == 0 && invDiff == 0 && botsOpen == bots.size();
+		// 접속 — 보통 부하 판은 끝까지 다 붙어 있어야 한다. --rejoin 은 닫히는 게 시험이라, 대신 다시 접속이 한 번도 안 실패해야 한다
+		const bool connectOk = args.rejoin ? rejoinCounts.connectFails == 0 : botsOpen == bots.size();
+		const bool pass = compared > 0 && moveOk && ammoDiff == 0 && flagDiff == 0 && invDiff == 0 && connectOk;
 		std::printf("LOADBOT bots=%d open=%zu compared=%llu posDiff=%llu velDiff=%llu ammoDiff=%llu flagDiff=%llu states=%llu stateGaps=%zu stateGapP50Ms=%.2f stateGapP99Ms=%.2f stateGapMaxMs=%.2f loopP99Ms=%.2f loopMaxMs=%.2f cpuPercent=%.1f pawnBlock=%d pawnReconciles=%llu predOdd=%llu invDiff=%llu crouchDiff=%llu fallDiff=%llu\n",
 			args.bots, botsOpen, (unsigned long long)compared, (unsigned long long)posDiff, (unsigned long long)velDiff, (unsigned long long)ammoDiff, (unsigned long long)flagDiff, (unsigned long long)states, stateGapsMs.size(),
 			percentile(stateGapsMs, 0.5), percentile(stateGapsMs, 0.99), percentile(stateGapsMs, 1.0), percentile(loopGapsMs, 0.99), percentile(loopGapsMs, 1.0), args.measureSeconds > 0 ? (cpuEnd - cpuBegin) / args.measureSeconds * 100.0 : 0.0,

@@ -3,7 +3,10 @@
 //   Server --map=<파일.mocl> [--port=7791] [--seed=20261102] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일]
 //          [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=1] [--maxSessions=64]
 //          [--measureFrom=초 --measureSeconds=초] [--clips=파일] [--pads=파일] [--launchers=파일] [--teleports=파일]
+//          [--soakSeconds=초] [--testSoakBreak=leave|memory]
 //
+// --soakSeconds 는 안전성 판(D172) — 시작 · 그 초마다 · 끝에 SOAK 줄(코어 접속 수 · 앉은 수 · 방 · 메모리 · 핸들). 판정은 Tools/Soak/soak.sh 가 한다.
+// --testSoakBreak 는 그 판정이 결함을 보는지 확인하는 일부러 틀림 — leave = 끊긴 접속을 방에서 안 뺀다 · memory = 인사마다 64KB 를 안 돌려준다.
 // --debug 는 시험 클라가 위치·체력을 정할 수 있게 한다. 사람이 하는 판에서는 켜지 않는다.
 // --warmup·--matchSeconds·--targetScore 는 시험에서 Lyra 값을 줄일 때만 쓴다.
 // --record 는 처치와 경기 결과를 적는다 — 봇이 받아 적은 기록과 바이트로 비교한다. 방 2부터는 뒤에 .room<번호> 를 붙인다.
@@ -24,6 +27,7 @@
 #include <Common/Logger.h>
 
 #include <timeapi.h>
+#include <psapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -51,6 +55,11 @@ namespace
 
 	constexpr int kHelloTimeoutSeconds = 5;		// 다리·봇은 접속 직후 바로 인사한다
 
+	// --testSoakBreak(D172) — 안전성 판정이 결함을 보는지 확인하는 일부러 틀림
+	constexpr int kSoakBreakLeave = 1;		// 끊긴 접속을 방 · 자리 표에서 안 뺀다 — 다 나간 뒤 앉은 수 · 방이 0 으로 안 돌아와야 한다
+	constexpr int kSoakBreakMemory = 2;		// 인사마다 64KB 를 잡고 안 돌려준다 — 메모리가 계속 늘어야 한다
+	constexpr size_t kSoakBreakMemoryBytes = 64 * 1024;
+
 	struct Args
 	{
 		std::string mapPath;
@@ -66,6 +75,8 @@ namespace
 		int maxSessions = 64;
 		double measureFromSeconds = 0;
 		double measureSeconds = 0;
+		double soakSeconds = 0;		// --soakSeconds=초 — 안전성 판 SOAK 줄 간격(D172). 0 = 안 찍음
+		int testSoakBreak = 0;		// --testSoakBreak=leave|memory — kSoakBreakLeave · kSoakBreakMemory
 		mo::RewindOptions rewind;
 		std::string clipsPath;
 		std::string launchersPath;	// 점프대(jumppad-plan j-4) — 리포 밖 파일(Tools/LyraPilot/make_launchers.py). 없으면 점프대 없는 판
@@ -106,6 +117,17 @@ namespace
 			else if (value("--maxSessions=", v)) out.maxSessions = std::atoi(v.c_str());
 			else if (value("--measureFrom=", v)) out.measureFromSeconds = std::atof(v.c_str());
 			else if (value("--measureSeconds=", v)) out.measureSeconds = std::atof(v.c_str());
+			else if (value("--soakSeconds=", v)) out.soakSeconds = std::atof(v.c_str());
+			else if (value("--testSoakBreak=", v))
+			{
+				if (v == "leave") out.testSoakBreak = kSoakBreakLeave;
+				else if (v == "memory") out.testSoakBreak = kSoakBreakMemory;
+				else
+				{
+					std::printf("[오류] 모르는 안전성 틀림: %s (leave · memory)\n", v.c_str());
+					return false;
+				}
+			}
 			else if (s == "--exitWhenEmpty") out.exitWhenEmpty = true;
 			else if (s == "--debug") out.debug = true;
 			else if (s == "--testNoPawnBlock") out.rules.pawnBlock = false;	// 시험 전용 — 사람끼리 막기를 끈다(MatchRules.h · 봇도 같이 줘야 한다)
@@ -254,6 +276,27 @@ namespace
 			}
 		}
 
+		// 안전성 판 한 줄(D172). core* = ServerCore 지표(지금 접속 · 만든 · 없앤 세션) · connected · disconnected = 라우터가 받은 소식 · seated = 방에 앉은 접속 ·
+		// helloWaiting = 인사 마감 줄(마감이 지나면 빠진다) · summaryBytes = 닫힌 방 요약 몫(끝 보고용으로 쌓는다 — 늘어나도 되는 몫. 힙 머리는 안 셈) · leakKB = --testSoakBreak=memory 가 잡은 몫
+		void PrintSoak(const char* when, double seconds) const
+		{
+			PROCESS_MEMORY_COUNTERS_EX memory = {};
+			memory.cb = sizeof(memory);
+			GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory));
+			DWORD handles = 0;
+			GetProcessHandleCount(GetCurrentProcess(), &handles);
+			const size_t summaryBytes = _summaries.capacity() * sizeof(std::shared_ptr<mo::RoomSummary>) + _summaries.size() * (sizeof(mo::RoomSummary) + 16);	// 16 = make_shared 셈 칸
+			const auto ll = [](int64_t v) { return (long long)v; };
+			const auto ull = [](uint64_t v) { return (unsigned long long)v; };
+			std::printf("SOAK %s t=%.0f coreSessions=%lld coreCreated=%lld coreDestroyed=%lld acceptFailed=%lld timedOut=%lld packetErrors=%lld sendOverflow=%lld partialSend=%lld recvOverflow=%lld "
+				"connected=%llu disconnected=%llu seated=%zu helloWaiting=%zu rooms=%zu roomsCreated=%u roomsClosed=%zu summaryBytes=%zu hellos=%llu helloRejected=%llu helloTimeouts=%llu "
+				"badPackets=%llu packetsNoRoom=%llu privateKB=%llu workingSetKB=%llu handles=%lu leakKB=%zu\n",
+				when, seconds, ll(_monitor._sessionCount.Load()), ll(_monitor._sessionCreated.Load()), ll(_monitor._sessionDestroyed.Load()), ll(_monitor._acceptFailed.Load()),
+				ll(_monitor._sessionTimedOut.Load()), ll(_monitor._packetErrors.Load()), ll(_monitor._sendQueueOverflow.Load()), ll(_monitor._partialSend.Load()), ll(_monitor._recvBufferOverflow.Load()),
+				ull(_connected), ull(_disconnected), _sessionRoom.size(), _helloDeadlines.size(), _rooms.size(), _roomsCreated, _summaries.size(), summaryBytes, ull(_hellos), ull(_helloRejected),
+				ull(_helloTimeouts), ull(_badPackets), ull(_packetsNoRoom), ull(memory.PrivateUsage / 1024), ull(memory.WorkingSetSize / 1024), handles, _testLeaks.size() * kSoakBreakMemoryBytes / 1024);
+		}
+
 		bool HasMeasure() const { return _snapshotEndTaken; }
 		const NetSnapshot& GetSnapshotBegin() const { return _snapshotBegin; }
 		const NetSnapshot& GetSnapshotEnd() const { return _snapshotEnd; }
@@ -389,6 +432,7 @@ namespace
 		{
 			const auto seated = _sessionRoom.find(session);
 			if (seated == _sessionRoom.end()) return;
+			if (_args.testSoakBreak == kSoakBreakLeave) return;		// 일부러 틀림(D172) — 방도 자리 표도 이 접속을 모른 채 둔다
 			const uint32_t roomId = seated->second;
 			RoomSlot& room = _rooms.find(roomId)->second;
 			_threads[room.thread]->PostLeave(roomId, session);
@@ -423,6 +467,12 @@ namespace
 				return;
 			}
 			++_hellos;
+			if (_args.testSoakBreak == kSoakBreakMemory)
+			{
+				// 일부러 틀림(D172) — 잡고 채운 뒤 안 돌려준다(끝까지 표에 남아 프로세스가 끝날 때 풀린다)
+				_testLeaks.emplace_back(new char[kSoakBreakMemoryBytes]);
+				std::memset(_testLeaks.back().get(), 1, kSoakBreakMemoryBytes);
+			}
 			Seat(session);
 		}
 
@@ -494,6 +544,7 @@ namespace
 		std::deque<std::pair<int64_t, Clock::time_point>> _helloDeadlines;	// 접속 순서
 		std::vector<mo::GameReport> _reports;
 		std::vector<std::shared_ptr<mo::RoomSummary>> _summaries;
+		std::vector<std::unique_ptr<char[]>> _testLeaks;	// --testSoakBreak=memory 가 잡은 덩어리
 		uint32_t _roomsCreated = 0;
 		uint64_t _connected = 0;
 		uint64_t _disconnected = 0;
@@ -673,6 +724,8 @@ int main(int argc, char** argv)
 
 	const auto start = Clock::now();
 	double routeSumUs = 0;
+	double nextSoakSeconds = args.soakSeconds;
+	if (args.soakSeconds > 0) server.PrintSoak("start", 0);
 	while (!g_shutdownRequested)
 	{
 		const auto begin = Clock::now();
@@ -681,11 +734,18 @@ int main(int argc, char** argv)
 		routeSumUs += std::chrono::duration<double, std::micro>(end - begin).count();
 		server.UpdateMeasure(end);
 
+		const double runSeconds = std::chrono::duration<double>(end - start).count();
+		if (args.soakSeconds > 0 && runSeconds >= nextSoakSeconds)
+		{
+			server.PrintSoak("tick", runSeconds);
+			nextSoakSeconds += args.soakSeconds;
+		}
 		if (args.exitWhenEmpty && server.IsDoneWithAllRooms()) break;
-		if (args.durationSeconds > 0 && std::chrono::duration<double>(end - start).count() >= args.durationSeconds) break;
+		if (args.durationSeconds > 0 && runSeconds >= args.durationSeconds) break;
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	const double elapsedSeconds = std::chrono::duration<double>(Clock::now() - start).count();
+	if (args.soakSeconds > 0) server.PrintSoak("end", elapsedSeconds);	// 멈추기 전 — 다 나간 뒤 0 으로 돌아왔나
 
 	server.Stop();
 	timeEndPeriod(1);
