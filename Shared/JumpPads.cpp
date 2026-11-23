@@ -17,8 +17,6 @@ namespace mo
 		constexpr double kPushClampMax = 12000.0;
 		constexpr double kPi = 3.14159265358979323846;
 		constexpr double kSmallNumber = 1.e-8;			// UE_SMALL_NUMBER — GetClampedToSize 의 0 벡터 갈래
-		// 보정 때 받은 자리가 순간이동 옮긴 자리인가(MatchTeleportExit) — 상태 패킷 자리는 단정밀도 — 나갈 자리 6곳은 |좌표| < 4,096cm 라 간격 0.000244cm(반올림은 그 절반). 간격의 40배
-		constexpr double kTeleportExitTolerance = 0.01;
 
 		size_t SplitFields(const char* p, const char* end, std::string* out, size_t maxFields)
 		{

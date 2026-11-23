@@ -22,7 +22,7 @@ class ULyraAbilitySystemComponent;
 struct FGameplayTag;
 struct FLyraAbilitySimpleFailureMessage;
 
-namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; struct Grenade; struct LauncherInfo; } struct Vec3; }
+namespace mo { namespace wire { struct PlayerState; struct AnimStateWire; struct Damage; struct Kill; struct Match; struct Shot; struct Pickup; struct Melee; struct Dash; struct Grenade; struct LauncherInfo; struct TeleportInfo; } struct Vec3; }
 
 // 남의 캐릭터 — 서버 상태를 틱 번호와 함께 쌓아 0.1초 뒤 시점을 보여 준다
 struct FMOBSnapshot
@@ -86,11 +86,24 @@ struct FMOBPendingDashCue
 };
 
 // 남의 점프대 효과 하나(jumppad-plan j-7) — 서버 상태에 발사 깃발이 새로 선 틱을 받아 두었다가 화면 시점이 그 틱에 닿을 때 그 몸에 낸다(남의 대시 효과와 같은 규칙)
+// 남의 순간이동 효과도 같은 줄에 싣는다(teleport-plan t-7) — 그 틱 상태가 옮긴 자리였다
 struct FMOBPendingLaunchCue
 {
 	uint32 Player = 0;
 	uint32 Tick = 0;			// 깃발이 선 상태의 틱 — 그 틱 이동 끝에 쏠 점프대에 들었다
-	int32 Pad = -1;				// 서버 점프대 표 번호
+	int32 Pad = -1;				// 서버 점프대 표 번호(bTeleport 면 들어간 순간이동 장치 표 번호)
+	bool bTeleport = false;
+	FVector Entry = FVector::ZeroVector;	// 순간이동 — 앞 상태 자리(들어간 쪽) · 그 틱 상태 자리(옮긴 자리 = 그래프 Teleport 의 DestLocation)
+	FVector Dest = FVector::ZeroVector;
+};
+
+// 남의 몸 순간이동 지켜보기(t-7) — 효과를 낸 뒤 그 몸이 화면에서 들어간 자리 → 옮긴 자리로 한 번에 건너뛰나(보간이 맵을 가로질러 미끄러지지 않나, 200cm 규칙)
+struct FMOBTeleportWatch
+{
+	uint32 Player = 0;
+	FVector Entry = FVector::ZeroVector;
+	FVector Dest = FVector::ZeroVector;
+	double StartedAt = 0;
 };
 
 // 겉모습 수류탄의 한 틱(G-5-b) — 던짐 소식(던진 틱 − 1 칸 = 생긴 자리) · 상태 소식(그 틱 걸음 뒤) · 터짐 소식(터진 틱 걸음 뒤)
@@ -158,8 +171,11 @@ struct FMOBGrenadeVisual
  *   -MOBStandLyra               -MOBStandAt 시험 전용 — 내 Lyra 몸도 그 자리에 둔다(평소엔 서버 몸만 옮겨지고 Lyra 몸은 시작 자리에 남는다). 점프대 · 순간이동 겹침을 내 몸으로 세려고(D91)
  *   -MOBStandHp=N               -MOBStandAt 의 부활 뒤 첫 자리 옮김 체력(받침 시험 — 다친 채 받침 위에 선다). 준 때만 그 뒤 20초마다 알림은 서버가 본 지금 체력으로 보낸다(조용히 체력을 바꾸지 않게)
  *   -MOBDeviceFxOff             점프대 겉모습을 옛날처럼 끈다(불빛 · 빛 재질 끔 · 밟을 때 효과 안 냄, D91). 없으면 점프대가 서버로 다시 쏘므로(D157) 켜 둔다(jumppad-plan j-7)
+ *                               순간이동은 옮길 때 효과 · 소리만 안 낸다(겉모습은 처음부터 안 껐다 — D91 · D160, teleport-plan t-7)
  *   -MOBPadWalk=x,y,z,yaw       시험 전용 — 경기 중 8초마다 내 몸을 그 자리에 옮기고(서버 --debug 필요) 0.5초 뒤 그 요로 앞으로 걷는다. 점프대 효과 · 예측을 내 몸으로 보려고(j-7)
+ *                               순간이동 앞에 두면 그 장치 시험(t-7) — 시점을 돌리는 장치면 걷는 요도 나갈 방향으로 바뀐다(사람이 앞 키를 누른 채인 것과 같게)
  *   -MOBBreakJumpPad            일부러 틀리기 — 받은 점프대 표를 내 예측에 안 넘긴다. MOB_LAUNCH flagDiff 가 서버가 쏜 수만큼 서야 한다(j-7)
+ *   -MOBBreakTeleport           일부러 틀리기 — 받은 순간이동 표를 내 예측에 안 넘긴다. MOB_TELEPORT predTeleported 0 · late 가 서버가 나를 옮긴 수만큼 서야 한다(t-7)
  *   -MOBAutoMelee               자동 입력에 근접을 더한다 — 적이 4m 안이면 누르고 있고, 아니면 6초마다 0.1초 누른다. -MOBAutoAim 과 같이 켜면 적이 10m 안에 보여도 다가간다(6초 중 4초). 없으면 기존 자동 입력 그대로
  *   -MOBBreakMeleeBlock         일부러 틀리기 — Lyra 근접 능력의 입력 표식을 안 떼어 Lyra 가 키로 혼자 근접을 켠다(MOB_MELEE lyraSelf 가 늘어야 한다)
  *   -MOBAutoDash                자동 입력에 대시를 더한다 — 3.6초마다 두 번: 걷는 방향이 바뀌는 프레임(누른 입력의 이동 ≠ 앞 입력 이동) · 1.8초 뒤 한 방향 걷기 구간의 한가운데.
@@ -257,7 +273,9 @@ private:
 	void TickRemoteDashCues();		// 매 프레임(TickRemotes 뒤) — 받아 둔 남의 대시 효과 중 화면 시점이 닿은 것을 낸다
 	void HandleLauncher(const mo::wire::LauncherInfo& M, int32 Size);	// 서버 점프대 표 한 줄(판 18, j-7) — 줄이 다 오면 내 예측에 넘긴다
 	void PlayLauncherCue(APawn* Target, int32 Pad, bool bSelf);	// 점프대 효과 — B_Launcher 그래프의 Execute GameplayCue On Actor 와 같은 값
-	void TickRemoteLaunchCues();	// 매 프레임(TickRemoteDashCues 뒤) — 받아 둔 남의 점프대 효과 중 화면 시점이 닿은 것을 낸다
+	void TickRemoteLaunchCues();	// 매 프레임(TickRemoteDashCues 뒤) — 받아 둔 남의 점프대 효과 중 화면 시점이 닿은 것을 낸다(순간이동 효과 · 지켜보기도)
+	void HandleTeleport(const mo::wire::TeleportInfo& M, int32 Size);	// 서버 순간이동 표 한 줄(판 19, t-7) — 줄이 다 오면 내 예측에 넘긴다
+	void PlayTeleportCue(APawn* Target, int32 Device, const FVector& Dest, bool bSelf, bool bSound);	// 순간이동 효과 · 소리 — B_Teleport 그래프와 같은 값
 	ALyraWeaponSpawner* BindPad(int32 Index);
 	void ApplyPadLook(ALyraWeaponSpawner& Actor, bool bAvailable, bool bEffects);
 	float ApplyPadHeal(const mo::wire::Pickup& M, ALyraWeaponSpawner* Actor);
@@ -442,7 +460,8 @@ private:
 	double NextPickupCheckAt = 0;
 	int32 PickupsHidden = 0;
 	// 점프대(B_Launcher_*) · 순간이동(B_Teleport) — Lyra 장치 그래프는 끈다. 그래프는 겹침 시작에서만 돈다(LaunchCharacter · K2_TeleportTo · 효과 신호) → 장치 쪽 겹침을 끄면 안 돈다.
-	// 순간이동은 서버에도 안 넣는다(사용자 결정 11-18, D91 · D157). 점프대는 서버가 쏘고(D157, jumppad-plan) 내 몸은 예측이 같은 셈으로 쏜다 — 효과만 다리가 낸다(PlayLauncherCue)
+	// 점프대는 서버가 쏘고(D157, jumppad-plan) 순간이동은 서버가 옮긴다(D163, teleport-plan — D91 · D157 의 「순간이동은 서버에도 안 넣는다」를 뒤집음). 내 몸은 예측이 같은 셈으로
+	// 쏘고 · 옮긴다 — 효과 · 소리 · 시점 돌림만 다리가 낸다(PlayLauncherCue · PlayTeleportCue)
 	struct FMOBDevice
 	{
 		TWeakObjectPtr<AActor> Actor;
@@ -478,6 +497,22 @@ private:
 	float PadWalkYaw = 0.f;
 	double NextPadWalkAt = 0, PadWalkPlacedAt = 0;
 	int32 PadWalkPlaces = 0;
+	float PadWalkYawNow = 0.f;		// 걷는 요 — 놓을 때 PadWalkYaw, 시점 돌리는 순간이동 뒤엔 나갈 방향(t-7)
+	// 순간이동(t-7) — 표(S2C_TELEPORT) · 내 몸(예측이 옮김 · 시점 돌림 · 서버 상태로 맞춤) · 남의 몸(큰 뜀 · 옮긴 자리 · 효과 · 지켜보기) · 효과 · 소리
+	bool bBreakTeleport = false;	// -MOBBreakTeleport — 일부러 틀림: 받은 순간이동 표를 내 예측에 안 넘긴다
+	int64 TeleportInfos = 0, TeleportInfoBad = 0;
+	int64 TeleportSelfYaw = 0;		// 내 시점을 나갈 방향으로 돌린 수(예측이 옮긴 입력 중 bForceDirection 장치)
+	// 예측이 옮긴 입력을 서버 상태로 맞춤(그 입력을 지난 첫 비교의 자리 차 200cm 안) · 못 맞춤 / 예측이 안 옮긴 범위에서 200cm 넘게 갈림 — 서버 자리가 옮긴 자리(효과만 늦게, D164) · 아님
+	int64 TeleportSelfConfirmed = 0, TeleportSelfUnconfirmed = 0, TeleportSelfLate = 0, TeleportSelfBigNoExit = 0;
+	TArray<uint32> PendingSelfTeleportSeqs;	// 예측이 옮긴 입력 번호 — 서버 상태로 맞출 때까지
+	int64 TeleportCuesSelf = 0, TeleportCuesRemote = 0, TeleportCueNoActor = 0, TeleportCueNoTag = 0, TeleportCueRouted = 0;
+	int64 TeleportSounds2D = 0, TeleportSounds3D = 0, TeleportSoundMissing = 0;
+	int64 TeleportRemoteJumps = 0, TeleportRemoteExits = 0, TeleportRemoteNoExit = 0, LaunchRemoteTeleport = 0;	// 남의 상태 200cm 넘는 뜀 · 그중 옮긴 자리 · 아님(부활 · 시험 놓기) / 발사 깃발이 순간이동 몫
+	double TeleportRemoteJumpMin = -1.0;
+	TArray<FMOBTeleportWatch> TeleportWatches;
+	int64 TeleportRemoteSnapped = 0, TeleportRemoteMidFrames = 0, TeleportRemoteSnapTimeout = 0, TeleportWatchLost = 0;	// 들어간 자리를 떠난 첫 프레임이 곧은 선 밖이거나 옮긴 쪽 끝 5%(건너뜀) · 선 안쪽 프레임 수(미끄러짐) / 1초 안에 못 가름 · 몸 없음
+	FDelegateHandle TeleportCueRouteHandle;
+	bool bTeleportCueCalling = false;
 	// 체력 받침(B-3) — 칸 = 서버 받침 번호. 상태는 서버 소식 그대로, 액터는 자리로 찾아 묶는다
 	struct FMOBPad
 	{

@@ -20,11 +20,13 @@ $outDir = "$proj\Saved\MOB"
 $map    = "$outDir\map_expanse.mocl"
 $pads   = "$outDir\pads_expanse.txt"   # health pads (content B, make_pads.py) - outside the repo like the map; no file = server without pads
 $launchers = "$outDir\launchers_expanse.txt"   # jump pads (jumppad-plan j-1, make_launchers.py) - outside the repo like the map; no file = server without jump pads
+$teleports = "$outDir\teleports_expanse.txt"   # teleports (teleport-plan t-1, make_teleports.py) - outside the repo like the map; no file = server without teleports
 $base   = "$outDir\game2_$Tag"
 
 $srvArgList = @("--map=`"$map`"", "--port=$Port", '--exitWhenEmpty', "--record=`"${base}_server_record.csv`"") + ($ServerArgs -split ' ' | Where-Object { $_ })
 if (Test-Path -LiteralPath $pads) { $srvArgList += "--pads=`"$pads`"" }
 if (Test-Path -LiteralPath $launchers) { $srvArgList += "--launchers=`"$launchers`"" }
+if (Test-Path -LiteralPath $teleports) { $srvArgList += "--teleports=`"$teleports`"" }
 $srv = Start-Process -FilePath $srvExe -ArgumentList $srvArgList -RedirectStandardOutput "${base}_server.txt" -RedirectStandardError "${base}_server_err.txt" -PassThru -WindowStyle Hidden
 Start-Sleep -Milliseconds 800
 

@@ -30,6 +30,7 @@ DATA="C:/Users/USER/Desktop/MyGit/MO_Shooter/Client/Lyra/Saved/MOB"
 MAP="$DATA/map_expanse.mocl"
 PADS="$DATA/pads_expanse.txt"	# 받침 자료(컨텐츠 B) — Epic 맵 값이라 맵처럼 리포 밖
 LAUNCHERS="$DATA/launchers_expanse.txt"	# 점프대 표(jumppad-plan j-1, make_launchers.py) — 같은 까닭으로 리포 밖
+TELEPORTS="$DATA/teleports_expanse.txt"	# 순간이동 표(teleport-plan t-1, make_teleports.py) — 같은 까닭으로 리포 밖
 # 세 무기로 부활(시험 전용 --testStartAllWeapons, 무기 줍기 W-2)은 프로브 넷(경기규칙 · 재생 · 권위 · 되감기)의 서버에만 준다.
 # 옵션 없이 회귀 한 벌을 돌려(W-5) 그 넷만 갈렸다 — 각본이 무기를 바꾸는데 권총 하나면 서버가 거절한다(switchRejected 2 · 39 · 94 · 1).
 # 나머지 판은 Lyra 규칙(권총 하나로 부활)대로 돈다
@@ -64,6 +65,11 @@ run_checks() {
 	"$tools/MoveCheck/Release/MoveCheck.exe" "$DATA/map_expanse.mocl" "$DATA/move_expanse_pads.csv" $limit --launchers "$DATA/launchers_expanse.txt" > "$OUT/move_expanse_pads.log" 2>&1
 	# PAD_WIRE = 점프대 표 와이어 왕복(j-5) · PAD_RESTORE = 보정 때 발사 대기 되살림(j-6)
 	grep -E '^(ONE frames|RUN frames|RUN segments|COUNT |PAD |PAD_COVER|PADCHECK|RUNPAD |PAD_WIRE |PAD_RESTORE )' "$OUT/move_expanse_pads.log" | sed "s/^/move_expanse_pads /" >> "$g"
+	# 순간이동(teleport-plan t-3 · t-8) — Lyra 순간이동 기록(move_expanse_tele, 장치 6개 · 53번 옮김)과 make_teleports.py 표로 겹침 비트 · 옮김 프레임 · 옮긴 자리 · 속도 · 요 ·
+	# 뒤따르는 발사를 프레임마다 대조하고, 이어 달리기는 우리 셈으로 옮긴다(RUNTELE). TELE_WIRE = 표 와이어 왕복(t-5) · TELE_RESTORE = 보정 때 옮긴 자리 가림(t-6).
+	# 점프대 줄(PAD …)은 뺀다 — 이 기록엔 점프대 발사가 없어 점프대 대조는 바로 위 move_expanse_pads 몫이다
+	"$tools/MoveCheck/Release/MoveCheck.exe" "$DATA/map_expanse.mocl" "$DATA/move_expanse_tele.csv" $limit --launchers "$LAUNCHERS" --teleports "$TELEPORTS" > "$OUT/move_expanse_tele.log" 2>&1
+	grep -E '^(ONE frames|RUN frames|RUN segments|COUNT |TELE_TABLE |TELE_WIRE |TELE |TELE_RESTORE |TELE_COVER |TELECHECK|RUNPAD |RUNTELE )' "$OUT/move_expanse_tele.log" | sed "s/^/move_expanse_tele /" >> "$g"
 	"$tools/WeaponCheck/Release/WeaponCheck.exe" "$DATA/weaponrec_gym.csv" "$DATA/map_gym.mocl" > "$OUT/weapon.log" 2>&1
 	grep -v '^TIME' "$OUT/weapon.log" | sed 's/^/weapon /' >> "$g"
 	# 근접(컨텐츠 E) — Lyra 연습장 근접 기록(cprobe_e1g3)과 Shared ResolveMelee 대조. 어긋난 줄(DIFF)도 그대로 기준선에 들어가 다르면 잡힌다
@@ -448,6 +454,32 @@ run_jumppad() {
 	verdict 봇점프대 $ok "봇 rc=$brc 서버 rc=$src 서버$(echo "$sl" | grep -oE ' (queued|applied|refused|byPad)=[0-9,]+' | tr -d '\n') 봇$(echo "$bl" | grep -oE ' (tableRows|serverLaunches|predFired|flagDiff|restoreFails)=[0-9]+' | tr -d '\n')$(echo "$jr" | grep -oE ' (ran|posDiff|launchFlagDiff|endDiffMax)=[0-9.]+' | tr -d '\n')"
 }
 
+# 순간이동(teleport-plan t-6 · t-8) — 봇 각본 teleport 가 장치 여섯 개를 하나씩 탄다(서버 --debug 자리 옮김 → 걸어 들어가거나 상자 면 앞 공중에서 밀어 넣음 → 옮겨져 내려앉음).
+# 봇 TELEPORT PASS = 장치마다 서버 옮김 · 예측 옮김 한 번 · 위치 · 속도 · 깃발 · 요 · 장치 차이 0 · 끝 자리 1cm 안 · 위층 도착 2/2.
+# 여기서 더 보는 것 = 서버 옮김(begins = moves = launches = 6 · 장치마다 1) = 봇이 본 발사 깃발(serverLaunches) = 예측이 옮긴 수(predTeleported) · 받은 표 6줄(bad 0) ·
+# 시점 돌림 4(시점 돌리는 장치 넷). 점프대 판과 같은 조건(--testNoPawnBlock · --testLockstep). --break 이면 예측에 표를 안 넘겨(--breakTeleport=off) 어긋나야 한다
+run_teleport() {
+	local break_arg=""
+	[ "$BREAK" = 1 ] && break_arg="--breakTeleport=off"
+	"$SRV" "--map=$MAP" --port=7971 --exitWhenEmpty --warmup=2 --matchSeconds=300 --seed=21 "--pads=$PADS" "--launchers=$LAUNCHERS" "--teleports=$TELEPORTS" --debug --testNoPawnBlock --testLockstep=1 > "$OUT/teleport_srv.log" 2>&1 &
+	local spid=$!
+	"$BOT" "--map=$MAP" --port=7971 --bots=1 --seed=21 --script=teleport --testNoPawnBlock --testLockstep $break_arg > "$OUT/teleport_bot.log" 2>&1
+	local brc=$?
+	wait $spid
+	local src=$? ok=1 sl bl rr
+	[ $brc = 0 ] && [ $src = 0 ] || ok=0
+	# 봇 로그는 줄 끝이 CRLF(서버는 LF)라 CR 을 떼고 끝을 맞춘다
+	sl="$(grep -a '^SERVER teleport ' "$OUT/teleport_srv.log" | tr -d '\r')"
+	bl="$(grep -a '^BOT teleport ' "$OUT/teleport_bot.log" | tr -d '\r')"
+	rr="$(grep -a '^TELEPORT result ' "$OUT/teleport_bot.log" | tr -d '\r')"
+	[ "${rr##* }" = PASS ] || ok=0
+	[ "$(num "$sl" begins)" = 6 ] && [ "$(num "$sl" moves)" = 6 ] && [ "$(num "$sl" launches)" = 6 ] || ok=0
+	echo "$sl" | grep -q ' byDevice=1,1,1,1,1,1,0,0$' || ok=0
+	[ "$(num "$rr" serverLaunches)" = 6 ] && [ "$(num "$rr" predTeleported)" = 6 ] && [ "$(num "$rr" restoreFails)" = 0 ] || ok=0
+	[ "$(num "$bl" tableRows)" = 6 ] && [ "$(num "$bl" bad)" = 0 ] && [ "$(num "$bl" predTeleported)" = 6 ] && [ "$(num "$bl" forcedYaw)" = 4 ] || ok=0
+	verdict 봇순간이동 $ok "봇 rc=$brc 서버 rc=$src 서버$(echo "$sl" | grep -oE ' (begins|moves|launches|byDevice)=[0-9,]+' | tr -d '\n') 봇$(echo "$bl" | grep -oE ' (tableRows|bad|predTeleported|forcedYaw)=[0-9]+' | tr -d '\n')$(echo "$rr" | grep -oE ' (ran|serverLaunches|posDiff|yawDiff|deviceDiff|endDiffMax)=[0-9.]+' | tr -d '\n')"
+}
+
 # 사람끼리 막기 대조(컨텐츠 F-1) — Lyra 연습장에서 두 사람이 부딪힌 기록을 Shared 이동으로 다시 돌려 위치 · 속도가 0.01 안이어야 한다.
 # 기록 = F-1 에서 PASS(cells=40)를 낸 네 벌 그대로(f1a · f1b · f1c · f1e)
 run_bump() {
@@ -687,6 +719,7 @@ else
 		run_dash
 		run_grenade
 		run_jumppad
+		run_teleport
 		run_rules
 		run_grenade_leave
 		run_press_order

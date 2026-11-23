@@ -7,6 +7,7 @@
 #include "Movement.h"
 #include "Prediction.h"
 #include "Pickups.h"
+#include "Teleports.h"
 #include "Weapon.h"
 #include "AnimClips.h"
 #include "AnimPose.h"
@@ -248,6 +249,15 @@ namespace
 	const TCHAR* const kGrenadeImpactSoundPath = TEXT("/Game/Audio/MetaSounds/sfx_Weapon_GrenadeImpact_nl_meta.sfx_Weapon_GrenadeImpact_nl_meta");
 	const TCHAR* const kGrenadeImpactAttenuationPath = TEXT("/Game/Audio/AttenuationPresets/ATT_Projectile.ATT_Projectile");
 	const TCHAR* const kLauncherCueTag = TEXT("GameplayCue.World.Launcher.Activate");	// B_Launcher 변수 Gameplay Tag(원본 기준 weapons_launchers.txt — 점프대 8개 다 같은 값)
+	const TCHAR* const kTeleportCueTag = TEXT("GameplayCue.World.Teleporter.Activate");	// B_Teleport 변수 GameplayCueTag(원본 기준 weapons_teleports.txt MOB_TELEPORT_VAR — 6개 다 같은 값)
+	const TCHAR* const kTeleportSoundPath = TEXT("/Game/Audio/MetaSounds/sfx_Teleport_nl_meta_Preset.sfx_Teleport_nl_meta_Preset");	// B_Teleport 그래프 PlaySound2D · PlaySoundAtLocation 의 Sound
+	// 남의 순간이동 지켜보기 — 화면 몸이 들어간 자리에서 이만큼 넘게 떠난 프레임을 본다: 들어간 자리 → 옮긴 자리 곧은 선과 이만큼 안이고 선의 안쪽(양끝 5% 뺌)이면
+	// 미끄러짐으로 세고 계속 본다. 선 밖이거나 옮긴 쪽 끝 5% 면 건너뜀으로 닫고, 들어간 쪽 끝 5% 면 아직 가를 수 없어 계속 본다.
+	// 옮긴 자리 둘레로 가리지 않는 까닭 — 발사가 붙은 장치는 옮기자마자 날아가 화면 한 프레임에 이만큼 넘게
+	// 간다(t-7 판 tC 장치 2: 떠난 첫 프레임이 옮긴 자리에서 100.7cm). 이만큼 = 들어가기 앞 한두 프레임 걸음보다 넉넉하고 장치 사이(2,000cm 넘음)보다 훨씬 작다(제 판단).
+	// 1초 안에 들어간 자리를 못 떠나면 따로 센다
+	constexpr double kTeleportWatchNear = 100.0;
+	constexpr double kTeleportWatchSeconds = 1.0;
 	const TCHAR* const kGrenadeDetonateCueTag = TEXT("GameplayCue.Weapon.Grenade.Detonate");	// B_Grenade 변수 Gameplay Tag(원본 기준 B_Grenade_cdo.t3d)
 	void KeepBridgeCrouch(ULyraCharacterMovementComponent* Self, FVector&, float)
 	{
@@ -361,6 +371,12 @@ struct FMOBCore
 	std::vector<mo::Launcher> LauncherRows;
 	std::vector<bool> LauncherGot;
 	bool bLaunchersReady = false;
+	// 순간이동 표(S2C_TELEPORT, teleport-plan t-7) — 서버가 보낸 줄. 다 오면 예측에 넘기고(-MOBBreakTeleport 면 안 넘김), 내 상태 · 남의 상태가 옮긴 자리인지 가리는 데도 쓴다
+	std::vector<mo::Teleporter> TeleportRows;
+	std::vector<bool> TeleportGot;
+	double TeleportMeshBaseZ = 0;
+	bool bTeleportsReady = false;
+	mo::TeleportSet Teleports;		// TeleportRows 를 가리킨다(MatchTeleportExit) — 다 온 뒤에만 채운다
 
 	// 사람끼리 막기(D83) — 내 예측이 볼 남 캡슐. 마지막으로 받은 상태의 산 사람만(서버 · 봇 SetPawnsForPrediction 과 같은 식).
 	// 남 자리는 받은 최신 상태라 서버가 내 입력을 굴린 순간의 자리와 다르다 — 그 차이는 Reconcile 보정으로 나온다
@@ -585,6 +601,7 @@ void UMOBridgeSubsystem::ParseCommandLine()
 	bBreakDevices = FParse::Param(Cmd, TEXT("MOBBreakDevices"));
 	bDeviceFxOff = FParse::Param(Cmd, TEXT("MOBDeviceFxOff"));
 	bBreakJumpPad = FParse::Param(Cmd, TEXT("MOBBreakJumpPad"));
+	bBreakTeleport = FParse::Param(Cmd, TEXT("MOBBreakTeleport"));
 	{
 		FString PadWalkText;
 		if (FParse::Value(Cmd, TEXT("MOBPadWalk="), PadWalkText, false))
@@ -1064,6 +1081,12 @@ void UMOBridgeSubsystem::HandlePacket(const uint8* Data, int32 Size)
 		HandleLauncher(M, Size);
 		break;
 	}
+	case wire::Msg::S2C_TELEPORT:
+	{
+		wire::TeleportInfo M = wire::TeleportInfo(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
+		HandleTeleport(M, Size);
+		break;
+	}
 	case wire::Msg::S2C_PICKUP:
 	{
 		wire::Pickup M = wire::Pickup(); FMemory::Memcpy(&M, Data, FMath::Min<int32>(Size, sizeof(M)));
@@ -1190,6 +1213,38 @@ void UMOBridgeSubsystem::ApplySelfState(const wire::PlayerState& P)
 	{
 		const FMOBCore::FPawnScope PawnScope(*Core);
 		R = Core->Prediction.Reconcile(P, kCorrectTolerance);
+	}
+	// 순간이동(t-7) — 예측이 옮긴 입력 S 를 서버 상태로 맞춘다: S 를 지난 첫 비교에서 서버 자리 ↔ 같은 번호 예측 자리 차가 200cm 안이면 맞음(옮긴 쪽 · 안 옮긴 쪽은
+	// 장치 사이 2,000cm 넘게 갈린다), 넘으면 못 맞춤. 상태 자리가 옮긴 자리 그대로인지는 안 본다 — 서버가 한 틱에 입력 여럿을 돌리면 상태가 옮긴 입력을 지나 있다
+	// (t-7 판 tA: 옮긴 입력 125 → 다음 상태 입력 127). 예측이 안 옮긴 범위에서 200cm 넘게 갈렸고 서버 자리가 어느 장치의 옮긴 자리면 서버만 옮겼다 — 효과만
+	// 지금 낸다(D164 — Lyra 도 효과는 서버 것이 오고 소리 · 시점 돌림은 제 겹침에서만). 옮긴 자리가 아니면(옮긴 뒤 걸음이 더 돌았거나 · 다른 까닭) 따로 센다
+	if (R.compared && Core->bTeleportsReady)
+	{
+		bool bPredictedInRange = false;
+		for (int32 i = PendingSelfTeleportSeqs.Num() - 1; i >= 0; --i)
+		{
+			if (PendingSelfTeleportSeqs[i] > P.lastSeq) continue;
+			bPredictedInRange = true;
+			if (R.posDiff < wire::kRemoteTeleportDistance) ++TeleportSelfConfirmed;
+			else
+			{
+				++TeleportSelfUnconfirmed;
+				UE_LOG(LogMOB, Warning, TEXT("MOB_TELEPORT_UNCONFIRMED seq=%u stateSeq=%u posDiff=%.1f server=(%.1f,%.1f,%.1f)"), PendingSelfTeleportSeqs[i], P.lastSeq, R.posDiff, P.x, P.y, P.z);
+			}
+			PendingSelfTeleportSeqs.RemoveAt(i);
+		}
+		if (!bPredictedInRange && R.posDiff >= wire::kRemoteTeleportDistance)
+		{
+			const int32 Exit = mo::MatchTeleportExit(Core->Teleports, mo::Vec3(P.x, P.y, P.z), Core->Params.capsuleRadius, mo::kTeleportExitTolerance);
+			if (Exit >= 0)
+			{
+				++TeleportSelfLate;
+				const APlayerController* SelfPC = GetWorld()->GetFirstPlayerController();
+				PlayTeleportCue(SelfPC ? SelfPC->GetPawn() : nullptr, Exit, FVector(P.x, P.y, P.z), true, false);
+			}
+			else ++TeleportSelfBigNoExit;
+			UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_LATE seq=%u device=%d posDiff=%.1f server=(%.1f,%.1f,%.1f)"), P.lastSeq, Exit, R.posDiff, P.x, P.y, P.z);
+		}
 	}
 	if (R.compared)
 	{
@@ -1363,6 +1418,43 @@ void UMOBridgeSubsystem::AddRemoteSnapshot(const wire::PlayerState& P, uint32 Se
 	S.bCrouched = (P.flags & wire::STATE_CROUCHED) != 0;
 	// 남의 점프대(j-7) — 깃발이 새로 선 상태 = 그 틱 이동 끝에 쏠 점프대에 들었다. 어느 점프대인지는 그 자리 겹침으로 찾는다(여럿이면 마지막 — 서버 발사는 덮어쓴다,
 	// JumpPads.h RestoreLaunchers 와 같다). 효과는 화면 시점이 그 틱에 닿을 때(TickRemoteLaunchCues) — 받자마자 내면 보간 지연만큼 앞서 난다
+	// 남의 순간이동(t-7) — 앞 상태에서 200cm 넘게 뛰었고 그 자리가 어느 장치의 옮긴 자리면 그 틱 이동 끝에 옮겨졌다(남의 몸엔 예측이 없어 앞 상태와 견준다). 효과 때는 점프대와 같다.
+	// 못 잡는 것 — 서버가 옮긴 입력 뒤에 같은 틱에서 입력을 더 돌리면 상태 자리가 옮긴 자리를 지나 있다(t-7 판 tA 내 상태 79 · 115cm) — 진행 파일 미결
+	// 화면은 이미 있는 규칙(200cm 넘는 두 상태는 섞지 않음, TickRemotes)으로 건너뛴다 — 지켜보기가 실물로 센다
+	int32 TeleDevice = -1;
+	if (Core && Core->bTeleportsReady && R.SnapCount > 0)
+	{
+		const FMOBSnapshot& Prev = R.Snaps[(R.SnapCount - 1) % FMOBRemote::kSnapshots];
+		const double Jump = FVector::Dist(Prev.Pos, S.Pos);
+		if (Jump > wire::kRemoteTeleportDistance)
+		{
+			++TeleportRemoteJumps;
+			TeleDevice = mo::MatchTeleportExit(Core->Teleports, mo::Vec3(P.x, P.y, P.z), Core->Params.capsuleRadius, mo::kTeleportExitTolerance);
+			if (TeleDevice < 0)
+			{
+				++TeleportRemoteNoExit;
+				UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_REMOTE_JUMP player=%u tick=%u jump=%.1f at=(%.1f,%.1f,%.1f)"), P.id, ServerTick, Jump, P.x, P.y, P.z);
+			}
+			else
+			{
+				++TeleportRemoteExits;
+				TeleportRemoteJumpMin = TeleportRemoteJumpMin < 0.0 ? Jump : FMath::Min(TeleportRemoteJumpMin, Jump);
+				if (PendingLaunchCues.Num() >= 32)
+				{
+					PendingLaunchCues.RemoveAt(0);	// 점프대 효과와 같은 상한
+					++LaunchCueDropped;
+				}
+				FMOBPendingLaunchCue& Cue = PendingLaunchCues.AddDefaulted_GetRef();
+				Cue.Player = P.id;
+				Cue.Tick = ServerTick;
+				Cue.Pad = TeleDevice;
+				Cue.bTeleport = true;
+				Cue.Entry = Prev.Pos;
+				Cue.Dest = S.Pos;
+				UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_REMOTE player=%u tick=%u device=%d jump=%.1f at=(%.1f,%.1f,%.1f)"), P.id, ServerTick, TeleDevice, Jump, P.x, P.y, P.z);
+			}
+		}
+	}
 	const bool bLaunchFlag = (P.flags & wire::STATE_LAUNCH_PENDING) != 0;
 	if (bLaunchFlag && !R.bLaunchFlag && Core && Core->bLaunchersReady)
 	{
@@ -1375,7 +1467,7 @@ void UMOBridgeSubsystem::AddRemoteSnapshot(const wire::PlayerState& P, uint32 Se
 		{
 			if (Mask & (1u << k)) Pad = k;
 		}
-		if (Pad < 0) ++LaunchRemoteNoPad;
+		if (Pad < 0) ++(TeleDevice >= 0 ? LaunchRemoteTeleport : LaunchRemoteNoPad);	// 순간이동 뒤따르는 발사 깃발 — 점프대 효과가 아니다
 		else
 		{
 			if (PendingLaunchCues.Num() >= 32)
@@ -2010,6 +2102,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		SelfPrev = SelfCur;
 		VisualError = FVector::ZeroVector;
 		PadWalkPlacedAt = Now;
+		PadWalkYawNow = PadWalkYaw;
 		++PadWalkPlaces;
 		UE_LOG(LogMOB, Log, TEXT("MOB_PADWALK place=%d seq=%u at=(%.1f,%.1f,%.1f) yaw=%.1f"), PadWalkPlaces, Place.seq, PadWalkAt.X, PadWalkAt.Y, PadWalkAt.Z, PadWalkYaw);
 	}
@@ -2023,7 +2116,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 	if (bPadWalking)
 	{
 		// 놓은 뒤 0.5초는 서고, 그 뒤 정한 요로 앞으로(사람 키 대신)
-		const double Rad = FMath::DegreesToRadians((double)PadWalkYaw);
+		const double Rad = FMath::DegreesToRadians((double)PadWalkYawNow);
 		Move = Now - PadWalkPlacedAt >= 0.5 ? FVector(FMath::Cos(Rad), FMath::Sin(Rad), 0.0) : FVector::ZeroVector;
 	}
 	InputSentMax = FMath::Max(InputSentMax, (double)FVector2f((float)Move.X, (float)Move.Y).Size());
@@ -2176,6 +2269,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		ViewAlpha = (float)(ShownRenderTick - ViewWhole);
 	}
 
+	FRotator InputControl = Control;	// 순간이동이 시점을 돌리면(t-7) 이 프레임의 남은 입력부터 새 요 · 숙임
 	for (int32 i = 0; i < Due; ++i)
 	{
 		wire::Input In = wire::Input();
@@ -2183,8 +2277,8 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		In.h.type = (uint16)wire::Msg::C2S_INPUT;
 		In.moveX = (float)Move.X;
 		In.moveY = (float)Move.Y;
-		In.yaw = bPadWalking ? PadWalkYaw : FRotator::NormalizeAxis(Control.Yaw);
-		In.pitch = FRotator::NormalizeAxis(Control.Pitch);
+		In.yaw = bPadWalking ? PadWalkYawNow : FRotator::NormalizeAxis(InputControl.Yaw);
+		In.pitch = FRotator::NormalizeAxis(InputControl.Pitch);
 		In.aimX = (float)Aim.X;
 		In.aimY = (float)Aim.Y;
 		In.aimZ = (float)Aim.Z;
@@ -2235,6 +2329,7 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		const uint64 DashStartedBefore = Core->Prediction.GetDashCounters().started;
 		const uint64 GrenadeThrownBefore = Core->Prediction.GetGrenadeCounters().thrown;
 		const uint64 LaunchFiredBefore = Core->Prediction.GetLaunchCounters().fired;
+		const uint64 TeleportedBefore = Core->Prediction.GetTeleportCounters().teleported;
 		{
 			const FMOBCore::FPawnScope PawnScope(*Core);	// 화면 판정(JudgeMelee) 뒤에 넘긴다 — 봇과 같은 차례
 			Core->Prediction.AddInput(In, bMeleeStarts && MeleeGuess.Kind == wire::MELEE_HIT ? &MeleePush : nullptr);
@@ -2243,6 +2338,27 @@ void UMOBridgeSubsystem::TickInput(double Now)
 		MeleeYaw = In.yaw;
 		// 점프대(j-7) — 이 입력 걸음 끝에 예측이 쏠 점프대에 들었으면 그 걸음에 효과(그래프도 겹침 시작에서 낸다 — 발사는 다음 걸음 머리)
 		if (Core->Prediction.GetLaunchCounters().fired != LaunchFiredBefore) PlayLauncherCue(Ch, Core->Prediction.GetLastLaunchPad(), true);
+		// 순간이동(t-7) — 이 입력 걸음 끝에 예측이 옮겼으면 효과 · 소리(그래프는 겹침 시작에서 Teleport 앞에 낸다 — 화면 몸은 아직 앞 자리), bForceDirection 장치면
+		// 시점을 나갈 화살표 앞방향으로(그래프 SetControlRotation(RotationFromXVector)) — 다음 입력부터 그 요가 실린다(서버는 입력 요를 그대로 쓴다, Room.cpp ApplyInput)
+		if (Core->Prediction.GetTeleportCounters().teleported != TeleportedBefore)
+		{
+			const mo::CSelfPrediction::TeleportEvent& Ev = Core->Prediction.GetLastTeleport();
+			if (PendingSelfTeleportSeqs.Num() >= 8) PendingSelfTeleportSeqs.RemoveAt(0);	// 서버 상태가 안 오는 동안 쌓인 것(제 판단 — 옮김은 몇 초에 한 번)
+			PendingSelfTeleportSeqs.Add(Ev.seq);
+			PlayTeleportCue(Ch, Ev.device, ToFVector(Core->Prediction.GetMove().location), true, true);
+			FRotator ExitRot = InputControl;
+			if (Ev.forceYaw && Ev.device >= 0 && Ev.device < (int32)Core->TeleportRows.size())
+			{
+				const mo::Vec3& F = Core->TeleportRows[Ev.device].exitForward;
+				ExitRot = FVector(F.x, F.y, F.z).Rotation();
+				PC->SetControlRotation(ExitRot);
+				InputControl = ExitRot;
+				PadWalkYawNow = (float)ExitRot.Yaw;
+				++TeleportSelfYaw;
+			}
+			UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_SELF seq=%u device=%d force=%d yaw=%.2f predYaw=%.2f at=(%.1f,%.1f,%.1f)"), Ev.seq, Ev.device, Ev.forceYaw ? 1 : 0, ExitRot.Yaw, Ev.yaw,
+				Core->Prediction.GetMove().location.x, Core->Prediction.GetMove().location.y, Core->Prediction.GetMove().location.z);
+		}
 		if (!PressText.IsEmpty() && PressLinesLeft > 0)
 		{
 			--PressLinesLeft;
@@ -3113,7 +3229,121 @@ void UMOBridgeSubsystem::PlayLauncherCue(APawn* Target, int32 Pad, bool bSelf)
 	RequestEventShot(bSelf ? TEXT("launch_self_air") : TEXT("launch_remote_air"), 0.6, 3);
 }
 
+// 서버 순간이동 표 한 줄(판 19 S2C_TELEPORT, teleport-plan t-7) — 줄 수(count)가 다 오면 내 예측에 넘긴다(봇 OnTeleport 와 같다). 서버는 점프대 표 바로 뒤 · 부활 소식보다 먼저 보낸다.
+// meshBaseZ 는 표 전체 값을 줄마다 싣는다 — 줄마다 다르면 틀린 줄로 본다
+void UMOBridgeSubsystem::HandleTeleport(const wire::TeleportInfo& M, int32 Size)
+{
+	++TeleportInfos;
+	mo::Teleporter Row;
+	double MeshZ = 0;
+	if (!Core || Size != (int32)sizeof(M) || !mo::TeleportFromWire(M, Row, MeshZ))
+	{
+		++TeleportInfoBad;
+		return;
+	}
+	if (Core->TeleportRows.size() != M.count)
+	{
+		Core->TeleportRows.assign(M.count, mo::Teleporter());
+		Core->TeleportGot.assign(M.count, false);
+		Core->bTeleportsReady = false;
+		Core->Teleports = mo::TeleportSet();
+		Core->TeleportMeshBaseZ = MeshZ;
+	}
+	if (MeshZ != Core->TeleportMeshBaseZ)
+	{
+		++TeleportInfoBad;
+		return;
+	}
+	Core->TeleportRows[M.index] = Row;
+	Core->TeleportGot[M.index] = true;
+	if (Core->bTeleportsReady) return;
+	for (const bool bGot : Core->TeleportGot)
+	{
+		if (!bGot) return;
+	}
+	Core->bTeleportsReady = true;
+	Core->Teleports.items = Core->TeleportRows.data();
+	Core->Teleports.count = Core->TeleportRows.size();
+	Core->Teleports.meshBaseZ = Core->TeleportMeshBaseZ;
+	if (!bBreakTeleport) Core->Prediction.SetTeleports(Core->TeleportRows, Core->TeleportMeshBaseZ, Core->Params.capsuleRadius);
+	// 이 다리가 낸 순간이동 효과가 실제로 신호 관리자 길에 들어갔나(점프대와 같은 식)
+	if (!TeleportCueRouteHandle.IsValid())
+	{
+		if (UGameplayCueManager* GCM = UAbilitySystemGlobals::Get().GetGameplayCueManager())
+		{
+			const FGameplayTag CueTag = FGameplayTag::RequestGameplayTag(kTeleportCueTag, false);
+			TeleportCueRouteHandle = GCM->OnGameplayCueRouted().AddWeakLambda(this, [this, CueTag](AActor*, FGameplayTag Routed, EGameplayCueEvent::Type Event, const FGameplayCueParameters&, EGameplayCueExecutionOptions)
+			{
+				if (Event == EGameplayCueEvent::Executed && CueTag.IsValid() && Routed == CueTag && bTeleportCueCalling) ++TeleportCueRouted;
+			});
+		}
+	}
+	for (int32 k = 0; k < (int32)Core->TeleportRows.size(); ++k)
+	{
+		const mo::Teleporter& T = Core->TeleportRows[k];
+		UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_ROW %d name=%s target=%d exit=(%.0f,%.0f,%.0f) keep=%d launch=%d force=%d"), k, UTF8_TO_TCHAR(T.name.c_str()), T.target,
+			T.exit.x, T.exit.y, T.exit.z, T.keepRelative ? 1 : 0, T.launchOnTeleport ? 1 : 0, T.forceDirection ? 1 : 0);
+	}
+	UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORTS rows=%d meshBaseZ=%.2f fxOff=%d breakPredict=%d"), (int32)Core->TeleportRows.size(), Core->TeleportMeshBaseZ, bDeviceFxOff ? 1 : 0, bBreakTeleport ? 1 : 0);
+}
+
+// 순간이동 효과 · 소리 — B_Teleport 그래프와 같은 값(원본 기준 C:\tmp\mob\lm\tn\b_teleport_graph.txt 1~240줄). 효과(Execute GameplayCue On Actor (Burst)): 대상 = 옮겨진 몸 ·
+// 태그 = 변수 GameplayCueTag(6개 다 GameplayCue.World.Teleporter.Activate) · 자리 · 법선 0 · 일으킨 이 = 그 몸 · 일으킨 것 = 들어간 장치 · 효과 · 능력 단계 1, 나머지 핀은 기본값.
+// 소리(Teleport Audio for Pawn): 그 몸을 이 화면이 보고 있으면(IsLocallyViewed) sfx_Teleport_nl_meta_Preset 을 2D 로(크기 1.0), 아니면 옮긴 자리(Teleport 의 DestLocation)와
+// 들어간 장치 뿌리(DefaultSceneRoot1)에서 하나씩(크기 0.7). bSound = 소리도 낸다(예측이 놓친 내 옮김은 효과만, D164). 장치는 서버 표 이름으로 찾는다
+void UMOBridgeSubsystem::PlayTeleportCue(APawn* Target, int32 Device, const FVector& Dest, bool bSelf, bool bSound)
+{
+	if (bDeviceFxOff) return;
+	static const FGameplayTag TeleportCueTag = FGameplayTag::RequestGameplayTag(kTeleportCueTag, false);
+	AActor* DeviceActor = nullptr;
+	if (Core && Device >= 0 && Device < (int32)Core->TeleportRows.size())
+	{
+		const FString Name(UTF8_TO_TCHAR(Core->TeleportRows[Device].name.c_str()));
+		for (const FMOBDevice& D : Devices)
+		{
+			AActor* A = D.Actor.Get();
+			if (A && D.bTeleport && A->GetName() == Name) DeviceActor = A;
+		}
+	}
+	if (!DeviceActor || !Target)
+	{
+		++TeleportCueNoActor;
+		return;
+	}
+	if (!TeleportCueTag.IsValid())
+	{
+		++TeleportCueNoTag;
+		return;
+	}
+	const FGameplayCueParameters Params = UAbilitySystemBlueprintLibrary::MakeGameplayCueParameters(0.f, 0.f, FGameplayEffectContextHandle(), FGameplayTag(), FGameplayTag(),
+		FGameplayTagContainer(), FGameplayTagContainer(), FVector::ZeroVector, FVector::ZeroVector, Target, DeviceActor, nullptr, nullptr, 1, 1, nullptr, false);
+	bTeleportCueCalling = true;
+	UGameplayCueFunctionLibrary::ExecuteGameplayCueOnActor(Target, TeleportCueTag, Params);
+	bTeleportCueCalling = false;
+	++(bSelf ? TeleportCuesSelf : TeleportCuesRemote);
+	if (bSound)
+	{
+		USoundBase* Sound = LoadObject<USoundBase>(nullptr, kTeleportSoundPath);
+		if (!Sound) ++TeleportSoundMissing;
+		else if (Target->IsLocallyViewed())
+		{
+			UGameplayStatics::PlaySound2D(DeviceActor, Sound, 1.f, 1.f, 0.f, nullptr, nullptr, false);
+			++TeleportSounds2D;
+		}
+		else
+		{
+			UGameplayStatics::PlaySoundAtLocation(DeviceActor, Sound, Dest, FRotator::ZeroRotator, 0.7f, 1.f, 0.f);
+			UGameplayStatics::PlaySoundAtLocation(DeviceActor, Sound, DeviceActor->GetActorLocation(), FRotator::ZeroRotator, 0.7f, 1.f, 0.f);
+			TeleportSounds3D += 2;
+		}
+	}
+	// -MOBEventShots — 효과 직후 · 옮긴 뒤 사진(사람 확인 표의 빛 · 옮겨짐을 미리 보려고)
+	RequestEventShot(bSelf ? TEXT("teleport_self") : TEXT("teleport_remote"), 0.15, 3);
+	RequestEventShot(bSelf ? TEXT("teleport_self_after") : TEXT("teleport_remote_after"), 0.6, 3);
+}
+
 // 남의 점프대 효과 — 시점 = 그 몸을 보간하는 화면 틱이 깃발 선 틱의 앞 틱을 넘은 첫 프레임(남의 대시 효과 TickRemoteDashCues 와 같은 규칙)
+// 남의 순간이동도 같은 때(화면 몸은 아직 들어간 쪽 — 그래프도 Teleport 앞에 낸다). 낸 뒤 그 몸이 한 번에 건너뛰나 지켜본다
 void UMOBridgeSubsystem::TickRemoteLaunchCues()
 {
 	for (int32 i = 0; i < PendingLaunchCues.Num();)
@@ -3124,8 +3354,55 @@ void UMOBridgeSubsystem::TickRemoteLaunchCues()
 			++i;
 			continue;
 		}
-		PlayLauncherCue(FindPlayerPawn(C.Player), C.Pad, false);
+		if (C.bTeleport)
+		{
+			PlayTeleportCue(FindPlayerPawn(C.Player), C.Pad, C.Dest, false, true);
+			FMOBTeleportWatch& W = TeleportWatches.AddDefaulted_GetRef();
+			W.Player = C.Player;
+			W.Entry = C.Entry;
+			W.Dest = C.Dest;
+			W.StartedAt = FPlatformTime::Seconds();
+		}
+		else PlayLauncherCue(FindPlayerPawn(C.Player), C.Pad, false);
 		PendingLaunchCues.RemoveAt(i);
+	}
+	const double NowSec = FPlatformTime::Seconds();
+	for (int32 i = TeleportWatches.Num() - 1; i >= 0; --i)
+	{
+		const FMOBTeleportWatch& W = TeleportWatches[i];
+		const APawn* Pawn = FindPlayerPawn(W.Player);
+		if (!Pawn)
+		{
+			++TeleportWatchLost;
+			TeleportWatches.RemoveAt(i);
+			continue;
+		}
+		const FVector At = Pawn->GetActorLocation();
+		if (FVector::Dist(At, W.Entry) > kTeleportWatchNear)
+		{
+			const FVector Line = W.Dest - W.Entry;
+			const double Along = FVector::DotProduct(At - W.Entry, Line) / FMath::Max(Line.SizeSquared(), 1.0);
+			const double OffLine = FVector::Dist(At, W.Entry + Line * Along);
+			if (OffLine <= kTeleportWatchNear && Along > 0.05 && Along < 0.95)
+			{
+				++TeleportRemoteMidFrames;
+				UE_LOG(LogMOB, Warning, TEXT("MOB_TELEPORT_MID player=%u at=(%.1f,%.1f,%.1f) along=%.3f offLine=%.1f entry=(%.1f,%.1f,%.1f) dest=(%.1f,%.1f,%.1f)"), W.Player,
+					At.X, At.Y, At.Z, Along, OffLine, W.Entry.X, W.Entry.Y, W.Entry.Z, W.Dest.X, W.Dest.Y, W.Dest.Z);
+			}
+			else if (OffLine > kTeleportWatchNear || Along >= 0.95)
+			{
+				++TeleportRemoteSnapped;
+				UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT_SNAP player=%u fromDest=%.1f along=%.3f offLine=%.1f watched=%.3f"), W.Player, FVector::Dist(At, W.Dest), Along, OffLine,
+					NowSec - W.StartedAt);
+				TeleportWatches.RemoveAt(i);
+				continue;
+			}
+		}
+		if (NowSec - W.StartedAt > kTeleportWatchSeconds)
+		{
+			++TeleportRemoteSnapTimeout;
+			TeleportWatches.RemoveAt(i);
+		}
 	}
 }
 
@@ -4803,6 +5080,17 @@ void UMOBridgeSubsystem::FinishAndQuit(const TCHAR* Why)
 			Core ? (int32)Core->LauncherRows.size() : 0, LauncherInfos, LauncherInfoBad, (unsigned long long)LC.fired, (unsigned long long)LC.applied, (unsigned long long)LC.refused,
 			(unsigned long long)LC.restored, (unsigned long long)LC.restoreFails, LaunchComparedOn, LaunchFlagDiff, LaunchCuesSelf, LaunchCuesRemote, LaunchCueRouted, LaunchCueNoActor,
 			LaunchCueNoTag, LaunchCueDropped, PendingLaunchCues.Num(), LaunchRemoteFlags, LaunchRemoteNoPad, PadWalkPlaces, bDeviceFxOff ? 1 : 0);
+	}
+	{
+		// 순간이동(t-7) — 표 · 내 몸(예측이 옮김 = 서버 상태로 맞춤 · 시점 돌림 · 늦은 효과) · 효과 · 소리 · 남의 몸(큰 뜀 중 옮긴 자리 · 효과 · 건너뜀 · 미끄러진 프레임)
+		const mo::CSelfPrediction::TeleportCounters TC = Core ? Core->Prediction.GetTeleportCounters() : mo::CSelfPrediction::TeleportCounters();
+		int32 TelePending = 0;
+		for (const FMOBPendingLaunchCue& C : PendingLaunchCues) TelePending += C.bTeleport ? 1 : 0;
+		UE_LOG(LogMOB, Log, TEXT("MOB_TELEPORT rows=%d infos=%lld bad=%lld predTeleported=%llu predForcedYaw=%llu selfYaw=%lld confirmed=%lld unconfirmed=%lld late=%lld bigNoExit=%lld cuesSelf=%lld cuesRemote=%lld routed=%lld noActor=%lld noTag=%lld sound2d=%lld sound3d=%lld soundMissing=%lld remoteJumps=%lld remoteExits=%lld remoteNoExit=%lld remoteJumpMin=%.1f launchFlagTeleport=%lld snapped=%lld midFrames=%lld snapTimeout=%lld watchLost=%lld pending=%d fxOff=%d break=%d"),
+			Core ? (int32)Core->TeleportRows.size() : 0, TeleportInfos, TeleportInfoBad, (unsigned long long)TC.teleported, (unsigned long long)TC.forcedYaw, TeleportSelfYaw,
+			TeleportSelfConfirmed, TeleportSelfUnconfirmed, TeleportSelfLate, TeleportSelfBigNoExit, TeleportCuesSelf, TeleportCuesRemote, TeleportCueRouted, TeleportCueNoActor, TeleportCueNoTag,
+			TeleportSounds2D, TeleportSounds3D, TeleportSoundMissing, TeleportRemoteJumps, TeleportRemoteExits, TeleportRemoteNoExit, TeleportRemoteJumpMin, LaunchRemoteTeleport,
+			TeleportRemoteSnapped, TeleportRemoteMidFrames, TeleportRemoteSnapTimeout, TeleportWatchLost, TelePending, bDeviceFxOff ? 1 : 0, bBreakTeleport ? 1 : 0);
 	}
 	// fails = 예비 가득 실패 소식(판 14 · L-4) · failBad = 그중 남 이름 · give ≠ Full(기대 0)
 	UE_LOG(LogMOB, Log, TEXT("MOB_PADS pads=%d msgs=%lld takes=%lld readies=%lld syncs=%lld badIndex=%lld noActor=%lld bound=%lld heals=%lld healBeforeFix=%lld healMismatch=%lld healNoPawn=%lld stateChecks=%lld stateDiff=%lld lastStateTick=%u fails=%lld failBad=%lld"),

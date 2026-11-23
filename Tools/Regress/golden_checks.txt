@@ -45,6 +45,22 @@ move_expanse_pads RUNPAD matched=49 mineOnly=0 lyraOnly=0 speedMax=0.001073 over
 move_expanse_pads COUNT ticks=14880 walkIter=8272 fallIter=6784 | floorSweep=5560 second=1 line=34 lineWalk=18 supplied=3003 adjust=3344 popOut=0
 move_expanse_pads COUNT perchTry=29 perchOk=6 perchOverride=3 perchFail=23
 move_expanse_pads COUNT ramp2=1 stepTry=4135 stepOk=3015 stepReject=334 slide=4447 twoWall=798 ledgeFall=11 | landed=119 landedEdge=4 fallWall2=72 fallStuck=1 apex=58 | jump=14 launch=49 | startPen=3 resolveTeleport=1 resolveSweep=0
+move_expanse_tele TELE_TABLE teleports=6 recTeles=6 mapped=6 teleColumns=1 meshBaseZ=-88 standHalf=90 (param 90) exitsInBox=0
+move_expanse_tele TELE_WIRE size=288 ok=6 bad=0 reject=20/20
+move_expanse_tele TELE mask frames=14284 lyraIn=0 mineIn=0 mismatch=0 | lyraTeles=53 mineTeles=53 matched=53 mineOnly=0 lyraOnly=0 deviceDiff=0 beginsOver1=0
+move_expanse_tele TELE pos max=0.000000 over0.01=0 | vel max=0.000000 over0.01=0 | modeDiff=0 (walk->fall 33 fall->fall 20 other 0) | yaw max=0.000000 over0.01=0 | cyaw checked=37 over0.01=0
+move_expanse_tele TELE launch matched=53 max=0.000000 over0.01=0 missing=0 atEnd=0
+move_expanse_tele TELE_RESTORE tried=53 fail=0 deviceDiff=0 maskDiff=0 maxDiff=0.000000 | falseExit=0 (launch pending 0)
+move_expanse_tele TELE_COVER 0=8 1=8 2=12 3=8 4=9 5=8
+move_expanse_tele TELECHECK PASS
+move_expanse_tele ONE frames=14284 (walk=10888 fall=3396) posMax=3187.8813 p50=0.00000 p99=0.0010 over0.01=88 over0.1=57 over1=53 | velMax=6.166 velOver1=5 | modeMismatch=33
+move_expanse_tele RUN frames=14284 (walk=10888 fall=3396) posMax=0.2978 p50=0.00003 p99=0.0462 over0.01=721 over0.1=38 over1=0 | velMax=13.682 velOver1=13 | modeMismatch=0
+move_expanse_tele RUN segments=48 over1cm=0 over10cm=0 worst=0.298 (seg 37) resync=0 firstOver1 median=0.00s
+move_expanse_tele RUNPAD matched=53 mineOnly=0 lyraOnly=0 speedMax=0.000000 over0.01=0 | teleportSegs=0 skippedRows=0
+move_expanse_tele RUNTELE matched=53 mineOnly=0 lyraOnly=0 deviceDiff=0
+move_expanse_tele COUNT ticks=14284 walkIter=10945 fallIter=3450 | floorSweep=7317 second=0 line=817 lineWalk=789 supplied=3884 adjust=4060 popOut=0
+move_expanse_tele COUNT perchTry=10 perchOk=4 perchOverride=0 perchFail=6
+move_expanse_tele COUNT ramp2=2 stepTry=4428 stepOk=3883 stepReject=218 slide=4370 twoWall=127 ledgeFall=24 | landed=106 landedEdge=1 fallWall2=1 fallStuck=0 apex=5 | jump=6 launch=53 | startPen=2 resolveTeleport=1 resolveSweep=0
 weapon TABLE   pistol   items=59 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001
 weapon TABLE   rifle    items=68 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001
 weapon TABLE   shotgun  items=65 unknown=0 diff=0 | curve samples=260 maxDiff=0.000001

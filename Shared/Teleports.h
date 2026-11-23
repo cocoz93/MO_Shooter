@@ -20,6 +20,9 @@ namespace mo
 	constexpr size_t kMaxTeleports = 8;
 	// 이름 최대 글자 수 — 점프대 이름과 같은 63자(와이어에 실을 때 0 으로 끝나는 64바이트 칸). 넘는 줄은 읽기에서 틀린 줄로 본다
 	constexpr size_t kMaxTeleportName = 63;
+	// 받은 자리가 순간이동 옮긴 자리인가(MatchTeleportExit) — 상태 패킷 자리는 단정밀도 — 나갈 자리 6곳은 |좌표| < 4,096cm 라 간격 0.000244cm(반올림은 그 절반). 간격의 40배.
+	// 보정(JumpPads.cpp RestoreLaunchers)과 다리(내 상태 · 남의 상태가 옮긴 자리인지 가림, teleport-plan t-7)가 같이 쓴다
+	constexpr double kTeleportExitTolerance = 0.01;
 
 	struct Teleporter
 	{
