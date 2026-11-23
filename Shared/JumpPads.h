@@ -3,6 +3,7 @@
 #include "GameProtocol.h"
 #include "MapCollision.h"
 #include "Movement.h"
+#include "Teleports.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +14,7 @@
 // Lyra 실행값 덤프에서 만든다 — Epic 맵 값이라 리포에 넣지 않는다, 받침 pads_expanse.txt 와 같은 판단). 발사 규칙의 상수는 청사진 그래프 마디 값이라 여기 박는다
 // (make_launchers.py GRAPH_GUARDS 가 그래프 글에서 같은 값을 확인해야 파일을 쓴다).
 // 서버 · 내 몸 예측(봇 · 다리) · MoveCheck 가 같은 함수를 부른다 — 쏘는 틱에 예측이 서버와 같아야 화면이 안 튄다.
-// 순간이동(B_Teleport)은 이 범위 밖이다(D157 — 사용자 말 「점프대도」).
+// 순간이동(B_Teleport)은 Teleports.h 가 맡고(D163 — D157 을 뒤집음), 이동 한 번을 감싸는 자리(TickWithLaunchers)와 보정(RestoreLaunchers)만 여기서 같이 부른다.
 namespace mo
 {
 	// 겹침 비트가 한 바이트(MoveState::launcherMask)
@@ -71,13 +72,21 @@ namespace mo
 		int begins = 0;					// 이번 이동 끝에 겹침이 새로 시작된 점프대 수
 		int fired = -1;					// 그중 쏜 점프대 번호(여럿이면 마지막 — 발사는 덮어쓴다). -1 = 안 쏨
 		int refused = 0;				// 겹침은 시작했는데 그래프가 안 쏜 수(떨어지며 들어옴)
+		// 순간이동(teleports 를 넘겼을 때만)
+		int teleportBegins = 0;			// 이번 이동 끝에 겹침이 새로 시작된 순간이동 칸 수
+		int teleported = -1;			// 들어가 옮겨진 장치 번호. -1 = 안 옮김
+		double teleportYaw = 0;			// 옮겼으면 나갈 방향 요 — 옮긴 틱의 몸 방향
+		bool teleportForceYaw = false;	// 조종 요도 teleportYaw 로(bForceDirection) — 클라가 제 시점을 돌린다
 	};
 
 	// 점프대와 함께 이동 한 걸음 — 지난 걸음 끝 겹침 시작이 남긴 발사를 이번 이동 머리에 넣고(HandlePendingLaunch), 이동 뒤 겹침 시작을 본다
 	// (겹침 사건은 이동 묶음이 닫힐 때 난다 — CharacterMovementComponent.cpp:2225 FScopedCapsuleMovementUpdate). 발사는 그 다음 걸음에 먹는다(j-2 기록 51번 전부).
-	// 점프대가 없으면(count 0) sim.Tick 한 번과 같고 MoveState 의 점프대 칸도 안 바뀐다.
+	// 점프대 · 순간이동이 다 없으면(count 둘 다 0) sim.Tick 한 번과 같고 MoveState 의 점프대 칸도 안 바뀐다.
 	// 모자란 점 — 이동 끝 자리만 본다. 한 걸음 안에 구 칸을 들어갔다 나오면 Lyra(쓸기 겹침)는 쏘지만 여기는 안 쏜다(j-2 기록엔 없음)
-	LauncherTickResult TickWithLaunchers(CMoveSim& sim, MoveState& state, const Vec3& input, float deltaTime, double yawDegrees, const LauncherSet& launchers, double capsuleRadius);
+	// teleports 가 있으면 이동 직후 순간이동을 먼저 본다(ApplyTeleports) — 옮겼으면 점프대 겹침은 옮긴 자리 · 나갈 방향 요로 세고(Teleport 가 옮긴 자리에서 겹침을 다시 센다),
+	// 뒤따르는 발사는 점프대 발사 뒤에 넣어 덮는다(그래프에서 LaunchCharacter 가 Teleport 다음)
+	LauncherTickResult TickWithLaunchers(CMoveSim& sim, MoveState& state, const Vec3& input, float deltaTime, double yawDegrees, const LauncherSet& launchers, double capsuleRadius,
+		const TeleportSet& teleports = TeleportSet());
 
 	// 밖에서 자리를 정해 준 뒤(부활 · 시험 놓기 · 보정) — 겹침 비트를 지금 자리로 다시 세고 남은 발사를 지운다. 놓인 자리가 점프대 안이어도 안 쏜다
 	// (Lyra 는 쓸지 않고 놓을 때도 이동 끝에 겹침을 갱신해 시작을 낸다 — PrimitiveComponent.cpp:3512-3534. 그래도 L_Expanse 부활 자리 20곳은
@@ -87,7 +96,10 @@ namespace mo
 	// 받은 상태로 점프대 칸을 다시 세운다(예측 보정 — 서버 자리 · 속도로 MoveState 를 덮은 뒤). 비트는 그 자리로 세고, launchPending(STATE_LAUNCH_PENDING)이면
 	// 그 자리에서 겹친 점프대(여럿이면 표 차례 마지막)에 상태 속도 · 요를 넣어 발사를 다시 셈한다 — 서버는 이동 끝 속도 · 그 입력 요로 셈했고
 	// 상태 패킷의 속도 · 요가 바로 그 값이다(단정밀도로 줄었을 뿐). false = 깃발은 켜졌는데 겹친 점프대가 없거나 그래프가 안 쏘는 값(부른 쪽이 센다). 그때 발사는 지운다
-	bool RestoreLaunchers(MoveState& state, const LauncherSet& launchers, double capsuleRadius, double capsuleHalfHeight, bool launchPending, double yawDegrees);
+	// teleports 가 있으면 순간이동 비트도 그 자리로 다시 세고, 깃발이 켜졌는데 그 자리가 뒤따르는 발사가 있는 장치의 옮긴 자리면(MatchTeleportExit) 순간이동 발사를 먼저 고른다
+	// (옮긴 틱에 점프대가 같이 쐈어도 순간이동 발사가 덮었다 — 위 TickWithLaunchers). 깃발 하나로 두 발사를 가리는 근거는 자리뿐이다(판 18 깃발 8비트가 다 참)
+	bool RestoreLaunchers(MoveState& state, const LauncherSet& launchers, double capsuleRadius, double capsuleHalfHeight, bool launchPending, double yawDegrees,
+		const TeleportSet& teleports = TeleportSet());
 
 	// 와이어 한 줄(S2C_LAUNCHER) — 쓰기는 이름이 kMaxLauncherName 을 넘거나 차례가 틀리면 false. 읽기는 종류 · 깃발 · 반지름 · 이름 끝 · 차례가 틀리면 false
 	bool LauncherToWire(const Launcher& launcher, size_t index, size_t count, wire::LauncherInfo& out);

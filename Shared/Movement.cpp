@@ -957,6 +957,24 @@ namespace mo
 		}
 	}
 
+	void CMoveSim::OnTeleported(MoveState& state)
+	{
+		// CharacterMovementComponent.cpp:6534-6593 — bRestoreFloorWhenMissingBaseComponent 기본 참 · 헤엄 · 날기 없음
+		_s = &state;
+		state.justTeleported = true;
+		if (state.mode == EMoveMode::Walking)
+		{
+			FindFloor(state.location, state.floor, nullptr);
+			if (state.floor.IsWalkableFloor() && state.floor.floorDist <= kMaxFloorDist && state.velocity.z <= 0.0) return;	// 가까이 닿았거나 계속 걷기
+			state.floor = FloorResult();
+			SetMode(EMoveMode::Falling);
+		}
+		else
+		{
+			state.floor = FloorResult();
+		}
+	}
+
 	void CMoveSim::SetMode(EMoveMode mode)
 	{
 		MoveState& s = *_s;

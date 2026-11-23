@@ -388,20 +388,46 @@ void UMOBWeaponDumpSubsystem::DumpMatch()
 
 // 점프대 j-1 — 점프대마다 청사진 변수(UpOverride · 대상 · 배율 같은 발사 값)와 칸 모양 · 월드 변환을 적는다. 실행 중 값이라 짓기 그래프가 채운 값까지 보인다.
 // 줄 머리 = MOB_LAUNCHER(배우) · MOB_LAUNCHER_VAR(청사진 변수) · MOB_LAUNCHER_COMP(장면 컴포넌트) — make_launchers.py 가 읽는다
+// 순간이동 t-1(teleport-plan.md) — 같은 몫을 B_Teleport_C 자식에 머리 MOB_TELEPORT* 로. 순간이동만 MOB_TELEPORT_REF(배우를 가리키는 변수 → 그 배우 월드 변환)를 더 적는다 — 나갈 자리가 다른 배우일 수 있어서.
+// 배우 하나를 가리키는 변수만 잡힌다 — L_Expanse 의 TeleportingTarget 은 배열이라 REF 0 줄이고, 짝은 VAR 값 줄의 경로로 읽는다(make_teleports.py).
+// MOB_TELEPORT_COMPX = 컴포넌트 월드 자리 · 세 축 · 상자 반크기를 소수 아홉 · 열두 자리로, MOB_TELEPORT_PAWN = 내 몸 메시가 캡슐 중심에서 얼마 아래인지
 void UMOBWeaponDumpSubsystem::DumpLaunchers()
 {
-	static const FName LauncherName(TEXT("B_Launcher_C"));
 	int32 Count = 0, Vars = 0, Shapes = 0;
+	DumpDevices(TEXT("B_Launcher_C"), TEXT("MOB_LAUNCHER"), false, Count, Vars, Shapes);
+	UE_LOG(LogMOBWeaponDump, Log, TEXT("MOB_WDUMP launchers=%d vars=%d overlapShapes=%d"), Count, Vars, Shapes);
+}
+
+void UMOBWeaponDumpSubsystem::DumpTeleports()
+{
+	int32 Count = 0, Vars = 0, Shapes = 0;
+	const int32 Refs = DumpDevices(TEXT("B_Teleport_C"), TEXT("MOB_TELEPORT"), true, Count, Vars, Shapes);
+	// 「들어온 자리 그대로」(KeepReleativeEntryUponExit) 는 몸 메시의 월드 자리로 셈한다(그래프 GetOffsetLocation ← Get Mesh) — 메시가 캡슐 중심에서 얼마 아래인지 적는다
+	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+	const ACharacter* Ch = PC ? Cast<ACharacter>(PC->GetPawn()) : nullptr;
+	if (Ch && Ch->GetMesh() && Ch->GetCapsuleComponent())
+	{
+		const FVector Rel = Ch->GetMesh()->GetRelativeLocation(), Base = Ch->GetBaseTranslationOffset();
+		Out += FString::Printf(TEXT("MOB_TELEPORT_PAWN name=%s meshRel=%.6f,%.6f,%.6f baseOffset=%.6f,%.6f,%.6f capsuleR=%.6f capsuleHH=%.6f meshMinusRoot=%.6f\n"), *Ch->GetName(), Rel.X, Rel.Y, Rel.Z, Base.X, Base.Y, Base.Z,
+			Ch->GetCapsuleComponent()->GetScaledCapsuleRadius(), Ch->GetCapsuleComponent()->GetScaledCapsuleHalfHeight(), Ch->GetMesh()->GetComponentLocation().Z - Ch->GetActorLocation().Z);
+	}
+	UE_LOG(LogMOBWeaponDump, Log, TEXT("MOB_WDUMP teleports=%d vars=%d overlapShapes=%d refs=%d pawn=%d"), Count, Vars, Shapes, Refs, Ch ? 1 : 0);
+}
+
+int32 UMOBWeaponDumpSubsystem::DumpDevices(const TCHAR* ClassName, const TCHAR* Prefix, bool bRefs, int32& Count, int32& Vars, int32& Shapes)
+{
+	const FName DeviceName(ClassName);
+	int32 Refs = 0;
 	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
 	{
 		AActor* A = *It;
-		bool bLauncher = false;
-		for (const UClass* C = A->GetClass(); C && !bLauncher; C = C->GetSuperClass()) bLauncher = C->GetFName() == LauncherName;
-		if (!bLauncher) continue;
+		bool bDevice = false;
+		for (const UClass* C = A->GetClass(); C && !bDevice; C = C->GetSuperClass()) bDevice = C->GetFName() == DeviceName;
+		if (!bDevice) continue;
 		++Count;
 		const FTransform T = A->GetActorTransform();
 		const FRotator R = T.Rotator();
-		Out += FString::Printf(TEXT("MOB_LAUNCHER name=%s class=%s loc=%.4f,%.4f,%.4f rot=%.4f,%.4f,%.4f scale=%.4f,%.4f,%.4f\n"), *A->GetName(), *A->GetClass()->GetName(),
+		Out += FString::Printf(TEXT("%s name=%s class=%s loc=%.4f,%.4f,%.4f rot=%.4f,%.4f,%.4f scale=%.4f,%.4f,%.4f\n"), Prefix, *A->GetName(), *A->GetClass()->GetName(),
 			T.GetLocation().X, T.GetLocation().Y, T.GetLocation().Z, R.Pitch, R.Yaw, R.Roll, T.GetScale3D().X, T.GetScale3D().Y, T.GetScale3D().Z);
 		// 청사진이 더한 변수만 — 네이티브 배우 속성은 장치 동작과 무관하고 양이 많다
 		for (TFieldIterator<FProperty> PIt(A->GetClass()); PIt; ++PIt)
@@ -409,11 +435,20 @@ void UMOBWeaponDumpSubsystem::DumpLaunchers()
 			const FProperty* P = *PIt;
 			const UClass* Owner = P->GetOwnerClass();
 			if (!Owner || Owner->HasAnyClassFlags(CLASS_Native)) continue;
-			if (CastField<FObjectPropertyBase>(P) && CastField<FObjectPropertyBase>(P)->PropertyClass->IsChildOf(UActorComponent::StaticClass())) continue;	// 컴포넌트는 아래 줄에서
+			const FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(P);
+			if (ObjProp && ObjProp->PropertyClass->IsChildOf(UActorComponent::StaticClass())) continue;	// 컴포넌트는 아래 줄에서
 			FString V;
 			P->ExportText_InContainer(0, V, A, A, A, PPF_None);
-			Out += FString::Printf(TEXT("MOB_LAUNCHER_VAR name=%s owner=%s var=%s type=%s value=%s\n"), *A->GetName(), *Owner->GetName(), *P->GetName(), *P->GetCPPType(), *V.Replace(TEXT("\n"), TEXT(" ")));
+			Out += FString::Printf(TEXT("%s_VAR name=%s owner=%s var=%s type=%s value=%s\n"), Prefix, *A->GetName(), *Owner->GetName(), *P->GetName(), *P->GetCPPType(), *V.Replace(TEXT("\n"), TEXT(" ")));
 			++Vars;
+			if (!bRefs || !ObjProp) continue;
+			const AActor* Ref = Cast<AActor>(ObjProp->GetObjectPropertyValue_InContainer(A));
+			if (!Ref) continue;
+			const FTransform RT = Ref->GetActorTransform();
+			const FRotator RR = RT.Rotator();
+			Out += FString::Printf(TEXT("%s_REF name=%s var=%s target=%s class=%s loc=%.4f,%.4f,%.4f rot=%.4f,%.4f,%.4f scale=%.4f,%.4f,%.4f\n"), Prefix, *A->GetName(), *P->GetName(), *Ref->GetName(), *Ref->GetClass()->GetName(),
+				RT.GetLocation().X, RT.GetLocation().Y, RT.GetLocation().Z, RR.Pitch, RR.Yaw, RR.Roll, RT.GetScale3D().X, RT.GetScale3D().Y, RT.GetScale3D().Z);
+			++Refs;
 		}
 		TInlineComponentArray<USceneComponent*> Parts(A);
 		for (USceneComponent* S : Parts)
@@ -427,13 +462,20 @@ void UMOBWeaponDumpSubsystem::DumpLaunchers()
 			else if (const UCapsuleComponent* Cp = Cast<UCapsuleComponent>(S)) Shape = FString::Printf(TEXT("capsule r=%.4f hh=%.4f"), Cp->GetScaledCapsuleRadius(), Cp->GetScaledCapsuleHalfHeight());
 			const UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(S);
 			if (Prim && Prim->GetGenerateOverlapEvents()) ++Shapes;
-			Out += FString::Printf(TEXT("MOB_LAUNCHER_COMP name=%s comp=%s class=%s parent=%s overlap=%d profile=%s collision=%d loc=%.4f,%.4f,%.4f rot=%.4f,%.4f,%.4f scale=%.4f,%.4f,%.4f shape=%s\n"),
-				*A->GetName(), *S->GetName(), *S->GetClass()->GetName(), S->GetAttachParent() ? *S->GetAttachParent()->GetName() : TEXT("-"),
+			Out += FString::Printf(TEXT("%s_COMP name=%s comp=%s class=%s parent=%s overlap=%d profile=%s collision=%d loc=%.4f,%.4f,%.4f rot=%.4f,%.4f,%.4f scale=%.4f,%.4f,%.4f shape=%s\n"),
+				Prefix, *A->GetName(), *S->GetName(), *S->GetClass()->GetName(), S->GetAttachParent() ? *S->GetAttachParent()->GetName() : TEXT("-"),
 				Prim && Prim->GetGenerateOverlapEvents() ? 1 : 0, Prim ? *Prim->GetCollisionProfileName().ToString() : TEXT("-"), Prim ? (int32)Prim->GetCollisionEnabled() : -1,
 				W.GetLocation().X, W.GetLocation().Y, W.GetLocation().Z, WR.Pitch, WR.Yaw, WR.Roll, W.GetScale3D().X, W.GetScale3D().Y, W.GetScale3D().Z, *Shape);
+			if (!bRefs) continue;
+			// 순간이동만 — 위 줄은 소수 넷째 자리라 나가는 방향(Exit Direction 앞방향 × 발사 배율)이 0.002cm/s 쯤 틀어진다. 셈에 쓰는 값은 이 줄에서 읽는다
+			const FVector X = W.GetUnitAxis(EAxis::X), Y = W.GetUnitAxis(EAxis::Y), Z = W.GetUnitAxis(EAxis::Z);
+			const UBoxComponent* Box = Cast<UBoxComponent>(S);
+			const FVector Ext = Box ? Box->GetScaledBoxExtent() : FVector::ZeroVector;
+			Out += FString::Printf(TEXT("%s_COMPX name=%s comp=%s loc=%.9f,%.9f,%.9f x=%.12f,%.12f,%.12f y=%.12f,%.12f,%.12f z=%.12f,%.12f,%.12f boxExt=%.9f,%.9f,%.9f\n"),
+				Prefix, *A->GetName(), *S->GetName(), W.GetLocation().X, W.GetLocation().Y, W.GetLocation().Z, X.X, X.Y, X.Z, Y.X, Y.Y, Y.Z, Z.X, Z.Y, Z.Z, Ext.X, Ext.Y, Ext.Z);
 		}
 	}
-	UE_LOG(LogMOBWeaponDump, Log, TEXT("MOB_WDUMP launchers=%d vars=%d overlapShapes=%d"), Count, Vars, Shapes);
+	return Refs;
 }
 
 void UMOBWeaponDumpSubsystem::Tick(float DeltaTime)
@@ -463,6 +505,7 @@ void UMOBWeaponDumpSubsystem::Tick(float DeltaTime)
 	DumpPawnBodies(Other, TEXT("other"));
 	DumpMatch();
 	if (FParse::Param(FCommandLine::Get(), TEXT("MOBWDLaunchers"))) DumpLaunchers();
+	if (FParse::Param(FCommandLine::Get(), TEXT("MOBWDTeleports"))) DumpTeleports();
 	Finish();
 }
 

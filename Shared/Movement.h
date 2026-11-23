@@ -169,7 +169,11 @@ namespace mo
 		// 점프대(JumpPads.h — jumppad-plan) — CMoveSim 은 안 건드리고 TickWithLaunchers 가 쓴다. 점프대가 없는 판은 늘 0 · 꺼짐
 		uint8_t launcherMask = 0;		// 지난 이동 끝에 몸 캡슐이 든 점프대 구 칸 비트(점프대 표 차례). 자리로 정해지므로 보정 때 서버 자리로 다시 센다
 		bool launchPending = false;		// PendingLaunchVelocity 가 차 있다 — 지난 이동 끝에 점프대가 쐈다. 다음 이동 머리가 먹는다. 와이어 깃발 STATE_LAUNCH_PENDING
+										// (순간이동 뒤따르는 발사도 이 칸을 쓴다 — Teleports.h)
 		Vec3 pendingLaunch;
+
+		// 순간이동(Teleports.h — teleport-plan) — 점프대 칸처럼 TickWithLaunchers 가 쓴다. 순간이동 표가 없는 판은 늘 0
+		uint8_t teleportMask = 0;		// 지난 이동 끝(옮겼으면 옮긴 자리)에 몸 캡슐이 든 순간이동 칸 비트(표 차례). 자리로 정해지므로 보정 때 서버 자리로 다시 센다
 	};
 
 	// 다른 사람 캡슐(컨텐츠 F) — 선 캡슐(축이 세로). 이동 쓸기 · 겹침 풀기가 맵과 함께 본다(Lyra 는 밀지 않고 막거나 미끄러뜨린다 — F-1 실측).
@@ -324,6 +328,11 @@ namespace mo
 
 		// 밖에서 위치를 정해 준 뒤 바닥을 다시 잡는다. 이동은 하지 않는다
 		void RefreshFloor(MoveState& state);
+
+		// UCharacterMovementComponent::OnTeleported — 순간이동이 자리를 옮긴 뒤(Teleports.h ApplyTeleports). 속도는 그대로 두고 옮긴 자리에서 바닥을 다시 본다:
+		// 걷기 중이면 바닥을 찾아 걸을 수 있고 MAX_FLOOR_DIST 안이고 위로 안 가면 계속 걷기, 아니면 낙하. 낙하 중이면 바닥을 비우고 낙하 그대로
+		// (UpdateFloorFromAdjustment 가 낙하 중엔 바닥을 안 찾아서 착지 갈래에 안 닿는다)
+		void OnTeleported(MoveState& state);
 
 		// 다른 사람 캡슐(컨텐츠 F) — 다음 Tick 들의 이동 쓸기 · 겹침 풀기가 본다. 배열은 부른 쪽이 들고 있어야 한다. 비우려면 (nullptr, 0)
 		void SetPawns(const PawnCapsule* pawns, size_t count) { _pawns = pawns; _pawnCount = pawns ? count : 0; }

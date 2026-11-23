@@ -9,6 +9,7 @@ param(
     [switch]$Ads,
     [switch]$Crouch,
     [switch]$Pads,
+    [switch]$Teleports,
     [int]$TimeoutSec = 580
 )
 # Replays a fixed random input on Lyra movement and writes Saved/MOB/move_<Tag>.csv (answer sheet for Tools/MoveCheck).
@@ -31,6 +32,12 @@ if ($Crouch) { $a += '-MOBMoveCrouch' }
 # -Pads: jump pads (jumppad-plan j-2). Each segment puts the pawn 150-350 cm in front of one launcher (in turn) and walks into it; random input and jumps are off.
 # Use with -MapPath /ShooterMaps/Maps/L_Expanse. Extra columns yaw,pads,cue and '#pad' header lines (MOBMoveRecordSubsystem.h).
 if ($Pads) { $a += '-MOBMovePads' }
+# -Teleports: teleports (teleport-plan t-2). Same placement as -Pads but in front of one B_Teleport (in turn, +-60 deg of its forward); also writes the pad columns.
+# Extra columns tele,tdev,tcue,cyaw and '#tele' header lines (MOBMoveRecordSubsystem.h). Use with -MapPath /ShooterMaps/Maps/L_Expanse.
+if ($Teleports) {
+    if ($Pads) { throw 'use -Pads and -Teleports in separate runs' }
+    $a += '-MOBMoveTeleports'
+}
 $t0 = Get-Date
 $p = Start-Process -FilePath $ue -ArgumentList $a -PassThru
 if (-not $p.WaitForExit($TimeoutSec * 1000)) { "TIMEOUT after $TimeoutSec s - killing"; Stop-Process -Id $p.Id -Force }

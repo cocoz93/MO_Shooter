@@ -11,6 +11,7 @@ class APawn;
  *   -MOBWeaponDump=<이름>   결과 파일 Saved/MOB/weapons_<이름>.txt
  *   -MOBWDGraph=<경로;경로>  더 뽑을 블루프린트 그래프(L-2-a) — 노드 안 그래프(상태 기계 · 층)까지 걷고 애님 노드 속성도 적는다
  *   -MOBWDLaunchers          맵의 점프대(B_Launcher_C 자식)마다 청사진 변수 · 칸 모양 · 월드 변환을 「MOB_LAUNCHER」 줄로(점프대 j-1)
+ *   -MOBWDTeleports          맵의 순간이동(B_Teleport_C 자식)마다 같은 몫을 「MOB_TELEPORT」 줄로 + 정밀 변환 · 내 몸 메시 자리(순간이동 t-1)
  * 봇 하나가 있는 맵(?NumBots=1)으로 실행하면 캐릭터 충돌 몸체까지 적는다.
  * 판정에 쓰는 줄은 「MOB_WDUMP」 로 시작한다.
  */
@@ -33,6 +34,8 @@ private:
 	void DumpPawnBodies(APawn* Pawn, const TCHAR* Label);
 	void DumpMatch();
 	void DumpLaunchers();
+	void DumpTeleports();
+	int32 DumpDevices(const TCHAR* ClassName, const TCHAR* Prefix, bool bRefs, int32& Count, int32& Vars, int32& Shapes);	// 돌림 = REF 줄 수
 	void Finish();
 
 	FString Tag;

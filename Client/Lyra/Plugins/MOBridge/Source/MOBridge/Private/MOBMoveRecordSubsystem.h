@@ -27,6 +27,13 @@ class ULyraCharacterMovementComponent;
  *                           넷째 구간 묶음마다 갈래를 바꾼다: 0 점프대를 보고 걸음 · 1 아무 쪽이나 보고 걸음 · 2 아무 쪽이나 보고 점프해 들어감 · 3 반 걸음.
  *                           점프대 몫은 Lyra 그래프 그대로 돈다(겹침 → LaunchCharacter → 다음 프레임 줄의 lx · ly · lz).
  *                           줄 끝 칸 = yaw(이동 뒤 몸 방향 — 그래프가 읽는 앞방향) · pads(이동 뒤 몸 캡슐과 겹친 점프대 구 칸 비트, 차례 = 머리 「#pad」 줄) · cue(살아 있는 효과 배우 수)
+ *   -MOBMoveTeleports       순간이동 정답지(teleport-plan t-2). 점프대 모드와 같은 꼴로 구간마다 순간이동 장치 하나(B_Teleport_C 자식 · 칸 = Box) 앞쪽 ±60° 바닥에 놓고 걷는다.
+ *                           갈래 넷 · 입력 · 점프는 점프대 모드와 같다. 점프대 칸(yaw,pads,cue · 「#pad」 줄)도 같이 적는다 — 옮겨진 뒤 점프대를 밟을 수 있어서.
+ *                           앞에 바닥이 없는 장치(L_Expanse 위층 둘 — 걸어서 못 들어간다)는 상자 위 50cm 에서 떨어뜨리고, 위가 막혔으면 상자 앞면 5cm 앞 공중에서
+ *                           상자 쪽으로 밀어 넣는다(로그 「MOB_MOVE_TELE_DROP kind=above|front」 · 위를 막은 것 「MOB_MOVE_TELE_ABOVE_BLOCKED」). 위층 둘은 11-23 기록에서 다 front.
+ *                           줄 끝에 더 = tele(이동 뒤 몸 캡슐과 겹친 순간이동 칸 비트, 차례 = 머리 「#tele」 줄 = make_teleports.py 차례) · tdev(이번 이동 안에서 옮겨졌으면
+ *                           들어간 장치 번호 — 이동 앞 자리에서 가장 가까운 칸, 아니면 -1) · tcue(살아 있는 순간이동 효과 배우 수) · cyaw(이동 뒤 컨트롤러 요 — bForceDirection 이 돌린다)
+ *                           옮김은 이동 안 겹침 시작에서 난다(그래프 Teleport) — 이동 뒤 자리가 옮긴 자리, 뒤따르는 발사는 다음 줄의 lx · ly · lz
  * 판정에 쓰는 줄은 「MOB_MOVE」 로 시작한다. 파일 형식은 Tools/MoveCheck 머리 주석이 정본이다.
  */
 UCLASS()
@@ -94,6 +101,18 @@ private:
 	bool bPadJumped = false;
 	int32 PadPlaced = 0, PadMiss = 0, PadLaunchRows = 0, PadOverlapRows = 0, PadCueRows = 0, PadCueSpawns = 0;
 	FDelegateHandle PadSpawnHandle;
+
+	// 순간이동(-MOBMoveTeleports, 순간이동 t-2) — 칸 · 놓기 · 갈래는 점프대 몫(PadVariant · PadJumpAt · bPadJumped · PadRng)을 같이 쓴다
+	void FindTeles();
+	bool PlaceForTele(ULyraCharacterMovementComponent* M, ACharacter* Ch);
+	int32 CountTeleCues() const;
+	bool bTele = false;
+	TArray<FPadSpot> Teles;			// 이름 차례(make_teleports.py 와 같은 차례). Sphere 자리에 Box
+	FVector PreMoveLocation = FVector::ZeroVector;
+	bool bPrevTeleMove = false;
+	int32 TelePlaced = 0, TeleDropped = 0, TeleMiss = 0, TeleMoves = 0, TeleLaunchNext = 0, TeleOverlapRows = 0, TeleCueRows = 0, TeleCueSpawns = 0;
+	TArray<int32> TeleByDevice;		// 장치마다 옮겨진 수
+	FDelegateHandle TeleSpawnHandle;
 
 	double PawnReadyAt = -1;
 	double HookedRealAt = 0;

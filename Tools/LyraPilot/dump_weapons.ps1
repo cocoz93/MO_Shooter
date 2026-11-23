@@ -2,7 +2,8 @@ param(
     [string]$MapPath = '/ShooterCore/Maps/L_ShooterGym',
     [string]$Tag = 'gym',
     [int]$TimeoutSec = 180,
-    [switch]$Launchers   # jump pads (j-1): launcher actors' blueprint vars + shapes, and the launcher graphs (deep)
+    [switch]$Launchers,  # jump pads (j-1): launcher actors' blueprint vars + shapes, and the launcher graphs (deep)
+    [switch]$Teleports   # teleports (t-1, teleport-plan.md): B_Teleport actors' vars + shapes + referenced actors, and the teleport graphs (deep)
 )
 # Dumps runtime weapon numbers, blueprint graphs and character collision bodies to Saved/MOB/weapons_<Tag>.txt
 $proj = 'C:\Users\USER\Desktop\MyGit\MO_Shooter\Client\Lyra'
@@ -16,6 +17,11 @@ $a = @("`"$proj\Lyra.uproject`"", "$MapPath`?NumBots=1", '-game', '-RenderOffScr
 if ($Launchers) {
     $a += '-MOBWDLaunchers'
     $a += '-MOBWDGraph=/ShooterCore/Blueprint/B_Launcher.B_Launcher;/ShooterCore/Blueprint/B_Launcher_Up.B_Launcher_Up;/ShooterCore/Blueprint/B_Launcher_Push.B_Launcher_Push;/ShooterCore/GameplayCues/GCNL_Launcher_Activate.GCNL_Launcher_Activate'
+}
+if ($Teleports) {
+    if ($Launchers) { throw 'use -Launchers and -Teleports in separate runs (one -MOBWDGraph= each)' }
+    $a += '-MOBWDTeleports'
+    $a += '-MOBWDGraph=/ShooterCore/Blueprint/B_Teleport.B_Teleport;/ShooterCore/GameplayCues/GCNL_Teleporter_Activate.GCNL_Teleporter_Activate'
 }
 $t0 = Get-Date
 $p = Start-Process -FilePath $ue -ArgumentList $a -PassThru

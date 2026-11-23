@@ -17,6 +17,8 @@ namespace mo
 		constexpr double kPushClampMax = 12000.0;
 		constexpr double kPi = 3.14159265358979323846;
 		constexpr double kSmallNumber = 1.e-8;			// UE_SMALL_NUMBER — GetClampedToSize 의 0 벡터 갈래
+		// 보정 때 받은 자리가 순간이동 옮긴 자리인가(MatchTeleportExit) — 상태 패킷 자리는 단정밀도 — 나갈 자리 6곳은 |좌표| < 4,096cm 라 간격 0.000244cm(반올림은 그 절반). 간격의 40배
+		constexpr double kTeleportExitTolerance = 0.01;
 
 		size_t SplitFields(const char* p, const char* end, std::string* out, size_t maxFields)
 		{
@@ -197,10 +199,11 @@ namespace mo
 		return true;
 	}
 
-	LauncherTickResult TickWithLaunchers(CMoveSim& sim, MoveState& state, const Vec3& input, float deltaTime, double yawDegrees, const LauncherSet& launchers, double capsuleRadius)
+	LauncherTickResult TickWithLaunchers(CMoveSim& sim, MoveState& state, const Vec3& input, float deltaTime, double yawDegrees, const LauncherSet& launchers, double capsuleRadius,
+		const TeleportSet& teleports)
 	{
 		LauncherTickResult result;
-		if (launchers.count == 0)
+		if (launchers.count == 0 && teleports.count == 0)
 		{
 			sim.Tick(state, input, deltaTime);
 			return result;
@@ -212,7 +215,19 @@ namespace mo
 		sim.Tick(state, input, deltaTime, pending ? &launch : nullptr);
 		result.launchedThisTick = pending;
 
-		const uint8_t now = LauncherMask(launchers.items, launchers.count, state.location, capsuleRadius, sim.HalfHeightOf(state));
+		// 순간이동 — 이동 묶음이 닫힐 때 칸 겹침 시작으로 B_Teleport 가 옮긴다(t-2 기록 53번 다 겹침이 시작된 그 이동 안). 옮겼으면 아래 점프대는 옮긴 자리 · 나갈 방향으로 센다
+		Vec3 teleportLaunch;
+		const TeleportStep teleport = ApplyTeleports(sim, state, teleports, capsuleRadius, teleportLaunch);
+		result.teleportBegins = teleport.begins;
+		result.teleported = teleport.device;
+		if (teleport.device >= 0)
+		{
+			result.teleportYaw = teleport.yaw;
+			result.teleportForceYaw = teleport.forceYaw;
+			yawDegrees = teleport.yaw;
+		}
+
+		const uint8_t now = launchers.count ? LauncherMask(launchers.items, launchers.count, state.location, capsuleRadius, sim.HalfHeightOf(state)) : 0;
 		const uint8_t began = (uint8_t)(now & ~state.launcherMask);
 		state.launcherMask = now;
 		for (size_t i = 0; i < launchers.count && i < kMaxLaunchers; ++i)
@@ -232,6 +247,12 @@ namespace mo
 			state.pendingLaunch = out;
 			result.fired = (int)i;
 		}
+		// 순간이동 뒤따르는 발사 — 그래프에서 Teleport(옮긴 자리 겹침 → 점프대가 쏨) 다음 마디라 점프대 발사를 덮는다(기록엔 겹친 적 없음 — 그래프 차례로 본 판단)
+		if (teleport.launch)
+		{
+			state.launchPending = true;
+			state.pendingLaunch = teleportLaunch;
+		}
 		return result;
 	}
 
@@ -242,10 +263,19 @@ namespace mo
 		state.launcherMask = launchers.count ? LauncherMask(launchers.items, launchers.count, state.location, capsuleRadius, capsuleHalfHeight) : 0;
 	}
 
-	bool RestoreLaunchers(MoveState& state, const LauncherSet& launchers, double capsuleRadius, double capsuleHalfHeight, bool launchPending, double yawDegrees)
+	bool RestoreLaunchers(MoveState& state, const LauncherSet& launchers, double capsuleRadius, double capsuleHalfHeight, bool launchPending, double yawDegrees,
+		const TeleportSet& teleports)
 	{
 		ResetLaunchers(state, launchers, capsuleRadius, capsuleHalfHeight);
+		ResetTeleports(state, teleports, capsuleRadius, capsuleHalfHeight);
 		if (!launchPending) return true;
+		const int teleported = MatchTeleportExit(teleports, state.location, capsuleRadius, kTeleportExitTolerance);
+		if (teleported >= 0 && teleports.items[teleported].launchOnTeleport)
+		{
+			state.launchPending = true;
+			state.pendingLaunch = TeleportLaunch(teleports.items[teleported]);
+			return true;
+		}
 		int pad = -1;
 		for (size_t i = 0; i < launchers.count && i < kMaxLaunchers; ++i)
 		{

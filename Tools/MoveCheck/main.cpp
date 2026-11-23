@@ -1,6 +1,6 @@
 ﻿// 조각 1-c 대조 도구 — Lyra 에 재생한 입력을 Shared/Movement 에 그대로 넣어 위치·속도·이동 모드를 비교한다.
 //
-// 사용: MoveCheck <map.mocl> <move.csv> [--mismatch <out.csv>] [--limit <프레임 수>] [--launchers <launchers.txt>]
+// 사용: MoveCheck <map.mocl> <move.csv> [--mismatch <out.csv>] [--limit <프레임 수>] [--launchers <launchers.txt>] [--teleports <teleports.txt>]
 //
 // 입력 파일 = MOBMoveRecordSubsystem 이 쓰는 move_<이름>.csv
 //   #param <이름> <값>      실행값(블루프린트가 덮은 뒤의 값)
@@ -10,6 +10,8 @@
 //   앉기 칸(-Crouch 기록만, 컨텐츠 D) = cev(0 없음 / 1 앉기 키 ToggleCrouch / 2 점프 전 일어서기 UnCrouch) · 사건 전 앉으려 함 · 앉음 ·
 //   캡슐 반높이 · MaxWalkSpeed, 그리고 이동 뒤 앉으려 함 · 앉음 · 반높이. 앞 상태는 사건 전에 잡았으므로 한 프레임 대조도 사건을 넣고 돌린다
 //   점프대 칸(-Pads 기록만, jumppad-plan j-2) = yaw(이동 뒤 몸 요) · pads(이동 뒤 몸이 든 점프대 비트, 차례는 #pad 줄) · cue(쓰지 않음)
+//   순간이동 칸(-Teleports 기록만, teleport-plan t-2 — 점프대 칸 뒤) = tele(이동 뒤 몸이 든 순간이동 칸 비트, 차례는 #tele 줄) · tdev(이번 이동 안에서 옮겨졌으면
+//   들어간 장치 번호, 아니면 -1) · tcue(쓰지 않음) · cyaw(이동 뒤 조종 요 — bForceDirection 이 돌린다)
 //   어느 칸이 있는지는 머리줄(frame,seg,…)의 이름으로 가린다
 //   ev: 0 없음 / 1 Jump / 2 StopJumping. 모드: 1 걷기 / 3 낙하. ext=1 이면 프레임 사이에 밖에서 위치가 바뀐 것
 //
@@ -18,12 +20,19 @@
 //   이어 달리기: 구간 첫 프레임만 맞추고 끝까지 돌린 차이 — 서버가 실제로 쓰는 방식이다
 // --launchers 가 있으면(점프대 기록 + make_launchers.py 표) 셋을 더 잰다(jumppad-plan j-3)
 //   PAD  : 프레임마다 Lyra 자리로 센 우리 겹침 비트 ↔ 기록 pads · 우리 겹침 시작이 셈한 발사 ↔ 다음 프레임 기록 발사(프레임 · 속도)
-//   RUN  : 이어 달리기가 기록 발사 칸 대신 TickWithLaunchers(우리 겹침 · 우리 셈)로 쏜다. 순간이동(B_Teleport — 범위 밖, D157)이 든 구간은 뺀다
+//   RUN  : 이어 달리기가 기록 발사 칸 대신 TickWithLaunchers(우리 겹침 · 우리 셈)로 쏜다. 순간이동(B_Teleport)이 든 구간은 --teleports 가 없으면 뺀다
 //   RUNPAD: 그 이어 달리기에서 쏜 프레임 · 속도가 기록과 같은가
+// --teleports 가 있으면(순간이동 기록 + make_teleports.py 표, teleport-plan t-3 — --launchers 도 같이 줘야 한다) 넷을 더 잰다
+//   TELE_TABLE: 표 읽기 · 기록 #tele 이름 맞춤 · 나갈 자리가 칸 안인 수(0 이어야 잇달아 옮기는 일이 없다)
+//   TELE : 프레임마다 Lyra 자리로 센 우리 순간이동 비트 ↔ 기록 tele, 그리고 Lyra 이동 앞 상태에서 한 번 돌린 우리 이동 + 순간이동(TickWithLaunchers)의
+//          옮긴 프레임 · 장치 · 자리 · 속도 · 모드 · 몸 요 · 조종 요 · 다음 프레임 발사 ↔ 기록 tdev · 뒤 자리 · 뒤 속도 · amode · yaw · cyaw · 다음 줄 발사 칸.
+//          TELE_RESTORE = 옮긴 자리 · 속도를 단정밀도로 줄여 RestoreLaunchers 가 순간이동 발사를 다시 고르나 · 안 옮긴 자리를 옮긴 자리로 잘못 보는 수
+//   RUN  : 순간이동이 든 구간을 빼지 않는다 — TickWithLaunchers 가 점프대 · 순간이동을 다 우리 셈으로 돈다. RUNTELE = 옮긴 프레임 · 장치가 기록과 같은가
 
 #include "JumpPads.h"
 #include "MapCollision.h"
 #include "Movement.h"
+#include "Teleports.h"
 
 #include <algorithm>
 #include <cmath>
@@ -55,6 +64,8 @@ namespace
 		float half = 0, walk = 0, halfA = 0;
 		double yaw = 0;
 		int pads = 0, cue = 0;
+		int tele = 0, tdev = -1, tcue = 0;
+		double cyaw = 0;
 	};
 
 	// 머리줄에서 읽은 덧붙은 칸
@@ -63,6 +74,7 @@ namespace
 		bool ads = false;
 		bool crouch = false;
 		bool pads = false;	// yaw,pads,cue
+		bool tele = false;	// tele,tdev,tcue,cyaw
 	};
 
 	Columns ParseHeader(const char* line)
@@ -76,6 +88,7 @@ namespace
 				if (name == "ads") c.ads = true;
 				if (name == "cev") c.crouch = true;
 				if (name == "pads") c.pads = true;
+				if (name == "tele") c.tele = true;
 				name.clear();
 				if (*p != ',') break;
 			}
@@ -139,6 +152,10 @@ namespace
 		{
 			r.yaw = D(); r.pads = I(); r.cue = I();
 		}
+		if (cols.tele)
+		{
+			r.tele = I(); r.tdev = I(); r.tcue = I(); r.cyaw = D();
+		}
 		return *s == '\0' || *s == '\r' || *s == '\n';
 	}
 
@@ -176,18 +193,40 @@ namespace
 	}
 
 	// launchers 가 비었으면 기록 발사 칸을 넣고, 있으면 우리 겹침 · 우리 셈으로 쏜다(TickWithLaunchers — 서버 · 예측과 같은 함수)
-	LauncherTickResult RunTick(CMoveSim& sim, MoveState& s, const Row& r, const Columns& cols, const LauncherSet& launchers = LauncherSet(), double capsuleRadius = 0)
+	// 순간이동은 점프대와 같이 줄 때만(main 이 --teleports 에 --launchers 를 요구) — 기록 발사 칸과 우리 순간이동 발사가 섞이지 않게
+	LauncherTickResult RunTick(CMoveSim& sim, MoveState& s, const Row& r, const Columns& cols, const LauncherSet& launchers = LauncherSet(), double capsuleRadius = 0,
+		const TeleportSet& teleports = TeleportSet())
 	{
 		const bool hasLaunch = r.launch.x != 0 || r.launch.y != 0 || r.launch.z != 0;
 		// maxSpeed 칸은 이동 전 GetMaxSpeed — 앉아 걸을 때 이미 300 이다. 이동 코드는 MaxWalkSpeed 를 받아 그 틱의 앉음으로 고르므로
 		// 앉기 기록은 walk 칸(MaxWalkSpeed)을 준다. 0 이면 이동 금지(Lyra GetMaxSpeed 의 태그 갈래)라 그대로 0
 		s.maxSpeed = (cols.crouch && r.maxSpeed != 0.f) ? r.walk : r.maxSpeed;
-		if (launchers.count) return TickWithLaunchers(sim, s, r.input, r.dt, r.yaw, launchers, capsuleRadius);
+		if (launchers.count) return TickWithLaunchers(sim, s, r.input, r.dt, r.yaw, launchers, capsuleRadius, teleports);
 		sim.Tick(s, r.input, r.dt, hasLaunch ? &r.launch : nullptr);
 		return LauncherTickResult();
 	}
 
 	bool IsZeroVec(const Vec3& v) { return v.x == 0 && v.y == 0 && v.z == 0; }
+
+	// 두 요의 차(도, −180 ~ 180)
+	double YawDiff(double a, double b)
+	{
+		double d = std::fmod(a - b + 180.0, 360.0);
+		if (d < 0) d += 360.0;
+		return d - 180.0;
+	}
+
+	bool ReadFile(const char* path, std::vector<char>& out)
+	{
+		FILE* f = nullptr;
+		if (fopen_s(&f, path, "rb") != 0 || !f) return false;
+		_fseeki64(f, 0, SEEK_END);
+		out.resize((size_t)_ftelli64(f));
+		_fseeki64(f, 0, SEEK_SET);
+		const size_t got = std::fread(out.data(), 1, out.size(), f);
+		std::fclose(f);
+		return got == out.size();
+	}
 
 	// 순간이동 이동 — 한 이동(1/60초)에 500cm 넘게 옮긴 것. 정상 이동은 종단 속도로도 못 간다(30,000cm/s 가 필요). B_Teleport 가 이동 안에서 자리를 옮긴다(j-2 기록 구간 둘)
 	bool IsTeleportMove(const Row& r) { return Dist(r.ap, r.p) > 500.0; }
@@ -308,17 +347,24 @@ int main(int argc, char** argv)
 {
 	if (argc < 3)
 	{
-		std::printf("usage: MoveCheck <map.mocl> <move.csv> [--mismatch <out.csv>] [--limit <frames>] [--launchers <launchers.txt>]\n");
+		std::printf("usage: MoveCheck <map.mocl> <move.csv> [--mismatch <out.csv>] [--limit <frames>] [--launchers <launchers.txt>] [--teleports <teleports.txt>]\n");
 		return 2;
 	}
 	const char* mismatchPath = nullptr;
 	const char* launchersPath = nullptr;
+	const char* teleportsPath = nullptr;
 	size_t limit = (size_t)-1;
 	for (int i = 3; i + 1 < argc; i += 2)
 	{
 		if (std::strcmp(argv[i], "--mismatch") == 0) mismatchPath = argv[i + 1];
 		else if (std::strcmp(argv[i], "--limit") == 0) limit = (size_t)std::strtoull(argv[i + 1], nullptr, 10);
 		else if (std::strcmp(argv[i], "--launchers") == 0) launchersPath = argv[i + 1];
+		else if (std::strcmp(argv[i], "--teleports") == 0) teleportsPath = argv[i + 1];
+	}
+	if (teleportsPath && !launchersPath)
+	{
+		std::printf("--teleports needs --launchers (the run then fires every launch itself, pads and teleports)\n");
+		return 2;
 	}
 
 	std::vector<uint8_t> mapBytes;
@@ -354,6 +400,7 @@ int main(int argc, char** argv)
 	std::map<std::string, double> values;
 	std::vector<Row> rows;
 	std::vector<std::string> recPadNames;	// 기록 #pad 줄 — pads 비트 차례
+	std::vector<std::string> recTeleNames;	// 기록 #tele 줄 — tele 비트 · tdev 차례
 	size_t badRows = 0;
 	Columns cols;
 	static char line[4096];
@@ -374,6 +421,17 @@ int main(int argc, char** argv)
 			{
 				if ((size_t)index >= recPadNames.size()) recPadNames.resize((size_t)index + 1);
 				recPadNames[(size_t)index] = name;
+			}
+			continue;
+		}
+		if (std::strncmp(line, "#tele ", 6) == 0)
+		{
+			char name[256];
+			int index = -1;
+			if (sscanf_s(line + 6, "%d %255s", &index, name, (unsigned)sizeof(name)) == 2 && index >= 0)
+			{
+				if ((size_t)index >= recTeleNames.size()) recTeleNames.resize((size_t)index + 1);
+				recTeleNames[(size_t)index] = name;
 			}
 			continue;
 		}
@@ -637,7 +695,7 @@ int main(int argc, char** argv)
 			const Row* next = (k + 1 < rows.size() && rows[k + 1].frame == r.frame + 1 && rows[k + 1].seg == r.seg) ? &rows[k + 1] : nullptr;
 			if (IsTeleportMove(r))
 			{
-				// 순간이동 — 범위 밖(D157). 뒤따르는 발사는 B_Teleport 몫이라 따로 센다
+				// 순간이동 — 점프대 대조 밖(--teleports 면 아래 TELE 가 본다). 뒤따르는 발사는 B_Teleport 몫이라 따로 센다
 				++teleportMoves;
 				if (next && !IsZeroVec(next->launch)) ++teleportLaunch;
 				continue;
@@ -726,6 +784,224 @@ int main(int argc, char** argv)
 		std::printf("PADCHECK %s\n", pass ? "PASS" : "FAIL");
 	}
 
+	// 순간이동(teleport-plan t-3) — 표를 읽고 기록 #tele 차례를 표 차례로 옮긴다(이름으로)
+	TeleportTable teleTable;
+	TeleportSet teleSet;
+	std::vector<int> recTeleToOurs;		// 기록 #tele 번호 → 표 번호(-1 = 표에 없음)
+	bool teleTableOk = true;
+	if (teleportsPath)
+	{
+		std::vector<char> text;
+		size_t badLine = 0;
+		const ETeleportsLoad tr = ReadFile(teleportsPath, text) ? ParseTeleports(text.data(), text.size(), teleTable, badLine) : ETeleportsLoad::BadLine;
+		if (tr != ETeleportsLoad::Ok)
+		{
+			std::printf("teleports load failed: %s line %zu\n", TeleportsLoadName(tr), badLine);
+			return 1;
+		}
+		// 시험의 시험 — 칸 반너비에 일부러 더하거나(cm, 음수 가능 → 옮김 프레임 어긋남) 「들어간 자리 그대로」를 꺼(→ 문 포털 옮긴 자리 어긋남) 대조가 잡는지 본다
+		char* boxBreak = nullptr;
+		size_t boxBreakLen = 0;
+		if (_dupenv_s(&boxBreak, &boxBreakLen, "MOVECHECK_BREAK_TELEPORT_BOX") == 0 && boxBreak)
+		{
+			const double add = std::atof(boxBreak);
+			for (Teleporter& t : teleTable.items) t.boxExtent = t.boxExtent + Vec3(add, add, add);
+			std::printf("BREAK teleportBox%+g\n", add);
+			std::free(boxBreak);
+		}
+		char* keepBreak = nullptr;
+		size_t keepBreakLen = 0;
+		if (_dupenv_s(&keepBreak, &keepBreakLen, "MOVECHECK_BREAK_TELEPORT_KEEP") == 0 && keepBreak)
+		{
+			for (Teleporter& t : teleTable.items) t.keepRelative = false;
+			std::printf("BREAK teleportKeepRelative=off\n");
+			std::free(keepBreak);
+		}
+		teleSet.items = teleTable.items.data();
+		teleSet.count = teleTable.items.size();
+		teleSet.meshBaseZ = teleTable.meshBaseZ;
+		size_t mapped = 0;
+		recTeleToOurs.assign(recTeleNames.size(), -1);
+		for (size_t i = 0; i < recTeleNames.size(); ++i)
+		{
+			for (size_t j = 0; j < teleTable.items.size(); ++j)
+			{
+				if (recTeleNames[i] == teleTable.items[j].name)
+				{
+					recTeleToOurs[i] = (int)j;
+					++mapped;
+					break;
+				}
+			}
+		}
+		// 나갈 자리가 칸 안이면 Lyra 는 잇달아 옮길 텐데 우리는 한 번만 옮긴다(ApplyTeleports) — 선 몸으로 센다
+		size_t exitsInBox = 0;
+		for (const Teleporter& t : teleTable.items)
+		{
+			if (TeleportMask(teleSet, t.exit, params.capsuleRadius, params.capsuleHalfHeight)) ++exitsInBox;
+		}
+		teleTableOk = cols.tele && mapped == recTeleNames.size() && mapped == teleSet.count && exitsInBox == 0 && teleTable.standHalfHeight == (double)params.capsuleHalfHeight;
+		std::printf("TELE_TABLE teleports=%zu recTeles=%zu mapped=%zu teleColumns=%d meshBaseZ=%g standHalf=%g (param %g) exitsInBox=%zu\n", teleSet.count, recTeleNames.size(),
+			mapped, cols.tele ? 1 : 0, teleTable.meshBaseZ, teleTable.standHalfHeight, params.capsuleHalfHeight, exitsInBox);
+	}
+
+	// TELE 한 프레임 — Lyra 자리(이동 뒤)로 센 우리 비트 ↔ 기록 tele, 그리고 Lyra 이동 앞 상태에서 우리 이동 + 순간이동을 한 번 돌려 옮김을 맞댄다.
+	// 이번 이동 머리 발사는 기록 칸을 넣는다(점프대 · 순간이동 몫 다 Lyra 값 — 지난 프레임 셈이 틀려도 이 프레임 대조로 안 번진다). 점프대는 안 쏜다(빈 표)
+	if (teleSet.count && cols.tele)
+	{
+		const double radius = params.capsuleRadius;
+		CMoveSim teleSim(map, params);
+		size_t maskFrames = 0, maskLyraIn = 0, maskOursIn = 0, maskMismatch = 0;
+		size_t lyraTeles = 0, mineTeles = 0, matched = 0, mineOnly = 0, lyraOnly = 0, deviceDiff = 0, beginsOver1 = 0;
+		size_t posOver001 = 0, velOver001 = 0, modeDiff = 0, yawDiff = 0, cyawChecked = 0, cyawDiff = 0, walkToFall = 0, fallToFall = 0, otherModes = 0;
+		size_t launchMatched = 0, launchOver001 = 0, launchMissing = 0, launchAtEnd = 0;
+		size_t restoreTried = 0, restoreFail = 0, restoreDeviceDiff = 0, restoreMaskDiff = 0, falseExit = 0, falseExitPending = 0;
+		double posMax = 0, velMax = 0, yawMax = 0, launchMax = 0, restoreMax = 0;
+		std::vector<size_t> perDevice(teleSet.count, 0);
+		int printedTele = 0;
+		const auto note = [&]() { if (printedTele >= 20) return false; ++printedTele; return true; };
+		for (size_t k = 0; k < rows.size(); ++k)
+		{
+			const Row& r = rows[k];
+			EMoveMode unused;
+			if (!ToMode(r.modeBefore, unused)) continue;
+			const double halfBefore = (cols.crouch && r.crouched) ? params.crouchedHalfHeight : params.capsuleHalfHeight;
+			const double halfAfter = (cols.crouch && r.crouchedA) ? params.crouchedHalfHeight : params.capsuleHalfHeight;
+			const uint8_t after = TeleportMask(teleSet, r.ap, radius, halfAfter);
+			uint8_t lyra = 0;
+			for (size_t b = 0; b < recTeleToOurs.size() && b < 31; ++b)
+			{
+				if (((r.tele >> b) & 1) && recTeleToOurs[b] >= 0) lyra |= (uint8_t)(1u << recTeleToOurs[b]);
+			}
+			++maskFrames;
+			if (lyra) ++maskLyraIn;
+			if (after) ++maskOursIn;
+			if (lyra != after)
+			{
+				++maskMismatch;
+				if (note()) std::printf("TELE_MASK_DIFF frame=%d seg=%d lyra=%u mine=%u ap=(%.3f %.3f %.3f)\n", r.frame, r.seg, lyra, after, r.ap.x, r.ap.y, r.ap.z);
+			}
+
+			MoveState s;
+			SyncState(s, r, teleSim, cols);
+			if (cols.crouch) ApplyCrouchEvent(teleSim, s, r);
+			ResetTeleports(s, teleSet, radius, halfBefore);
+			s.launchPending = !IsZeroVec(r.launch);
+			s.pendingLaunch = r.launch;
+			s.maxSpeed = (cols.crouch && r.maxSpeed != 0.f) ? r.walk : r.maxSpeed;	// RunTick 과 같다
+			const LauncherTickResult res = TickWithLaunchers(teleSim, s, r.input, r.dt, r.yaw, LauncherSet(), radius, teleSet);
+			if (res.teleportBegins > 1) ++beginsOver1;
+			const Row* next = (k + 1 < rows.size() && rows[k + 1].frame == r.frame + 1 && rows[k + 1].seg == r.seg) ? &rows[k + 1] : nullptr;
+			const bool lyraTele = r.tdev >= 0;
+			const bool mineTele = res.teleported >= 0;
+			if (lyraTele) ++lyraTeles;
+			if (mineTele) ++mineTeles;
+			if (!mineTele && !lyraTele)
+			{
+				// 안 옮긴 자리를 보정이 「옮긴 자리」로 볼까 — 발사가 남은 프레임이면 순간이동 발사를 잘못 넣는다
+				const Vec3 apFloat((float)r.ap.x, (float)r.ap.y, (float)r.ap.z);
+				if (MatchTeleportExit(teleSet, apFloat, radius, 0.01) >= 0)
+				{
+					++falseExit;
+					if (next && !IsZeroVec(next->launch))
+					{
+						++falseExitPending;
+						if (note()) std::printf("TELE_FALSE_EXIT frame=%d seg=%d ap=(%.4f %.4f %.4f)\n", r.frame, r.seg, r.ap.x, r.ap.y, r.ap.z);
+					}
+				}
+			}
+			if (lyraTele != mineTele)
+			{
+				++(mineTele ? mineOnly : lyraOnly);
+				if (note()) std::printf("TELE_FRAME_DIFF frame=%d seg=%d mine=%d lyra=%d begins=%d one-frame d=%.4f\n", r.frame, r.seg, res.teleported, r.tdev, res.teleportBegins, Dist(s.location, r.ap));
+				continue;
+			}
+			if (!mineTele) continue;
+
+			++matched;
+			++perDevice[(size_t)res.teleported];
+			const int lyraDev = (size_t)r.tdev < recTeleToOurs.size() ? recTeleToOurs[(size_t)r.tdev] : -1;
+			if (lyraDev != res.teleported)
+			{
+				++deviceDiff;
+				if (note()) std::printf("TELE_DEVICE_DIFF frame=%d mine=%d lyra=%d\n", r.frame, res.teleported, lyraDev);
+			}
+			const double dp = Dist(s.location, r.ap), dv = Dist(s.velocity, r.av);
+			posMax = std::max(posMax, dp);
+			velMax = std::max(velMax, dv);
+			if (dp > 0.01)
+			{
+				++posOver001;
+				if (note()) std::printf("TELE_POS_DIFF frame=%d dev=%d d=%.5f mine=(%.4f %.4f %.4f) lyra=(%.4f %.4f %.4f)\n", r.frame, res.teleported, dp,
+					s.location.x, s.location.y, s.location.z, r.ap.x, r.ap.y, r.ap.z);
+			}
+			if (dv > 0.01) ++velOver001;
+			if (FromMode(s.mode) != r.modeAfter) ++modeDiff;
+			if (r.modeBefore == kModeWalking && r.modeAfter == kModeFalling) ++walkToFall;
+			else if (r.modeBefore == kModeFalling && r.modeAfter == kModeFalling) ++fallToFall;
+			else ++otherModes;
+			const double dy = std::fabs(YawDiff(res.teleportYaw, r.yaw));
+			yawMax = std::max(yawMax, dy);
+			if (dy > 0.01) ++yawDiff;
+			if (res.teleportForceYaw)
+			{
+				++cyawChecked;
+				if (std::fabs(YawDiff(res.teleportYaw, r.cyaw)) > 0.01) ++cyawDiff;
+			}
+			// 뒤따르는 발사 — 다음 프레임 기록 발사 칸(이동 머리가 먹은 값)
+			const Teleporter& t = teleSet.items[(size_t)res.teleported];
+			if (!next) ++launchAtEnd;
+			else if (t.launchOnTeleport && s.launchPending && !IsZeroVec(next->launch))
+			{
+				++launchMatched;
+				const double d = Dist(s.pendingLaunch, next->launch);
+				launchMax = std::max(launchMax, d);
+				if (d > 0.01) ++launchOver001;
+			}
+			else if (t.launchOnTeleport || s.launchPending || !IsZeroVec(next->launch))
+			{
+				++launchMissing;
+				if (note()) std::printf("TELE_LAUNCH_DIFF frame=%d dev=%d mine=%d lyra=%d\n", r.frame, res.teleported, s.launchPending ? 1 : 0, IsZeroVec(next->launch) ? 0 : 1);
+			}
+			// 보정 되살림 — 상태 패킷처럼 옮긴 자리 · 속도 · 요를 단정밀도로 줄여 RestoreLaunchers(점프대 표도 같이)가 같은 장치 · 같은 발사 · 같은 비트를 다시 세나
+			MoveState rs;
+			rs.location = Vec3((float)r.ap.x, (float)r.ap.y, (float)r.ap.z);
+			rs.velocity = Vec3((float)r.av.x, (float)r.av.y, (float)r.av.z);
+			rs.crouched = cols.crouch && r.crouchedA;
+			if (MatchTeleportExit(teleSet, rs.location, radius, 0.01) != res.teleported) ++restoreDeviceDiff;
+			if (t.launchOnTeleport)
+			{
+				++restoreTried;
+				if (!RestoreLaunchers(rs, launcherSet, radius, halfAfter, true, (double)(float)r.yaw, teleSet) || !rs.launchPending) ++restoreFail;
+				else
+				{
+					restoreMax = std::max(restoreMax, Dist(rs.pendingLaunch, TeleportLaunch(t)));
+					if (rs.teleportMask != after) ++restoreMaskDiff;
+				}
+			}
+		}
+		std::printf("TELE mask frames=%zu lyraIn=%zu mineIn=%zu mismatch=%zu | lyraTeles=%zu mineTeles=%zu matched=%zu mineOnly=%zu lyraOnly=%zu deviceDiff=%zu beginsOver1=%zu\n",
+			maskFrames, maskLyraIn, maskOursIn, maskMismatch, lyraTeles, mineTeles, matched, mineOnly, lyraOnly, deviceDiff, beginsOver1);
+		std::printf("TELE pos max=%.6f over0.01=%zu | vel max=%.6f over0.01=%zu | modeDiff=%zu (walk->fall %zu fall->fall %zu other %zu) | yaw max=%.6f over0.01=%zu | cyaw checked=%zu over0.01=%zu\n",
+			posMax, posOver001, velMax, velOver001, modeDiff, walkToFall, fallToFall, otherModes, yawMax, yawDiff, cyawChecked, cyawDiff);
+		std::printf("TELE launch matched=%zu max=%.6f over0.01=%zu missing=%zu atEnd=%zu\n", launchMatched, launchMax, launchOver001, launchMissing, launchAtEnd);
+		std::printf("TELE_RESTORE tried=%zu fail=%zu deviceDiff=%zu maskDiff=%zu maxDiff=%.6f | falseExit=%zu (launch pending %zu)\n",
+			restoreTried, restoreFail, restoreDeviceDiff, restoreMaskDiff, restoreMax, falseExit, falseExitPending);
+		std::printf("TELE_COVER");
+		bool covered = true;
+		for (size_t i = 0; i < teleSet.count; ++i)
+		{
+			std::printf(" %zu=%zu", i, perDevice[i]);
+			covered = covered && perDevice[i] > 0;
+		}
+		std::printf("\n");
+		// 판정 — 비트가 다 같고, 옮긴 프레임 · 장치 · 자리 · 속도 · 모드 · 요 · 발사가 다 같고, 보정이 같은 발사를 되살리고, 장치마다 한 번 이상 옮겼다
+		const bool pass = teleTableOk && maskMismatch == 0 && mineOnly == 0 && lyraOnly == 0 && deviceDiff == 0 && matched > 0 && matched == lyraTeles &&
+			posOver001 == 0 && velOver001 == 0 && modeDiff == 0 && yawDiff == 0 && cyawDiff == 0 && launchOver001 == 0 && launchMissing == 0 &&
+			restoreFail == 0 && restoreDeviceDiff == 0 && restoreMaskDiff == 0 && restoreMax <= 0.01 && falseExitPending == 0 && covered;
+		std::printf("TELECHECK %s\n", pass ? "PASS" : "FAIL");
+	}
+
 	// 한 프레임 — 매번 Lyra 상태에서 시작한다
 	FILE* mismatch = nullptr;
 	if (mismatchPath && fopen_s(&mismatch, mismatchPath, "wb") == 0 && mismatch)
@@ -808,9 +1084,9 @@ int main(int argc, char** argv)
 		if (firstOver1At >= 0.f) firstOver1.push_back(firstOver1At);
 	};
 
-	// 점프대 이어 달리기 — 순간이동이 든 구간은 뺀다(우리 이동엔 순간이동이 없어 그 뒤가 다 어긋난다 · 범위 밖 D157)
+	// 점프대 이어 달리기 — 순간이동 표가 없으면 순간이동이 든 구간은 뺀다(우리 이동이 안 옮겨 그 뒤가 다 어긋난다). 표가 있으면 다 돈다
 	std::vector<int> teleportSegs;
-	if (launcherSet.count)
+	if (launcherSet.count && !teleSet.count)
 	{
 		for (const Row& r : rows)
 		{
@@ -818,6 +1094,8 @@ int main(int argc, char** argv)
 		}
 	}
 	size_t runPadMatched = 0, runPadMineOnly = 0, runPadLyraOnly = 0, runPadSpeedOver001 = 0, runPadSkippedRows = 0;
+	size_t runTeleMatched = 0, runTeleMineOnly = 0, runTeleLyraOnly = 0, runTeleDeviceDiff = 0;
+	int runTelePrinted = 0;
 	double runPadSpeedMax = 0;
 	int runPadPrinted = 0;
 
@@ -845,6 +1123,7 @@ int main(int argc, char** argv)
 			SyncState(run, r, runSim, cols);
 			if (cols.crouch) ApplyCrouchEvent(runSim, run, r);
 			if (launcherSet.count) ResetLaunchers(run, launcherSet, params.capsuleRadius, runSim.HalfHeightOf(run));
+			if (teleSet.count) ResetTeleports(run, teleSet, params.capsuleRadius, runSim.HalfHeightOf(run));
 		}
 		else if (r.ext != 0)
 		{
@@ -852,6 +1131,7 @@ int main(int argc, char** argv)
 			SyncState(run, r, runSim, cols);
 			if (cols.crouch) ApplyCrouchEvent(runSim, run, r);
 			if (launcherSet.count) ResetLaunchers(run, launcherSet, params.capsuleRadius, runSim.HalfHeightOf(run));
+			if (teleSet.count) ResetTeleports(run, teleSet, params.capsuleRadius, runSim.HalfHeightOf(run));
 		}
 		else
 		{
@@ -869,7 +1149,7 @@ int main(int argc, char** argv)
 		const bool padPending = run.launchPending;
 		const Vec3 padLaunch = run.pendingLaunch;
 		QueryPerformanceCounter(&t0);
-		RunTick(runSim, run, r, cols, launcherSet, params.capsuleRadius);
+		const LauncherTickResult runResult = RunTick(runSim, run, r, cols, launcherSet, params.capsuleRadius, teleSet);
 		QueryPerformanceCounter(&t1);
 		runSeconds += (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
 		++runTicks;
@@ -891,6 +1171,26 @@ int main(int argc, char** argv)
 				{
 					++runPadPrinted;
 					std::printf("RUNPAD_FRAME_DIFF frame=%d seg=%d mine=%d lyra=%d\n", r.frame, r.seg, padPending ? 1 : 0, lyraFire ? 1 : 0);
+				}
+			}
+		}
+
+		if (teleSet.count && cols.tele)
+		{
+			const bool lyraTele = r.tdev >= 0, mineTele = runResult.teleported >= 0;
+			if (lyraTele && mineTele)
+			{
+				++runTeleMatched;
+				const int lyraDev = (size_t)r.tdev < recTeleToOurs.size() ? recTeleToOurs[(size_t)r.tdev] : -1;
+				if (lyraDev != runResult.teleported) ++runTeleDeviceDiff;
+			}
+			else if (lyraTele || mineTele)
+			{
+				++(mineTele ? runTeleMineOnly : runTeleLyraOnly);
+				if (runTelePrinted < 20)
+				{
+					++runTelePrinted;
+					std::printf("RUNTELE_FRAME_DIFF frame=%d seg=%d mine=%d lyra=%d d=%.4f\n", r.frame, r.seg, runResult.teleported, r.tdev, Dist(run.location, r.ap));
 				}
 			}
 		}
@@ -921,6 +1221,10 @@ int main(int argc, char** argv)
 	{
 		std::printf("RUNPAD matched=%zu mineOnly=%zu lyraOnly=%zu speedMax=%.6f over0.01=%zu | teleportSegs=%zu skippedRows=%zu\n",
 			runPadMatched, runPadMineOnly, runPadLyraOnly, runPadSpeedMax, runPadSpeedOver001, teleportSegs.size(), runPadSkippedRows);
+	}
+	if (teleSet.count && cols.tele)
+	{
+		std::printf("RUNTELE matched=%zu mineOnly=%zu lyraOnly=%zu deviceDiff=%zu\n", runTeleMatched, runTeleMineOnly, runTeleLyraOnly, runTeleDeviceDiff);
 	}
 	PrintCounters(runSim.GetCounters());
 	if (cols.crouch) PrintCrouchCounters(runSim.GetCounters());
