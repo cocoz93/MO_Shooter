@@ -237,6 +237,27 @@ namespace mo
 		const LaunchCounters& GetLaunchCounters() const { return _launchCounters; }
 		// 마지막 걸음이 쏜 점프대 번호(-1 = 안 쏨). AddInput 바로 뒤에만 그 입력 몫이다 — 보정의 다시 돌리기가 덮는다(다리가 내 몸 효과를 낼 점프대를 고른다)
 		int GetLastLaunchPad() const { return _lastLaunch.fired; }
+
+		// 순간이동(teleport-plan t-6) — 서버가 보낸 표(S2C_TELEPORT)를 받아 같은 TickWithLaunchers 로 옮긴다. 표가 없으면 순간이동 없는 걸음 그대로.
+		// 살아 있는 동안 받으면 지금 자리로 비트만 다시 센다(SetLaunchers 와 같다)
+		void SetTeleports(const std::vector<Teleporter>& table, double meshBaseZ, double capsuleRadius);
+		size_t GetTeleportCount() const { return _teleportTable.size(); }
+		struct TeleportCounters
+		{
+			uint64_t teleported = 0;	// 내 걸음 끝에 옮겨짐(AddInput 때만 센다 — 다시 돌리기는 안 셈)
+			uint64_t forcedYaw = 0;		// 그중 조종 요도 돌리라는 장치(bForceDirection)
+		};
+		const TeleportCounters& GetTeleportCounters() const { return _teleportCounters; }
+		// 마지막으로 옮겨진 입력(AddInput 때만 바뀐다 — 보정의 다시 돌리기는 안 덮는다). forceYaw 면 부르는 쪽(봇 · 다리)이 다음 입력부터 제 시점 요를 yaw 로 돌린다 —
+		// 서버는 입력 요를 그대로 쓰므로(Room.cpp ApplyInput) 클라가 돌린 요가 다음 입력에 실려야 Lyra(조종 방향까지 돌림)와 같아진다
+		struct TeleportEvent
+		{
+			uint32_t seq = 0;		// 옮겨진 입력 번호. 0 = 아직 없음
+			int device = -1;		// 들어간 장치(표 차례)
+			double yaw = 0;			// 나갈 방향 요
+			bool forceYaw = false;
+		};
+		const TeleportEvent& GetLastTeleport() const { return _lastTeleport; }
 		// 아직 확인 안 된 번호(AckGrenade 가 본 번호 뒤) 중 서버 소식 없이 내가 던진 칸 — 판이 끝날 때 서버가 돌렸는지 모르는 몫(봇 판정에서 뺀다)
 		uint64_t CountGrenadeThrownUnacked() const;
 		// 대시도 같다 — 아직 확인 안 된 번호(AckDash 가 본 번호 뒤) 중 서버 소식 없이 내가 켠 칸. 판이 끝날 때 서버가 받고 안 돌린 입력의 몫(봇 판정에서 뺀다, L-11-c)
@@ -334,5 +355,9 @@ namespace mo
 		double _capsuleRadius = 0;
 		LaunchCounters _launchCounters;
 		LauncherTickResult _lastLaunch;		// 마지막 ApplyMove 의 점프대 결과 — AddInput 이 센다
+		std::vector<Teleporter> _teleportTable;	// 순간이동 표 사본 — _teleports 가 가리킨다
+		TeleportSet _teleports;
+		TeleportCounters _teleportCounters;
+		TeleportEvent _lastTeleport;
 	};
 }

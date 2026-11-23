@@ -789,6 +789,7 @@ int main(int argc, char** argv)
 	TeleportSet teleSet;
 	std::vector<int> recTeleToOurs;		// 기록 #tele 번호 → 표 번호(-1 = 표에 없음)
 	bool teleTableOk = true;
+	bool teleWirePass = true;	// 아래 TELE_WIRE — TELECHECK 판정에 같이 든다
 	if (teleportsPath)
 	{
 		std::vector<char> text;
@@ -843,6 +844,66 @@ int main(int argc, char** argv)
 		teleTableOk = cols.tele && mapped == recTeleNames.size() && mapped == teleSet.count && exitsInBox == 0 && teleTable.standHalfHeight == (double)params.capsuleHalfHeight;
 		std::printf("TELE_TABLE teleports=%zu recTeles=%zu mapped=%zu teleColumns=%d meshBaseZ=%g standHalf=%g (param %g) exitsInBox=%zu\n", teleSet.count, recTeleNames.size(),
 			mapped, cols.tele ? 1 : 0, teleTable.meshBaseZ, teleTable.standHalfHeight, params.capsuleHalfHeight, exitsInBox);
+
+		// 와이어 왕복(t-5) — 표 → S2C_TELEPORT → 표가 칸마다 같은가(셈 값은 double 그대로 실어 == 로 같아야 한다). 점프대 PAD_WIRE 와 같은 꼴.
+		// 거름 = 틀린 소식을 받아들이면 bad — 하나씩 칸을 틀리게 만든다. 이름 63자는 받고 64자는 쓰기에서 거른다
+		size_t wireOk = 0, wireBad = 0, rejectTried = 0, rejectOk = 0;
+		const auto same3 = [](const Vec3& a, const Vec3& b) { return a.x == b.x && a.y == b.y && a.z == b.z; };
+		const auto sameTeleporter = [&](const Teleporter& a, const Teleporter& b)
+		{
+			return a.name == b.name && a.target == b.target && same3(a.boxCenter, b.boxCenter) && same3(a.boxAxisX, b.boxAxisX) && same3(a.boxAxisY, b.boxAxisY) &&
+				same3(a.boxExtent, b.boxExtent) && same3(a.root, b.root) && same3(a.rootForward, b.rootForward) && same3(a.exit, b.exit) && same3(a.exitForward, b.exitForward) &&
+				a.keepRelative == b.keepRelative && a.launchOnTeleport == b.launchOnTeleport && a.launchMultiplier == b.launchMultiplier && a.forceDirection == b.forceDirection &&
+				a.offsetZMax == b.offsetZMax;
+		};
+		const size_t n = teleTable.items.size();
+		for (size_t i = 0; i < n; ++i)
+		{
+			wire::TeleportInfo info;
+			Teleporter back;
+			double backMesh = 0;
+			const bool ok = TeleportToWire(teleTable.items[i], i, n, teleTable.meshBaseZ, info) && info.h.size == sizeof(info) && info.h.type == (uint16_t)wire::Msg::S2C_TELEPORT &&
+				info.index == i && info.count == n && TeleportFromWire(info, back, backMesh) && sameTeleporter(teleTable.items[i], back) && backMesh == teleTable.meshBaseZ;
+			++(ok ? wireOk : wireBad);
+		}
+		{
+			const auto expectReject = [&](bool accepted) { ++rejectTried; if (!accepted) ++rejectOk; };
+			const double nan = std::nan("");
+			wire::TeleportInfo base;
+			Teleporter back;
+			double backMesh = 0;
+			TeleportToWire(teleTable.items[0], 0, n, teleTable.meshBaseZ, base);
+			Teleporter named = teleTable.items[0];
+			named.name.assign(kMaxTeleportName, 'a');
+			wire::TeleportInfo info;
+			if (!(TeleportToWire(named, 0, n, teleTable.meshBaseZ, info) && TeleportFromWire(info, back, backMesh) && back.name == named.name)) ++wireBad;	// 63자는 지나간다
+			named.name.assign(kMaxTeleportName + 1, 'a');
+			expectReject(TeleportToWire(named, 0, n, teleTable.meshBaseZ, info));
+			expectReject(TeleportToWire(teleTable.items[0], n, n, teleTable.meshBaseZ, info));		// 차례가 표 밖
+			Teleporter self = teleTable.items[0];
+			self.target = 0;
+			expectReject(TeleportToWire(self, 0, n, teleTable.meshBaseZ, info));					// 짝이 저 자신
+			info = base; info.flags = 1 << 3; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.index = info.count; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.count = 0; info.index = 0; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.count = (uint8_t)(kMaxTeleports + 1); expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.target = info.count; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.target = info.index; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.boxExtent[0] = 0; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.boxAxisX[2] = 0.5; expectReject(TeleportFromWire(info, back, backMesh));		// 칸이 기욺
+			info = base; info.rootForward[0] *= 2; info.rootForward[1] *= 2; expectReject(TeleportFromWire(info, back, backMesh));	// 단위 벡터 아님
+			info = base; info.exitForward[0] *= 2; info.exitForward[1] *= 2; info.exitForward[2] *= 2; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.offsetZMax = -1; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.rootForward[0] = 0; info.rootForward[1] = 0; info.rootForward[2] = 1;
+			expectReject(TeleportFromWire(info, back, backMesh));		// 「그대로」 장치(표 0 = 문 포털)인데 뿌리 앞방향이 수평 아님
+			info = base; info.meshBaseZ = nan; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.boxCenter[1] = nan; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; info.launchMultiplier = nan; expectReject(TeleportFromWire(info, back, backMesh));
+			info = base; std::memset(info.name, 'a', sizeof(info.name)); expectReject(TeleportFromWire(info, back, backMesh));	// 0 으로 안 끝남
+			info = base; std::memset(info.name, 0, sizeof(info.name)); expectReject(TeleportFromWire(info, back, backMesh));	// 빈 이름
+		}
+		teleWirePass = wireBad == 0 && wireOk == n && rejectOk == rejectTried && rejectTried > 0 && teleTable.items[0].keepRelative;
+		std::printf("TELE_WIRE size=%zu ok=%zu bad=%zu reject=%zu/%zu\n", sizeof(wire::TeleportInfo), wireOk, wireBad, rejectOk, rejectTried);
 	}
 
 	// TELE 한 프레임 — Lyra 자리(이동 뒤)로 센 우리 비트 ↔ 기록 tele, 그리고 Lyra 이동 앞 상태에서 우리 이동 + 순간이동을 한 번 돌려 옮김을 맞댄다.
@@ -998,7 +1059,7 @@ int main(int argc, char** argv)
 		// 판정 — 비트가 다 같고, 옮긴 프레임 · 장치 · 자리 · 속도 · 모드 · 요 · 발사가 다 같고, 보정이 같은 발사를 되살리고, 장치마다 한 번 이상 옮겼다
 		const bool pass = teleTableOk && maskMismatch == 0 && mineOnly == 0 && lyraOnly == 0 && deviceDiff == 0 && matched > 0 && matched == lyraTeles &&
 			posOver001 == 0 && velOver001 == 0 && modeDiff == 0 && yawDiff == 0 && cyawDiff == 0 && launchOver001 == 0 && launchMissing == 0 &&
-			restoreFail == 0 && restoreDeviceDiff == 0 && restoreMaskDiff == 0 && restoreMax <= 0.01 && falseExitPending == 0 && covered;
+			restoreFail == 0 && restoreDeviceDiff == 0 && restoreMaskDiff == 0 && restoreMax <= 0.01 && falseExitPending == 0 && covered && teleWirePass;
 		std::printf("TELECHECK %s\n", pass ? "PASS" : "FAIL");
 	}
 

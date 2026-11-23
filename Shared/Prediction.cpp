@@ -131,6 +131,15 @@ namespace mo
 		if (_lastLaunch.fired >= 0) ++_launchCounters.fired;
 		if (_lastLaunch.launchedThisTick) ++_launchCounters.applied;
 		_launchCounters.refused += (uint64_t)_lastLaunch.refused;
+		if (_lastLaunch.teleported >= 0)
+		{
+			++_teleportCounters.teleported;
+			if (_lastLaunch.teleportForceYaw) ++_teleportCounters.forcedYaw;
+			_lastTeleport.seq = slot.seq;
+			_lastTeleport.device = _lastLaunch.teleported;
+			_lastTeleport.yaw = _lastLaunch.teleportYaw;
+			_lastTeleport.forceYaw = _lastLaunch.teleportForceYaw;
+		}
 		ApplyWeapon(slot, _melee.IsActive());
 		RememberMove(slot);
 		RememberWeapon(slot, _melee.IsActive());
@@ -145,6 +154,16 @@ namespace mo
 		_move.launcherMask = _launchers.count ? LauncherMask(_launchers.items, _launchers.count, _move.location, _capsuleRadius, _sim.HalfHeightOf(_move)) : 0;
 	}
 
+	void CSelfPrediction::SetTeleports(const std::vector<Teleporter>& table, double meshBaseZ, double capsuleRadius)
+	{
+		_teleportTable = table;
+		_teleports.items = _teleportTable.data();
+		_teleports.count = _teleportTable.size();
+		_teleports.meshBaseZ = meshBaseZ;
+		_capsuleRadius = capsuleRadius;
+		ResetTeleports(_move, _teleports, _capsuleRadius, _sim.HalfHeightOf(_move));	// 비트만 — 놓인 자리가 칸 안이어도 안 옮긴다
+	}
+
 	void CSelfPrediction::OnSpawn(double x, double y, double z, uint32_t lastSeq, float yaw)
 	{
 		_waitingSpawn = false;
@@ -155,6 +174,7 @@ namespace mo
 		_move.maxSpeed = _maxWalkSpeed;
 		_sim.RefreshFloor(_move);
 		ResetLaunchers(_move, _launchers, _capsuleRadius, _sim.HalfHeightOf(_move));	// 서버 SpawnPlayer · ApplyPlace 와 같다 — 놓아서는 안 쏜다
+		ResetTeleports(_move, _teleports, _capsuleRadius, _sim.HalfHeightOf(_move));	// 순간이동도 — 놓아서는 안 옮긴다
 		_jump.Reset();
 		_meleePushId = 0;
 		_lockInputs = SpawnMoveLockInputs(_rules);
@@ -225,6 +245,7 @@ namespace mo
 		_move.maxSpeed = _maxWalkSpeed;
 		_sim.RefreshFloor(_move);
 		ResetLaunchers(_move, _launchers, _capsuleRadius, _sim.HalfHeightOf(_move));	// 서버 ApplyPlace 와 같다
+		ResetTeleports(_move, _teleports, _capsuleRadius, _sim.HalfHeightOf(_move));
 		_jump.Reset();
 		_meleePushId = 0;		// 서버 ApplyPlace 와 같다 — 힘 묶음을 새로 만들었다. 대시 능력은 서버도 안 건드린다(켜짐 · 쿨다운 · 앞 입력 그대로)
 		_lockInputs = 0;
@@ -308,7 +329,8 @@ namespace mo
 		if (_move.crouched != serverCrouched) _move.wantsToCrouch = serverCrouched;
 		_move.crouched = serverCrouched;
 		// 점프대 — 비트는 서버 자리로 다시 세고(앉음을 정한 뒤 반높이로), 남은 발사는 서버 깃발 · 상태 속도 · 요로 다시 셈한다(JumpPads.h RestoreLaunchers)
-		if (!RestoreLaunchers(_move, _launchers, _capsuleRadius, _sim.HalfHeightOf(_move), serverLaunchPending, server.yaw)) ++_launchCounters.restoreFails;
+		// 순간이동 비트도 같이 — 깃발이 켜졌고 서버 자리가 순간이동 옮긴 자리면 순간이동 발사를 고른다
+		if (!RestoreLaunchers(_move, _launchers, _capsuleRadius, _sim.HalfHeightOf(_move), serverLaunchPending, server.yaw, _teleports)) ++_launchCounters.restoreFails;
 		else if (serverLaunchPending) ++_launchCounters.restored;
 		_jump = slot.jump;
 		_meleePushId = slot.meleePushId;
@@ -877,7 +899,7 @@ namespace mo
 		_ads.Apply((input.buttons & wire::BUTTON_ADS) != 0, slot.dashBlocks);		// 대시가 켜지는 입력에 끄고, 막힌 누름은 떼었다 다시 눌러야 켜진다(서버와 같다)
 		_move.maxSpeed = AdsWalkSpeed(_maxWalkSpeed, _ads.active);
 		// 근접 밀기는 위 능력 자리에서 넣었다 — 점프 깃발 · 앉기 바람 · 조준 속도는 힘 묶음을 안 건드려 걸음 바로 앞에서 넣던 판 13 과 같은 결과(L-5-a)
-		_lastLaunch = TickWithLaunchers(_sim, _move, moveInput, kTick, input.yaw, _launchers, _capsuleRadius);	// 서버 ApplyInput 과 같다 — 표가 없으면 _sim.Tick 한 번
+		_lastLaunch = TickWithLaunchers(_sim, _move, moveInput, kTick, input.yaw, _launchers, _capsuleRadius, _teleports);	// 서버 ApplyInput 과 같다 — 표가 없으면 _sim.Tick 한 번
 		return moveUsed;
 	}
 

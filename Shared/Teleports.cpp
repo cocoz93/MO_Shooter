@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 
 namespace mo
 {
@@ -63,6 +64,22 @@ namespace mo
 		double Dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 		double Length(const Vec3& v) { return std::sqrt(Dot(v, v)); }
 		bool IsUnit(const Vec3& v) { return std::fabs(Length(v) - 1.0) <= kAxisTolerance; }
+		bool IsFinite(const Vec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+
+		// 장치 한 줄의 모양 검사 — 파일 읽기(ParseTeleports)와 와이어 읽기(TeleportFromWire)가 같이 쓴다. 칸의 z 축은 파일에만 있어 그쪽이 따로 본다
+		bool ShapeOk(const Teleporter& t)
+		{
+			bool ok = IsFinite(t.boxCenter) && IsFinite(t.boxExtent) && IsFinite(t.root) && IsFinite(t.exit) && std::isfinite(t.launchMultiplier) && std::isfinite(t.offsetZMax);
+			// 칸이 서 있어야 겹침 셈(TeleportOverlaps)이 맞다 — x · y 축 = 수평 단위 벡터
+			ok = ok && IsUnit(t.boxAxisX) && IsUnit(t.boxAxisY) && std::fabs(t.boxAxisX.z) <= kAxisTolerance && std::fabs(t.boxAxisY.z) <= kAxisTolerance &&
+				t.boxExtent.x > 0 && t.boxExtent.y > 0 && t.boxExtent.z > 0 && IsUnit(t.rootForward) && IsUnit(t.exitForward) && t.offsetZMax >= 0;
+			// 「들어간 자리 그대로」 — 보정(MatchTeleportExit)이 나갈 면 위 판정을 쓰려면 뿌리 앞방향이 수평이어야 한다(L_Expanse 문 포털 둘 = z 0)
+			if (ok && t.keepRelative) ok = std::fabs(t.rootForward.z) <= kAxisTolerance;
+			return ok && !t.name.empty() && t.name.size() <= kMaxTeleportName;
+		}
+
+		void ToArray(const Vec3& v, double* out) { out[0] = v.x; out[1] = v.y; out[2] = v.z; }
+		Vec3 FromArray(const double* v) { return Vec3(v[0], v[1], v[2]); }
 	}
 
 	ETeleportsLoad ParseTeleports(const char* text, size_t size, TeleportTable& out, size_t& outBadLine)
@@ -106,13 +123,9 @@ namespace mo
 			if (ok)
 			{
 				t.name = f[2];
-				// 칸이 서 있어야 겹침 셈(TeleportOverlaps)이 맞다 — z 축 = 월드 위, x · y 축 = 수평 단위 벡터
+				// 칸이 서 있어야 겹침 셈(TeleportOverlaps)이 맞다 — z 축 = 월드 위(나머지 모양은 ShapeOk)
 				ok = std::fabs(boxZ.x) <= kAxisTolerance && std::fabs(boxZ.y) <= kAxisTolerance && std::fabs(boxZ.z - 1.0) <= kAxisTolerance &&
-					IsUnit(t.boxAxisX) && IsUnit(t.boxAxisY) && std::fabs(t.boxAxisX.z) <= kAxisTolerance && std::fabs(t.boxAxisY.z) <= kAxisTolerance &&
-					t.boxExtent.x > 0 && t.boxExtent.y > 0 && t.boxExtent.z > 0 && IsUnit(t.rootForward) && IsUnit(t.exitForward) && t.offsetZMax >= 0 &&
-					index == (int)table.items.size() && t.target != index;
-				// 「들어간 자리 그대로」 — 보정(MatchTeleportExit)이 나갈 면 위 판정을 쓰려면 뿌리 앞방향이 수평이어야 한다(L_Expanse 문 포털 둘 = z 0)
-				if (ok && t.keepRelative) ok = std::fabs(t.rootForward.z) <= kAxisTolerance;
+					ShapeOk(t) && index == (int)table.items.size() && t.target != index;
 			}
 			if (!ok)
 			{
@@ -250,5 +263,62 @@ namespace mo
 			return (int)i;
 		}
 		return -1;
+	}
+
+	bool TeleportToWire(const Teleporter& teleporter, size_t index, size_t count, double meshBaseZ, wire::TeleportInfo& out)
+	{
+		if (teleporter.name.empty() || teleporter.name.size() > kMaxTeleportName || index >= count || count > kMaxTeleports) return false;
+		if (teleporter.target < 0 || (size_t)teleporter.target >= count || (size_t)teleporter.target == index) return false;
+		out = wire::TeleportInfo();
+		out.h.size = (uint16_t)sizeof(out);
+		out.h.type = (uint16_t)wire::Msg::S2C_TELEPORT;
+		out.index = (uint8_t)index;
+		out.count = (uint8_t)count;
+		out.target = (uint8_t)teleporter.target;
+		out.flags = (uint8_t)((teleporter.keepRelative ? wire::TELEPORT_KEEP_RELATIVE : 0) | (teleporter.launchOnTeleport ? wire::TELEPORT_LAUNCH : 0) |
+			(teleporter.forceDirection ? wire::TELEPORT_FORCE_DIRECTION : 0));
+		ToArray(teleporter.boxCenter, out.boxCenter);
+		ToArray(teleporter.boxAxisX, out.boxAxisX);
+		ToArray(teleporter.boxAxisY, out.boxAxisY);
+		ToArray(teleporter.boxExtent, out.boxExtent);
+		ToArray(teleporter.root, out.root);
+		ToArray(teleporter.rootForward, out.rootForward);
+		ToArray(teleporter.exit, out.exitLocation);
+		ToArray(teleporter.exitForward, out.exitForward);
+		out.launchMultiplier = teleporter.launchMultiplier;
+		out.offsetZMax = teleporter.offsetZMax;
+		out.meshBaseZ = meshBaseZ;
+		std::memcpy(out.name, teleporter.name.data(), teleporter.name.size());	// 나머지는 위 초기화로 0 — 0 으로 끝난다
+		return true;
+	}
+
+	bool TeleportFromWire(const wire::TeleportInfo& in, Teleporter& out, double& outMeshBaseZ)
+	{
+		if ((in.flags & ~(wire::TELEPORT_KEEP_RELATIVE | wire::TELEPORT_LAUNCH | wire::TELEPORT_FORCE_DIRECTION)) != 0) return false;
+		if (in.count == 0 || in.count > kMaxTeleports || in.index >= in.count || in.target >= in.count || in.target == in.index) return false;
+		if (!std::isfinite(in.meshBaseZ)) return false;
+		size_t nameLength = 0;
+		while (nameLength < sizeof(in.name) && in.name[nameLength] != '\0') ++nameLength;
+		if (nameLength == 0 || nameLength == sizeof(in.name)) return false;
+		Teleporter t;
+		t.name.assign(in.name, nameLength);
+		t.target = in.target;
+		t.boxCenter = FromArray(in.boxCenter);
+		t.boxAxisX = FromArray(in.boxAxisX);
+		t.boxAxisY = FromArray(in.boxAxisY);
+		t.boxExtent = FromArray(in.boxExtent);
+		t.root = FromArray(in.root);
+		t.rootForward = FromArray(in.rootForward);
+		t.exit = FromArray(in.exitLocation);
+		t.exitForward = FromArray(in.exitForward);
+		t.keepRelative = (in.flags & wire::TELEPORT_KEEP_RELATIVE) != 0;
+		t.launchOnTeleport = (in.flags & wire::TELEPORT_LAUNCH) != 0;
+		t.launchMultiplier = in.launchMultiplier;
+		t.forceDirection = (in.flags & wire::TELEPORT_FORCE_DIRECTION) != 0;
+		t.offsetZMax = in.offsetZMax;
+		if (!ShapeOk(t)) return false;
+		out = t;
+		outMeshBaseZ = in.meshBaseZ;
+		return true;
 	}
 }

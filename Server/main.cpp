@@ -2,7 +2,7 @@
 //
 //   Server --map=<파일.mocl> [--port=7791] [--seed=20261102] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일]
 //          [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=1] [--maxSessions=64]
-//          [--measureFrom=초 --measureSeconds=초] [--clips=파일] [--pads=파일] [--launchers=파일]
+//          [--measureFrom=초 --measureSeconds=초] [--clips=파일] [--pads=파일] [--launchers=파일] [--teleports=파일]
 //
 // --debug 는 시험 클라가 위치·체력을 정할 수 있게 한다. 사람이 하는 판에서는 켜지 않는다.
 // --warmup·--matchSeconds·--targetScore 는 시험에서 Lyra 값을 줄일 때만 쓴다.
@@ -69,6 +69,7 @@ namespace
 		mo::RewindOptions rewind;
 		std::string clipsPath;
 		std::string launchersPath;	// 점프대(jumppad-plan j-4) — 리포 밖 파일(Tools/LyraPilot/make_launchers.py). 없으면 점프대 없는 판
+		std::string teleportsPath;	// 순간이동(teleport-plan t-4) — 리포 밖 파일(Tools/LyraPilot/make_teleports.py). 없으면 순간이동 없는 판
 		std::string padsPath;		// 받침(체력 · 무기, 컨텐츠 B · W-1) — 리포 밖 파일(Tools/LyraPilot/make_pads.py). 없으면 받침 없는 판
 		mo::AnimOptions anim;
 		mo::PickupOptions pickups;	// 받침 목록은 main 이 들고 있다 — 방은 가리키기만
@@ -92,6 +93,7 @@ namespace
 			else if (value("--clips=", v)) out.clipsPath = v;
 			else if (value("--pads=", v)) out.padsPath = v;
 			else if (value("--launchers=", v)) out.launchersPath = v;
+			else if (value("--teleports=", v)) out.teleportsPath = v;
 			else if (value("--seed=", v)) out.seed = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
 			else if (value("--duration=", v)) out.durationSeconds = std::atof(v.c_str());
 			else if (value("--record=", v)) out.recordPath = v;
@@ -525,7 +527,7 @@ int main(int argc, char** argv)
 	Args args;
 	if (!ParseArgs(argc, argv, args))
 	{
-		std::printf("쓰는 법: Server --map=<파일.mocl> [--port=7791] [--seed=N] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일] [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=N] [--maxSessions=N] [--clips=파일] [--pads=파일] [--launchers=파일]\n");
+		std::printf("쓰는 법: Server --map=<파일.mocl> [--port=7791] [--seed=N] [--duration=초] [--exitWhenEmpty] [--debug] [--record=파일] [--warmup=초] [--matchSeconds=초] [--targetScore=N] [--fallKillZ=높이] [--gameThreads=N] [--maxSessions=N] [--clips=파일] [--pads=파일] [--launchers=파일] [--teleports=파일]\n");
 		return 2;
 	}
 
@@ -608,6 +610,53 @@ int main(int argc, char** argv)
 		const mo::Launcher& l = launchers[i];
 		std::printf("LAUNCHER %zu kind=%s name=%s sphere=(%.3f,%.3f,%.3f) r=%.2f up=%g mul=%g target=%d(%.3f,%.3f,%.3f) noFallEntry=%d minVz=%g\n", i, mo::LauncherKindName(l.kind), l.name.c_str(),
 			l.sphereCenter.x, l.sphereCenter.y, l.sphereCenter.z, l.sphereRadius, l.upOverride, l.multiplier, l.useTarget ? 1 : 0, l.target.x, l.target.y, l.target.z, l.noFallEntry ? 1 : 0, l.minVerticalVelocity);
+	}
+
+	// 순간이동 — 같은 규칙: 틀린 줄이 하나라도 있으면 시작하지 않는다. 더해 표를 잰 선 캡슐 반높이가 이동 설정과 다르거나(메시 높이 몫이 어긋난다)
+	// 나갈 자리가 다른 칸 안이면(Lyra 는 잇달아 옮길 텐데 Shared 는 한 번만 옮긴다 — Teleports.h ApplyTeleports) 이 서버가 Lyra 와 같게 못 도는 맵이라 거부한다
+	mo::TeleportTable teleports;	// 서버가 멈출 때까지 방들이 읽는다
+	if (!args.teleportsPath.empty())
+	{
+		std::vector<char> data;
+		if (!ReadFile(args.teleportsPath, data))
+		{
+			std::printf("[오류] 순간이동 파일을 읽지 못함: %s\n", args.teleportsPath.c_str());
+			return 1;
+		}
+		size_t badLine = 0;
+		const mo::ETeleportsLoad loaded = mo::ParseTeleports(data.data(), data.size(), teleports, badLine);
+		if (loaded != mo::ETeleportsLoad::Ok)
+		{
+			std::printf("[오류] 순간이동 파일이 틀림: %s — %s (줄 %zu)\n", args.teleportsPath.c_str(), mo::TeleportsLoadName(loaded), badLine);
+			return 1;
+		}
+		if (teleports.standHalfHeight != (double)params.capsuleHalfHeight)
+		{
+			std::printf("[오류] 순간이동 파일의 선 캡슐 반높이 %g 가 이동 설정 %g 와 다름: %s\n", teleports.standHalfHeight, (double)params.capsuleHalfHeight, args.teleportsPath.c_str());
+			return 1;
+		}
+		mo::TeleportSet set;
+		set.items = teleports.items.data();
+		set.count = teleports.items.size();
+		set.meshBaseZ = teleports.meshBaseZ;
+		for (size_t i = 0; i < teleports.items.size(); ++i)
+		{
+			if (mo::TeleportMask(set, teleports.items[i].exit, params.capsuleRadius, params.capsuleHalfHeight))
+			{
+				std::printf("[오류] 순간이동 %zu 의 나갈 자리가 다른 칸 안 — 잇달아 옮김은 안 함: %s\n", i, args.teleportsPath.c_str());
+				return 1;
+			}
+		}
+	}
+	if (!teleports.items.empty()) args.pickups.teleports = &teleports;
+	std::printf("TELEPORTS count=%zu meshBaseZ=%g standHalf=%g file=%s\n", teleports.items.size(), teleports.meshBaseZ, teleports.standHalfHeight,
+		args.teleportsPath.empty() ? "-" : args.teleportsPath.c_str());
+	for (size_t i = 0; i < teleports.items.size(); ++i)
+	{
+		const mo::Teleporter& t = teleports.items[i];
+		std::printf("TELEPORT %zu name=%s target=%d box=(%.3f,%.3f,%.3f) ext=(%.3f,%.3f,%.3f) exit=(%.3f,%.3f,%.3f) yaw=%.3f keep=%d launch=%d mul=%g force=%d zmax=%g\n", i, t.name.c_str(), t.target,
+			t.boxCenter.x, t.boxCenter.y, t.boxCenter.z, t.boxExtent.x, t.boxExtent.y, t.boxExtent.z, t.exit.x, t.exit.y, t.exit.z, mo::TeleportExitYaw(t),
+			t.keepRelative ? 1 : 0, t.launchOnTeleport ? 1 : 0, t.launchMultiplier, t.forceDirection ? 1 : 0, t.offsetZMax);
 	}
 
 	CMatchServer server(args, map, params);
@@ -842,6 +891,12 @@ int main(int argc, char** argv)
 	std::printf("SERVER launch begins=%llu queued=%llu applied=%llu refused=%llu infos=%llu byPad=", (unsigned long long)room.launchBegins, (unsigned long long)room.launchesQueued,
 		(unsigned long long)room.launchesApplied, (unsigned long long)room.launchRefused, (unsigned long long)room.launcherInfosSent);
 	for (size_t i = 0; i < mo::kMaxLaunchers; ++i) std::printf("%s%llu", i ? "," : "", (unsigned long long)room.launchesByPad[i]);
+	std::printf("\n");
+	// 순간이동(teleport-plan t-4 · t-5) — begins = 이동 끝 칸 겹침 시작 · moves = 옮김 · launches = 옮기며 남긴 발사(다음 이동 머리에 넣으면 위 applied 에 같이 센다) ·
+	// infos = 보낸 S2C_TELEPORT(들어온 사람 × 장치 수) · byDevice = 들어간 장치(표 차례)
+	std::printf("SERVER teleport begins=%llu moves=%llu launches=%llu infos=%llu byDevice=", (unsigned long long)room.teleportBegins, (unsigned long long)room.teleports,
+		(unsigned long long)room.teleportLaunches, (unsigned long long)room.teleportInfosSent);
+	for (size_t i = 0; i < mo::kMaxTeleports; ++i) std::printf("%s%llu", i ? "," : "", (unsigned long long)room.teleportsByDevice[i]);
 	std::printf("\n");
 	// failMsgs = 예비 가득 실패로 집으려던 사람에게 보낸 소식(판 14 · L-4) — full 과 같아야 한다
 	std::printf("SERVER weaponPickups new=%llu noSwitch=%llu ammo=%llu full=%llu noSlot=%llu postGame=%llu fromRecheck=%llu switchRejected=%llu debugAmmoSets=%llu debugKills=%llu failMsgs=%llu\n",

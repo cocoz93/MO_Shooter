@@ -71,6 +71,8 @@ namespace mo
 		const std::vector<PickupPad>* pads = nullptr;
 		// 점프대(jumppad-plan j-4) — main 이 --launchers= 로 읽어 든다. 받침과 같은 맵 장치 표라 같이 넘긴다. 없으면 점프대 없는 판(이동이 sim.Tick 한 번과 같다)
 		const std::vector<Launcher>* launchers = nullptr;
+		// 순간이동(teleport-plan t-4) — main 이 --teleports= 로 읽어 든다(같은 맵 장치 표라 같이 넘긴다). 없으면 순간이동 없는 판(TickWithLaunchers 가 안 본다)
+		const TeleportTable* teleports = nullptr;
 	};
 
 	// 시점 입력의 네 갈래. 값을 돌려주는 함수로 두어 시험이 갈래를 전수로 볼 수 있게 한다
@@ -137,9 +139,16 @@ namespace mo
 		uint64_t launchBegins = 0;			// 이동 끝에 점프대 구 칸 겹침이 새로 시작됨
 		uint64_t launchesQueued = 0;		// 그중 쏨 — 다음 이동 머리에 넣을 발사를 남김. 장치별은 launchesByPad
 		uint64_t launchesApplied = 0;		// 이동 머리에 넣은 발사. queued 보다 적은 만큼 = 다음 이동 전에 죽거나 · 놓이거나 · 나가 지운 것
+											// (순간이동 뒤따르는 발사도 같은 칸이라 여기 같이 센다 — 순간이동 표가 있으면 queued + teleportLaunches 와 견준다)
 		uint64_t launchRefused = 0;			// 떨어지며 들어와 안 쏨(Do Not Activate on Fall Entry — L_Expanse 8개 다 꺼짐이라 0 이어야 한다)
 		uint64_t launchesByPad[kMaxLaunchers] = {};	// 점프대 표 차례
 		uint64_t launcherInfosSent = 0;		// 보낸 S2C_LAUNCHER — 들어온 사람 수 × 점프대 수여야 한다(j-5)
+		// 순간이동(teleport-plan t-4) — TickWithLaunchers 결과를 센다. 순간이동 표 없이 돌면 다 0(길을 안 탐)
+		uint64_t teleportBegins = 0;		// 이동 끝 자리에서 순간이동 칸 겹침이 새로 시작됨(옮기기 전 자리로 센 수)
+		uint64_t teleports = 0;				// 그중 옮김(한 이동에 한 번). 장치별은 teleportsByDevice
+		uint64_t teleportLaunches = 0;		// 옮기며 뒤따르는 발사를 남김(LaunchOnTeleport) — 다음 이동 머리에 넣으면 launchesApplied 에 센다
+		uint64_t teleportsByDevice[kMaxTeleports] = {};	// 들어간 장치 — 순간이동 표 차례
+		uint64_t teleportInfosSent = 0;		// 보낸 S2C_TELEPORT — 들어온 사람 수 × 장치 수여야 한다(t-5)
 		// 무기 받침(W-2) — 위 pickups · pickupsFromRecheck 는 체력 받침만 센다(회귀 「받침갈래」가 체력 회복 수와 맞춰 본다). 대기 · 다시 검사는 같은 규칙이라 위 둘이 같이 센다
 		uint64_t weaponPickupsNew = 0;			// 없던 무기를 넣고 바로 듦
 		uint64_t weaponPickupsNoSwitch = 0;		// 없던 무기 — 재장전 중이라 넣기만(IgnorePickUpWhenReload)
@@ -523,6 +532,7 @@ namespace mo
 		// give · weapon = 무기 받침을 집었을 때 줍기 결과(EGiveResult 숫자)와 무기 — 칸 · 탄은 picker 가방에서 읽는다(W-3)
 		void SendPad(size_t padIndex, wire::EPickupReason reason, const Player* picker, float heal, const Player* only, uint8_t give = wire::kPickupGiveNone, uint8_t weapon = 0);
 		void SendLaunchers(const Player& to);	// S2C_LAUNCHER 점프대마다 하나 — 들어올 때(표는 판 동안 안 바뀐다)
+		void SendTeleports(const Player& to);	// S2C_TELEPORT 장치마다 하나 — 들어올 때 점프대 표 바로 뒤(같은 까닭)
 		size_t PadCount() const { return _pickups.pads ? _pickups.pads->size() : 0; }
 		bool IsImmune(const Player& player) const;
 		Vec3 ResolveAimStart(const Player& player, const Vec3& locationBeforeMove, const Vec3& aim);
@@ -569,6 +579,7 @@ namespace mo
 		const PickupOptions _pickups;
 		std::vector<PadState> _padStates;	// _pickups.pads 와 같은 차례
 		LauncherSet _launchers;				// _pickups.launchers 를 가리킨다(없으면 빈 묶음)
+		TeleportSet _teleports;				// _pickups.teleports 를 가리킨다(없으면 빈 묶음)
 		CMoveSim _moveSim;
 		CSpreadRng _spawnRng;		// 시작 자리 고르기 전용. 탄 방향은 입력 번호로 정해져(SpreadSeed) 서버에 탄 난수 상태가 없다
 		uint32_t _tick = 0;

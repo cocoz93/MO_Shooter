@@ -146,6 +146,12 @@ namespace mo
 			_launchers.items = _pickups.launchers->data();
 			_launchers.count = _pickups.launchers->size();
 		}
+		if (_pickups.teleports)
+		{
+			_teleports.items = _pickups.teleports->items.data();
+			_teleports.count = _pickups.teleports->items.size();
+			_teleports.meshBaseZ = _pickups.teleports->meshBaseZ;
+		}
 		if (_anim.clips)
 		{
 			// main 이 시작할 때 같은 초기화로 확인했으므로 여기서 실패하지 않는다
@@ -245,6 +251,7 @@ namespace mo
 		added.padOverlap.assign(PadCount(), 0);
 		for (size_t i = 0; i < PadCount(); ++i) SendPad(i, wire::PICKUP_SYNC, nullptr, 0.f, &added);	// 늦게 들어와도 꺼진 받침 · 남은 대기를 안다
 		SendLaunchers(added);	// 부활(S2C_SPAWN)보다 먼저 — 받는 쪽 예측이 첫 입력부터 점프대를 안다
+		SendTeleports(added);	// 순간이동 표도 같은 까닭으로 부활보다 먼저
 		SpawnPlayer(added);
 
 		if (_phase == wire::EMatchPhase::Waiting)
@@ -569,6 +576,7 @@ namespace mo
 		SendToAll(&spawn, (int)sizeof(spawn));
 		UpdatePadOverlaps(player);	// 새 몸이 받침 안에 서면 겹침 시작이다
 		ResetLaunchers(player.move, _launchers, _params.capsuleRadius, _moveSim.HalfHeightOf(player.move));	// 부활 자리 20곳은 점프대와 717cm 넘게 떨어져 비트가 늘 0(JumpPads.h)
+		ResetTeleports(player.move, _teleports, _params.capsuleRadius, _moveSim.HalfHeightOf(player.move));	// 순간이동 칸도 비트만 다시 센다 — 놓아서는 안 옮긴다(Teleports.h). 부활 자리 20곳은 칸과 수평 281cm 넘게 떨어져 비트가 늘 0
 	}
 
 	void CRoom::TickRespawns()
@@ -811,6 +819,18 @@ namespace mo
 		}
 	}
 
+	void CRoom::SendTeleports(const Player& to)
+	{
+		for (size_t i = 0; i < _teleports.count; ++i)
+		{
+			wire::TeleportInfo msg;
+			// 이름 · 수 · 짝은 main 이 ParseTeleports 로 거른 표라 실패하지 않는다. 실패하면 받는 쪽 표가 모자라 예측이 순간이동을 안 쓴다(count 줄이 다 와야 쓴다)
+			if (!TeleportToWire(_teleports.items[i], i, _teleports.count, _teleports.meshBaseZ, msg)) continue;
+			_sender.SendToSession(to.session, &msg, (int)sizeof(msg));
+			++_stats.teleportInfosSent;
+		}
+	}
+
 	// ─── 입력 ──────────────────────────────────────────────
 	// 시험용 — 사망·부활 대기·무적·이동 막음을 모두 지운다
 	void CRoom::ApplyPlace(Player& player, const wire::DebugPlace& place)
@@ -831,6 +851,7 @@ namespace mo
 		player.lastSeq = place.seq;
 		UpdatePadOverlaps(player);	// 순간이동(SetActorLocation)도 겹침을 다시 본다 — 0-3 pads2 는 이렇게 올라서서 그 프레임에 집었다
 		ResetLaunchers(player.move, _launchers, _params.capsuleRadius, _moveSim.HalfHeightOf(player.move));	// 점프대는 놓은 자리에서 비트만 다시 센다 — 놓아서는 안 쏜다(JumpPads.h ResetLaunchers)
+		ResetTeleports(player.move, _teleports, _params.capsuleRadius, _moveSim.HalfHeightOf(player.move));	// 순간이동 칸도 같다 — 칸 안에 놓아도 안 옮긴다(Teleports.h ResetTeleports)
 		if (_animReady)
 		{
 			// 순간이동 + 멈춤 = 판 시작과 같다 — 자세를 든 무기 묶음으로 처음부터(경로 봇이 무기를 든 뒤 옮기면 서기 시계가 옮긴 틱에서 시작).
@@ -1108,7 +1129,10 @@ namespace mo
 		// 점프대 — 지난 이동 끝 겹침 시작이 남긴 발사를 이번 이동 머리에 넣고, 이동 끝 자리로 겹침 시작을 본다(Shared/JumpPads — 예측 · MoveCheck 와 같은 함수).
 		// 몸 방향 = 이 입력의 요 — Lyra 는 조종 회전을 이동 전에 받아 몸이 그 요로 돈 채 움직인다(bUseControllerRotationYaw). 점프대가 사람 · 봇을 가리지 않는다 —
 		// Lyra 는 AI 조종 몸을 안 쏘지만(B_Launcher 바탕 그래프) 우리 봇은 입력을 보내는 원격 사람 자리다(제 판단, jumppad-plan)
-		const LauncherTickResult launch = TickWithLaunchers(_moveSim, player.move, moveInput, kTickSeconds, input.yaw, _launchers, _params.capsuleRadius);
+		// 순간이동도 같은 자리에서 본다(Shared/Teleports — 이동 끝 칸 겹침 시작 → 옮김 → 옮긴 자리로 점프대 → 뒤따르는 발사가 덮음). 옮긴 틱 Lyra 몸 요는 나갈 방향이지만
+		// 아래 player.yaw 는 입력 요 그대로 둔다 — Lyra 도 다음 프레임 조종 요로 몸을 되돌리고(bUseControllerRotationYaw — t-2 기록 문 포털 16번 다 다음 프레임 몸 요 = 조종 요),
+		// bForceDirection 장치는 클라가 제 시점을 돌려 다음 입력에 싣는다(봇은 각본 --script=teleport 만 돌림 — 예측 GetLastTeleport · 다리는 t-7 몫. 기록 37번은 옮긴 프레임부터 몸 요 = 조종 요)(제 판단, t-4)
+		const LauncherTickResult launch = TickWithLaunchers(_moveSim, player.move, moveInput, kTickSeconds, input.yaw, _launchers, _params.capsuleRadius, _teleports);
 		if (launch.launchedThisTick) ++_stats.launchesApplied;
 		_stats.launchBegins += (uint64_t)launch.begins;
 		_stats.launchRefused += (uint64_t)launch.refused;
@@ -1116,6 +1140,13 @@ namespace mo
 		{
 			++_stats.launchesQueued;
 			++_stats.launchesByPad[launch.fired];
+		}
+		_stats.teleportBegins += (uint64_t)launch.teleportBegins;
+		if (launch.teleported >= 0)
+		{
+			++_stats.teleports;
+			++_stats.teleportsByDevice[launch.teleported];
+			if (_teleports.items[launch.teleported].launchOnTeleport) ++_stats.teleportLaunches;
 		}
 		_stats.dashLiftoffs += _moveSim.GetCounters().rootForceLiftoffs - liftoffsBefore;	// 위아래를 더하는 힘은 대시뿐이다(근접 밀기는 위아래 무시)
 		_moveSim.SetStandables(nullptr, 0);
@@ -1929,6 +1960,7 @@ namespace mo
 		target.move.velocity = Vec3();
 		std::fill(target.padOverlap.begin(), target.padOverlap.end(), (uint8_t)0);	// 죽으면 충돌이 꺼져 겹침이 끝난다
 		target.move.launcherMask = 0;		// 점프대 겹침도 끝나고, 아직 안 먹은 발사는 버린다(죽은 몸은 안 움직인다 — 부활이 새 MoveState 로 시작)
+		target.move.teleportMask = 0;		// 순간이동 칸 겹침도 끝난다(아래 발사 칸은 순간이동 발사와 같이 쓴다)
 		target.move.launchPending = false;
 		target.move.pendingLaunch = Vec3();
 

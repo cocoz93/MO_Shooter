@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include "GameProtocol.h"
 #include "Movement.h"
 
 #include <cstddef>
@@ -103,4 +104,9 @@ namespace mo
 	// 나갈 자리가 하나로 정해지는 장치는 그 점과 tolerance 안. 「들어간 자리 그대로」 장치는 나갈 면(들어간 장치 뿌리 앞방향이 법선) 위 tolerance 안 ·
 	// 위아래 몫이 0 ~ offsetZMax · 옆 몫이 칸 반대각 + 캡슐 반지름 + 칸 중심 ↔ 뿌리 거리 안. 받은 자리는 단정밀도라 tolerance 는 그 반올림보다 넉넉해야 한다
 	int MatchTeleportExit(const TeleportSet& teleports, const Vec3& location, double capsuleRadius, double tolerance);
+
+	// 와이어 한 줄(S2C_TELEPORT, 판 19) — 쓰기는 이름이 비었거나 kMaxTeleportName 을 넘거나 차례 · 짝이 틀리면 false. 읽기는 깃발 · 차례 · 짝 · 이름 끝 ·
+	// 장치 모양(파일 읽기와 같은 검사 — 단위 벡터 · 수평 축 · 반너비 > 0 · 위아래 상한 ≥ 0 · 「그대로」 장치 뿌리 앞방향 수평 · 유한 값)이 틀리면 false. meshBaseZ 는 표 전체 값을 줄마다 싣는다
+	bool TeleportToWire(const Teleporter& teleporter, size_t index, size_t count, double meshBaseZ, wire::TeleportInfo& out);
+	bool TeleportFromWire(const wire::TeleportInfo& in, Teleporter& out, double& outMeshBaseZ);
 }

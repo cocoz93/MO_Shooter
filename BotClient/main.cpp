@@ -14,6 +14,10 @@
 //   --script=jumppad [--breakJumpPad=off|value] = 점프대 각본(jumppad-plan j-6). 서버 --debug --launchers= 로 뜬 판에 봇 하나. 받은 점프대 표마다 따로 돌린 예측으로
 //     걸어 들어가 쏘이는 방향(8방향 중 첫 것)을 미리 고르고, 그 자리에 시험 놓기 → 같은 입력을 보내 서버 · 예측 · 미리 돌린 끝 자리를 견준다(JUMPPAD 줄).
 //     --breakJumpPad = 일부러 틀림 — off 예측에 표를 안 줌 · value 예측 표의 발사 값을 1% 키움. 둘 다 서버와 갈려 FAIL 이어야 한다
+//   --script=teleport [--breakTeleport=off|value] = 순간이동 각본(teleport-plan t-6). 서버 --debug --teleports= 로 뜬 판에 봇 하나. 점프대 각본과 같은 길 —
+//     받은 장치마다 상자 축 네 방향에서 바닥에 내려 걸어 들어가 보고(안 되면 상자 앞 5cm 공중에서 밀어 넣기 — 위층 둘은 걸어서 못 닿는다, 진행 파일 t-2)
+//     옮겨지고 내려앉는 첫 방향을 미리 고른 뒤 시험 놓기 → 같은 입력(시점 돌리는 장치면 옮겨진 다음 입력부터 나갈 방향 요)으로 서버 · 예측 · 미리 돌린 끝을 견준다(TELEPORT 줄).
+//     --breakTeleport = 일부러 틀림 — off 예측에 표를 안 줌 · value 예측 표의 나갈 자리 · 발사 배율을 1% 키움. 둘 다 FAIL 이어야 한다
 //
 // 판정은 하지 않는다 — 입력을 보내고 받은 것을 적어 맞춰 볼 뿐이다.
 // 1. 봇마다 같은 공용 코드(Shared)로 자기 입력을 여기서도 돌려, 돌아온 상태와 위치·속도·탄창까지 비교한다.
@@ -128,6 +132,8 @@ namespace
 	constexpr int kBreakGrenadeServer = 2;	// --breakGrenade=server — 서버에 안 보냄
 	constexpr int kBreakJumpPadOff = 1;		// --breakJumpPad=off — 예측에 점프대 표를 안 줌(예측만 안 쏨)
 	constexpr int kBreakJumpPadValue = 2;	// --breakJumpPad=value — 예측 표의 발사 값(위로 · 목표 · 배율)을 1% 키움
+	constexpr int kBreakTeleportOff = 1;	// --breakTeleport=off — 예측에 순간이동 표를 안 줌(예측만 안 옮김)
+	constexpr int kBreakTeleportValue = 2;	// --breakTeleport=value — 예측 표의 나갈 자리 · 발사 배율을 1% 키움
 
 	struct Args
 	{
@@ -158,6 +164,7 @@ namespace
 		bool grenade = false;			// --grenade — 가끔 수류탄을 누른다(G-3). 꺼져 있으면 기존 시험과 같은 입력
 		int breakGrenade = 0;			// --breakGrenade=predict|server — 수류탄 단추를 예측 · 서버 한쪽에만(일부러 틀림)
 		int breakJumpPad = 0;			// --breakJumpPad=off|value — 점프대 각본의 일부러 틀림(kBreakJumpPadOff · kBreakJumpPadValue)
+		int breakTeleport = 0;			// --breakTeleport=off|value — 순간이동 각본의 일부러 틀림(kBreakTeleportOff · kBreakTeleportValue)
 		std::string judgeClips;			// 주면 봇이 화면 역할로 탄마다 자기 판정을 남긴다(후보 1, 7단계). measureView 를 함께 켠다
 		std::string judgeLog;
 		bool judgeNoSpread = false;		// 서버 --rewindNoSpread 와 같이 쓴다 — 자세만 본다
@@ -682,9 +689,14 @@ namespace
 		void SetDash(bool on, int breakDash) { _dashPress = on; _breakDash = breakDash; }
 		void SetGrenade(bool on, int breakGrenade) { _grenadePress = on; _breakGrenade = breakGrenade; }
 		void SetJumpPadBreak(int breakJumpPad) { _breakJumpPad = breakJumpPad; }
+		void SetTeleportBreak(int breakTeleport) { _breakTeleport = breakTeleport; }
+		const CSelfPrediction::TeleportCounters& GetTeleportFixes() const { return _self.GetTeleportCounters(); }
 		const CSelfPrediction::LaunchCounters& GetLaunchFixes() const { return _self.GetLaunchCounters(); }
 		uint64_t GetLauncherInfos() const { return _launcherInfos; }
 		uint64_t GetLauncherInfoBad() const { return _launcherInfoBad; }
+		uint64_t GetTeleportInfos() const { return _teleportInfos; }
+		uint64_t GetTeleportInfoBad() const { return _teleportInfoBad; }
+		size_t GetTeleportTableRows() const { return _teleportsReady ? _teleportRows.size() : 0; }
 		uint64_t GetLaunchFlagStates() const { return _launchFlagStates; }
 		uint64_t GetLaunchFlagDiff() const { return _launchFlagDiff; }
 		uint64_t GetServerLaunches() const { return _serverLaunches; }
@@ -708,10 +720,12 @@ namespace
 		bool IsScriptDone() const { return _jumpPadScript ? (_jumpPadDone && _jumpPadPass) : _scriptStep == (int)_scriptStepCount; }
 		void SetScript(double holdSeconds, uint8_t weapon, const std::string& name)
 		{
-			if (name == "jumppad")
+			if (name == "jumppad" || name == "teleport")
 			{
-				// 점프대 각본은 두뇌 · 경로 모드 밖의 따로 길이다 — 자기 비교(CompareSelf)를 그대로 돌려 서버와 같은지 본다
+				// 점프대 각본은 두뇌 · 경로 모드 밖의 따로 길이다 — 자기 비교(CompareSelf)를 그대로 돌려 서버와 같은지 본다.
+				// 순간이동 각본도 같은 길을 탄다(놓기 · 입력 · 끝 상태 기다리기) — 미리 돌리기 · 표 기다리기 · 판정만 _teleportScript 로 가른다
 				_jumpPadScript = true;
+				_teleportScript = name == "teleport";
 				return;
 			}
 			_scripted = true;
@@ -887,6 +901,9 @@ namespace
 				break;
 			case wire::Msg::S2C_LAUNCHER:
 				OnLauncher(Copy<wire::LauncherInfo>(data, size), size);
+				break;
+			case wire::Msg::S2C_TELEPORT:
+				OnTeleport(Copy<wire::TeleportInfo>(data, size), size);
 				break;
 			case wire::Msg::S2C_RESULT:
 				_result = Copy<wire::Result>(data, size);
@@ -1909,7 +1926,49 @@ namespace
 				}
 			}
 			_self.SetLaunchers(forPrediction, MakeLyraMoveParams().capsuleRadius);
-			if (_jumpPadScript) std::printf("JUMPPAD table=%zu break=%d\n", _launcherRows.size(), _breakJumpPad);
+			if (_jumpPadScript && !_teleportScript) std::printf("JUMPPAD table=%zu break=%d\n", _launcherRows.size(), _breakJumpPad);
+		}
+
+		// 순간이동 표 한 줄(S2C_TELEPORT, 판 19) — count 줄이 다 와야 표로 본다. 몸 메시 높이(meshBaseZ)는 줄마다 같아야 한다(다르면 그 줄을 틀린 줄로 센다)
+		void OnTeleport(const wire::TeleportInfo& info, int size)
+		{
+			++_teleportInfos;
+			Teleporter row;
+			double meshBaseZ = 0;
+			if (size != (int)sizeof(info) || !TeleportFromWire(info, row, meshBaseZ))
+			{
+				++_teleportInfoBad;
+				return;
+			}
+			if (_teleportRows.size() != info.count)
+			{
+				_teleportRows.assign(info.count, Teleporter());
+				_teleportGot.assign(info.count, false);
+				_teleportsReady = false;
+				_teleportMeshBaseZ = meshBaseZ;
+			}
+			if (meshBaseZ != _teleportMeshBaseZ)
+			{
+				++_teleportInfoBad;
+				return;
+			}
+			_teleportRows[info.index] = row;
+			_teleportGot[info.index] = true;
+			if (_teleportsReady || std::find(_teleportGot.begin(), _teleportGot.end(), false) != _teleportGot.end()) return;
+			_teleportsReady = true;
+			// 예측에 넘긴다(t-6) — 일부러 틀림은 예측 쪽 표만 바꾼다(각본의 미리 돌리기는 받은 표 그대로)
+			std::vector<Teleporter> forPrediction = _teleportRows;
+			if (_breakTeleport == kBreakTeleportOff) forPrediction.clear();
+			if (_breakTeleport == kBreakTeleportValue)
+			{
+				for (Teleporter& d : forPrediction)
+				{
+					d.exit = d.exit * 1.01;
+					d.launchMultiplier *= 1.01;
+				}
+			}
+			_self.SetTeleports(forPrediction, _teleportMeshBaseZ, MakeLyraMoveParams().capsuleRadius);
+			if (_teleportScript) std::printf("TELEPORT table=%zu break=%d\n", _teleportRows.size(), _breakTeleport);
 		}
 
 		// 점프대 하나를 미리 돌린 결과 — 이 입력을 그대로 보내면 서버도 같은 길을 가야 한다(같은 Shared 코드 · 같은 입력)
@@ -1932,6 +1991,106 @@ namespace
 		static constexpr uint32_t kJumpPadFlyMax = 600;			// 쏘인 뒤 내려앉을 때까지 최대 10초
 		static constexpr uint32_t kJumpPadSettleMax = 120;		// 내려앉은 뒤 멈출 때까지 최대 2초
 		static constexpr double kJumpPadBackoff = 150.0;		// 구 칸 + 캡슐 반지름 밖으로 더 물러서는 거리(cm)
+		// 순간이동 각본(t-6) — 같은 JumpPadPlan 칸을 쓴다(walkTicks = 옮겨진 입력까지 · settleTicks = 날아 내려앉아 멈출 때까지 · fireInput = 옮겨진 입력)
+		static constexpr double kTeleportAirGap = 5.0;			// 공중 밀어 넣기 — 상자 면과 캡슐 사이(t-2 기록기 「앞 공중」과 같은 5cm)
+		static constexpr double kTeleportUpZ = 250.0;			// 맨 위층 도착 — 끝 자리(캡슐 중심) z 가 이보다 높으면 위층(t-6 각본 판 끝 자리 — 위층 377 · 아래층 −745 ~ −468)
+		static constexpr uint32_t kTeleportFlyMax = 600 + kJumpPadSettleMax;	// 옮겨진 뒤 날아 내려앉아 멈출 때까지 최대
+
+		// 받은 순간이동 표의 장치마다 따로 만든 예측으로 미리 돌린다 — 상자 축 네 방향 × (바닥에 내려 걸어 들어감 · 앞 공중 밀어 넣기) 중
+		// 그 장치로 한 번만 옮겨지고 내려앉아 멈추는 첫 방법을 고른다. 시점 돌리는 장치면 옮겨진 다음 입력부터 나갈 방향 요(다리 · 사람과 같은 몫 — 서버는 입력 요를 그대로 쓴다)
+		void PlanTeleports()
+		{
+			const MoveParams params = MakeLyraMoveParams();
+			CMoveSim sim(_map, params);
+			_jumpPadPlans.assign(_teleportRows.size(), JumpPadPlan());
+			_teleportPlanEndYaw.assign(_teleportRows.size(), 0.f);
+			for (size_t k = 0; k < _teleportRows.size(); ++k)
+			{
+				const Teleporter& dev = _teleportRows[k];
+				JumpPadPlan& plan = _jumpPadPlans[k];
+				for (int attempt = 0; attempt < 8 && !plan.ok; ++attempt)
+				{
+					const bool air = attempt >= 4;
+					const int side = attempt % 4;		// 0 +X · 1 −X · 2 +Y · 3 −Y (상자 축) — 그 축을 따라 상자 쪽으로 걷는다
+					const Vec3 axis = side < 2 ? dev.boxAxisX : dev.boxAxisY;
+					const double extent = side < 2 ? dev.boxExtent.x : dev.boxExtent.y;
+					const Vec3 dir = (side % 2 == 0) ? axis * -1.0 : axis;		// 상자 밖 +축 쪽에서 −축 방향으로(또는 반대로) 들어간다
+					const float yaw = (float)(std::atan2(dir.y, dir.x) * (180.0 / 3.14159265358979323846));
+					const float moveX = (float)dir.x, moveY = (float)dir.y;
+					const double back = extent + params.capsuleRadius + (air ? kTeleportAirGap : kJumpPadBackoff);
+					std::unique_ptr<CSelfPrediction> rehearsal(new CSelfPrediction(sim, _rules, params.maxWalkSpeed));
+					rehearsal->SetLaunchers(_launcherRows, params.capsuleRadius);
+					rehearsal->SetTeleports(_teleportRows, _teleportMeshBaseZ, params.capsuleRadius);
+					Vec3 start(dev.boxCenter.x - dir.x * back, dev.boxCenter.y - dir.y * back, dev.boxCenter.z);
+					uint32_t hold = 0;
+					uint8_t weapon = 0;
+					if (!air)
+					{
+						// 내려앉기 — 상자 높이 + 150 에서 떨어뜨려 바닥에 멈춘 자리를 놓을 자리로 쓴다(점프대 각본과 같은 길)
+						(void)rehearsal->OnPlace(start.x, start.y, start.z + 150.0, 0xFF, 0, 0);
+						weapon = rehearsal->GetWeaponIndex();
+						bool settled = false;
+						for (uint32_t i = 0; i < 180 && !settled; ++i)
+						{
+							{ wire::Input in = JumpPadInput(yaw, 0.f, 0.f, weapon); rehearsal->AddInput(in); }
+							const MoveState& m = rehearsal->GetMove();
+							settled = i >= 30 && m.mode == EMoveMode::Walking && Length(m.velocity) == 0.0;
+						}
+						start = rehearsal->GetMove().location;
+						if (!settled || rehearsal->GetTeleportCounters().teleported != 0 || std::abs(start.z - dev.boxCenter.z) > 400.0) continue;
+						hold = kJumpPadHoldTicks;
+					}
+					// 본 돌리기 — 그 자리에 놓고 (바닥이면) 서 있기 → 옮겨질 때까지 걸음 → 손 떼고 날아 내려앉아 멈출 때까지
+					const uint32_t placeSeq = rehearsal->OnPlace(start.x, start.y, start.z, 0xFF, 0, 0);
+					weapon = rehearsal->GetWeaponIndex();
+					const uint64_t teleBefore = rehearsal->GetTeleportCounters().teleported;
+					float runYaw = yaw;
+					for (uint32_t i = 0; i < hold; ++i) { wire::Input in = JumpPadInput(runYaw, 0.f, 0.f, weapon); rehearsal->AddInput(in); }
+					uint32_t walk = 0, fly = 0;
+					bool moved = false;
+					while (walk < kJumpPadWalkMax && !moved)
+					{
+						{ wire::Input in = JumpPadInput(runYaw, moveX, moveY, weapon); rehearsal->AddInput(in); }
+						++walk;
+						moved = rehearsal->GetTeleportCounters().teleported != teleBefore;
+					}
+					if (!moved) continue;
+					const CSelfPrediction::TeleportEvent ev = rehearsal->GetLastTeleport();
+					if (ev.seq <= placeSeq || ev.device != (int)k) continue;
+					if (ev.forceYaw) runYaw = (float)ev.yaw;
+					bool flew = false, stopped = false;
+					double topZ = rehearsal->GetMove().location.z;
+					for (; fly < kTeleportFlyMax && !stopped; ++fly)
+					{
+						{ wire::Input in = JumpPadInput(runYaw, 0.f, 0.f, weapon); rehearsal->AddInput(in); }
+						const MoveState& m = rehearsal->GetMove();
+						topZ = std::max(topZ, m.location.z);
+						if (m.mode == EMoveMode::Falling) flew = true;
+						stopped = flew && m.mode == EMoveMode::Walking && Length(m.velocity) == 0.0;
+					}
+					const MoveState& last = rehearsal->GetMove();
+					if (!stopped || last.location.z < _rules.fallKillZ || rehearsal->GetTeleportCounters().teleported - teleBefore != 1) continue;
+					const float expectYaw = dev.forceDirection ? (float)TeleportExitYaw(dev) : yaw;
+					if (runYaw != expectYaw) continue;
+					plan.ok = true;
+					plan.start = start;
+					plan.yaw = yaw;
+					plan.moveX = moveX;
+					plan.moveY = moveY;
+					plan.holdTicks = hold;
+					plan.walkTicks = walk;
+					plan.settleTicks = fly;
+					plan.fireInput = (int)(hold + walk - 1);
+					plan.end = last.location;
+					plan.topZ = topZ;
+					plan.dir = attempt;
+					_teleportPlanEndYaw[k] = runYaw;
+				}
+				std::printf("TELEPORT plan dev=%zu target=%d ok=%d way=%s side=%d yaw=%.0f start=(%.2f %.2f %.2f) moveInput=%d walk=%u fly=%u force=%d endYaw=%.2f end=(%.2f %.2f %.2f) topZ=%.2f\n",
+					k, dev.target, plan.ok ? 1 : 0, plan.dir < 0 ? "-" : (plan.dir >= 4 ? "air" : "floor"), plan.dir % 4, plan.yaw, plan.start.x, plan.start.y, plan.start.z, plan.fireInput,
+					plan.walkTicks, plan.settleTicks, dev.forceDirection ? 1 : 0, _teleportPlanEndYaw[k], plan.end.x, plan.end.y, plan.end.z, plan.topZ);
+			}
+		}
 
 		wire::Input JumpPadInput(float yaw, float moveX, float moveY, uint8_t weapon) const
 		{
@@ -2033,16 +2192,21 @@ namespace
 			input = JumpPadInput(_jumpPadYaw, 0.f, 0.f, weapon);
 			// 경기 중 · 표가 다 왔을 때만 — 경기 시작이 부활로 시작 자리에 돌려놓으므로(OnSpawn 이 각본을 처음부터) 그 뒤에 시작한다
 			if (_jumpPadDone) return false;
-			if (!_launchersReady || _phase != (uint8_t)wire::EMatchPhase::Playing) return true;
+			// 순간이동 각본은 순간이동 표만 기다린다 — 서버는 점프대 표를 그 앞에 보내므로(Room.cpp SendLaunchers → SendTeleports) 점프대 표가 있으면 이미 와 있다
+			if (!(_teleportScript ? _teleportsReady : _launchersReady) || _phase != (uint8_t)wire::EMatchPhase::Playing) return true;
 			if (!_welcome.debugAllowed)
 			{
-				std::printf("JUMPPAD 실패 — 서버가 --debug 없이 떴다\n");
+				std::printf("%s 실패 — 서버가 --debug 없이 떴다\n", _teleportScript ? "TELEPORT" : "JUMPPAD");
 				FinishJumpPad();
 				return false;
 			}
 			if (_jumpPadPlans.empty())
 			{
-				PlanJumpPads();
+				if (_teleportScript) PlanTeleports();
+				else PlanJumpPads();
+				_teleportPred0 = _self.GetTeleportCounters().teleported;
+				_teleportYawDiff = 0;
+				_teleportDeviceDiff = 0;
 				_jumpPadPosDiff0 = _posDiff;
 				_jumpPadVelDiff0 = _velDiff;
 				_jumpPadFlagDiff0 = _flagDiff;
@@ -2076,13 +2240,17 @@ namespace
 				_jumpPadYaw = plan.yaw;
 				_jumpPadInput = 0;
 				_jumpPadStage = 1;
+				_teleportPlaceSeq = seq;
 				return false;
 			}
 			if (_jumpPadStage == 1)
 			{
 				const uint32_t i = _jumpPadInput++;
 				const bool walking = i >= plan.holdTicks && i < plan.holdTicks + plan.walkTicks;
-				input = JumpPadInput(plan.yaw, walking ? plan.moveX : 0.f, walking ? plan.moveY : 0.f, weapon);
+				// 순간이동 — 내 예측이 이 놓기 뒤에 시점 돌리는 장치로 옮겼으면 다음 입력부터 나갈 방향 요(서버는 이 요를 그대로 쓴다). 기다리는 입력도 같은 요(_jumpPadYaw)
+				const CSelfPrediction::TeleportEvent& ev = _self.GetLastTeleport();
+				if (_teleportScript && ev.seq > _teleportPlaceSeq && ev.forceYaw) _jumpPadYaw = (float)ev.yaw;
+				input = JumpPadInput(_teleportScript ? _jumpPadYaw : plan.yaw, walking ? plan.moveX : 0.f, walking ? plan.moveY : 0.f, weapon);
 				if (_jumpPadInput == plan.holdTicks + plan.walkTicks + plan.settleTicks)
 				{
 					_jumpPadLastSeq = _self.GetSeq() + 1;	// 이 입력이 받을 번호(AddInput 이 다음에 매긴다)
@@ -2104,10 +2272,25 @@ namespace
 			const Vec3 pred((float)mine.location.x, (float)mine.location.y, (float)mine.location.z);
 			const double planDiff = Length(server - planEnd), predDiff = Length(server - pred);
 			_jumpPadEndDiffMax = std::max(_jumpPadEndDiffMax, std::max(planDiff, predDiff));
-			if (server.z - plan.start.z > 100.0) ++_jumpPadUp;
 			++_jumpPadRan;
-			std::printf("JUMPPAD run pad=%zu seq=%u server=(%.2f %.2f %.2f) planDiff=%.4f predDiff=%.4f dz=%.2f\n", _jumpPadPad, p.lastSeq, server.x, server.y, server.z,
-				planDiff, predDiff, server.z - plan.start.z);
+			if (_teleportScript)
+			{
+				// 서버 요 = 마지막 입력 요 — 시점 돌리는 장치면 나갈 방향 요여야 한다(미리 돌린 끝 요와 같아야). 장치 = 내 예측이 이 놓기 뒤에 옮긴 장치
+				const CSelfPrediction::TeleportEvent& ev = _self.GetLastTeleport();
+				const bool yawOk = p.yaw == _teleportPlanEndYaw[_jumpPadPad];
+				const bool deviceOk = ev.seq > _teleportPlaceSeq && ev.device == (int)_jumpPadPad;
+				if (!yawOk) ++_teleportYawDiff;
+				if (!deviceOk) ++_teleportDeviceDiff;
+				if (server.z > kTeleportUpZ) ++_jumpPadUp;
+				std::printf("TELEPORT run dev=%zu seq=%u server=(%.2f %.2f %.2f) planDiff=%.4f predDiff=%.4f yaw=%.2f/%.2f predDevice=%d\n", _jumpPadPad, p.lastSeq, server.x, server.y,
+					server.z, planDiff, predDiff, p.yaw, _teleportPlanEndYaw[_jumpPadPad], ev.seq > _teleportPlaceSeq ? ev.device : -1);
+			}
+			else
+			{
+				if (server.z - plan.start.z > 100.0) ++_jumpPadUp;
+				std::printf("JUMPPAD run pad=%zu seq=%u server=(%.2f %.2f %.2f) planDiff=%.4f predDiff=%.4f dz=%.2f\n", _jumpPadPad, p.lastSeq, server.x, server.y, server.z,
+					planDiff, predDiff, server.z - plan.start.z);
+			}
 			++_jumpPadPad;
 			_jumpPadStage = 0;
 		}
@@ -2122,6 +2305,27 @@ namespace
 			const uint64_t serverLaunches = _serverLaunches - _jumpPadServerLaunches0;
 			const uint64_t predFired = lc.fired - _jumpPadFired0;
 			const uint64_t posDiff = _posDiff - _jumpPadPosDiff0, velDiff = _velDiff - _jumpPadVelDiff0, flagDiff = _flagDiff - _jumpPadFlagDiff0;
+			if (_teleportScript)
+			{
+				// 판정 — 표 전부 고름 · 다 돌림 · 서버 발사 깃발이 선 수 = 예측 옮긴 수 = 장치 수(장치 6개 다 뒤따르는 발사가 있다 — 서버 옮긴 수는 서버 줄 SERVER teleport 로 따로 본다) ·
+				// 상태 비교 어긋남 0 · 끝 자리 1cm 안 · 끝 요 · 옮긴 장치 맞음 · 위층 도착 = 나갈 자리가 위층인 장치 수(> 0) · 되살림 실패 0
+				size_t upExpected = 0, launching = 0;
+				for (const Teleporter& d : _teleportRows)
+				{
+					upExpected += d.exit.z > kTeleportUpZ ? 1 : 0;
+					launching += d.launchOnTeleport ? 1 : 0;
+				}
+				const uint64_t predTeleported = _self.GetTeleportCounters().teleported - _teleportPred0;
+				_jumpPadPass = planned == _teleportRows.size() && planned > 0 && _jumpPadRan == planned && serverLaunches == launching && predTeleported == planned &&
+					posDiff == 0 && velDiff == 0 && flagDiff == 0 && _jumpPadEndDiffMax <= 1.0 && _teleportYawDiff == 0 && _teleportDeviceDiff == 0 &&
+					_jumpPadUp == upExpected && upExpected > 0 && lc.restoreFails == 0;
+				std::printf("TELEPORT result devices=%zu planned=%zu ran=%zu serverLaunches=%llu predTeleported=%llu posDiff=%llu velDiff=%llu flagDiff=%llu launchFlagDiff=%llu endDiffMax=%.4f yawDiff=%llu deviceDiff=%llu up=%zu/%zu restoreFails=%llu %s\n",
+					_teleportRows.size(), planned, _jumpPadRan, (unsigned long long)serverLaunches, (unsigned long long)predTeleported, (unsigned long long)posDiff,
+					(unsigned long long)velDiff, (unsigned long long)flagDiff, (unsigned long long)_launchFlagDiff, _jumpPadEndDiffMax, (unsigned long long)_teleportYawDiff,
+					(unsigned long long)_teleportDeviceDiff, _jumpPadUp, upExpected, (unsigned long long)lc.restoreFails, _jumpPadPass ? "PASS" : "FAIL");
+				_net.Close();
+				return;
+			}
 			// 판정 — 표 전부 고름 · 다 돌림 · 서버 쏜 수 = 예측 쏜 수 = 점프대 수 · 상태 비교 어긋남 0 · 끝 자리(서버 ↔ 미리 돌림 · 예측) 1cm 안 · 되살림 실패 0
 			_jumpPadPass = planned == _launcherRows.size() && planned > 0 && _jumpPadRan == planned && serverLaunches == planned && predFired == planned &&
 				posDiff == 0 && velDiff == 0 && flagDiff == 0 && _jumpPadEndDiffMax <= 1.0 && lc.restoreFails == 0;
@@ -2774,6 +2978,12 @@ namespace
 		std::vector<bool> _launcherGot;
 		bool _launchersReady = false;
 		uint64_t _launcherInfos = 0, _launcherInfoBad = 0;
+		// 순간이동(teleport-plan t-5) — 받은 표(다 오면 예측에 넘긴다, t-6)
+		std::vector<Teleporter> _teleportRows;	// S2C_TELEPORT 로 받은 표(count 줄이 다 와야 쓴다)
+		std::vector<bool> _teleportGot;
+		bool _teleportsReady = false;
+		double _teleportMeshBaseZ = 0;
+		uint64_t _teleportInfos = 0, _teleportInfoBad = 0;
 		uint64_t _launchFlagStates = 0;		// 서버 발사 깃발이 켜진 비교 줄
 		uint64_t _launchFlagDiff = 0;		// 그 깃발이 예측과 다른 줄(flagDiff 안에도 든다)
 		uint64_t _serverLaunches = 0;		// 서버 깃발이 꺼짐 → 켜짐으로 바뀐 내 상태 수
@@ -2789,6 +2999,12 @@ namespace
 		size_t _jumpPadRan = 0, _jumpPadUp = 0;
 		double _jumpPadEndDiffMax = 0;
 		uint64_t _jumpPadPosDiff0 = 0, _jumpPadVelDiff0 = 0, _jumpPadFlagDiff0 = 0, _jumpPadServerLaunches0 = 0, _jumpPadFired0 = 0;	// 각본 시작 때 셈(각본 몫만 판정)
+		// 순간이동 각본(t-6) — 위 점프대 각본 칸을 같이 쓰고 이것만 더한다
+		bool _teleportScript = false;		// --script=teleport(_jumpPadScript 도 켠다)
+		int _breakTeleport = 0;				// --breakTeleport — kBreakTeleportOff · kBreakTeleportValue
+		std::vector<float> _teleportPlanEndYaw;	// 장치마다 미리 돌린 마지막 입력 요
+		uint32_t _teleportPlaceSeq = 0;		// 지금 장치 시험 놓기 번호 — 그 뒤 옮김만 이 장치 몫
+		uint64_t _teleportPred0 = 0, _teleportYawDiff = 0, _teleportDeviceDiff = 0;
 		CSpreadRng _grenadeRng;
 		// 같은 입력 누름 차례(L-5-c) — 섞는 난수 · 둘 이상 누른 입력 수
 		CSpreadRng _pressRng;
@@ -2882,6 +3098,16 @@ namespace
 					return false;
 				}
 			}
+			else if (value("--breakTeleport=", v))
+			{
+				if (v == "off") out.breakTeleport = kBreakTeleportOff;
+				else if (v == "value") out.breakTeleport = kBreakTeleportValue;
+				else
+				{
+					std::printf("모르는 순간이동 틀림 %s (off · value)\n", v.c_str());
+					return false;
+				}
+			}
 			else if (value("--breakDash=", v))
 			{
 				if (v == "predict") out.breakDash = kBreakDashPredict;
@@ -2909,7 +3135,7 @@ namespace
 				return false;
 			}
 		}
-		if (!out.script.empty() && out.script != "startstop" && out.script != "events" && out.script != "crouch" && out.script != "grenade" && out.script != "jumppad")
+		if (!out.script.empty() && out.script != "startstop" && out.script != "events" && out.script != "crouch" && out.script != "grenade" && out.script != "jumppad" && out.script != "teleport")
 		{
 			std::printf("모르는 경로 %s\n", out.script.c_str());
 			return false;
@@ -2984,6 +3210,7 @@ int main(int argc, char** argv)
 		bots.back()->SetDash(args.dash, args.breakDash);
 		bots.back()->SetGrenade(args.grenade, args.breakGrenade);
 		bots.back()->SetJumpPadBreak(args.breakJumpPad);
+		bots.back()->SetTeleportBreak(args.breakTeleport);
 		bots.back()->SetPush(args.push);
 		bots.back()->SetFireAlways(args.judgeFireAlways);
 		bots.back()->SetPauseAfterSpawn(args.testPauseAfterSpawn);
@@ -3099,6 +3326,21 @@ int main(int argc, char** argv)
 		std::printf("BOT launch infos=%llu bad=%llu tableRows=%zu serverLaunches=%llu predFired=%llu predApplied=%llu flagStates=%llu flagDiff=%llu restored=%llu restoreFails=%llu\n",
 			(unsigned long long)infos, (unsigned long long)infoBad, tables, (unsigned long long)serverLaunches, (unsigned long long)fired, (unsigned long long)applied,
 			(unsigned long long)flagStates, (unsigned long long)flagDiffL, (unsigned long long)restored, (unsigned long long)restoreFails);
+	}
+	// 순간이동(t-5 · t-6) — 받은 표 줄 · 예측이 옮긴 수(AddInput 몫). 서버가 --teleports= 없이 떴으면 다 0
+	{
+		uint64_t infos = 0, infoBad = 0, predTeleported = 0, forcedYaw = 0;
+		size_t tables = 0;
+		for (const std::unique_ptr<CBot>& bot : bots)
+		{
+			infos += bot->GetTeleportInfos();
+			infoBad += bot->GetTeleportInfoBad();
+			tables += bot->GetTeleportTableRows();
+			predTeleported += bot->GetTeleportFixes().teleported;
+			forcedYaw += bot->GetTeleportFixes().forcedYaw;
+		}
+		std::printf("BOT teleport infos=%llu bad=%llu tableRows=%zu predTeleported=%llu forcedYaw=%llu\n", (unsigned long long)infos, (unsigned long long)infoBad, tables,
+			(unsigned long long)predTeleported, (unsigned long long)forcedYaw);
 	}
 	// ─── 부하 시험 — 끝까지 안 가므로 결과 대조는 없다. 도중 값이 서버와 같은지만 ──
 	if (!args.script.empty())
