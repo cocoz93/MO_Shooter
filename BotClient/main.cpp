@@ -1784,9 +1784,9 @@ namespace
 			if (_flagDiffLogged >= FLAG_DIFF_LOG_LIMIT) return;
 			++_flagDiffLogged;
 			// predFalling = 예측의 떨어짐(flags 는 서버 깃발 — 0x1 이 서버 떨어짐). 앉기 키는 땅에서만 앉혀 두 쪽 떨어짐이 다르면 앉음도 갈린다
-			std::printf("FLAGDIFF bot=%u kind=%s seq=%u server=%d pred=%d phase=%u weapon=%u/%u mag=%d/%d spare=%d/%d slots=%u/%u flags=0x%x predFalling=%d\n", GetId(), kind, p.lastSeq,
+			std::printf("FLAGDIFF bot=%u kind=%s seq=%u server=%d pred=%d phase=%u weapon=%u/%u mag=%d/%d spare=%d/%d slots=%u/%u flags=0x%x predFalling=%d pos=%.4f vel=%.4f\n", GetId(), kind, p.lastSeq,
 				server ? 1 : 0, pred ? 1 : 0, (unsigned)_phase, (unsigned)p.weapon, (unsigned)slot.weapon, (int)p.magazine, (int)slot.magazine, (int)p.spare, (int)slot.spare,
-				(unsigned)p.quickSlots, (unsigned)slot.quickSlots, (unsigned)p.flags, slot.move.mode == EMoveMode::Falling ? 1 : 0);
+				(unsigned)p.quickSlots, (unsigned)slot.quickSlots, (unsigned)p.flags, slot.move.mode == EMoveMode::Falling ? 1 : 0, _comparePos, _compareVel);
 		}
 
 		void CompareSelf(const wire::PlayerState& p)
@@ -1826,6 +1826,8 @@ namespace
 			const double dp = std::sqrt(dx * dx + dy * dy + dz * dz);
 			const double vx = (double)p.vx - slotVx, vy = (double)p.vy - slotVy, vz = (double)p.vz - slotVz;
 			const double dv = std::sqrt(vx * vx + vy * vy + vz * vz);
+			_comparePos = dp;
+			_compareVel = dv;
 			_posMax = std::max(_posMax, dp);
 			bool bad = false;
 			if (dp > 0) { ++_posDiff; bad = true; }
@@ -3700,6 +3702,7 @@ namespace
 		double _posMax = 0;
 		uint32_t _firstBadSeq = 0;
 		int _flagDiffLogged = 0;		// FLAGDIFF 줄을 적은 수(LogFlagDiff — 봇마다 FLAG_DIFF_LOG_LIMIT 까지)
+		double _comparePos = 0, _compareVel = 0;	// 지금 비교 중인 상태의 위치 · 속도 차(CompareSelf) — FLAGDIFF 줄이 깃발 어긋남 때 위치도 갈렸나를 같이 적는다
 	};
 
 	bool ParseArgs(int argc, char** argv, Args& out)
