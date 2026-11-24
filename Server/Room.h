@@ -441,7 +441,7 @@ namespace mo
 			uint32_t lastQueuedSeq = 0;
 			uint32_t lastReceivedSeq = 0;	// 대기열에서 버린 입력도 센다 — 번호를 건너뛰었는지는 받은 번호로 본다
 			int starvedInRow = 0;
-			bool idleSinceInput = false;	// 마지막 진짜 입력 뒤 빈 입력 이동이 있었다 — 다음 진짜 입력의 대시 「앞 입력」이 빈 입력(이동 0)이 된다(Dash.h RememberInput)
+			bool idleSinceInput = false;	// 마지막 진짜 입력 뒤 빈 입력 이동이 있었다 — 다음 진짜 입력의 대시를 따로 센다(D174 ②. D175 앞엔 대시 「앞 입력」이 이동 0 이 돼 서버만 취소됐다)
 			int tokens = 1;
 			std::array<QueuedInput, kInputQueueSize> queue;
 			int queueHead = 0;

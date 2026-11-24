@@ -69,7 +69,8 @@ namespace mo
 	// 대시 능력 — 서버 · 예측 · 대조 도구가 같이 쓴다. 입력 하나의 차례:
 	//   NextInput → (대시 단추를 누른 입력이면) TryActivate → … 걸음 … → RememberInput(이번 입력의 이동 · 요)
 	// 서버가 만든 빈 입력(serverMade)에는 NextInput · TryActivate 를 안 부른다 — 시계가 안 간다(D87, 근접 · 무기 시계와 같다).
-	// RememberInput 은 그 입력에도 부른다 — 걸음이 그 입력으로 돌았으니 다음 입력의 「앞 입력」은 그것이다
+	// RememberInput 도 안 부른다(D175) — 클라는 그 빈 입력을 몰라 마지막 진짜 입력을 「앞 입력」으로 쓴다. 엔진도 입력이 끊긴 사람을 움직이는
+	// ForcePositionUpdate 가 이동 입력 기억(LastControlInputVector)을 안 건드린다(UE 5.8 CharacterMovementComponent.cpp:8726~8771 · Pawn.cpp:869, 원본 기준)
 	class CDashAbility
 	{
 	public:

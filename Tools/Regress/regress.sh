@@ -337,6 +337,37 @@ run_dash() {
 	verdict 봇대시 $ok "봇 rc=$brc 서버 rc=$src 켬=$started 소식=$msgs 봇받음=$mine 방향=$f/$b/$l/$r 사건=${ev[*]} 버림=${dr[*]} 튼수=${st[*]}$(echo "$bd" | grep -oE ' (dashDiff|startMismatches|unconfirmed|unconfirmedPost|unacked)=[0-9]+' | tr -d '\n') 누름차=$pdiff 빼기칸 서버=$sbo 봇=$(num "$aw" blendOut) 대시밖=$(num "$aw" blendOutBad)$press_note"
 }
 
+# 렉 뒤 첫 대시(D175) — 봇이 대시 누르기 바로 앞 입력 뒤 20틱 쉰다(--testGapDash=20). 서버는 16틱째부터 빈 입력으로 움직이고 그다음 진짜 입력이 대시다.
+# 서버가 빈 입력을 대시 「앞 입력」으로 기억하면 방향이 이동 0 이 돼 앞 말고는 서버만 취소된다(고치기 전 같은 판 서버 켬 86 · 예측 227 · 방향 86/0/0/0 · ammoDiff 3010).
+# 막기는 켠 채(쉬기판과 같은 까닭 — 막기를 끄면 빈 입력 동안의 위치 · 떨어짐 차이가 남는다, D87 대가). --break 이면 예측에 대시를 안 넣어 어긋나야 한다
+run_gapdash() {
+	local break_arg=""
+	[ "$BREAK" = 1 ] && break_arg="--breakDash=predict"
+	"$SRV" "--map=$MAP" --port=7952 --exitWhenEmpty --warmup=2 --matchSeconds=40 --seed=21 "--pads=$PADS" "--clips=$DATA/clips.bin" > "$OUT/gapdash_srv.log" 2>&1 &
+	local spid=$!
+	"$BOT" "--map=$MAP" --port=7952 --seed=21 --dash --ads --melee --crouch --testGapDash=20 $break_arg > "$OUT/gapdash_bot.log" 2>&1
+	local brc=$?
+	wait $spid
+	local src=$? ok=1
+	[ $brc = 0 ] && [ $src = 0 ] || ok=0
+	grep -q '^RESULT PASS' "$OUT/gapdash_bot.log" || ok=0
+	local sd si bd same gap started pstarted after f b l r
+	sd="$(grep -a '^SERVER dash ' "$OUT/gapdash_srv.log")"
+	si="$(grep -a '^SERVER inputs ' "$OUT/gapdash_srv.log")"
+	bd="$(grep -a '^BOT dash ' "$OUT/gapdash_bot.log")"
+	same="$(grep -a '^BOT 서버 ↔' "$OUT/gapdash_bot.log")"
+	gap="$(grep -a '^BOT gapDash ' "$OUT/gapdash_bot.log")"
+	started="$(num "$sd" started)"; pstarted="$(num "$bd" predStarted)"; after="$(num "$si" dashAfterIdle)"
+	f="$(num "$sd" F)"; b="$(num "$sd" B)"; l="$(num "$sd" L)"; r="$(num "$sd" R)"
+	# 쉰 뒤 누른 대시가 실제로 빈 입력 뒤에 왔나(세는 자리 둘 — 봇 · 서버) · 서버 켬 = 예측 켬 · 대시 차이 0 · 탄 · 깃발 차이 0
+	[ -n "$after" ] && [ "$after" -gt 0 ] && [ "$(num "$gap" dashes)" -gt 0 ] 2>/dev/null || ok=0
+	[ -n "$started" ] && [ "$started" -gt 0 ] && [ "$started" = "$pstarted" ] || ok=0
+	[ "$(num "$bd" dashDiff)" = 0 ] && [ "$(num "$same" ammoDiff)" = 0 ] && [ "$(num "$same" flagDiff)" = 0 ] || ok=0
+	# 앞 말고 세 방향도 켜졌나 — 서버가 빈 입력(이동 0)을 앞 입력으로 쓰면 뒤 · 왼 · 오가 0 이 된다
+	[ -n "$b" ] && [ "$b" -gt 0 ] && [ "$l" -gt 0 ] && [ "$r" -gt 0 ] 2>/dev/null || ok=0
+	verdict 렉뒤대시 $ok "봇 rc=$brc 서버 rc=$src 빈입력뒤대시=$after(방향없음 $(num "$si" dashAfterIdleNoDirection)) 서버켬=$started 예측켬=$pstarted 방향=$f/$b/$l/$r$(echo "$bd" | grep -oE ' dashDiff=[0-9]+' | tr -d '\n') 탄어긋남=$(num "$same" ammoDiff) 깃발어긋남=$(num "$same" flagDiff)"
+}
+
 # 같은 입력 누름 차례(L-5-c) — 봇대시 · 봇수류탄 판 공통. 봇은 넷(근접 · 대시 · 수류탄 · 재장전) 중 둘 이상 누른 입력마다 섞은 차례를 싣는다.
 # 서버가 그런 입력을 다 믿고(unordered 0 · ordered = multi > 0), 봇이 센 수 − 서버 수는 0 이상 · 서버가 받고 안 돌린 입력(received − applied − whileDead —
 # 방을 닫을 때 봇마다 마지막 하나쯤, 11-21 판 10) 이하. $3 = 1 이면 근접 · 대시 짝(MD)이 두 방향 다 1 이상이어야 한다(봇대시 판 — 봇이 대시 누름 넷 중 하나에
@@ -835,6 +866,7 @@ else
 		run_block
 		run_pause
 		run_dash
+		run_gapdash
 		run_grenade
 		run_jumppad
 		run_teleport

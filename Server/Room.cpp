@@ -988,7 +988,8 @@ namespace mo
 					CountDash(dash.result);
 					if (afterIdle)
 					{
-						// 빈 입력 이동 뒤 대시(안전성 판 「예측만 대시」 가르기) — 서버의 「앞 입력」은 빈 입력(이동 0), 예측은 그 빈 입력을 몰라 마지막 진짜 입력이다
+						// 빈 입력 이동 뒤 대시(안전성 판 「예측만 대시」 가르기) — D175 앞엔 서버의 「앞 입력」이 빈 입력(이동 0)이라 예측(마지막 진짜 입력)과 갈렸다.
+						// 지금은 둘 다 마지막 진짜 입력이라 방향 없음 비율이 여느 대시와 같아야 한다(soak.sh INFO 빈입력)
 						++_stats.dashAfterIdle;
 						if (dash.result == EDashResult::NoDirection) ++_stats.dashAfterIdleNoDirection;
 						if (_dashAfterIdleLogged < kDashAfterIdleLogLimit)
@@ -1172,7 +1173,9 @@ namespace mo
 		const bool standOnGrenade = player.move.floor.IsWalkableFloor() && player.move.floor.hit.standable;
 		if (standOnGrenade) ++_stats.grenadeWalkFloors;
 		if (freshBody && (standOnGrenade || _moveSim.GetCounters().standableHits != standableHitsBefore)) ++_stats.grenadeWalkFreshTouches;
-		player.dash.RememberInput(moveInput, input.yaw);	// 다음 입력의 「앞 입력」 — 이 걸음이 가져간 이동(막음 뒤) · 이 입력의 요. 빈 입력도 걸음을 굴렸으니 넣는다(Dash.h)
+		// 다음 입력의 「앞 입력」 — 이 걸음이 가져간 이동(막음 뒤) · 이 입력의 요. 서버가 만든 빈 입력은 안 넣는다(D175) — 클라는 그 빈 입력을 모르고
+		// 마지막 진짜 입력을 앞 입력으로 대시하므로, 넣으면 렉 뒤 첫 대시가 서버에서만 이동 0 으로 취소 · 앞으로 바뀐다(안전성 판 gapb20: 서버 켬 86 / 예측 227)
+		if (!serverMade) player.dash.RememberInput(moveInput, input.yaw);
 		if (_rules.pawnBlock)
 		{
 			_moveSim.SetPawns(nullptr, 0);
