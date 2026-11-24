@@ -286,15 +286,29 @@ namespace
 			DWORD handles = 0;
 			GetProcessHandleCount(GetCurrentProcess(), &handles);
 			const size_t summaryBytes = _summaries.capacity() * sizeof(std::shared_ptr<mo::RoomSummary>) + _summaries.size() * (sizeof(mo::RoomSummary) + 16);	// 16 = make_shared 셈 칸
+			// heapKB = 프로세스 힙에서 지금 잡혀 있는 양(CRT malloc · new 가 이 힙을 쓴다). privateKB 는 힙이 한 번 늘린 칸을 돌려주지 않아 동시 방 수가 새 최고를 찍을 때마다 계단으로 뛴다
+			// (11-23 결함 없는 8분 판 넷 중 하나가 t=350 에 +8MB) — 「돌려줬나」는 이 값으로 본다. 못 읽으면 -1
+			HEAP_SUMMARY heap = {};
+			heap.cb = sizeof(heap);
+			const long long heapKB = HeapSummary(GetProcessHeap(), 0, &heap) ? (long long)(heap.cbAllocated / 1024) : -1;
+			// 패킷 버퍼 풀(ServerCore CSerialBuffer · LockFree CExternalTlsFreeList) — 받은 청크를 끝까지 쥐고 풀 안에서 다시 쓴다. 스레드마다 지금 쓰는 청크를 하나씩 들고
+			// 그 칸을 다 써야 다음 청크를 받는다 — 패킷을 처음 잡는 스레드가 생기거나, 칸을 다 썼는데 쉬는 청크가 없으면 청크가 늘어 heapKB 가 계단으로 뛴다
+			// (11-24 k1~k8: 힙 계단 = 청크 증가와 같은 때).
+			// bufChunkKB = 청크 하나가 프로세스 힙에 잡는 양 = 칸 수 × 칸마다 생성자가 new 하는 버퍼(MSG_DEFAULT_SIZE). 청크 머리는 풀 자기 힙
+			// (LockFree InternalFreeList.h HeapCreate)이라 heapKB 밖 — 머리까지 넣어 셌더니 결함 없는 판이 청크당 약 250KB 씩 모자랐다
+			using BufferPool = LockFree::CExternalTlsFreeList<CSerialBuffer>;
+			const long long bufChunks = CSerialBuffer::_TlsMsgFreeList ? (long long)CSerialBuffer::_TlsMsgFreeList->GetChunkAllocCount() : -1;
+			const long long bufChunksIdle = CSerialBuffer::_TlsMsgFreeList ? (long long)CSerialBuffer::_TlsMsgFreeList->GetChunkIdleCount() : -1;
+			const size_t bufChunkKB = (size_t)BufferPool::CHUNK_SIZE * MSG_DEFAULT_SIZE / 1024;
 			const auto ll = [](int64_t v) { return (long long)v; };
 			const auto ull = [](uint64_t v) { return (unsigned long long)v; };
 			std::printf("SOAK %s t=%.0f coreSessions=%lld coreCreated=%lld coreDestroyed=%lld acceptFailed=%lld timedOut=%lld packetErrors=%lld sendOverflow=%lld partialSend=%lld recvOverflow=%lld "
 				"connected=%llu disconnected=%llu seated=%zu helloWaiting=%zu rooms=%zu roomsCreated=%u roomsClosed=%zu summaryBytes=%zu hellos=%llu helloRejected=%llu helloTimeouts=%llu "
-				"badPackets=%llu packetsNoRoom=%llu privateKB=%llu workingSetKB=%llu handles=%lu leakKB=%zu\n",
+				"badPackets=%llu packetsNoRoom=%llu privateKB=%llu workingSetKB=%llu heapKB=%lld bufChunks=%lld bufChunksIdle=%lld bufChunkKB=%zu handles=%lu leakKB=%zu\n",
 				when, seconds, ll(_monitor._sessionCount.Load()), ll(_monitor._sessionCreated.Load()), ll(_monitor._sessionDestroyed.Load()), ll(_monitor._acceptFailed.Load()),
 				ll(_monitor._sessionTimedOut.Load()), ll(_monitor._packetErrors.Load()), ll(_monitor._sendQueueOverflow.Load()), ll(_monitor._partialSend.Load()), ll(_monitor._recvBufferOverflow.Load()),
 				ull(_connected), ull(_disconnected), _sessionRoom.size(), _helloDeadlines.size(), _rooms.size(), _roomsCreated, _summaries.size(), summaryBytes, ull(_hellos), ull(_helloRejected),
-				ull(_helloTimeouts), ull(_badPackets), ull(_packetsNoRoom), ull(memory.PrivateUsage / 1024), ull(memory.WorkingSetSize / 1024), handles, _testLeaks.size() * kSoakBreakMemoryBytes / 1024);
+				ull(_helloTimeouts), ull(_badPackets), ull(_packetsNoRoom), ull(memory.PrivateUsage / 1024), ull(memory.WorkingSetSize / 1024), heapKB, bufChunks, bufChunksIdle, bufChunkKB, handles, _testLeaks.size() * kSoakBreakMemoryBytes / 1024);
 		}
 
 		bool HasMeasure() const { return _snapshotEndTaken; }
@@ -848,9 +862,10 @@ int main(int argc, char** argv)
 		(unsigned long long)room.ticks, intervalCount ? intervalSumMs / (double)intervalCount : 0.0, intervalMaxMs, (unsigned long long)lateTicks, percentile(allWork, 0.5), percentile(allWork, 0.99), percentile(allWork, 1.0));
 	std::printf("SERVER connected=%llu disconnected=%llu hellos=%llu badPackets=%llu\n",
 		(unsigned long long)server.GetConnected(), (unsigned long long)server.GetDisconnected(), (unsigned long long)server.GetHellos(), (unsigned long long)badPackets);
-	std::printf("SERVER inputs received=%llu applied=%llu whileDead=%llu droppedFull=%llu droppedOldSeq=%llu starvedTicks=%llu idleMoves=%llu debugPlaces=%llu statesSent=%llu\n",
+	std::printf("SERVER inputs received=%llu applied=%llu whileDead=%llu droppedFull=%llu droppedOldSeq=%llu starvedTicks=%llu idleMoves=%llu idleMovesPostGame=%llu dashAfterIdle=%llu dashAfterIdleNoDirection=%llu debugPlaces=%llu statesSent=%llu\n",
 		(unsigned long long)room.inputsReceived, (unsigned long long)room.inputsApplied, (unsigned long long)room.inputsWhileDead, (unsigned long long)room.inputsDroppedFull, (unsigned long long)room.inputsDroppedOldSeq,
-		(unsigned long long)room.starvedTicks, (unsigned long long)room.idleMoves, (unsigned long long)room.debugPlaces, (unsigned long long)room.statesSent);
+		(unsigned long long)room.starvedTicks, (unsigned long long)room.idleMoves, (unsigned long long)room.idleMovesPostGame, (unsigned long long)room.dashAfterIdle, (unsigned long long)room.dashAfterIdleNoDirection,
+		(unsigned long long)room.debugPlaces, (unsigned long long)room.statesSent);
 	// 한 입력 안 누름 차례(판 14 · L-4) — 근접 · 대시 · 수류탄 · 재장전 중 둘 이상 켜진 클라 입력 = 차례 믿음 + 못 믿음(0 · 겹침). 봇 · 다리는 L-5-c 전까지 0 을 실어 전부 못 믿음.
 	// 능력 자리(L-5-a) — abilityMulti = 근접 · 대시 · 수류탄 둘 이상 · reordered = 그중 고정 차례와 다르게 켠 입력 · reloadFirst = 재장전이 수류탄 앞 · reloadPressCut = 그 누름을 던짐이 끊음
 	// fireAnimFirst = 같은 입력 능력 사건 앞에 끼운 쏘기 사건(L-12-b)

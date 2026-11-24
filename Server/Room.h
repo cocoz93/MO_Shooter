@@ -110,6 +110,9 @@ namespace mo
 		uint64_t pressReloadBeforeGrenade = 0;
 		uint64_t starvedTicks = 0;			// 입력이 안 와서 그 틱에 꺼낼 것이 없음
 		uint64_t idleMoves = 0;				// 입력 없이 오래 지나 빈 입력으로 움직임(공중에 멈추지 않게)
+		uint64_t idleMovesPostGame = 0;		// 그중 경기 끝 단계 — 짧은 경기 판(m8)에서 빈 입력 이동이 크게 는 자리를 가르려고
+		uint64_t dashAfterIdle = 0;			// 빈 입력 이동 바로 뒤 진짜 입력에 대시를 누름 — 서버 앞 입력은 이동 0, 예측은 마지막 진짜 입력이라 고른 방향이 갈릴 수 있다
+		uint64_t dashAfterIdleNoDirection = 0;	// 그중 방향 0 으로 취소(예측은 켤 수 있다)
 		uint64_t debugPlaces = 0;
 		uint64_t debugAmmoSets = 0;			// 시험 입력이 탄을 정함(DEBUG_PLACE_SET_AMMO)
 		uint64_t debugKills = 0;			// 시험 입력이 죽임(DEBUG_PLACE_KILL)
@@ -379,6 +382,7 @@ namespace mo
 		static constexpr int kInputQueueSize = 32;		// 0.53초치
 		static constexpr int kMaxInputTokens = 8;		// 입력이 밀렸을 때 한 틱에 더 꺼낼 수 있는 한도
 		static constexpr int kIdleMoveAfterTicks = 15;	// 입력이 이만큼 안 오면 빈 입력으로 움직임
+		static constexpr int kDashAfterIdleLogLimit = 4;	// 방마다 DASHAFTERIDLE 줄을 적는 수(안전성 판 「예측만 대시」 가르기 — soak-progress 「긴 판」 갈래 ②)
 		// 부활 하나 + 입력마다 교체 · 쏘기 · 재장전 · 근접 · 대시 · 수류탄 + 남이 때린 근접 반응(근접 간격이 34 입력 넘게라 한 틱에 한 사람이 둘 못 때린다). 넘치면 버리고 센다
 		static constexpr int kAnimEventsPerTick = 1 + 6 * kMaxInputTokens + (wire::kMaxPlayersInRoom - 1);
 
@@ -437,6 +441,7 @@ namespace mo
 			uint32_t lastQueuedSeq = 0;
 			uint32_t lastReceivedSeq = 0;	// 대기열에서 버린 입력도 센다 — 번호를 건너뛰었는지는 받은 번호로 본다
 			int starvedInRow = 0;
+			bool idleSinceInput = false;	// 마지막 진짜 입력 뒤 빈 입력 이동이 있었다 — 다음 진짜 입력의 대시 「앞 입력」이 빈 입력(이동 0)이 된다(Dash.h RememberInput)
 			int tokens = 1;
 			std::array<QueuedInput, kInputQueueSize> queue;
 			int queueHead = 0;
@@ -602,6 +607,7 @@ namespace mo
 		CMoveSim _moveSim;
 		CSpreadRng _spawnRng;		// 시작 자리 고르기 전용. 탄 방향은 입력 번호로 정해져(SpreadSeed) 서버에 탄 난수 상태가 없다
 		uint32_t _tick = 0;
+		int _dashAfterIdleLogged = 0;	// 적은 DASHAFTERIDLE 줄 수(kDashAfterIdleLogLimit 까지)
 		uint32_t _nextPlayerId = 1;
 		wire::EMatchPhase _phase = wire::EMatchPhase::Waiting;
 		uint32_t _phaseEndTick = 0;

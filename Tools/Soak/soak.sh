@@ -22,10 +22,11 @@ CHURN=6
 MATCH=60
 TAIL=20
 BREAK=""
-# 문턱 — 3분 판 기준선(11-23 p1 · b1~b3, soak-progress.md)에서 정했다
-#   메모리 = 늘어나도 되는 몫(닫힌 방 요약)을 뺀 개인 메모리 증가(1/3 지점 → 봇 끝 전), KB. 기준선 542~3,890(계단으로 뜀) · 인사마다 64KB 를 안 돌려준 판 10,990 → 그 사이 7,000
+# 문턱 — 기준선(soak-progress.md)에서 정했다
+#   메모리 = 힙 남은 증가(시작 ↔ 다 나간 뒤 heapKB 에서 늘어나도 되는 몫 둘 — 닫힌 방 요약 · 버퍼 풀 청크 — 을 뺀 값), KB. 값은 아래 MEM_LIMIT 주석
 #   핸들 = 끝(다 나간 뒤) − 시작(접속 전). 기준선 51~59(만든 세션 264 와 무관한 처음 한 번 몫) → 80. 접속마다 하나씩 새면 +264 라 잡힌다
-MEM_LIMIT=7000
+MEM_LIMIT=2048		# 11-24 힙 기준선 k1~k3(3분) · k8(8분): 남은 증가 16~49KB(청크당 버퍼 몫 셈의 작은 어긋남 — 청크 수에 비례, 8분 판 17청크에 49KB) ·
+			# 인사마다 64KB 를 안 돌려준 km 약 17MB. 2,048 = 긴 판에서 청크가 몇 배 늘어도 어긋남이 못 닿는 높이 · 3분 판에서도 인사당 8KB 넘게 새면 잡힌다
 HANDLE_LIMIT=80
 INFO_ONLY=0		# --infoOnly — 메모리 · 핸들을 판정하지 않고 적기만(메모리 오류 검사 빌드는 격리 칸이 메모리를 붙잡는다)
 while [ $# -gt 0 ]; do
@@ -115,7 +116,9 @@ verdict 오류0 $ok "$(echo "$S_END" | grep -oE ' (acceptFailed|timedOut|packetE
 ok=1
 [ "$arc" = 0 ] && [ "$brc" = 0 ] || ok=0
 grep -aq '^RESULT PASS' "$OUT/bot_stay.log" && grep -aq '^RESULT PASS' "$OUT/bot_churn.log" || ok=0
-verdict 봇판정 $ok "남는쪽$(echo "$A_LOAD" | grep -oE ' (compared|ammoDiff|flagDiff|invDiff|pawnReconciles|predOdd)=[0-9]+' | tr -d '\n') | 끊는쪽$(echo "$B_LOAD" | grep -oE ' (compared|ammoDiff|flagDiff|invDiff|pawnReconciles|predOdd)=[0-9]+' | tr -d '\n')"
+# 뒤 셋(crouchDiff · fallDiff · launchDiff)은 막기 켠 판이라 판정 밖 — 따로 센 몫(D82 · D100 · D174)을 같이 적는다
+LOAD_KEYS='compared|ammoDiff|flagDiff|invDiff|pawnReconciles|predOdd|crouchDiff|fallDiff|launchDiff'
+verdict 봇판정 $ok "남는쪽$(echo "$A_LOAD" | grep -oE " ($LOAD_KEYS)=[0-9]+" | tr -d '\n') | 끊는쪽$(echo "$B_LOAD" | grep -oE " ($LOAD_KEYS)=[0-9]+" | tr -d '\n')"
 
 # 5. 실제로 반복했다 — 0 이면 못 돌린 것과 결함 없음을 못 가른다
 ok=1
@@ -125,31 +128,26 @@ ok=1
 [ "$(num "$S_END" roomsClosed)" -gt 1 ] 2>/dev/null || ok=0
 verdict 반복함 $ok "남는쪽$(echo "$A_RJ" | grep -oE ' (rejoins|serverClosed|afterResult|selfClosed|connectFails)=[0-9]+' | tr -d '\n') | 끊는쪽$(echo "$B_RJ" | grep -oE ' (rejoins|serverClosed|afterResult|selfClosed|connectFails)=[0-9]+' | tr -d '\n') | 방 만듦=$(num "$S_END" roomsCreated) 닫힘=$(num "$S_END" roomsClosed) 인사=$(num "$S_END" hellos)"
 
-# 6. 메모리 — 봇이 도는 구간의 1/3 지점 줄 ↔ 봇이 끝나기 전 마지막 줄. 늘어나도 되는 몫(summaryBytes)을 빼고 그 사이 증가량(KB)으로 본다.
-#    시간당으로 늘려 보지 않는다 — 파일럿(11-23 p1)에서 메모리가 고르게 늘지 않고 1.6~1.9MB 계단으로 뛰어(t=60 · 180) 짧은 판을 늘리면 뜻이 없다.
-#    새는 결함은 접속 · 방 수에 비례하므로 긴 판일수록 증가량이 커져 잡힌다. 참고로 그 사이 인사 하나당 KB 도 적는다
-mid=""; late=""
-while IFS= read -r line; do
-	t="$(num "$line" t)"
-	[ -z "$mid" ] && [ "$t" -ge $((SECS / 3)) ] && mid="$line"
-	[ "$t" -le "$SECS" ] && late="$line"
-done < <(grep -a '^SOAK tick ' "$OUT/srv.log")
-if [ -n "$mid" ] && [ -n "$late" ] && [ "$(num "$late" t)" -gt "$(num "$mid" t)" ]; then
-	tm="$(num "$mid" t)"; tl="$(num "$late" t)"
-	am=$(( $(num "$mid" privateKB) - $(num "$mid" summaryBytes) / 1024 ))
-	al=$(( $(num "$late" privateKB) - $(num "$late" summaryBytes) / 1024 ))
-	growth=$((al - am))
-	hellos=$(( $(num "$late" hellos) - $(num "$mid" hellos) ))
-	perHello="-"; [ "$hellos" -gt 0 ] && perHello=$((growth / hellos))
-	desc="t=$tm~$tl 개인메모리 $(num "$mid" privateKB)→$(num "$late" privateKB)KB 요약몫 $(( $(num "$mid" summaryBytes) / 1024 ))→$(( $(num "$late" summaryBytes) / 1024 ))KB 뺀증가=${growth}KB 그사이인사=$hellos 인사당=${perHello}KB 틀림몫=$(num "$late" leakKB)KB"
+# 6. 메모리 — 시작(접속 전) ↔ 끝(다 나간 뒤)의 힙 사용량(heapKB = 지금 잡힌 양, 풀면 돌아온다 — 11-24 시험 프로그램: 100B × 20만 잡으면 79→21,234KB · 풀면 83KB).
+#    늘어나도 되는 몫 둘을 뺀다 — 닫힌 방 요약(summaryBytes) · 패킷 버퍼 풀이 늘린 청크(bufChunks × bufChunkKB. 풀은 받은 청크를 끝까지 쥐고 다시 쓴다).
+#    개인 메모리(privateKB)는 판정에 안 쓴다 — 힙이 늘린 칸을 돌려주지 않아 계단으로 뛴다(11-23 결함 없는 8분 판 넷 중 하나가 t=350 에 +8MB, 그 전 판정이 FAIL). 참고로 적는다
+#    버퍼 풀 자체가 새는지는 「쥔 청크」(끝 bufChunks − bufChunksIdle — 스레드마다 지금 쓰는 청크 하나씩)로 적는다. 판정은 긴 판 흐름을 본 뒤
+hS="$(num "$S_START" heapKB)"; hE="$(num "$S_END" heapKB)"
+cS="$(num "$S_START" bufChunks)"; cE="$(num "$S_END" bufChunks)"; cI="$(num "$S_END" bufChunksIdle)"; cK="$(num "$S_END" bufChunkKB)"
+if [ -z "$hS" ] || [ -z "$hE" ] || [ -z "$cS" ] || [ -z "$cE" ] || [ -z "$cI" ] || [ -z "$cK" ] || [ "$hS" -lt 0 ] || [ "$hE" -lt 0 ] || [ "$cS" -lt 0 ] || [ "$cE" -lt 0 ]; then
+	verdict 메모리 0 "힙 · 버퍼 풀 값을 못 읽음 heapKB=$hS→$hE bufChunks=$cS→$cE bufChunksIdle=$cI bufChunkKB=$cK"
+else
+	sumKB=$(( ($(num "$S_END" summaryBytes) - $(num "$S_START" summaryBytes)) / 1024 ))
+	poolKB=$(( (cE - cS) * cK ))
+	residual=$(( hE - hS - sumKB - poolKB ))
+	cPeak="$(grep -a '^SOAK ' "$OUT/srv.log" | grep -oE ' bufChunks=[0-9]+' | cut -d= -f2 | sort -n | tail -1)"
+	desc="힙 $hS→${hE}KB(+$((hE - hS))) 요약몫 +${sumKB}KB 버퍼풀 청크 $cS→$cE(최고 $cPeak · 쥔 $((cE - cI)) · 청크당 ${cK}KB) +${poolKB}KB 남은증가=${residual}KB 인사=$(num "$S_END" hellos) 틀림몫=$(num "$S_END" leakKB)KB 개인메모리 $(num "$S_START" privateKB)→$(num "$S_END" privateKB)KB"
 	if [ "$INFO_ONLY" = 0 ]; then
-		ok=1; [ "$growth" -le "$MEM_LIMIT" ] || ok=0
+		ok=1; [ "$residual" -le "$MEM_LIMIT" ] || ok=0
 		verdict 메모리 $ok "$desc 문턱=${MEM_LIMIT}KB"
 	else
 		echo "INFO 메모리 $desc (--infoOnly — 판정 안 함)"
 	fi
-else
-	verdict 메모리 0 "1/3 지점 · 끝 전 줄을 못 찾음(SOAK tick $ticks 줄)"
 fi
 
 # 7. 핸들 — 다 나간 뒤 ↔ 시작(접속 전)
@@ -161,6 +159,9 @@ if [ "$INFO_ONLY" = 0 ]; then
 else
 	echo "INFO 핸들 $hdesc (--infoOnly — 판정 안 함)"
 fi
+
+# 적기만 — 서버 빈 입력 이동과 그 바로 뒤 대시(「예측만 대시」 가르기, soak-progress 「긴 판」 갈래 ②). 사건 줄은 srv.log DASHAFTERIDLE
+echo "INFO 빈입력$(grep -a '^SERVER inputs ' "$OUT/srv.log" | tr -d '\r' | grep -oE ' (starvedTicks|idleMoves|idleMovesPostGame|dashAfterIdle|dashAfterIdleNoDirection)=[0-9]+' | tr -d '\n') 사건줄=$(grep -a -c '^DASHAFTERIDLE ' "$OUT/srv.log")"
 
 if [ $FAILS = 0 ]; then echo "SOAK RESULT PASS"; else echo "SOAK RESULT FAIL ($FAILS)"; fi
 [ $FAILS = 0 ]

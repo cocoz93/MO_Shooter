@@ -31,6 +31,7 @@
 //   --breakCrouch(--crouch 와 함께)는 앉기 키를 서버에만 보내고 여기 예측엔 안 넣는다 — 앉음 비교(BOT crouch diff)가 실패해야 한다
 //   --testNoPawnBlock(서버도 같이)은 사람끼리 막기를 끈다(시험 전용, D83) — 서버 ↔ 같은 코드 위치 차이 0 을 엄격히 본다. 안 주면 막기를 켜고 남 캡슐로 예측 · 보정한다
 //   --testPauseAfterSpawn=N 은 부활 직후 N 틱 동안 입력을 만들지도 보내지도 않는다(클라가 멈칫한 꼴 — 서버가 빈 입력으로 움직인다). 이동 막음 비교(BOT moveLock diff)는 0 이어야 한다
+//   --testGapDash=N(--dash 와 함께)은 대시 누르기 바로 앞 입력 뒤에 N 틱 쉰다 — 서버가 빈 입력으로 움직인 뒤 대시를 누른 꼴(D174 ②, 서버 SERVER inputs dashAfterIdle · DASHAFTERIDLE 줄)
 //   --testInputBurst=N 은 클라가 멈칫한 꼴 — 입력은 틱마다 만들되 쥐고 있다가, 서버가 보낸 입력을 다 돌린 뒤(내 상태 lastSeq = 마지막으로 보낸 번호) 쥔 입력이 N 개가 되면 한꺼번에 보낸다.
 //     서버 줄에 입력이 남아 있으면 틱마다 꺼낼 한도가 1 이라(Room.cpp TickPlayerInputs) 몰아 보내도 한 틱에 하나씩 돌아 몰림이 숨는다 — 줄이 빈 뒤 굶는 동안 한도가 쌓여야
 //     받은 묶음을 한 틱에 돌린다(한도 끝 8 — N 은 8 이하로). 순간이동 원인 확인(11-23) — 남의 몸 효과가 「한 틱에 입력 여럿」 상태에서 빠지는지 본다.
@@ -271,6 +272,7 @@ namespace
 		bool breakMirror = false;
 		bool breakCrouch = false;		// --breakCrouch — 앉기 키를 예측에 안 넣는다(일부러 틀림)
 		int testPauseAfterSpawn = 0;		// --testPauseAfterSpawn=N — 부활 직후 N 틱 동안 입력을 안 만듦(빈 입력 이동은 16 틱째부터)
+		int testGapDash = 0;				// --testGapDash=N — 대시 누르기 바로 앞에서 N 틱 입력을 안 만듦(D174 ②)
 		int testInputBurst = 0;			// --testInputBurst=N — 클라 멈칫 흉내: 서버 줄이 빈 뒤 쥔 입력이 N 개면 한꺼번에 보냄(2 이상일 때만)
 		double seconds = 0;				// 0 이 아니면 부하 시험
 		double measureFromSeconds = 0;
@@ -899,6 +901,8 @@ namespace
 		void SetPush(bool on) { _push = on; }
 		void SetFireAlways(bool on) { _fireAlways = on; }
 		void SetPauseAfterSpawn(int ticks) { _pauseAfterSpawn = ticks; }
+		void SetGapDash(int ticks) { _gapDash = ticks; }
+		uint64_t GetGapDashes() const { return _gapDashes; }
 		void SetInputBurst(int count) { _inputBurst = count; }
 		uint64_t GetPawnReconciles() const { return _pawnReconciles; }
 		uint64_t GetPawnCorrected() const { return _pawnCorrected; }
@@ -1789,10 +1793,11 @@ namespace
 		{
 			if (_flagDiffLogged >= FLAG_DIFF_LOG_LIMIT) return;
 			++_flagDiffLogged;
-			// predFalling = 예측의 떨어짐(flags 는 서버 깃발 — 0x1 이 서버 떨어짐). 앉기 키는 땅에서만 앉혀 두 쪽 떨어짐이 다르면 앉음도 갈린다
-			std::printf("FLAGDIFF bot=%u kind=%s seq=%u server=%d pred=%d phase=%u weapon=%u/%u mag=%d/%d spare=%d/%d slots=%u/%u flags=0x%x predFalling=%d pos=%.4f vel=%.4f\n", GetId(), kind, p.lastSeq,
+			// predFalling = 예측의 떨어짐(flags 는 서버 깃발 — 0x1 이 서버 떨어짐). 앉기 키는 땅에서만 앉혀 두 쪽 떨어짐이 다르면 앉음도 갈린다.
+			// predDash = 이 입력 뒤 예측 대시가 켜져 있나(slot.dashBlocks) — 서버 DASHAFTERIDLE 줄(같은 사람 · 앞선 입력 번호)과 맞춰 「예측만 대시」를 가른다(soak-progress 「긴 판」 갈래 ②)
+			std::printf("FLAGDIFF bot=%u kind=%s seq=%u server=%d pred=%d phase=%u weapon=%u/%u mag=%d/%d spare=%d/%d slots=%u/%u flags=0x%x predFalling=%d pos=%.4f vel=%.4f predDash=%d\n", GetId(), kind, p.lastSeq,
 				server ? 1 : 0, pred ? 1 : 0, (unsigned)_phase, (unsigned)p.weapon, (unsigned)slot.weapon, (int)p.magazine, (int)slot.magazine, (int)p.spare, (int)slot.spare,
-				(unsigned)p.quickSlots, (unsigned)slot.quickSlots, (unsigned)p.flags, slot.move.mode == EMoveMode::Falling ? 1 : 0, _comparePos, _compareVel);
+				(unsigned)p.quickSlots, (unsigned)slot.quickSlots, (unsigned)p.flags, slot.move.mode == EMoveMode::Falling ? 1 : 0, _comparePos, _compareVel, slot.dashBlocks ? 1 : 0);
 		}
 
 		void CompareSelf(const wire::PlayerState& p)
@@ -1868,13 +1873,15 @@ namespace
 				if (!_rules.pawnBlock) ++_flagDiff;
 				LogFlagDiff("crouched", p, slot, (p.flags & wire::STATE_CROUCHED) != 0, slot.move.crouched);
 			}
-			// 점프대(j-6) — 이 상태 끝에 쏜 발사가 다음 입력을 기다리나. 이동의 결과지만 표가 같으면 막기 판에서도 같아야 해 flagDiff 에 넣는다. 켜진 줄 수를 같이 센다
+			// 점프대(j-6) — 이 상태 끝에 쏜 발사가 다음 입력을 기다리나. 켜진 줄 수를 같이 센다.
+			// 이동의 결과라 사람끼리 막기를 켠 판은 떨어짐(F-2) · 앉음(W-5-d)과 같은 까닭으로 갈릴 수 있어 따로 센다(D174 — 안전성 긴 판 5건 모두 위치가 먼저 갈렸고
+			// 서버만 장치를 탄 BOT device diff 줄과 1:1). 막기를 끈 판(회귀 점프대 · 순간이동 각본)은 flagDiff 에 든다
 			const bool serverLaunch = (p.flags & wire::STATE_LAUNCH_PENDING) != 0;
 			if (serverLaunch) ++_launchFlagStates;
 			if (serverLaunch != slot.move.launchPending)
 			{
 				++_launchFlagDiff;
-				++_flagDiff;
+				if (!_rules.pawnBlock) ++_flagDiff;
 				bad = true;
 				LogFlagDiff("launchPending", p, slot, serverLaunch, slot.move.launchPending);
 			}
@@ -3293,9 +3300,12 @@ namespace
 					const double angle = ((double)input.yaw + kDashKindYaw[_dashKind]) * kPi / 180.0;
 					input.moveX = (float)std::cos(angle);
 					input.moveY = (float)std::sin(angle);
+					// 시험(--testGapDash, D174 ②) — 이 입력 뒤 쉰다. 서버는 16 틱째부터 빈 입력(이동 0)으로 움직여 대시의 「앞 입력」이 이동 0 이 되고, 예측은 이 입력의 이동이 남는다
+					if (_gapDash > 0) { _pauseLeft = _gapDash; _gapPending = true; }
 				}
 				else if (_dashWait <= 0)
 				{
+					if (_gapPending) { ++_gapDashes; _gapPending = false; }
 					input.buttons |= wire::BUTTON_DASH;
 					if (_dashKind == 4) input.pitch = 40.f;
 					else if (_dashKind == 5) input.pitch = -30.f;
@@ -3574,6 +3584,9 @@ namespace
 		bool _crouchToggle = false;		// --crouch
 		bool _breakCrouch = false;		// --breakCrouch
 		int _pauseAfterSpawn = 0, _pauseLeft = 0;	// --testPauseAfterSpawn — 부활마다 쉴 틱 수 · 남은 수
+		int _gapDash = 0;		// --testGapDash — 대시 누르기 앞에서 쉴 틱 수(쉬기는 _pauseLeft 로)
+		uint64_t _gapDashes = 0;	// 그렇게 쉰 뒤 누른 대시 수
+		bool _gapPending = false;	// 쉬기를 걸었고 아직 대시를 안 누름
 		int _inputBurst = 0;					// --testInputBurst — 한 번에 보낼 묶음 크기(서버 줄이 빈 뒤)
 		std::vector<wire::Input> _heldInputs;	// 아직 안 보낸 입력(만든 차례 그대로)
 		uint32_t _flushedSeq = 0;				// 마지막으로 실제 보낸 입력 번호 — 내 상태 lastSeq 가 이만큼 오면 서버 줄이 비었다
@@ -3618,7 +3631,7 @@ namespace
 		double _teleportMeshBaseZ = 0;
 		uint64_t _teleportInfos = 0, _teleportInfoBad = 0;
 		uint64_t _launchFlagStates = 0;		// 서버 발사 깃발이 켜진 비교 줄
-		uint64_t _launchFlagDiff = 0;		// 그 깃발이 예측과 다른 줄(flagDiff 안에도 든다)
+		uint64_t _launchFlagDiff = 0;		// 그 깃발이 예측과 다른 줄(막기를 끈 판만 flagDiff 안에도 든다 — D174)
 		uint64_t _serverLaunches = 0;		// 발사를 남긴 내 장치 소식 수 — 점프대 · 뒤따르는 발사가 있는 순간이동(D169 — 전엔 깃발이 선 상태 수)
 		uint64_t _flagLaunches = 0;			// 서버 깃발이 꺼짐 → 켜짐으로 바뀐 내 상태 수(한 틱에 입력 여럿을 돌리면 빠진다 — 견주기용)
 		// 장치 소식(S2C_DEVICE · D169 · device-event-plan e-2)
@@ -3714,7 +3727,7 @@ namespace
 	// 부하 판 끝 줄(LOADBOT · BOTLAG)의 봇 합. --rejoin(D172)이면 갈아 끼우기 전에 옛 봇 몫을 여기 더해 두고, 끝에 남은 봇 몫을 더한다
 	struct LoadTotals
 	{
-		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, pawnReconciles = 0, invDiff = 0, crouchDiff = 0, fallDiff = 0;
+		uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, pawnReconciles = 0, invDiff = 0, crouchDiff = 0, fallDiff = 0, launchDiff = 0;
 		uint64_t ackLagSum = 0, ackLagSamples = 0;
 		uint32_t ackLagMax = 0;
 	};
@@ -3725,6 +3738,7 @@ namespace
 		to.invDiff += bot.GetInvDiff();
 		to.crouchDiff += bot.GetCrouchDiff();
 		to.fallDiff += bot.GetFallDiff();
+		to.launchDiff += bot.GetLaunchFlagDiff();
 		to.posDiff += bot.GetPosDiff();
 		to.velDiff += bot.GetVelDiff();
 		to.ammoDiff += bot.GetAmmoDiff();
@@ -3864,6 +3878,7 @@ namespace
 			else if (s == "--testLockstep") out.lockstep = true;
 			else if (s == "--breakCrouch") out.breakCrouch = true;
 			else if (s.rfind("--testPauseAfterSpawn=", 0) == 0) out.testPauseAfterSpawn = std::atoi(s.c_str() + 22);
+			else if (s.rfind("--testGapDash=", 0) == 0) out.testGapDash = std::atoi(s.c_str() + 14);
 			else if (s.rfind("--testInputBurst=", 0) == 0) out.testInputBurst = std::atoi(s.c_str() + 17);
 			else
 			{
@@ -3961,6 +3976,7 @@ int main(int argc, char** argv)
 		bot->SetPush(args.push);
 		bot->SetFireAlways(args.judgeFireAlways);
 		bot->SetPauseAfterSpawn(args.testPauseAfterSpawn);
+		bot->SetGapDash(args.testGapDash);
 		bot->SetInputBurst(args.testInputBurst);
 		if (args.lockstep) bot->SetSeedByPlayerId(args.seed + 100);
 		bot->SetJudge(judging ? &judge : nullptr);
@@ -4279,7 +4295,7 @@ int main(int argc, char** argv)
 		LoadTotals totals = retiredTotals;
 		for (const std::unique_ptr<CBot>& bot : bots) AddLoadTotals(totals, *bot);
 		const uint64_t compared = totals.compared, posDiff = totals.posDiff, velDiff = totals.velDiff, ammoDiff = totals.ammoDiff, flagDiff = totals.flagDiff, states = totals.states;
-		const uint64_t pawnReconciles = totals.pawnReconciles, invDiff = totals.invDiff, crouchDiff = totals.crouchDiff, fallDiff = totals.fallDiff;
+		const uint64_t pawnReconciles = totals.pawnReconciles, invDiff = totals.invDiff, crouchDiff = totals.crouchDiff, fallDiff = totals.fallDiff, launchDiff = totals.launchDiff;
 		size_t rejoinWaiting = 0;
 		for (const RejoinSlot& slot : rejoinSlots)
 		{
@@ -4321,10 +4337,10 @@ int main(int argc, char** argv)
 		// 접속 — 보통 부하 판은 끝까지 다 붙어 있어야 한다. --rejoin 은 닫히는 게 시험이라, 대신 다시 접속이 한 번도 안 실패해야 한다
 		const bool connectOk = args.rejoin ? rejoinCounts.connectFails == 0 : botsOpen == bots.size();
 		const bool pass = compared > 0 && moveOk && ammoDiff == 0 && flagDiff == 0 && invDiff == 0 && connectOk;
-		std::printf("LOADBOT bots=%d open=%zu compared=%llu posDiff=%llu velDiff=%llu ammoDiff=%llu flagDiff=%llu states=%llu stateGaps=%zu stateGapP50Ms=%.2f stateGapP99Ms=%.2f stateGapMaxMs=%.2f loopP99Ms=%.2f loopMaxMs=%.2f cpuPercent=%.1f pawnBlock=%d pawnReconciles=%llu predOdd=%llu invDiff=%llu crouchDiff=%llu fallDiff=%llu\n",
+		std::printf("LOADBOT bots=%d open=%zu compared=%llu posDiff=%llu velDiff=%llu ammoDiff=%llu flagDiff=%llu states=%llu stateGaps=%zu stateGapP50Ms=%.2f stateGapP99Ms=%.2f stateGapMaxMs=%.2f loopP99Ms=%.2f loopMaxMs=%.2f cpuPercent=%.1f pawnBlock=%d pawnReconciles=%llu predOdd=%llu invDiff=%llu crouchDiff=%llu fallDiff=%llu launchDiff=%llu\n",
 			args.bots, botsOpen, (unsigned long long)compared, (unsigned long long)posDiff, (unsigned long long)velDiff, (unsigned long long)ammoDiff, (unsigned long long)flagDiff, (unsigned long long)states, stateGapsMs.size(),
 			percentile(stateGapsMs, 0.5), percentile(stateGapsMs, 0.99), percentile(stateGapsMs, 1.0), percentile(loopGapsMs, 0.99), percentile(loopGapsMs, 1.0), args.measureSeconds > 0 ? (cpuEnd - cpuBegin) / args.measureSeconds * 100.0 : 0.0,
-			args.pawnBlock ? 1 : 0, (unsigned long long)pawnReconciles, (unsigned long long)predCount.pawnOddSimplex, (unsigned long long)invDiff, (unsigned long long)crouchDiff, (unsigned long long)fallDiff);
+			args.pawnBlock ? 1 : 0, (unsigned long long)pawnReconciles, (unsigned long long)predCount.pawnOddSimplex, (unsigned long long)invDiff, (unsigned long long)crouchDiff, (unsigned long long)fallDiff, (unsigned long long)launchDiff);
 		std::printf("RESULT %s\n", pass ? "PASS" : "FAIL");
 		return pass ? 0 : 1;
 	}
@@ -4356,6 +4372,7 @@ int main(int argc, char** argv)
 	uint64_t compared = 0, posDiff = 0, velDiff = 0, ammoDiff = 0, flagDiff = 0, states = 0, detours = 0, lockstepTimeouts = 0;
 	uint64_t adsCompared = 0, adsDiff = 0, adsInputs = 0, lockDiff = 0, lockCompared = 0;
 	uint64_t crouchCompared = 0, crouchDiff = 0, crouchPresses = 0, pressMulti = 0;
+	uint64_t gapDashes = 0;		// --testGapDash 로 쉰 뒤 누른 대시(D174 ②)
 	uint64_t pressPairs[wire::kPressKeyCount][wire::kPressKeyCount][2] = {};
 	uint64_t pawnReconciles = 0, pawnCorrected = 0, fallDiff = 0;
 	double pawnCorrectSum = 0, pawnCorrectMax = 0;
@@ -4412,6 +4429,7 @@ int main(int argc, char** argv)
 		AddMeleeFixes(meleeFixes, bot.GetMeleeFixes());
 		AddDashCounts(dash, bot.GetDashCounts());
 		AddDashFixes(dashFixes, bot.GetDashFixes());
+		gapDashes += bot.GetGapDashes();
 		AddGrenadeCounts(grenade, bot.GetGrenadeCounts());
 		AddGrenadeFixes(grenadeFixes, bot.GetGrenadeFixes());
 		grenadeUnconfirmedPost += bot.GetGrenadeUnconfirmedPost();
@@ -4537,6 +4555,7 @@ int main(int argc, char** argv)
 			u(dash.extraJump), u(dash.extraReload), u(dash.extraMelee), u(dash.pairMelee), u(dash.mine), u(dash.mineDir[0]), u(dash.mineDir[1]), u(dash.mineDir[2]), u(dash.mineDir[3]), u(dashFixes.results), u(dashFixes.resultsNoSlot),
 			u(dashFixes.startMismatches + dashFixes.forceFixes + dashFixes.unconfirmed), u(dashFixes.startMismatches), u(dashFixes.forceFixes), u(dashFixes.unconfirmed), u(dashUnconfirmedPost), u(dashFixes.unconfirmedDead), u(dashUnacked), u(dashFixes.replays), u(dashFixes.replaysMissed), u(dashFixes.meleeInReplay));
 		std::printf("BOT dashRules msgs=%llu post=%llu | bad shape=%llu dead=%llu\n", u(dash.msgs), u(dash.post), u(dash.badShape), u(dash.badDead));
+		if (args.testGapDash > 0) std::printf("BOT gapDash ticks=%d dashes=%llu\n", args.testGapDash, u(gapDashes));	// 서버 SERVER inputs dashAfterIdle 과 견준다
 		// 수류탄(G-3) — mine 합 = 서버 SERVER grenade thrown(봇만 든 판). 소식 · 상태 · 피해 받은 수(msgs)는 봇마다 같은 소식을 따로 받으므로 봇 수 배.
 		// pressed = 봇이 누른 입력, predPresses = 예측이 센 누름(같아야 한다). kinds = 피치 그대로 · 하늘 · 발 앞 바닥 · 먼 바닥, waiting · post = 부활 대기 · 경기 끝에 누름.
 		// finalThrown = 예측 칸마다 마지막으로 정한 던짐의 합 = predThrown + 부활 다시 돌리기(+/−) + 다시 고르기(+/−) − 판 끝에 아직 확인 안 된 몫(unacked) — mine 과 같아야 한다(sameFinal).

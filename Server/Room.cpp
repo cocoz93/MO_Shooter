@@ -897,6 +897,8 @@ namespace mo
 	void CRoom::ApplyInput(Player& player, const wire::Input& input, const bool serverMade)
 	{
 		player.lastSeq = input.seq;
+		const bool afterIdle = !serverMade && player.idleSinceInput;	// 빈 입력 이동 바로 뒤 진짜 입력 — 대시를 누르면 아래 PRESS_DASH 가 센다
+		if (!serverMade) player.idleSinceInput = false;
 		// 한 입력 안 누름 차례(L-4 · 판 14) — 실린 차례를 읽어 센다. 켜는 차례는 아래 능력 자리가 따른다(L-5-a · D127 — 못 믿으면 판 13 고정 차례)
 		if (!serverMade)
 		{
@@ -984,6 +986,17 @@ namespace mo
 				{
 					const DashStart dash = player.dash.TryActivate(input.pitch, input.yaw, false);
 					CountDash(dash.result);
+					if (afterIdle)
+					{
+						// 빈 입력 이동 뒤 대시(안전성 판 「예측만 대시」 가르기) — 서버의 「앞 입력」은 빈 입력(이동 0), 예측은 그 빈 입력을 몰라 마지막 진짜 입력이다
+						++_stats.dashAfterIdle;
+						if (dash.result == EDashResult::NoDirection) ++_stats.dashAfterIdleNoDirection;
+						if (_dashAfterIdleLogged < kDashAfterIdleLogLimit)
+						{
+							++_dashAfterIdleLogged;
+							std::printf("DASHAFTERIDLE tick=%u room=%u player=%u seq=%u phase=%u result=%d\n", _tick, _roomId, player.id, input.seq, (unsigned)_phase, (int)dash.result);
+						}
+					}
 					if (dash.result == EDashResult::Started) StartDash(player, dash, input.seq);
 					break;
 				}
@@ -1992,6 +2005,8 @@ namespace mo
 			// 입력을 끊어 공중에 머무는 일이 없게 — 쌓인 한도를 쓰게 해 다시 밀린 입력으로 빨라지는 것도 줄인다
 			--player.tokens;
 			++_stats.idleMoves;
+			if (_phase == wire::EMatchPhase::PostGame) ++_stats.idleMovesPostGame;
+			player.idleSinceInput = true;
 			wire::Input idle = wire::Input();
 			idle.yaw = player.yaw;
 			idle.pitch = player.pitch;
